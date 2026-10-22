@@ -28,7 +28,8 @@
 //!
 //! Exposed through `fauna_sync_engine::account_runtime::AccountStoreHandle`'s
 //! typed doors (`mail`, `write_mail_state`, `put_mail_credential`,
-//! `mark_mail_credential_wrapped`, `revoke_mail_credential`,
+//! `mark_mail_credential_wrapped`, `mark_mail_credential_token_minted`,
+//! `revoke_mail_credential`,
 //! `retire_mail_generation`).
 
 use anyhow::{Context, Result, ensure};
@@ -39,6 +40,7 @@ use fauna_core::data::{
     MailConfig, MailCredential, MsekFingerprint, PriorMsekRetirement, Timestamp,
 };
 use fauna_core::mail_rows::{MailRecord, MailRowKey, MailRows, MailStateRow, decode_mail_row};
+use fauna_core::secret::SecretArray32;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::merge_policy::KIND_MAIL;
 
@@ -133,12 +135,21 @@ where
         .context("mail row: plane put")?;
     Ok(true)
 }
+/// The stored state row's value, if one rests.
+fn as_state(stored: &Option<(MailRecord, Vec<u8>)>) -> Option<&MailStateRow> {
+    match stored {
+        Some((MailRecord::State(s), _)) => Some(s),
+        Some(_) => unreachable!("decode_mail_row keys the state row as a state"),
+        None => None,
+    }
+}
 
-/// Write the account's mail-state row: `state`'s content, stamped strictly
-/// above the stored row and joined with it (the MSEK present-wins, the
-/// window and burns union; the recreatable four follow this newer stamp).
-/// `state.updated_at` is ignored. Whether anything was written — `false` when
-/// the stored row already holds this content.
+/// Write the account's mail-state row: `state` written over the stored row
+/// by [`MailStateRow::written_over`] — each half stamped strictly above the
+/// stored row only when `state` changes it, an absent MSEK or sentinel no
+/// change, so a write from a replica behind another device's swap or sentinel
+/// cannot outrank either — then joined with it. `state`'s stamps are
+/// ignored. Whether anything was written — `false` when nothing changed.
 pub async fn write_mail_state<B, R>(
     store: &AccountStore<B>,
     fleet: &AccountStatePlane<'_, B, R>,
@@ -150,19 +161,34 @@ where
     R: RpcRequester,
 {
     let stored = read_row(store, &MailRowKey::State).await?;
-    let stored_state = match &stored {
-        Some((MailRecord::State(s), _)) => Some(s),
-        Some(_) => unreachable!("decode_mail_row keys the state row as a state"),
-        None => None,
-    };
-    if stored_state.is_some_and(|s| s.same_content(state)) {
-        return Ok(false);
-    }
-    let intent = MailStateRow {
-        updated_at: stamp_above(stored_state.map(|s| s.updated_at), now),
-        ..state.clone()
-    };
+    let current = as_state(&stored);
+    let at = stamp_above(current.map(MailStateRow::latest_stamp), now);
+    let intent = state.written_over(current, at);
     join_and_put(fleet, stored, MailRecord::State(intent)).await
+}
+
+/// Clear the rotation sentinel — only when the stored one names `new_msek`
+/// ([`MailStateRow::rotation_cleared`]: a clear naming a different MSEK′, or
+/// over no sentinel, writes nothing). Whether anything was written.
+pub async fn clear_mail_rotation<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    new_msek: &SecretArray32,
+    now: Timestamp,
+) -> Result<bool>
+where
+    B: StoreBackend,
+    R: RpcRequester,
+{
+    let stored = read_row(store, &MailRowKey::State).await?;
+    let Some(current) = as_state(&stored) else {
+        return Ok(false);
+    };
+    let at = stamp_above(Some(current.latest_stamp()), now);
+    let Some(cleared) = MailStateRow::rotation_cleared(current, new_msek, at) else {
+        return Ok(false);
+    };
+    join_and_put(fleet, stored, MailRecord::State(cleared)).await
 }
 
 async fn stored_credential<B: StoreBackend>(
@@ -243,6 +269,42 @@ where
     }
     let intent = MailCredential {
         wrapped_under: Some(fingerprint),
+        updated_at: stamp_above(Some(stored.updated_at), now),
+        ..stored.clone()
+    };
+    join_and_put(
+        fleet,
+        Some((MailRecord::Credential(stored), bytes)),
+        MailRecord::Credential(intent),
+    )
+    .await
+}
+
+/// Record that a fresh outbound submission token issued at `minted_at` was
+/// provisioned for `credential_id` — the token-mint stamp the refresh reads
+/// (`mail-credentials.md` § Architectural rules, rule 10), the remainder's
+/// stamp advanced. Whether anything was written — `false` when no row rests
+/// there, when it is marked burned or revoked (a marked row has no token), or
+/// when it already names a mint at least as recent.
+pub async fn mark_credential_token_minted<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    credential_id: &str,
+    minted_at: u64,
+    now: Timestamp,
+) -> Result<bool>
+where
+    B: StoreBackend,
+    R: RpcRequester,
+{
+    let Some((stored, bytes)) = stored_credential(store, credential_id).await? else {
+        return Ok(false);
+    };
+    if stored.is_marked() || stored.token_minted_at >= Some(minted_at) {
+        return Ok(false);
+    }
+    let intent = MailCredential {
+        token_minted_at: Some(minted_at),
         updated_at: stamp_above(Some(stored.updated_at), now),
         ..stored.clone()
     };

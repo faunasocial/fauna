@@ -30,7 +30,7 @@ use std::sync::Arc;
 /// die with the view that armed it. Not keyed by the store *object* either:
 /// tui keeps one long-lived handle, but apple builds a fresh
 /// `KeychainSecretStore` (and the UniFFI seam a fresh bridge) per registry, and
-/// web a fresh `LocalStorageSecretStore` per registry in two wasm modules with
+/// web a fresh `WebIdentityStore` per registry in two wasm modules with
 /// separate statics. What every app's views share is the store's *backing* —
 /// the keychain, the localStorage origin — so that is where the flag lives. It
 /// is scoped exactly as far as the backing: another store's writes (the aux
@@ -398,7 +398,7 @@ mod tests {
     }
 
     /// Two store OBJECTS over one backing — apple's fresh `KeychainSecretStore`
-    /// per registry over the one keychain, web's fresh `LocalStorageSecretStore`
+    /// per registry over the one keychain, web's fresh `WebIdentityStore`
     /// per wasm module over the one origin. A fault armed through either must
     /// refuse writes through the other, or those apps' journeys arm a fault the
     /// ceremony's own registry never sees.

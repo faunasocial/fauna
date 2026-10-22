@@ -296,7 +296,7 @@ function noteContactsRevision(): void {
 }
 
 /** Make sure this tab's account runtime is starting. It starts once the
- *  conversations manager exists (`$lib/account-runtime`), and
+ *  conversations manager exists (`#lib/account-runtime`), and
  *  `startReceivePoll` calls this on every signed-in actor change, so a page
  *  that reads an account-plane kind (`fauna.state.backup` on the Backups page)
  *  but builds no manager itself never calls it. Fire-and-forget: the plane
@@ -398,7 +398,7 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     noteContactsRevision();
     // This tab's account runtime, over the manager just built — it registers
     // the account-plane seams on it at the store's ready edge
-    // (`$lib/account-runtime`). Not awaited: the store opening must never
+    // (`#lib/account-runtime`). Not awaited: the store opening must never
     // hold the conversations page back, and a failed start degrades to the
     // blob rail on its own.
     startAccountRuntimeFor(id.secretHex, id.actorId, built);
@@ -462,7 +462,7 @@ export function getConversationsManager(): Promise<WasmConversationsManager> {
     //
     // ⚠ And it needs a SECOND edge: the folder-key custody it reads rests in the
     // account runtime started above, which this build never awaits. So the pass
-    // runs at whichever edge is later (`$lib/launch-pass`) — in line when the
+    // runs at whichever edge is later (`#lib/launch-pass`) — in line when the
     // runtime has started, else once its start settles, beside the receive
     // poll, without holding the manager back. It used to run here regardless,
     // fail "the account runtime is not running" on every launch the runtime
@@ -678,7 +678,7 @@ export function pollIntervalMs(): number {
  *  what lets a caller mute the ticker and then treat any later delivery as the
  *  push arm's, with no wall-clock assumption.
  *
- *  Imported only by `$lib/e2e-automation` (testing.md § convention 15), so a
+ *  Imported only by `#lib/e2e-automation` (testing.md § convention 15), so a
  *  production bundle tree-shakes it out with the rest of the surface. */
 export function setConvPollSecs(secs: number | null): void {
   pollOverrideMs = secs === null ? null : Math.max(0, secs) * 1000;
@@ -923,7 +923,7 @@ export function refreshConversations(): void {
   // The running tab's new-message OS banner (`conversations` outcome 11) — one
   // tracker tick per snapshot change, which is what this chokepoint is. The
   // when/for-whom decision is the shared `MessageNotificationTracker` behind
-  // `newMessageBanners()`; `$lib/message-banner` only fires. Outside the try
+  // `newMessageBanners()`; `#lib/message-banner` only fires. Outside the try
   // above deliberately: a snapshot read that threw must not also cost the tick,
   // since the tracker is stateful and a skipped tick mis-seeds every later one.
   raiseNewMessageBanners(manager);
@@ -1120,6 +1120,10 @@ async function drainFeed(
           // context, and the merge's clock (the wasm-time discipline).
           secretHex,
           Math.floor(Date.now() / 1000),
+          // A Sent record the warm-up still holds carries its hold; the shared
+          // ingest projects it as `MessageSnapshot.warmup_hold`
+          // (mail-deliverability.md § Enforcement at submission time).
+          m.warmup_hold ?? null,
         );
         // The cursor moves only once the record is behind us. A record that
         // does not open under the account's key set is NOT a throw: the wasm
@@ -1343,6 +1347,11 @@ async function pollFaunaMlsOnce(): Promise<void> {
     // gate's auto-join arm), then pull channel ciphertext on the newly-bound +
     // existing channels; refresh after.
     await manager.drainInbox();
+    // The standing room invitations — an inbox kind the drain above leaves
+    // un-acked, because accepting is the user's decision — re-listed every pass
+    // (a peek), in the native `full_sweep!`'s order: after the drain, before the
+    // channel walk. Without it no invitation ever stands on web. Never rejects.
+    await manager.refreshRoomInvitations();
     await manager.pollConversations();
     // Re-read the contact roster the recipient suggestions draw on — the web
     // twin of the native receive loop's backstop-tick `full_sweep!` arm
@@ -1382,13 +1391,13 @@ async function pollFaunaMlsOnce(): Promise<void> {
 // ── Receive pump — the web twin of the shared loop's `tokio::select!` ────────
 //
 // Every receive pass — ticker, push, reconnect or poke — funnels through ONE
-// `ReceivePump` (`$lib/receive-pump`, which owns why: serialization over the
+// `ReceivePump` (`#lib/receive-pump`, which owns why: serialization over the
 // single-threaded MLS engine, the cycle counters, and the pass ceiling that turns
 // a never-settling pass into a reported stall instead of a silently dead rail).
 // This module owns only the two rails it pumps and the arms that wake it.
 
 /** True while the receive pump is stalled — a pass outran its ceiling, web's
- *  shape of a receive loop that died (`$lib/receive-pump`). The conversations
+ *  shape of a receive loop that died (`#lib/receive-pump`). The conversations
  *  page renders it on `error-message` directly under the engine-role refusal
  *  (`ui/conversations.md` § Errors & edge cases). */
 export const receiveRailStalled: Writable<boolean> = writable(false);
@@ -1498,7 +1507,7 @@ let convPushSuppressed = false;
  *  handler reads rather than an unsubscribe — a test can flip it mid-session and
  *  restore it, which an unsubscribe could not.
  *
- *  Imported only by `$lib/e2e-automation` (testing.md § convention 15). */
+ *  Imported only by `#lib/e2e-automation` (testing.md § convention 15). */
 export function setConvPushSuppressed(on: boolean): void {
   convPushSuppressed = on;
 }
@@ -1587,7 +1596,7 @@ export async function startReceivePoll(): Promise<void> {
   await ensureWasm();
   subscribeReceivePushes();
   subscribeReconnectSweep();
-  // The account runtime starts once the manager exists (`$lib/account-runtime`),
+  // The account runtime starts once the manager exists (`#lib/account-runtime`),
   // and the ticker below builds it only on a tick — up to a full interval
   // after the sign-in, 30 s in production, since a tick that saw no identity
   // has already armed its sleep. Every account-plane read in that window
@@ -1630,7 +1639,7 @@ export async function startReceivePoll(): Promise<void> {
       // `convReceiveCycles` — the ticker, reconnect and poke arms are the cycle
       // triggers, exactly as native counts its own and not its single-rail push
       // wakes. Awaited: a stalled pass therefore parks this ticker too, which is
-      // what stops a dead pump being re-armed (`$lib/receive-pump`).
+      // what stops a dead pump being re-armed (`#lib/receive-pump`).
       await receivePump.cycle();
     }
     // Published as `pollWake` so `setConvPollSecs` can re-arm this exact sleep;
@@ -1676,7 +1685,7 @@ let mocksInstalled = false;
 // So the seams are declared here by hand and reached through one guarded cast,
 // rather than named on the generated type. Same problem and same answer as the
 // onboarding chunk, which has needed it since it got its own test flavor
-// (`$lib/onboarding/machine.svelte.ts`'s string-name dispatch). Declaring them as
+// (`#lib/onboarding/machine.svelte.ts`'s string-name dispatch). Declaring them as
 // an intersection is safe against signature drift: under the test flavor the
 // generated type declares them too, and TS merges the two into an overload set.
 interface ConversationsTestSeams {
@@ -1945,10 +1954,10 @@ const CONVERSATIONS_COMMANDS = [
   'conv_receive_now',
 ] as const;
 
-/** Register this module's e2e commands. Called only from `$lib/e2e-automation`
+/** Register this module's e2e commands. Called only from `#lib/e2e-automation`
  *  (test builds — testing.md § Test-agent build exclusion), so production bundles
  *  tree-shake it out entirely. The `window.__fauna_callCommand` hook itself is
- *  owned by `$lib/e2e-commands`. */
+ *  owned by `#lib/e2e-commands`. */
 export function registerConversationsCommands(): void {
   registerE2eCommands(CONVERSATIONS_COMMANDS, handleConversationsCommand);
 }

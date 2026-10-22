@@ -61,6 +61,20 @@ class BackupsVM @Inject constructor(
     private var machine: BackupsMachine? = null
 
     /**
+     * Bumped each time a gesture that changes which snapshots exist completes
+     * (create, delete, undelete, immediate delete, prune execute). The Restore
+     * section's local picker re-reads on it: a kind entry's snapshot restores
+     * from that picker, so one just taken is listed there without a page
+     * re-entry (`ui/backups.md` § Snapshot-list shape → *Kind entries*).
+     */
+    private val _snapshotsChanged = MutableStateFlow(0)
+    val snapshotsChanged: StateFlow<Int> = _snapshotsChanged.asStateFlow()
+
+    private fun mutated() {
+        _snapshotsChanged.value += 1
+    }
+
+    /**
      * Build the machine over the current connection if not already built, then
      * refresh. A null return (nest not yet connected) leaves an empty page; the
      * next [refresh] retries the build (mirrors [DevicesVM]).
@@ -79,12 +93,12 @@ class BackupsVM @Inject constructor(
 
     fun createSnapshot() {
         val m = machine ?: return
-        viewModelScope.launch { m.createSnapshot() }
+        viewModelScope.launch { m.createSnapshot(); mutated() }
     }
 
     fun deleteSnapshot(id: Long) {
         val m = machine ?: return
-        viewModelScope.launch { m.deleteSnapshot(id) }
+        viewModelScope.launch { m.deleteSnapshot(id); mutated() }
     }
 
     /** Recovery is offered ONLY out of `SoftDeleted` (backups.md § *Soft-deleted
@@ -92,7 +106,7 @@ class BackupsVM @Inject constructor(
      *  guard is the affordance rule, never the enforcement. */
     fun undeleteSnapshot(id: Long) {
         val m = machine ?: return
-        viewModelScope.launch { m.undeleteSnapshot(id) }
+        viewModelScope.launch { m.undeleteSnapshot(id); mutated() }
     }
 
     /** Open one snapshot's file list (`snapshot-detail-files`) — the
@@ -116,7 +130,7 @@ class BackupsVM @Inject constructor(
 
     fun pruneExecute() {
         val m = machine ?: return
-        viewModelScope.launch { m.pruneExecute() }
+        viewModelScope.launch { m.pruneExecute(); mutated() }
     }
 
     fun cancelPrunePreview() {
@@ -192,7 +206,10 @@ class BackupsVM @Inject constructor(
         // closes it when the row leaves the machine's list, so the nest's
         // `hard_floor_breach` refusal leaves the friction bar and its typed inputs
         // standing for a retry.
-        viewModelScope.launch { m.deleteSnapshotImmediate(id, confirmId, acknowledge) }
+        viewModelScope.launch {
+            m.deleteSnapshotImmediate(id, confirmId, acknowledge)
+            mutated()
+        }
     }
 
     /**

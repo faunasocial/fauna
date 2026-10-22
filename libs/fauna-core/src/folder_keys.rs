@@ -112,7 +112,22 @@ pub struct FolderContentKeys {
     pub prior: Vec<ContentKeyGeneration>,
 }
 
+/// The BLAKE3 `derive_key` context of [`ContentKeyGeneration::fingerprint`]
+/// (`key-material-hierarchy.md` § Architectural rules #3: domain-separated,
+/// versioned, never reused).
+pub const CONTENT_KEY_FINGERPRINT_CONTEXT: &str = "fauna.content-key.fingerprint.v1";
+
 impl ContentKeyGeneration {
+    /// A one-way, domain-separated digest naming this generation's key —
+    /// never the key, and useless for opening anything. Two distinct keys at
+    /// one version (a concurrent-rotation merge) fingerprint apart, which is
+    /// what lets a reader see the second one arrive: the sync engine's head
+    /// re-judge trigger keeps one `gen:<version>:<fingerprint>` token per
+    /// generation held (`writer-signed-change-records.md` ruling (8)(f)).
+    pub fn fingerprint(&self) -> [u8; 32] {
+        blake3::derive_key(CONTENT_KEY_FINGERPRINT_CONTEXT, &*self.key)
+    }
+
     /// Deterministic ordering key for picking the surviving `current` on a
     /// concurrent-rotation conflict (two owner devices rotating at once): newer
     /// version first, then later `rotated_at`, then larger key bytes as a final
@@ -1436,6 +1451,29 @@ mod tests {
         assert!(all.contains(&k(1)), "gen 1 retained");
         // Commutative + deterministic.
         assert_eq!(b.merge(&a), merged);
+    }
+
+    /// The re-judge trigger's token: two keys at one version fingerprint
+    /// apart, and the fingerprint is neither the key nor anything the key's
+    /// `chunk_crypto` use derives without the context.
+    #[test]
+    fn same_version_keys_fingerprint_apart_and_never_as_the_key() {
+        let mut a = FolderContentKeys::genesis(k(1), 1_000);
+        a.rotate(k(9), 2_000);
+        let mut b = FolderContentKeys::genesis(k(1), 1_000);
+        b.rotate(k(5), 2_000);
+        let merged = a.merge(&b);
+        let fps: Vec<(u64, [u8; 32])> = merged
+            .generations()
+            .map(|g| (g.version, g.fingerprint()))
+            .collect();
+        let v2: Vec<_> = fps.iter().filter(|(v, _)| *v == 2).collect();
+        assert_eq!(v2.len(), 2);
+        assert_ne!(v2[0].1, v2[1].1);
+        for g in merged.generations() {
+            assert_ne!(g.fingerprint(), g.key.to_array());
+            assert_eq!(g.fingerprint(), g.clone().fingerprint(), "deterministic");
+        }
     }
 
     #[test]

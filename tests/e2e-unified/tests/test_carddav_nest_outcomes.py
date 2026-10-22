@@ -19,6 +19,7 @@ import urllib.request
 
 import pytest
 
+from common.auth import no_redirect_opener
 from helpers import budgets
 
 from helpers.carddav_client import CardDAVClient, CardDAVError, build_vcard
@@ -287,11 +288,7 @@ def test_given_only_an_email_address_a_contacts_app_finds_the_address_book(
     assert srv, f"no _carddavs SRV record is published for {domain}: {records}"
     assert srv[0]["expected"].split() == ["0", "1", "443", f"mail.{domain}."], srv[0]
 
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
-            return None
-
-    opener = urllib.request.build_opener(NoRedirect)
+    opener = no_redirect_opener()
     try:
         opener.open(f"{nest_instance['url']}/.well-known/carddav", timeout=budgets.RPC_ROUNDTRIP_S)
         pytest.fail("the apex well-known must redirect, not serve")
@@ -441,13 +438,8 @@ def test_another_user_can_never_reach_your_address_book_even_with_the_same_name(
 
 def _apex_carddav(nest) -> tuple[int, str | None]:
     """GET the nest's apex `/.well-known/carddav`, no redirect-following."""
-
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *args, **kwargs):
-            return None
-
     try:
-        resp = urllib.request.build_opener(NoRedirect).open(
+        resp = no_redirect_opener().open(
             f"{nest['url']}/.well-known/carddav", timeout=budgets.RPC_ROUNDTRIP_S)
         return resp.status, resp.headers.get("Location")
     except urllib.error.HTTPError as err:
@@ -480,9 +472,8 @@ def test_switching_contacts_off_closes_the_door_and_the_signpost(dav_toggle_venu
     discovery: with contacts explicitly off, the apex `/.well-known/carddav`
     answers 503 and no contacts app can reach an address book — while calendars
     on the same listener keep serving; with every DAV surface off, the DAV
-    listener is not open at all."""
-    import socket
-
+    listener is not open at all — asked of the venue, which knows where its
+    MDA listens (a container's published port stays open on the host)."""
     venue = dav_toggle_venue(mail=True, carddav=False)
     status, location = _apex_carddav(venue.nest_instance)
     assert status == 503, f"contacts explicitly off must 503 at the apex; got {status} → {location}"
@@ -505,8 +496,8 @@ def test_switching_contacts_off_closes_the_door_and_the_signpost(dav_toggle_venu
     # Every surface the shared DAV listener serves switched off (an unset one
     # would follow mail and keep the listener up).
     closed = dav_toggle_venue(mail=True, caldav=False, carddav=False, webdav=False)
-    with pytest.raises(OSError):
-        socket.create_connection(("127.0.0.1", closed.caldav_port), timeout=budgets.RPC_ROUNDTRIP_S).close()
+    assert not closed.dav_listener_open(), (
+        "with every DAV surface switched off, the DAV listener must not be open")
 
 
 # ── contacts-in-standard-apps 19 ─────────────────────────────────────────────

@@ -32,10 +32,12 @@
 //! ([`AftermathSink::config_stage_settled`]). **The succession cut's custody
 //! arm** (`writer-signed-change-records.md` ruling (11)(a) — every owned set
 //! re-minted under the successor, over custody, its adoption marker first)
-//! runs beside the legs, at every store-ready the account attests a
-//! predecessor at; its order against them, and against the corpus re-seal in
-//! the sync agent, is immaterial (ruling (11)(a)), and the launch reconcile
-//! runs the same arm again on every identity-holding app.
+//! runs last, after the review-surface re-read, at every store-ready the
+//! account attests a predecessor at — last because it waits for custody's
+//! first listing (a successor's fresh store holds no set before it) and
+//! nothing else should wait with it; its order against the legs, and against
+//! the corpus re-seal in the sync agent, is immaterial (ruling (11)(a)), and
+//! the launch reconcile runs the same arm again on every identity-holding app.
 //!
 //! **The chain put comes first because everything after it reads through
 //! it.** Until the re-point lands, the READ fold links no predecessor — their
@@ -135,6 +137,9 @@ where
     R::Error: RpcErrorClass + core::fmt::Display,
     S: AftermathSink,
 {
+    // The identity the succession cut's custody arm runs as, where this
+    // device attests a predecessor — run last, below.
+    let mut cut_as = None;
     let parked = match ledger.self_actor() {
         Ok(self_actor) => {
             let self_hex = self_actor.to_hex();
@@ -143,24 +148,8 @@ where
             // first tip-sealed write, and every later read and mark write
             // goes through the chain it lands.
             let attested = registry.attested_predecessor_actor_ids(&self_hex);
-            // ── The succession cut's custody arm ─────────────────────────
-            // Where this device attests a predecessor, re-mint every owned
-            // set under the successor (`writer-signed-change-records.md`
-            // ruling (11)(a)); best-effort — the launch reconcile runs the
-            // same arm, so a refusal here costs a launch's wait.
             if !attested.is_empty() {
-                match custody_cut.cut(self_actor).await {
-                    Ok(0) => {}
-                    Ok(reminted) => tracing::info!(
-                        reminted,
-                        "the succession cut re-minted the owned sets' nonces"
-                    ),
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "the succession cut's custody arm did not finish; the launch reconcile \
-                         runs it again"
-                    ),
-                }
+                cut_as = Some(self_actor);
             }
             match repoint_and_raise(ledger, &attested).await {
                 Ok(()) => {
@@ -235,6 +224,32 @@ where
     // Unconditional — a refused raise must not blank a mark an earlier
     // ceremony raised (the trait method's own doc).
     sink.config_stage_settled().await;
+
+    // ── The succession cut's custody arm ─────────────────────────────────
+    // Where this device attests a predecessor, re-mint every owned set under
+    // the successor (`writer-signed-change-records.md` ruling (11)(a)). Last,
+    // because it may wait: a successor's fresh store answers no custody until
+    // its first listing lands, and the cut waits for that rather than reading
+    // the empty store as "no set" — its order against the legs above is
+    // immaterial (the same ruling), so none of them waits with it.
+    // Best-effort — the launch reconcile runs the same arm, so a refusal here
+    // costs a launch's wait.
+    if let Some(identity) = cut_as {
+        match custody_cut.cut(identity).await {
+            // Logged, not silent: a cut that found nothing to re-mint and one
+            // that never ran otherwise read the same.
+            Ok(0) => tracing::info!("the succession cut found no un-cut owned set to re-mint"),
+            Ok(reminted) => tracing::info!(
+                reminted,
+                "the succession cut re-minted the owned sets' nonces"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "the succession cut's custody arm did not finish; the launch reconcile runs it \
+                 again"
+            ),
+        }
+    }
     parked
 }
 
@@ -436,7 +451,7 @@ where
     let Some(ceremony) = PendingCeremony::from_json(&raw).and_then(PendingCeremony::into_ceremony)
     else {
         tracing::warn!("the parked aftermath ceremony does not decode — cleared, nothing raised");
-        clear_if_unchanged(registry, &self_hex, &raw);
+        clear_if_unchanged(registry, &self_hex, &raw).await;
         return ParkedRaises::Voided;
     };
     let attested = registry.attested_predecessor_actor_ids(&self_hex);
@@ -453,7 +468,7 @@ where
     let filters = raise_filters(nest, ledger, &ceremony).await;
     let destinations = raise_destinations(backup, &ceremony).await;
     if members && filters && destinations {
-        clear_if_unchanged(registry, &self_hex, &raw);
+        clear_if_unchanged(registry, &self_hex, &raw).await;
         ParkedRaises::Drained
     } else {
         ParkedRaises::StillOwed
@@ -463,10 +478,13 @@ where
 /// Clear the park only if it still holds exactly what this pass drained — a
 /// sweep retry that re-parked a wider roster meanwhile keeps its park for the
 /// next store-ready.
-fn clear_if_unchanged(registry: &AccountRegistry, self_hex: &str, drained: &str) {
-    if registry.pending_aftermath_ceremony(self_hex).as_deref() == Some(drained) {
-        registry.clear_aftermath_ceremony(self_hex);
-    }
+///
+/// The compare and the delete are one critical section, serialized across the
+/// host's instances (web's Web Lock, native's file lock) by the registry.
+async fn clear_if_unchanged(registry: &AccountRegistry, self_hex: &str, drained: &str) {
+    registry
+        .clear_aftermath_ceremony_if_serialized(self_hex, drained)
+        .await;
 }
 
 /// The destination-mark raise: an `Open` mark per destination any of the

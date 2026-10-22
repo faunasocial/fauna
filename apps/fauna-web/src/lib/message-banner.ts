@@ -44,9 +44,9 @@ export interface FiredBanner {
 
 // The fired-banner log + its two diff-tick counters — web's leg of
 // `fauna_e2e_agent::MESSAGE_BANNERS_KEY`, read out through
-// `$lib/e2e-automation`'s `__fauna_messageBanners` hook (the hook is what the
+// `#lib/e2e-automation`'s `__fauna_messageBanners` hook (the hook is what the
 // production bundle drops; these three are plain module state, the same shape
-// the receive pump's counters already have in `$lib/conversations`).
+// the receive pump's counters already have in `#lib/conversations`).
 //
 // The counters are not decoration: two of the three rules are NEGATIVE, and a
 // tick that merely *finished* after a test planted its message may have read the
@@ -80,9 +80,9 @@ export function messageBanners(): {
  * banner the user never sees, and a doubled tick is one the tracker has already
  * accounted for.
  *
- * Takes the manager rather than reaching for the singleton itself: `$lib/
+ * Takes the manager rather than reaching for the singleton itself: `#lib/
  * conversations` owns that singleton and calls this, and the reverse import
- * would be a cycle (the same shape `syncFeedRoomPosts` keeps with `$lib/feed`).
+ * would be a cycle (the same shape `syncFeedRoomPosts` keeps with `#lib/feed`).
  */
 export function raiseNewMessageBanners(manager: WasmConversationsManager): void {
   started += 1;

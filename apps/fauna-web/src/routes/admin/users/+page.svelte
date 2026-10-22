@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     adminUsersList,
     adminUsersListAll,
@@ -31,9 +31,9 @@
     type AdminInviteCode,
     type AdminInviteRequest,
     type RegistrationMode,
-  } from '$lib/rpc';
-  import { toBytes, actorHex, actorIdFromHex } from '$lib/hex';
-  import { t } from '$lib/i18n/strings';
+  } from '#lib/rpc';
+  import { toBytes, actorHex, actorIdFromHex } from '#lib/hex';
+  import { t } from '#lib/i18n/strings';
   import {
     mailServingStatusLabel,
     adminUserRowControls,
@@ -51,9 +51,9 @@
     prevPageOffset,
     type RegistrationModeOption,
     type AgeBandOption,
-  } from '$lib/wasm';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/wasm';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Consolidated admin-users hub (admin.md § 2) — five sections: Pending
   // requests / Registration / Admit / Invite / Users. Drives the shared `fauna.admin.*`
@@ -111,6 +111,7 @@
   let admitHandleInput = $state('');
   let admitTier = $state('');
   let admitGuardianIdx = $state(0);
+  let admitAgeBand = $state('');
   // Section 4 — invite: create form.
   let showCreateForm = $state(false);
   let newCodeTier = $state('');
@@ -236,6 +237,7 @@
     ageBandOptionsList = ageBandOptions();
     ageBandNotSet = claimedAgeBandOption(null);
     newCodeAgeBand = ageBandNotSet;
+    admitAgeBand = ageBandNotSet;
     try {
       await refresh();
     } catch (e) {
@@ -347,7 +349,7 @@
     try {
       // A guardian on a handle-less admit is refused by the nest and lands in
       // `actionError` below — no local rule.
-      await adminUsersCreate(s, actor, admitTier || defaultTier(), handle, guardianActorAt(admitGuardianIdx));
+      await adminUsersCreate(s, actor, admitTier || defaultTier(), handle, guardianActorAt(admitGuardianIdx), ageBandFor(admitGuardianIdx, admitAgeBand));
       await refresh();
     } catch (e) {
       actionError = e instanceof Error ? e.message : String(e);
@@ -670,15 +672,31 @@
         <option value={tier.name}>{tier.name}</option>
       {/each}
     </select>
-    <!-- Guardian for the directly admitted account ("None" ⇒ ordinary); no age
-         band here — that id is unapproved. -->
+    <!-- Guardian for the directly admitted account ("None" ⇒ ordinary), and its
+         age band (enabled only beside a guardian; account-age-band.md § App
+         surface → Age-band surfaces). -->
     <span class="caption">{t.admin.users_page.guardian_label}</span>
     <select
       data-testid={IDS.ADMIN_USERS_ADMIT_GUARDIAN_SELECT}
       value={guardianOptionAt(admitGuardianIdx)}
-      onchange={(e) => (admitGuardianIdx = (e.currentTarget as HTMLSelectElement).selectedIndex)}
+      onchange={(e) => {
+        admitGuardianIdx = (e.currentTarget as HTMLSelectElement).selectedIndex;
+        // A band presupposes a guardian: clearing one clears the other.
+        if (!guardianActorAt(admitGuardianIdx)) admitAgeBand = ageBandNotSet;
+      }}
     >
       {#each guardians.options as opt}<option value={opt}>{opt}</option>{/each}
+    </select>
+    <span class="caption">{t.family.age_band.label}</span>
+    <select
+      data-testid={IDS.ADMIN_USERS_ADMIT_AGE_BAND_SELECT}
+      aria-label={t.family.age_band.label}
+      disabled={!guardianActorAt(admitGuardianIdx)}
+      bind:value={admitAgeBand}
+    >
+      {#each ageBandOptionsList as opt (opt.value)}
+        <option value={opt.value}>{resolveLocalizedNested(opt.label)}</option>
+      {/each}
     </select>
     <button class="btn" data-testid={IDS.ADMIN_USERS_ADMIT_BUTTON} onclick={admitUser}
       >{t.admin.users_page.admit_button}</button>

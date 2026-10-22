@@ -23,7 +23,8 @@
 //!   ([`PrincipalCustody`] — the slot seam) and the two requesters.
 //! - [`HostLegs`] — the legs the pass runs between the fleet walk and the
 //!   device-endpoints step: natively the peer leg and the custody leg
-//!   (`fauna_sync_engine::account_runtime`), on web [`NoLegs`].
+//!   (`fauna_sync_engine::account_runtime`), on web `web_host::WebLegs` (no
+//!   per-pass legs; the restore gesture's custodian dial).
 //! - [`EngineElection`] — the engine-singleton re-try (`flock` natively, Web
 //!   Locks on web), with the initial election ([`elect_at_start`]) run by the
 //!   host inside its readiness barrier.
@@ -154,9 +155,10 @@ pub use handle::{
     PumpCycles, PumpCyclesView, RUNTIME_GONE,
 };
 pub use handle_source::{
-    ACCOUNT_HANDLE_WAIT, AccountHandleSource, AccountMailStore, AccountStoreAccess,
-    FIRST_PASS_WAIT, NotReadyReason, RUNTIME_ABSENT, ScopeNotReady, SeatAccountStore,
-    first_listing_gate, not_ready_reason, not_ready_reason_key, read_gate, wait_for_account_handle,
+    ACCOUNT_HANDLE_WAIT, AccountHandleSource, AccountMailImportSourceStore, AccountMailStore,
+    AccountStoreAccess, FIRST_PASS_WAIT, NotReadyReason, RUNTIME_ABSENT, ScopeNotReady,
+    SeatAccountStore, first_listing_gate, not_ready_reason, not_ready_reason_key, read_gate,
+    wait_for_account_handle,
 };
 pub use host::{
     AccountRuntimeHost, AssemblySettle, InstallClaim, InstallOutcome, PendingAssembly,
@@ -557,7 +559,8 @@ pub struct LegsOutput {
 /// `peer_leg` and `custody_leg` modules, in the order the pump always kept:
 /// withdrawal snapshots, ensure-bound, sibling dial, custody serve refresh,
 /// custody nest pull, custody dial + budget, receipts. Web has no iroh and
-/// hosts no custody, so it runs [`NoLegs`]. Each leg reports into its own
+/// hosts no custody, so its legs (`web_host::WebLegs`) run nothing per pass
+/// and carry only the restore gesture's custodian dial. Each leg reports into its own
 /// `PumpReport` slot and pushes step failures through [`push_step_error`].
 pub trait HostLegs<B: StoreBackend, R: RpcRequester> {
     fn run(
@@ -575,9 +578,44 @@ pub trait HostLegs<B: StoreBackend, R: RpcRequester> {
     /// one NodeId must never be an endpoint in two processes. The next pass
     /// this runtime runs, if it ever holds the role again, rebuilds them.
     fn stand_down(&mut self) -> impl std::future::Future<Output = ()>;
+
+    /// The restore gesture from a custodian NEST at `url`
+    /// ([`AccountStoreHandle::restore_from_custodian`]; `account-replica-posture.md`
+    /// § Replica posture → *Corollary — the cold device*). The walk is the
+    /// shared one (`crate::custodian_restore`); the host owns the dial (its
+    /// `CustodianDial`: the native nest client, or the browser sockets) and
+    /// the revocation view; `content_scopes` is the pass's own derivation,
+    /// called AFTER the state planes land (bound (d)). A host that cannot
+    /// dial a custodian answers `Err`.
+    fn restore_from_custodian(
+        &mut self,
+        ctx: RestoreCtx<'_, B>,
+        url: &str,
+        content_scopes: &mut dyn FnMut() -> Vec<ContentScope>,
+    ) -> impl std::future::Future<Output = Result<crate::host_legs::CustodianRestoreOutcome>>;
 }
 
-/// A host with no legs — web, and any test that wants the pass alone.
+/// What the restore gesture hands the host ([`HostLegs::restore_from_custodian`]):
+/// the store and this device's writer identity, trust and key schedule — the
+/// per-target arguments of the custodian nest arm.
+pub struct RestoreCtx<'a, B: StoreBackend> {
+    pub store: &'a AccountStore<B>,
+    pub trust: &'a GenerationTrust,
+    pub writer_key: &'a SigningKey,
+    pub slot: &'a dyn PrincipalCustody,
+    pub schedule: &'a AccountStateKeySchedule,
+    /// The identity seed and the attested predecessors' keypairs, when this
+    /// process holds them — what the gesture's plane-first opener keys the
+    /// restored generations with (`account-replica-posture.md` § *Escrow
+    /// custody*, ruling (2)). Filled on every seed-holding runtime, whatever
+    /// its roles: the gesture is the user's act and the plane open asks no
+    /// door. `None` on the seedless host, whose restore counts what it cannot
+    /// key as sealed (bound (e)).
+    pub seed: Option<(&'a [u8; 32], &'a [ActorKeypair])>,
+}
+
+/// A host with no legs and no custodian dial — the seedless host's tests and
+/// any test that wants the pass alone.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoLegs;
 
@@ -587,6 +625,16 @@ impl<B: StoreBackend, R: RpcRequester> HostLegs<B, R> for NoLegs {
     }
 
     async fn stand_down(&mut self) {}
+
+    async fn restore_from_custodian(
+        &mut self,
+        _ctx: RestoreCtx<'_, B>,
+        _url: &str,
+        _content_scopes: &mut dyn FnMut() -> Vec<ContentScope>,
+    ) -> Result<crate::host_legs::CustodianRestoreOutcome> {
+        // No dial: the command and its boundary exist on every host.
+        anyhow::bail!("restoring from a custodian nest is not available in this app yet")
+    }
 }
 
 /// The engine-singleton role this runtime plays (`account-runtime.md`
@@ -1715,6 +1763,10 @@ impl AccountDriver {
                                 });
                                 return ServeEnd::Reassemble;
                             };
+                            // The caller may drop the report (the agent's pass
+                            // nudge does), so the holder's own log is the only
+                            // place a failed step of this pass is seen.
+                            log_pump("reconcile-now", &report);
                             let allow_removed_heal = removed_heal_allowed!(&report);
                             let reason =
                                 reassembly_reason(&report, allow_removed_heal, !*burnt_heal_taken);
@@ -1872,6 +1924,53 @@ impl AccountDriver {
                                 )
                                 .await,
                             );
+                        }
+                        // The restore gesture from a custodian nest: between
+                        // passes, on any role (it is the user's act, and it
+                        // rides the nest wire, never the engine's legs'
+                        // standing state). The content scopes are derived by
+                        // the pass's own derivation, called once the state
+                        // planes have landed (bound (d)).
+                        Cmd::RestoreFromCustodian { url, reply } => {
+                            let mut scopes = || {
+                                derive_scopes(actor, &settings.memberships, registered, channels).0
+                            };
+                            let outcome = legs
+                                .restore_from_custodian(
+                                    RestoreCtx {
+                                        store,
+                                        trust: fleet_writer.trust,
+                                        writer_key: fleet_writer.key,
+                                        slot: fleet_writer.slot,
+                                        schedule: fleet_writer.schedule,
+                                        seed: principal.keypair().map(|kp| {
+                                            (kp.secret_bytes(), principal.predecessor_keypairs())
+                                        }),
+                                    },
+                                    &url,
+                                    &mut scopes,
+                                )
+                                .await;
+                            let restored = matches!(
+                                outcome,
+                                Ok(crate::host_legs::CustodianRestoreOutcome::Restored { .. })
+                            );
+                            let _ = reply.send(outcome);
+                            // What came back reaches the bound nest through the
+                            // engine holder's next full pass alone (the bind
+                            // leg's diff) — asked for now, never left to a
+                            // backstop tick: this runtime's own pass when it
+                            // holds the engine, else the holder's, through the
+                            // owed-pass watch the host forwards to the agent
+                            // (`holder_pass_owed`, as the seed pass's recovery
+                            // and a removal ask).
+                            if restored {
+                                if role.is_holder() {
+                                    backstop.set(fauna_sleep::sleep(Duration::ZERO));
+                                } else {
+                                    cycles.owe_holder_pass();
+                                }
+                            }
                         }
                         Cmd::Shutdown { reply } => {
                             // Carried out to the host, NOT answered here: the

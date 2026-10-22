@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.mockito.ArgumentMatchers.anyLong
@@ -53,5 +54,26 @@ class AdminDnsVMTest {
 
         verify(api).adminUsersListAll()
         verify(api, never()).adminUsersList(nullable(Long::class.java), anyLong())
+    }
+
+    /**
+     * A bound-id refusal on the cert issue (the nest's `fauna.nest.info` claim
+     * disagrees with the connection-bound id) reaches `error-message` through
+     * [AdminDnsVM.error] on both entry points — windows/apple/tui already do;
+     * android used to skip the dispatch silently. A refusal never reaches the
+     * machine, so the VM's own `error` is the only place it can show.
+     */
+    @Test
+    fun boundIdRefusalOnCertIssueReachesErrorMessage() = runTest {
+        val api = mock(ApiClient::class.java)
+        whenever(api.adminUsersListAll()).thenReturn(emptyList())
+        whenever(api.resolveThisNestId()).thenThrow(IllegalStateException("nest id mismatch"))
+        val vm = AdminDnsVM(api)
+
+        vm.issueCert("example.com")
+        assertEquals("resolve target nest for example.com: nest id mismatch", vm.error.value)
+
+        vm.beginManualIssue("example.org")
+        assertEquals("resolve target nest for example.org: nest id mismatch", vm.error.value)
     }
 }

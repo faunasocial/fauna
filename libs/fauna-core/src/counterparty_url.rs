@@ -157,8 +157,45 @@ pub fn validate_counterparty_nest_url_scoped(
     Ok(())
 }
 
+/// The policy's own origin reading of `url`: the lowercase scheme and
+/// `host[:port]` with the one optional trailing slash dropped, or `None` for
+/// a URL the device-scope policy refuses. Two addresses name the same nest
+/// exactly when their origins are equal — how the restore gesture matches a
+/// typed address against a custody row's `custodian_nest_url`
+/// (`account-replica-posture.md` § *Corollary — the cold device*, bound (b)).
+pub fn counterparty_origin(url: &str) -> Option<String> {
+    validate_counterparty_nest_url_scoped(url, DialScope::Device).ok()?;
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    Some(format!(
+        "{}://{}",
+        scheme.to_ascii_lowercase(),
+        authority.to_ascii_lowercase()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_origin_reading_ignores_case_and_the_trailing_slash() {
+        use super::counterparty_origin as origin;
+        assert_eq!(
+            origin("HTTPS://Friend-Nest.example/"),
+            Some("https://friend-nest.example".to_string())
+        );
+        assert_eq!(
+            origin("https://friend-nest.example:8443"),
+            origin("https://FRIEND-NEST.example:8443/")
+        );
+        assert_ne!(
+            origin("https://friend-nest.example:8443"),
+            origin("https://friend-nest.example")
+        );
+        // A refused address has no origin to match.
+        assert_eq!(origin("http://friend-nest.example"), None);
+        assert_eq!(origin("https://friend-nest.example/path"), None);
+    }
+
     use super::validate_counterparty_nest_url as validate;
     use super::{DialScope, validate_counterparty_nest_url_scoped as validate_scoped};
 

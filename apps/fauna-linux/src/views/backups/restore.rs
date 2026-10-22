@@ -290,6 +290,26 @@ pub fn populate_snapshot_select(handles: &RestoreHandles, snapshots: &[SnapshotS
     handles.snapshot_select.notify("selected");
 }
 
+/// Re-read the local-snapshot picker after a gesture that changed which
+/// snapshots exist (`snapshot_list.rs`'s `MutatingGesture`). A failed read
+/// keeps what the picker already paints — the page's next whole read reports a
+/// real fault — so it posts nothing, unlike the page-entry fetch.
+pub async fn reread_snapshot_select(
+    nest_rpc: std::sync::Arc<fauna_client::NestClient>,
+    tx: crate::client::UiSender,
+) {
+    if let Ok(reply) = fauna_client_snapshots::SnapshotsClient::new(nest_rpc)
+        .list(None, None, 0)
+        .await
+    {
+        tx.send(crate::app::UiMessage::Data(
+            crate::app::DataMessage::MessageKindSnapshotsLoaded {
+                snapshots: reply.rows,
+            },
+        ));
+    }
+}
+
 /// Rebuild the restore-history list from the freshly-fetched rows. Clears
 /// the per-snapshot divergence store; the message loop then re-fires one
 /// `fetch_restore_divergence` per row to repopulate the banners.

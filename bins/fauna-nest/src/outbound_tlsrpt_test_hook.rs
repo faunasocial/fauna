@@ -15,8 +15,12 @@
 //! always-200 `NullTlsrptHttpPoster`, so `https:` rua persist a row without an
 //! HTTP server; `mailto:` rua ride the real outbound queue.
 //!
-//! Consumer: the mail-bridge MTA TLSRPT e2e (T2.4 E1). Production never
-//! compiles this module.
+//! `POST /api/v1/test/tlsrpt/prune_now` also runs the inbound report retention
+//! prune at a scripted `now` (`smtp-server.md` § TLSRPT inbound report listener).
+//!
+//! Consumers: the mail-bridge MTA TLSRPT e2e (T2.4 E1), and
+//! `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py` for the prune.
+//! Production never compiles this module.
 
 #![cfg(feature = "test-hooks")]
 
@@ -151,4 +155,25 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
             "/api/v1/test/outbound/tlsrpt_persisted",
             get(handle_tlsrpt_persisted),
         )
+        .route(
+            "/api/v1/test/tlsrpt/prune_now",
+            post(handle_prune_tlsrpt_now),
+        )
+}
+
+#[derive(Deserialize)]
+struct PruneTlsrptNowBody {
+    /// Epoch second to run the retention prune at.
+    now: i64,
+}
+
+/// `POST /api/v1/test/tlsrpt/prune_now` — run the daily mail sweep's inbound
+/// TLSRPT retention prune (`run_tlsrpt_inbound_report_gc`) at the scripted
+/// `now`, so an e2e witnesses the 90-day retention without waiting 90 days.
+async fn handle_prune_tlsrpt_now(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PruneTlsrptNowBody>,
+) -> impl IntoResponse {
+    crate::bridge_routing_handlers::run_tlsrpt_inbound_report_gc_at(&state, body.now).await;
+    Json(json!({ "ok": true })).into_response()
 }

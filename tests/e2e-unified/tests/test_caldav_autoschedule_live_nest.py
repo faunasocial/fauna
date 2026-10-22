@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN): server-side CalDAV ``calendar-auto-schedule``
-fan-out proven **LIVE against example.com** — the production sibling of the tier_4
+fan-out proven **LIVE against a deployed nest** — the production sibling of the tier_4
 ``test_caldav_autoschedule_imip.py`` (real local image) and the completion of the
 CalDAV-e2e enduring goal (caldav-server.md § Server-side auto-schedule).
 
@@ -8,7 +8,7 @@ real publicly-trusted cert, real DNS/MX, real seal — none of which a local ima
 exercises): a stock CalDAV organizer (raw CalDAV wire — exactly what Apple
 Calendar speaks, no Fauna app in the loop) adds an attendee → the MDA's gateway
 fans an iMIP **REQUEST** out → the MTA ``LookupMX``-relays it → because
-``example.com``'s MX is the box itself, it loops back **inbound** → the inbound
+the handle domain's MX is the box itself, it loops back **inbound** → the inbound
 perimeter seals it to the recipient's INBOX → the linux Fauna app sees the
 invitation. Then the organizer **removes** the attendee → the gateway fans an iMIP
 **CANCEL** the same way → the linux app sees a second scheduling delivery.
@@ -17,9 +17,9 @@ invitation. Then the organizer **removes** the attendee → the gateway fans an 
 The live-box constraint (memory ``caldav-live-test-no-side-channel``) forbids any
 nest API / SSH / DB peek — the only ways to read box state are the linux app
 and the mail/CalDAV protocols. So the attendee is a **sub-address of the
-organizer**, ``test+autosched-<nonce>@example.com``:
+organizer**, ``test+autosched-<nonce>@example.net``:
 
-  - It is **distinct** from the organizer (``test@example.com``), so the gateway's
+  - It is **distinct** from the organizer (``test@example.net``), so the gateway's
     ``email_reachable_recipients`` keeps it as a real recipient
     (``fauna_core::ical`` excludes only the organizer's *own exact* address).
   - Sub-addressing is **on by default** (``fauna_mail::aliases``
@@ -27,7 +27,7 @@ organizer**, ``test+autosched-<nonce>@example.com``:
     ``resolve_recipient``-splits ``test+autosched-… → base test`` and seals into
     the **organizer's own** INBOX — readable in the linux conversations view.
 
-One identity (``test@example.com``) is therefore organizer, attendee-domain *and*
+One identity (``test@example.net``) is therefore organizer, attendee-domain *and*
 observer at once — no catch-all designation, no second onboarding, no API peek.
 The iMIP REQUEST surfaces as a normal inbound mail on the ``Smtp`` rail with
 subject ``Invitation: <summary>`` (``fauna_core::ical::imip_subject``); the CANCEL
@@ -83,7 +83,7 @@ the MTA's retry is accepted). This is the first live test to drive a *real MTA
 inbound* on the self-loop (the mail roundtrip tests inject via IMAP APPEND, which
 bypasses greylisting), so the REQUEST/CANCEL waits are deliberately generous; a
 timeout most likely means the self-loop triplet is greylisted (the loop-back is
-SPF+DKIM-authenticated as example.com, so it is *accepted*, only *deferred*). If it
+SPF+DKIM-authenticated as the box's own domain, so it is *accepted*, only *deferred*). If it
 times out, that greylist-on-self-loop behavior is the gap to capture next.
 """
 
@@ -181,7 +181,7 @@ def _wait_tally(app, nonce: str, at_least: int, timeout: float) -> tuple[int, li
 
 @pytest.mark.feature("calendar-in-standard-apps")
 def test_live_caldav_autoschedule_fans_imip(app):
-    """Organizer test@example.com PUTs a CalDAV invite to its own sub-address →
+    """Organizer test@example.net PUTs a CalDAV invite to its own sub-address →
     iMIP REQUEST loops back to its INBOX (observed in the linux app); remove
     the attendee → iMIP CANCEL loops back the same way."""
     if not app.driver.is_linux():
@@ -236,7 +236,7 @@ def test_live_caldav_autoschedule_fans_imip(app):
         f"the iMIP REQUEST for {summary!r} (invited {attendee}) never surfaced in "
         f"the organizer's conversations within {REQUEST_TIMEOUT:.0f}s. The gateway "
         "builds the REQUEST from the just-PUT body (no prior read / MLS snapshot "
-        "needed), the MTA MX-relays it, and example.com's MX is the box itself — so "
+        "needed), the MTA MX-relays it, and the handle domain's MX is the box itself — so "
         "the most likely cause is the inbound perimeter GREYLISTING the first-seen "
         "self-loop triplet (the loop-back is SPF+DKIM-authenticated, so it is "
         "deferred, not rejected). Confirm CalDAV is reachable + the gateway is "

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use fauna_mail::outbound::mta_sts::{
     CachingMtaStsFetcher, FetchedPolicy, MtaStsFetcher, MtaStsLookup, MtaStsMode, MtaStsParseError,
-    MtaStsPolicy, NullMtaStsFetcher, parse_policy,
+    MtaStsPolicy, MtaStsPolicyHttp, NullMtaStsFetcher, fetch_policy, parse_policy,
 };
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
@@ -649,4 +649,54 @@ async fn followers_after_leader_completes_hit_the_cache() {
     // A subsequent lookup must come from the cache — no new inner call.
     assert_found_eq(cache.lookup("example.com").await.unwrap(), &fp);
     assert_eq!(cache.inner().call_count().await, 1);
+}
+
+// ---------------------------------------------------------------------------
+// The policy GET goes through the injected `MtaStsPolicyHttp` seam (the
+// deployment's SSRF-guarded fetch) at the canonical URL; its answer classifies
+// into the TLSRPT outcomes.
+// ---------------------------------------------------------------------------
+
+struct ScriptedPolicyHttp {
+    urls: std::sync::Mutex<Vec<String>>,
+    answer: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl MtaStsPolicyHttp for ScriptedPolicyHttp {
+    async fn get_policy(&self, url: &str) -> anyhow::Result<String> {
+        self.urls.lock().unwrap().push(url.to_string());
+        self.answer
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("target refused"))
+    }
+}
+
+#[tokio::test]
+async fn fetch_policy_gets_the_canonical_url_through_the_seam() {
+    let body = "version: STSv1\nmode: enforce\nmx: mx.example.com\nmax_age: 86400\n";
+    for (answer, want) in [
+        (Some(body), "found"),
+        (Some("not a policy"), "invalid"),
+        (None, "fetch_error"),
+    ] {
+        let http = ScriptedPolicyHttp {
+            urls: std::sync::Mutex::new(Vec::new()),
+            answer,
+        };
+        let got = match fetch_policy(&http, "example.com", "id1".to_string()).await {
+            MtaStsLookup::Found(FetchedPolicy { id, .. }) => {
+                assert_eq!(id, "id1");
+                "found"
+            }
+            MtaStsLookup::Invalid => "invalid",
+            MtaStsLookup::FetchError => "fetch_error",
+            MtaStsLookup::NotPublished => "not_published",
+        };
+        assert_eq!(got, want);
+        assert_eq!(
+            *http.urls.lock().unwrap(),
+            ["https://mta-sts.example.com/.well-known/mta-sts.txt"]
+        );
+    }
 }

@@ -46,8 +46,8 @@ use gtk::glib::prelude::ToVariant;
 
 use fauna_client_sync::agent::PendingBind;
 use fauna_client_sync::agent::{
-    AgentCapabilityInputs, AgentSpawner, BindingRow, BindingState, LocationBindingsModel,
-    ModeToggle, ReachabilityObserver, SyncAgentProvisioner,
+    AgentCapabilityInputs, AgentSpawner, BindingRow, BindingState, FreeSpaceVerb,
+    LocationBindingsModel, ModeToggle, ReachabilityObserver, SyncAgentProvisioner,
 };
 // The channel-agnostic spawner half (`sync-agent.md` § Packaging + lifecycle),
 // lifted to shared Rust so fauna-tui reuses it. This module keeps only the
@@ -382,6 +382,27 @@ impl SystemdAgentSpawner {
                  .flatpak-info app-path) — falling back to app-child agent residency"
             );
             self.child.spawn();
+        }
+    }
+}
+
+/// The agent command this install channel's user unit runs — the derivation
+/// [`SystemdAgentSpawner::spawn_agent`] writes the unit from, for its second
+/// consumer, the GNOME Files Share module (`crate::file_manager_share`), so the
+/// channel's agent has one spelling. `None` for the sandbox-child channel
+/// (Snap), whose agent no host process can reach, and wherever the unit itself
+/// could not be derived.
+pub fn channel_unit_exec() -> Option<UnitExec> {
+    match LaunchChannel::detect() {
+        LaunchChannel::SandboxChild => None,
+        LaunchChannel::FlatpakUnit { app_id } => {
+            let info = std::fs::read_to_string("/.flatpak-info").ok()?;
+            let app_path = flatpak_info_app_path(&info)?;
+            unit_exec_for_flatpak(&app_id, flatpak_condition_target(&app_path, &app_id)?)
+        }
+        LaunchChannel::AppImageUnit { appimage } => unit_exec_for_appimage(appimage),
+        LaunchChannel::NativeUnit => {
+            agent_spawner::agent_binary_absolute().and_then(UnitExec::for_binary)
         }
     }
 }
@@ -778,6 +799,50 @@ pub fn mode_toggle_for(path: &Path) -> Option<ModeToggle> {
     })
 }
 
+/// How the bound row at `path` renders its *Free up space* verb — the shared
+/// rule ([`LocationBindingsModel::free_space_verb`]: present exactly while the
+/// row renders its mode switch, is on-demand and its placeholder surface
+/// stands; every number the agent's reading). `None` renders nothing: before
+/// [`install`], for a row the model does not hold, and for a row the rule
+/// withholds the verb from.
+pub fn free_space_verb_for(path: &Path) -> Option<FreeSpaceVerb> {
+    let path = path.display().to_string();
+    AGENT.with(|cell| {
+        let borrow = cell.borrow();
+        let model = borrow.as_ref()?.model.borrow();
+        let row = model.rendered().into_iter().find(|row| row.path == path)?;
+        model.free_space_verb(&row)
+    })
+}
+
+/// `folder-location-free-space-button` — *Free up space* on the bound
+/// on-demand folder at `path` over the agent's `FreeLocationSpace`, which
+/// answers once the sweep is accepted; the root's own loop does the work.
+/// **Not optimistic:** the row repaints from the `ListLocations` read that
+/// follows, and the status tick's watch ([`refresh_engine_holds`] →
+/// `fold_parks`) carries the readings as the sweep moves them — so a refusal
+/// leaves the row showing what the agent holds.
+pub fn free_location_space(path: String) {
+    let Some((provisioner, rt)) = provisioner_and_runtime() else {
+        return;
+    };
+    crate::async_helper::spawn_with_snapshot(
+        &rt,
+        move || async move {
+            if let Err(e) = provisioner.free_location_space(path).await {
+                tracing::warn!("free_location_space failed (nothing was freed): {e}");
+            }
+            provisioner.list_locations().await
+        },
+        move |result| {
+            if let Ok(agent_rows) = result {
+                fold_agent_rows(&agent_rows);
+            }
+            rerender_folders_page();
+        },
+    );
+}
+
 /// Keep the host's on-demand surface from a `GetServiceStatus` reply (the
 /// `sync-agent-status` poll's, `app.rs`) and repaint the bound rows when it
 /// changed — every row's switch reads it ([`mode_toggle_for`]).
@@ -1153,6 +1218,18 @@ mod tests {
                 crate::i18n::strings::lookup(notice.i18n_key()).is_some(),
                 "{notice:?} names {} — no such string",
                 notice.i18n_key()
+            );
+        }
+    }
+
+    /// Every line the *Free up space* verb can render resolves in the string
+    /// table.
+    #[test]
+    fn every_free_space_line_has_its_string() {
+        for key in fauna_client_sync::agent::FreeSpaceVerb::KEYS {
+            assert!(
+                crate::i18n::strings::lookup(key).is_some(),
+                "no string for {key}"
             );
         }
     }

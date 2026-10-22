@@ -20,8 +20,24 @@
         <!-- Ctrl+Comma for Settings — added in code-behind because VK_OEM_COMMA (188) is not in the VirtualKey enum -->
     </Page.KeyboardAccelerators>
 
-    <Grid>
+    <!-- Two rows: the shell-top chrome (row 0, declared after the NavigationView so
+         the tab order is unchanged) and the NavigationView (row 1). The chrome owns
+         its own row, so no global element ever lies over page content: the
+         macOS/iOS top-inset stack (critical alerts, then the status line, then the
+         supervised indicator; transport-connection.md § Connection-status indicator).
+         It is not the NavigationView's PaneHeader, the visual "top of sidebar":
+         WinUI does not reliably realize PaneHeader in the UIA tree, so FlaUI can't
+         read it there, and the Auto pane mode hides the whole pane below 641 DIP
+         (the 600 DIP minimum window), where an always-visible indicator still has
+         to show. -->
+    <Grid Background="{ThemeResource SolidBackgroundFillColorBaseBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
         <NavigationView
+            Grid.Row="1"
             x:Name="NavView"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
@@ -181,9 +197,9 @@
 
             <!-- ContentFrame + the screen-time lock overlay share ONE Grid cell so
                  the overlay covers exactly the content area — never the sidebar
-                 (family-tab must stay reachable) and never the top-chrome globals
-                 declared as this outer Grid's own later siblings below
-                 (supervised-indicator must stay clickable), mirroring apple's
+                 (family-tab must stay reachable) and never the shell-top chrome in
+                 the outer Grid's row 0 below (supervised-indicator must stay
+                 clickable), mirroring apple's
                  "applied BEFORE each shell's top-chrome safeAreaInset" placement
                  and tui's "the sidebar is untouched" rule (family-safety.md
                  § Screen time). -->
@@ -201,7 +217,7 @@
                      container itself, not just its child TextBlock — a container
                      carrying only an AutomationId is UIA-pruned while its
                      children still resolve fine (the critical-alerts lesson
-                     above), which would make is_visible("screen-time-lock")
+                     below), which would make is_visible("screen-time-lock")
                      read false even while genuinely Visible. -->
                 <Grid x:Name="ScreenTimeLockOverlay"
                       AutomationProperties.AutomationId="{x:Bind ids:Ids.ScreenTimeLock}"
@@ -217,123 +233,145 @@
             </Grid>
         </NavigationView>
 
-        <!-- Global critical-alerts banner (critical-alerts.md § Rendering
-             contract): prominent, destructive-styled, non-dismissable while
-             active — present iff ≥1 alert is active (CountToVisibility on
-             MainViewModel.ActiveCriticalAlerts). At Page level, on top of
-             NavigationView in z-order (declared after it), so it renders on
-             every authenticated page the Frame swaps underneath it. A
-             non-virtualizing StackPanel items panel keeps every row realized
-             in the UIA tree (mirrors FeedPage's post-card/feed-item lists —
-             memory: bounded count-all lists). Each row repeats the SAME
-             `critical-alert` AutomationId (indexed by driver-level position,
-             never a `critical-alert[0]` id string); Name carries the row text
-             too, or a DataTemplate element with only an AutomationId is
-             UIA-pruned (reference_winui_flaui_datatemplate_name). -->
-        <!-- AutomationProperties.Name required, and it is what made this banner
-             read as "never fires" for two sessions: a container carrying only an
-             AutomationId is PRUNED from the UIA tree while its children resolve
-             normally, so `critical-alert` counted 1 (the alarm WAS up) while
-             `critical-alerts` counted 0 and is_visible stayed False forever.
-             Same trap as atproto-depth-selector / quota-section / events-month-grid
-             (e2e_status_and_tips.md § Windows; the asymmetric count is the
-             tell). Safe on a get_text target: ElementFinder.GetText scrapes child
-             TextBlocks first and falls back to the element's own Name only as a
-             last resort, so a container Name never shadows the row text. -->
-        <ItemsControl x:Name="CriticalAlertsList"
-                      AutomationProperties.AutomationId="{x:Bind ids:Ids.CriticalAlerts}"
-                      AutomationProperties.Name="critical alerts"
-                      ItemsSource="{Binding ActiveCriticalAlerts, Mode=OneWay}"
-                      Visibility="{Binding ActiveCriticalAlerts, Mode=OneWay, Converter={StaticResource CountToVisibility}}"
-                      VerticalAlignment="Top" HorizontalAlignment="Stretch">
-            <ItemsControl.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <StackPanel />
-                </ItemsPanelTemplate>
-            </ItemsControl.ItemsPanel>
-            <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="x:String">
-                    <!-- TextBlock has no Background property in WinUI (unlike
-                         Border/Control) — the destructive fill lives on a Border
-                         wrapper; the AutomationId/Name/text stay on the TextBlock
-                         itself, which is what FlaUI's get_text reads. -->
-                    <Border Background="#B00020" Padding="16,10"
-                            HorizontalAlignment="Stretch">
-                        <TextBlock Text="{x:Bind}"
-                                   AutomationProperties.AutomationId="{x:Bind ids:Ids.CriticalAlert}"
-                                   AutomationProperties.Name="{x:Bind}"
-                                   Foreground="White" TextWrapping="Wrap" />
-                    </Border>
-                </DataTemplate>
-            </ItemsControl.ItemTemplate>
-        </ItemsControl>
+        <!-- Shell-top chrome (row 0). Page-level, outside NavigationView, so FlaUI
+             always finds every element in it. -->
+        <StackPanel Grid.Row="0">
+            <!-- Global critical-alerts banner (critical-alerts.md § Rendering
+                 contract): prominent, destructive-styled, non-dismissable while
+                 active — present iff ≥1 alert is active (CountToVisibility on
+                 MainViewModel.ActiveCriticalAlerts). The highest-severity global,
+                 so the first child of the shell-top chrome (as on macOS/iOS): it
+                 renders on every authenticated page the Frame swaps underneath it
+                 and pushes the shell down rather than covering it. A
+                 non-virtualizing StackPanel items panel keeps every row realized
+                 in the UIA tree (mirrors FeedPage's post-card/feed-item lists —
+                 memory: bounded count-all lists). Each row repeats the SAME
+                 `critical-alert` AutomationId (indexed by driver-level position,
+                 never a `critical-alert[0]` id string); Name carries the row text
+                 too, or a DataTemplate element with only an AutomationId is
+                 UIA-pruned (reference_winui_flaui_datatemplate_name). -->
+            <!-- AutomationProperties.Name required, and it is what made this banner
+                 read as "never fires" for two sessions: a container carrying only an
+                 AutomationId is PRUNED from the UIA tree while its children resolve
+                 normally, so `critical-alert` counted 1 (the alarm WAS up) while
+                 `critical-alerts` counted 0 and is_visible stayed False forever.
+                 Same trap as atproto-depth-selector / quota-section / events-month-grid
+                 (e2e_status_and_tips.md § Windows; the asymmetric count is the
+                 tell). Safe on a get_text target: ElementFinder.GetText scrapes child
+                 TextBlocks first and falls back to the element's own Name only as a
+                 last resort, so a container Name never shadows the row text. -->
+            <ItemsControl x:Name="CriticalAlertsList"
+                          AutomationProperties.AutomationId="{x:Bind ids:Ids.CriticalAlerts}"
+                          AutomationProperties.Name="critical alerts"
+                          ItemsSource="{Binding ActiveCriticalAlerts, Mode=OneWay}"
+                          Visibility="{Binding ActiveCriticalAlerts, Mode=OneWay, Converter={StaticResource CountToVisibility}}"
+                          HorizontalAlignment="Stretch">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                        <!-- TextBlock has no Background property in WinUI (unlike
+                             Border/Control) — the destructive fill lives on a Border
+                             wrapper; the AutomationId/Name/text stay on the TextBlock
+                             itself, which is what FlaUI's get_text reads. -->
+                        <Border Background="#B00020" Padding="16,10"
+                                HorizontalAlignment="Stretch">
+                            <TextBlock Text="{x:Bind}"
+                                       AutomationProperties.AutomationId="{x:Bind ids:Ids.CriticalAlert}"
+                                       AutomationProperties.Name="{x:Bind}"
+                                       Foreground="White" TextWrapping="Wrap" />
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
-        <!-- Global test message elements — at Page level (outside NavigationView)
-             so FlaUI can always find them. Uses TextBox (ReadOnly) because
-             TextBlock doesn't always create UIA peers, and InfoBar has animation delays.
-             The connection-status indicator lives here for the SAME reason: the
-             NavigationView PaneHeader (the visual "top of sidebar") is not reliably
-             realized in the UIA tree, so FlaUI can't read it there. -->
-        <StackPanel VerticalAlignment="Top" HorizontalAlignment="Right"
-                    Margin="0,8,16,0" IsHitTestVisible="False">
-            <!-- Global connection-status indicator (transport.md § Connection-status
-                 indicator): always-visible live nest WS-RPC connection state, reading
-                 Connected / Connecting… / Disconnected, bound to
-                 MainViewModel.ConnectionStatus. The visible half of the reconnect
-                 machinery — a transient drop shows "Connecting…", never an error
-                 banner. Unlike the empty message shims below it is normally visible. -->
-            <TextBox x:Name="ConnectionStatusText" Text="{Binding ConnectionStatus, Mode=OneWay}"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ConnectionStatus}"
-                     IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0" />
-            <!-- Global sync-agent-status indicator (sync-agent.md § Local agent
-                 health): the LOCAL fauna-sync-agent process's own health
-                 (Running / Restart pending / Not running) — a distinct concept
-                 from connection-status above (that one is the nest WS-RPC link).
-                 The canonical, AutomationId-bearing location (matches linux/macOS;
-                 ui.yaml § sync-agent-status). -->
-            <TextBox x:Name="SyncAgentStatusTextBox" Text="{Binding SyncAgentStatusText, Mode=OneWay}"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatus}"
-                     IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0" />
-            <TextBox x:Name="SyncAgentStatusVersionTextBox" Text="{Binding SyncAgentStatusVersionText, Mode=OneWay}"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatusVersion}"
-                     IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0" />
-            <TextBox x:Name="SyncAgentStatusUptimeTextBox" Text="{Binding SyncAgentStatusUptimeText, Mode=OneWay}"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatusUptime}"
-                     IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0" />
-            <!-- Collapsed until they carry a message, and collapsed again the moment
-                 they are cleared (UpdateTestMessages → MessageShim.ShouldShow). These
-                 share `error-message`/`warning-message`/`info-message` with every
-                 page's OWN InfoBar, and the FlaUI bridge resolves an id window-wide
-                 checking only !IsOffscreen — so an always-on-screen empty shim made
+            <!-- The status line: the global indicators, left-aligned, with the
+                 supervised indicator at its right end and a divider under it.
+                 ReadOnly TextBoxes because a TextBlock doesn't always create a UIA
+                 peer. -->
+            <Grid Padding="16,4,16,4" ColumnSpacing="12"
+                  BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <!-- IsHitTestVisible="False": read-only status text, never a click or
+                     caret target. -->
+                <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center"
+                            IsHitTestVisible="False">
+                    <!-- Global connection-status indicator (transport-connection.md
+                         § Connection-status indicator): always-visible live nest WS-RPC
+                         connection state, reading Connected / Connecting… / Disconnected
+                         / Cannot connect, bound to MainViewModel.ConnectionStatus. The
+                         visible half of the reconnect machinery: a transient drop shows
+                         "Connecting…", never an error banner. -->
+                    <TextBox x:Name="ConnectionStatusText" Text="{Binding ConnectionStatus, Mode=OneWay}"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.ConnectionStatus}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0"
+                             MinHeight="0" FontSize="12"
+                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <!-- Global sync-agent-status indicator (sync-agent.md § Local agent
+                         health): the LOCAL fauna-sync-agent process's own health
+                         (Running / Restart pending / Not running), a distinct concept
+                         from connection-status above (that one is the nest WS-RPC link),
+                         with its version and uptime beside it (ui.yaml
+                         § sync-agent-status). -->
+                    <TextBox x:Name="SyncAgentStatusTextBox" Text="{Binding SyncAgentStatusText, Mode=OneWay}"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatus}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0"
+                             MinHeight="0" FontSize="12"
+                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox x:Name="SyncAgentStatusVersionTextBox" Text="{Binding SyncAgentStatusVersionText, Mode=OneWay}"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatusVersion}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0"
+                             MinHeight="0" FontSize="12"
+                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox x:Name="SyncAgentStatusUptimeTextBox" Text="{Binding SyncAgentStatusUptimeText, Mode=OneWay}"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.SyncAgentStatusUptime}"
+                             IsReadOnly="True" BorderThickness="0" Background="Transparent" Padding="0"
+                             MinHeight="0" FontSize="12"
+                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <!-- Global supervised-indicator (family-safety.md § App surface,
+                     the one conditionally-present global element): permanent,
+                     non-dismissable chrome for supervised accounts, navigating to the
+                     family page. Rendered ONLY when fauna.family.status.supervised_by
+                     is set (CheckFamilyStatusAsync). Outside the status text's
+                     IsHitTestVisible="False" panel: this button must be clickable. -->
+                <Button Grid.Column="1" x:Name="SupervisedIndicatorButton"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.SupervisedIndicator}"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed"
+                        Click="SupervisedIndicatorButton_Click" />
+            </Grid>
+
+            <!-- Global test message elements, under the status line. Uses TextBox
+                 (ReadOnly) because TextBlock doesn't always create UIA peers, and
+                 InfoBar has animation delays. Collapsed until they carry a message,
+                 and collapsed again the moment they are cleared (UpdateTestMessages
+                 → MessageShim.ShouldShow). These share
+                 `error-message`/`warning-message`/`info-message` with every page's
+                 OWN InfoBar, and the FlaUI bridge resolves an id window-wide checking
+                 only !IsOffscreen — so an always-on-screen empty shim made
                  `is_visible("error-message")` true on a clean page and silently
                  unobservable the "no error at page start" assertion every such e2e
                  opens with. A collapsed element has no UIA peer, which is how the
                  shared id stays honest (same net effect linux gets structurally from
                  automation/find.rs::is_showing). -->
-            <TextBox x:Name="GlobalErrorText" Text="" Visibility="Collapsed"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
-                     IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
-            <TextBox x:Name="GlobalWarningText" Text="" Visibility="Collapsed"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
-                     IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
-            <TextBox x:Name="GlobalInfoText" Text="" Visibility="Collapsed"
-                     AutomationProperties.AutomationId="{x:Bind ids:Ids.InfoMessage}"
-                     IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
+            <StackPanel Padding="16,0,16,0" IsHitTestVisible="False">
+                <TextBox x:Name="GlobalErrorText" Text="" Visibility="Collapsed"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.ErrorMessage}"
+                         IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
+                <TextBox x:Name="GlobalWarningText" Text="" Visibility="Collapsed"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.WarningMessage}"
+                         IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
+                <TextBox x:Name="GlobalInfoText" Text="" Visibility="Collapsed"
+                         AutomationProperties.AutomationId="{x:Bind ids:Ids.InfoMessage}"
+                         IsReadOnly="True" BorderThickness="0" MinHeight="1" MinWidth="1" />
+            </StackPanel>
         </StackPanel>
-
-        <!-- Global supervised-indicator (family-safety.md § App surface —
-             the one conditionally-present global element): permanent,
-             non-dismissable chrome for supervised accounts, navigating to the
-             family page. Rendered ONLY when fauna.family.status.supervised_by
-             is set (CheckFamilyStatusAsync). A SEPARATE, hit-testable overlay
-             from the StackPanel above (that one is IsHitTestVisible="False"
-             so it never eats clicks meant for the page below — this button
-             must actually be clickable). -->
-        <Button x:Name="SupervisedIndicatorButton"
-                AutomationProperties.AutomationId="{x:Bind ids:Ids.SupervisedIndicator}"
-                VerticalAlignment="Top" HorizontalAlignment="Right"
-                Margin="0,36,16,0"
-                Visibility="Collapsed"
-                Click="SupervisedIndicatorButton_Click" />
     </Grid>
 </Page>

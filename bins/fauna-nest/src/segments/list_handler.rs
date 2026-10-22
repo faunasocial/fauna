@@ -293,11 +293,11 @@ pub(crate) trait ServedJournal: Send + Sync {
         scope_id: &[u8; 32],
         segment_id: u32,
     ) -> anyhow::Result<fauna_segment_store::SegmentBackupMeta>;
-    async fn read_segment_pair(
+    async fn open_segment_pair(
         &self,
         scope_id: &[u8; 32],
         segment_id: u32,
-    ) -> anyhow::Result<fauna_segment_store::SegmentPairBytes>;
+    ) -> anyhow::Result<fauna_segment_store::SegmentPairFiles>;
     fn segment_file_path(&self, scope_id: &[u8; 32], segment_id: u32) -> std::path::PathBuf;
     fn segment_meta_path(&self, scope_id: &[u8; 32], segment_id: u32) -> std::path::PathBuf;
     /// `PlacementJournal::floor_counter`.
@@ -323,12 +323,12 @@ impl<K: crate::segments::PlacementKind> ServedJournal for crate::segments::Place
         crate::segments::PlacementJournal::describe_segment_for_backup(self, scope_id, segment_id)
             .await
     }
-    async fn read_segment_pair(
+    async fn open_segment_pair(
         &self,
         scope_id: &[u8; 32],
         segment_id: u32,
-    ) -> anyhow::Result<fauna_segment_store::SegmentPairBytes> {
-        crate::segments::PlacementJournal::read_segment_pair(self, scope_id, segment_id).await
+    ) -> anyhow::Result<fauna_segment_store::SegmentPairFiles> {
+        crate::segments::PlacementJournal::open_segment_pair(self, scope_id, segment_id).await
     }
     fn segment_file_path(&self, scope_id: &[u8; 32], segment_id: u32) -> std::path::PathBuf {
         crate::segments::PlacementJournal::segment_file_path(self, scope_id, segment_id)
@@ -405,15 +405,16 @@ impl ServedSegments<'_> {
         }
     }
 
-    /// One finalized segment's pair, both files read as one observation.
-    pub(crate) async fn read_pair(
+    /// One finalized segment's pair, both files opened as one observation
+    /// ([`fauna_segment_store::SegmentPairFiles`]).
+    pub(crate) async fn open_pair(
         &self,
         scope_id: &[u8; 32],
         segment_id: u32,
-    ) -> anyhow::Result<fauna_segment_store::SegmentPairBytes> {
+    ) -> anyhow::Result<fauna_segment_store::SegmentPairFiles> {
         match self {
-            Self::Content(mgr) => Ok(mgr.read_segment_pair(scope_id, segment_id).await?),
-            Self::Placement(journal) => journal.read_segment_pair(scope_id, segment_id).await,
+            Self::Content(mgr) => Ok(mgr.open_segment_pair(scope_id, segment_id).await?),
+            Self::Placement(journal) => journal.open_segment_pair(scope_id, segment_id).await,
         }
     }
 

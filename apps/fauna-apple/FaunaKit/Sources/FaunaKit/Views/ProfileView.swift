@@ -78,10 +78,12 @@ public struct ProfileView: View {
     /// the viewed actor's contact edge (`fauna.contacts.list`, read on open via
     /// `refreshBlockState`) — a `blocked` edge ⇒ the button reads "Unblock", else
     /// "Block"; the tap flips it over `fauna.knocks.{block,unblock}` and re-renders.
+    /// `blockEdge` holds it as not-yet-known until that read (or the viewer's own
+    /// press) sets it, and the toggle stays disabled meanwhile (`ProfileBlockEdge`).
     /// `blocking` is the in-flight guard (disabled during the round-trip). A failed
     /// call leaves the state unchanged and re-enables for a retry. Mirrors linux
     /// `refresh_block_state` / `toggle_block` / `apply_block_state`.
-    @State private var isBlocked = false
+    @State private var blockEdge = ProfileBlockEdge()
     @State private var blocking = false
 
     public init(
@@ -163,7 +165,7 @@ public struct ProfileView: View {
             #if !FAUNA_KIDS
             if activeTab != "posts" {
                 if isSelf {
-                    SubscriptionTiersTab(vm: vm)
+                    SubscriptionTiersTab(vm: vm, handle: session.handle ?? "")
                 } else {
                     SubscriptionOffersTab(vm: offersVM)
                 }
@@ -218,6 +220,7 @@ public struct ProfileView: View {
                 // A fresh open: the knock's per-open state (error, "sent", route)
                 // starts clean, as a rebuilt page would.
                 knockVM.beginOpen(peer: viewedActorId)
+                blockEdge.reset()
                 await refreshBlockState()
             }
             await refreshHeader()
@@ -330,19 +333,20 @@ public struct ProfileView: View {
             // A not-blocked edge → "Block" (destructive) over `fauna.knocks.block`
             // (upsert → blocked); a blocked edge → "Unblock" (neutral) over
             // `fauna.knocks.unblock` (the guarded clear-the-edge, `ContactStatus`
-            // → `None`; `contacts.md` § Where logic lives → Unblock). Disabled only
-            // during the round-trip; a failed call re-enables for a retry. Mirrors
-            // linux `toggle_block` / `apply_block_state`.
-            Button(renderLocalizedText(contactToggleBlockLabel(isBlocked: isBlocked)),
-                   role: isBlocked ? nil : .destructive) {
+            // → `None`; `contacts.md` § Where logic lives → Unblock). Disabled
+            // until the open-time read sets the edge and during the round-trip; a
+            // failed call re-enables for a retry. Mirrors linux `toggle_block` /
+            // `apply_block_state`.
+            Button(renderLocalizedText(contactToggleBlockLabel(isBlocked: blockEdge.labelBlocked)),
+                   role: blockEdge.labelBlocked ? nil : .destructive) {
                 toggleBlock()
             }
-            .disabled(blocking)
+            .disabled(blocking || !blockEdge.isToggleEnabled)
             .accessibilityIdentifier(Ids.profileBlockButton)
             .automationActivate(
                 Ids.profileBlockButton,
-                isEnabled: { !blocking },
-                value: { renderLocalizedText(contactToggleBlockLabel(isBlocked: isBlocked)) }
+                isEnabled: { !blocking && blockEdge.isToggleEnabled },
+                value: { renderLocalizedText(contactToggleBlockLabel(isBlocked: blockEdge.labelBlocked)) }
             ) { toggleBlock() }
 
             // Report account — opens the shared report sheet on this OTHER profile
@@ -438,6 +442,23 @@ public struct ProfileView: View {
                     .automationActivate(Ids.profileLabelAddButton) { addLabel() }
             }
 
+            // The completion rows: nothing until something is typed; a pick
+            // stages the label exactly as if typed and added. Shared Rust
+            // (`label_suggestions`) does the matching; rows are flat-indexed.
+            if !labelInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let suggestions = conversationsVM?.contactOverlays.labelSuggestions(
+                    typed: labelInput, staged: privateVM.form.labels) ?? []
+                ForEach(Array(suggestions.enumerated()), id: \.offset) { _, suggestion in
+                    Button(suggestion) { pickLabelSuggestion(suggestion) }
+                        .buttonStyle(.borderless)
+                        .accessibilityIdentifier(Ids.profileLabelSuggestion)
+                        .automationActivate(Ids.profileLabelSuggestion,
+                                            text: { suggestion }) {
+                            pickLabelSuggestion(suggestion)
+                        }
+                }
+            }
+
             Button(L.profile.privateSave) { savePrivate() }
                 .disabled(privateVM.isSaving)
                 .accessibilityIdentifier(Ids.profilePrivateSaveButton)
@@ -447,6 +468,11 @@ public struct ProfileView: View {
         .padding(.horizontal)
         // Section landmark — registered so the driver's is_visible sees it.
         .automationValue(Ids.profilePrivateSection)
+    }
+
+    /// Stage the offered label exactly as if it had been typed and added.
+    private func pickLabelSuggestion(_ label: String) {
+        if privateVM.addLabel(label) { labelInput = "" }
     }
 
     /// Stage the typed label. The add field empties only when the label was
@@ -477,8 +503,12 @@ public struct ProfileView: View {
     /// `refresh_block_state`; `contacts.md` § Persistence — match the hex `peer_id`).
     private func refreshBlockState() async {
         guard let client else { return }
-        isBlocked = (try? await client.api.fetchContacts(actorId: viewedActorId))?
+        let blocked = (try? await client.api.fetchContacts(actorId: viewedActorId))?
             .contains { contactRowBlocksActor(rowPeerId: $0.peerId, rowStatus: $0.status, targetActorId: viewedActorId) } ?? false
+        // A failed read settles on not-blocked (the pre-hold behavior) so the
+        // toggle never stays disabled for good; a read landing after the
+        // viewer's own press is dropped by the edge's fold.
+        blockEdge.applyRead(blocked: blocked)
     }
 
     /// Block ⇄ unblock the viewed actor (`profile.md` § User actions; `contacts.md`
@@ -496,8 +526,8 @@ public struct ProfileView: View {
     }
 
     private func toggleBlock() {
-        guard let client, !blocking else { return }
-        let wasBlocked = isBlocked
+        guard let client, !blocking, blockEdge.isToggleEnabled else { return }
+        let wasBlocked = blockEdge.labelBlocked
         blocking = true
         Task {
             do {
@@ -508,9 +538,9 @@ public struct ProfileView: View {
                     try await client.api.blockKnock(
                         actorId: session.actorId ?? "", peerId: viewedActorId)
                 }
-                isBlocked = !wasBlocked
+                blockEdge.applyPress(blocked: !wasBlocked)
             } catch {
-                // Leave `isBlocked` unchanged so the button re-enables for a retry.
+                // Leave `blockEdge` unchanged so the button re-enables for a retry.
             }
             blocking = false
         }
@@ -548,6 +578,11 @@ public struct ProfileView: View {
 /// `SubscriptionsVM`; mutations re-read through the VM (observer-free).
 private struct SubscriptionTiersTab: View {
     @Bindable var vm: SubscriptionsVM
+    /// The viewer's own handle — the one input a lazy `webPublish.hydrate` needs.
+    let handle: String
+    /// The shared web-publish cache (injected at the app root): the §4 form's
+    /// return-URL display builds on its `siteLink.origin`.
+    @Environment(WebPublishStore.self) private var webPublish: WebPublishStore?
 
     var body: some View {
         ScrollView {
@@ -750,9 +785,9 @@ private struct SubscriptionTiersTab: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L.subscriptions.paymentProviders).font(.headline)
 
-            Button(L.subscriptions.addProvider) { vm.openProviderForm() }
+            Button(L.subscriptions.addProvider) { openProviderForm() }
                 .accessibilityIdentifier(Ids.subscriptionProviderAddButton)
-                .automationActivate(Ids.subscriptionProviderAddButton) { vm.openProviderForm() }
+                .automationActivate(Ids.subscriptionProviderAddButton) { openProviderForm() }
 
             if vm.showProviderForm {
                 providerForm
@@ -773,6 +808,20 @@ private struct SubscriptionTiersTab: View {
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.subscriptionProviderSection)
         .automationValue(Ids.subscriptionProviderSection, text: { String(vm.providers.count) })
+    }
+
+    /// Open the §4 form and hydrate the web-site origin its return-URL display
+    /// builds on (a no-op once the shared store is hydrated).
+    private func openProviderForm() {
+        vm.openProviderForm()
+        if let webPublish {
+            Task { await vm.hydrateSiteOrigin(webPublish, handle: handle) }
+        }
+    }
+
+    /// The §4 return-URL display's current value; `nil` ⇒ no public web address.
+    private var providerReturnUrl: String? {
+        vm.providerReturnUrl(origin: webPublish?.siteLink.origin)
     }
 
     /// The add-provider form (`subscription-provider-form`): kind select (the
@@ -808,6 +857,21 @@ private struct SubscriptionTiersTab: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 CopyButton(Ids.subscriptionProviderFormWebhookUrlCopyButton,
                            text: vm.providerWebhookUrl)
+            }
+
+            // The sibling display for the paywall return door — the redirect to
+            // set in the provider's checkout settings, built on the creator's
+            // web-site origin (`payments_return_url`, shared Rust). With no
+            // public web address it says so and the copy button is inert.
+            HStack {
+                Text(L.subscriptions.returnUrlLabel).foregroundStyle(.secondary)
+                automationText(Ids.subscriptionProviderFormReturnUrl,
+                               providerReturnUrl ?? L.subscriptions.returnUrlUnavailable)
+                    .lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                CopyButton(Ids.subscriptionProviderFormReturnUrlCopyButton,
+                           text: providerReturnUrl ?? "")
+                    .disabled(providerReturnUrl == nil)
             }
 
             HStack {

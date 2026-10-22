@@ -47,6 +47,7 @@ pub(crate) use dns::tests::{domain_row, domains_snapshot};
 mod files;
 mod logs;
 mod mail;
+mod mail_reports;
 mod nest;
 mod settings;
 mod users;
@@ -68,16 +69,19 @@ use fauna_client_capabilities::custody_hosting::{
 };
 use fauna_client_dns::{DnsAction, DnsManagementMachine, DnsSnapshot};
 use fauna_client_mail_settings::admin_policy::{
-    MailPolicyAction, MailPolicyMachine, MailPolicySnapshot,
+    MailPolicyAction, MailPolicyConfirm, MailPolicyMachine, MailPolicySnapshot,
 };
 use fauna_client_mail_settings::bridge_approval::{
-    BridgeApprovalAction, BridgeApprovalMachine, BridgeApprovalSnapshot,
+    BridgeApprovalAction, BridgeApprovalMachine, BridgeApprovalSnapshot, BridgeConfirm,
 };
 use fauna_client_mail_settings::caldav_policy::{
     CaldavPolicyAction, CaldavPolicyMachine, CaldavPolicySnapshot,
 };
 use fauna_client_mail_settings::carddav_policy::{
     CarddavPolicyAction, CarddavPolicyMachine, CarddavPolicySnapshot,
+};
+use fauna_client_mail_settings::dmarc_reports::{
+    DmarcReportsAction, DmarcReportsMachine, DmarcReportsSnapshot,
 };
 use fauna_client_mail_settings::forwarders::{
     ForwarderAction, ForwarderMachine, ForwardersSnapshot,
@@ -143,6 +147,12 @@ pub enum AdminPage {
     /// imap / outbound / alias), a dumb renderer of the shared `MailPolicyMachine`
     /// (`admin.md` § 6 Mail).
     Mail,
+    /// `admin-mail-reports` — the DMARC aggregate reports peer mail servers send
+    /// this nest about its own domains: the window totals, the top sources and
+    /// senders, the report rows and one report's raw XML, a dumb renderer of the
+    /// shared `DmarcReportsMachine` (`dmarc-reporting.md` § Admin pane summary
+    /// surface). Listed in `navigation.admin_pages` after `admin-mail`.
+    MailReports,
     /// `admin-aliases` — the admin external-forwarders page: an address on a
     /// hosted local domain forwarding to an external destination, no local
     /// mailbox (`admin.md` § 4 Aliases / `mail-aliases.md` § Kind 7).
@@ -205,6 +215,8 @@ impl AdminPage {
         AdminPage::Settings,
         AdminPage::Nest,
         AdminPage::Mail,
+        // ui.yaml `navigation.admin_pages` lists it right after `admin-mail`.
+        AdminPage::MailReports,
         AdminPage::Calendar,
         AdminPage::Contacts,
         AdminPage::Files,
@@ -230,6 +242,7 @@ impl AdminPage {
             AdminPage::Files => t::files_page::TITLE,
             AdminPage::Nest => t::nest_page::TITLE,
             AdminPage::Mail => t::mail_page::TITLE,
+            AdminPage::MailReports => t::mail_reports_page::TITLE,
             AdminPage::Aliases => t::aliases_page::TITLE,
             AdminPage::Settings => t::settings_page::TITLE,
             AdminPage::Web => t::web_page::TITLE,
@@ -252,6 +265,7 @@ impl AdminPage {
             AdminPage::Files => "admin-files",
             AdminPage::Nest => "admin-nest",
             AdminPage::Mail => "admin-mail",
+            AdminPage::MailReports => "admin-mail-reports",
             AdminPage::Aliases => "admin-aliases",
             AdminPage::Web => "admin-web",
             AdminPage::Dns => "admin-dns",
@@ -269,6 +283,8 @@ impl AdminPage {
 pub enum AdminField {
     /// `admin-calendar-caldav-port-input` — the CalDAV listener port draft.
     CaldavPort,
+    /// A `rule-editor-item-*-input` of the nest-rules mounting.
+    RuleEditor(crate::rule_editor::Input),
     /// `admin-nest-serving-port-input` — the client-facing API serving-port draft.
     ServingPort,
     /// `admin-nest-region-input` — the declared-region draft (`admin.md` § N Nest
@@ -473,6 +489,12 @@ pub enum MailField {
     // Aliases (`put_alias_policy`).
     AliasExactMax,
     AliasReservedLocalParts,
+    // DMARC reports (`put_dmarc_policy`).
+    DmarcAggregateRetention,
+    DmarcForensicRetention,
+    // The deployment's own Microsoft registration (`set_microsoft_registration`).
+    MicrosoftClientId,
+    MicrosoftTenant,
 }
 
 /// One editable `admin-mail-*` **in-group toggle** — a `bool` gathered into its
@@ -497,9 +519,10 @@ pub enum MailToggle {
     OutboundIpv6,
     AliasSubaddressing,
     AliasWildcardPrefix,
+    DmarcRufPublish,
 }
 
-/// The six mail-policy save groups' editable drafts (`admin-mail`, `admin.md`
+/// The seven mail-policy save groups' editable drafts (`admin-mail`, `admin.md`
 /// § 6). Each numeric/list input is a `String` draft (a mid-edit value can be
 /// empty or partial, which a typed `u32` can't hold) and each in-group toggle a
 /// `bool`; the two dropdowns keep their wire value. Re-seeded from the persisted
@@ -517,6 +540,18 @@ pub struct MailDrafts {
     pub imap: ImapDraft,
     pub outbound: OutboundDraft,
     pub alias: AliasDraft,
+    pub dmarc: DmarcDraft,
+    pub microsoft: MicrosoftDraft,
+}
+
+/// The Microsoft-registration section's two drafts — saved as a pair, never
+/// gathered over a persisted value: what the fields hold is what is sent (both
+/// empty clears), checked first by the shared
+/// `admin_policy::parse_microsoft_registration_draft`.
+#[derive(Debug, Clone, Default)]
+pub struct MicrosoftDraft {
+    pub client_id: String,
+    pub tenant: String,
 }
 
 /// The Spam / inbound-perimeter group's drafts (`SpamPolicyView`, `put_spam_policy`).
@@ -601,6 +636,19 @@ pub struct AliasDraft {
     pub wildcard_prefix: bool,
 }
 
+/// The DMARC-reports group's drafts (`DmarcPolicyView`, `put_dmarc_policy` —
+/// like the alias group, hydrated from its own read twin `get_dmarc_policy`).
+/// Only the forensic opt-in, its `fo=` mode and the two retentions are
+/// editable; the other record tags ride through from the persisted view.
+#[derive(Debug, Clone, Default)]
+pub struct DmarcDraft {
+    pub ruf_publish: bool,
+    /// Wire value: the RFC 7489 `fo=` tag (`1` / `0` / `d` / `s`).
+    pub fo_mode: String,
+    pub aggregate_retention: String,
+    pub forensic_retention: String,
+}
+
 /// The `admin-nest` page's reflective read — the pairing flag (from
 /// `fauna.admin.services.list`) plus the serving-port + host-OS-maintenance
 /// fields (from `fauna.setup.status`). Re-read on entry and after any nest-page
@@ -616,6 +664,9 @@ pub struct NestPageSnapshot {
     /// Whether the nest is fronted by the SNI router — the serving-port control
     /// is inert on a router-fronted (domain) deploy (`SetupStatusReply.fronted_by_router`).
     pub fronted_by_router: bool,
+    /// `nest-os-maintenance-status` — whether the nest read a host-status file;
+    /// `false` (no host channel) renders "no host data", never "up to date".
+    pub os_host_status_present: bool,
     /// `nest-os-updates-count` — pending host security updates (0 on a nest with
     /// no host maintenance channel).
     pub os_security_updates_pending: u32,
@@ -635,6 +686,11 @@ pub struct NestPageSnapshot {
     /// with every nest-page mutation. A nest that predates the choice answers
     /// the read with unknown-kind, which the fold words — never a failed read.
     pub web_app_origin: fauna_client_admin::AdminWebAppOriginView,
+    /// `admin-nest-update-channel-*` — which builds this box's updater follows,
+    /// folded by the shared `admin_update_channel_view` (`nest/update-channel.md`
+    /// § The UI). On this snapshot for the region's reason; a nest predating the
+    /// choice answers unknown-kind, which the fold words.
+    pub update_channel: fauna_client_admin::AdminUpdateChannelView,
     /// `admin-nest-oauth-*` — the OAuth issuer's served key set, folded by the
     /// shared `issuer_key_view` (`authorization-server.md` § The issuer).
     ///
@@ -785,9 +841,12 @@ pub struct UsersState {
     /// for a supervised admission ([`GUARDIAN_NONE_VALUE`] / `""` = none), like
     /// [`Self::invite_guardian_draft`]. Resolved to the wire actor id at admit
     /// time by [`resolve_guardian`]. Transient form state, untouched by `reseed`
-    /// beyond the none seed. The Admit section sends no band yet
-    /// (`age_band: None`) — its band select awaits the user's rule-A sign-off.
+    /// beyond the none seed.
     pub admit_guardian_draft: String,
+    /// `admin-users-admit-age-band-select` — the admitted account's band draft, an
+    /// option VALUE (`not-set` or a wire token), like [`Self::invite_age_band_draft`].
+    /// Sent only beside a guardian; clearing the guardian resets it.
+    pub admit_age_band_draft: String,
     /// Per-pending-request approve-at tier drafts (`invite-request-row-tier-select[i]`),
     /// parallel to `snapshot.invite_requests`, re-seeded on every fold.
     pub request_tier_drafts: Vec<String>,
@@ -860,6 +919,9 @@ impl UsersState {
         if self.admit_guardian_draft.is_empty() {
             self.admit_guardian_draft = GUARDIAN_NONE_VALUE.to_string();
         }
+        if self.admit_age_band_draft.is_empty() {
+            self.admit_age_band_draft = AGE_BAND_NOT_SET_VALUE.to_string();
+        }
 
         // Invite-form drafts (§ 3) — seed sensible defaults only when untouched.
         if self.invite_tier_draft.is_empty() {
@@ -928,11 +990,6 @@ pub struct AdminState {
     /// The six mail-policy groups' editable drafts — re-seeded from the persisted
     /// `mail_snapshot` on every fold, gathered into each group's full-PUT on Save.
     pub mail_drafts: MailDrafts,
-    /// Whether `admin-mail-health-warmup-reset-button` is armed — the two-click
-    /// inline confirm (ui.yaml scopes no confirm id to it, so the arm lives on the
-    /// button, which relabels to the confirm sentence). Disarmed by the confirm
-    /// and by every mail fold, so it never survives a re-read.
-    pub mail_warmup_reset_armed: bool,
     /// The `admin-calendar-caldav-port-input` editable draft — re-seeded from the
     /// persisted `caldav_port` on every snapshot (the field mirrors nest state),
     /// so it always shows the current port until the human types over it.
@@ -965,12 +1022,21 @@ pub struct AdminState {
     /// commits it, re-seeded from the nest's choice on every reflective snapshot
     /// (the field-mirrors-nest-state discipline). `None` marks neither radio.
     pub web_app_origin_draft: Option<fauna_client_admin::WebAppOrigin>,
+    /// The `admin-nest-update-channel-*-radio` selection — local until the save,
+    /// re-seeded from the nest's channel on every reflective snapshot. `None`
+    /// marks no radio (a pinned box follows no channel).
+    pub update_channel_draft: Option<fauna_client_admin::UpdateChannel>,
     /// The shared `feature-policy-editor`, open over one member at the ADMIN
     /// tier (`None` while closed) — seeded from the authored document in the
     /// reflective snapshot, re-seeded after every write.
     pub feature_editor: Option<fauna_client_features::PolicyEditor>,
     /// `feature-policy-editor-status` — the last admin-tier write's verdict.
     pub feature_editor_status: Option<String>,
+    /// The admin's mounting of the shared `rule-editor` (`nest-rules.md` § The
+    /// shared rule editor (a)) in `admin-nest-rules-section` — loaded from
+    /// `fauna.admin.content_policy.get` on the page's nav-edge read, written by
+    /// its save through `.set`.
+    pub rules: crate::rule_editor::Mount,
     /// Whether the inline Factory-Reset confirm (`admin-factory-reset-confirm-button`)
     /// is armed — set by `admin-factory-reset-button`, the sign-out-confirm shape.
     pub factory_reset_confirming: bool,
@@ -987,7 +1053,7 @@ pub struct AdminState {
     /// [`SeedRotateConfirm::Ready`] carrying the shared fold.
     ///
     /// Captured at arm time and never re-derived while armed — the bridges
-    /// rotate-confirm discipline ([`RotateConfirm`]): a roster that shifted
+    /// confirm discipline (`BridgeConfirm`): a roster that shifted
     /// between arming and confirming must not silently change what the admin
     /// already read.
     pub seed_rotate_confirm: Option<SeedRotateConfirm>,
@@ -1024,6 +1090,20 @@ pub struct AdminState {
     pub reports_loaded: bool,
     /// The last resolve's outcome line, worded by the shared `resolve_verdict`.
     pub reports_status: Option<String>,
+    /// The blocked list (`admin-nest-blocked-section` — `moderation.md` § Admin
+    /// block of a reported item): every item this nest currently blocks, as
+    /// `fauna.moderation.admin_block.list` returns it. A blocked item's report
+    /// has left the open queue, so Unblock acts from here.
+    pub blocked: Vec<fauna_protocol::moderation::AdminBlockEntry>,
+    /// Whether the blocked-list read has resolved (loading is not empty).
+    pub blocked_loaded: bool,
+    /// The armed Block / Unblock confirm (`admin-nest-report-block-confirm-*`),
+    /// `None` while un-armed. Captured at arm time (the takedown discipline):
+    /// the summary names exactly what a confirm dispatches.
+    pub block_confirm: Option<ArmedBlock>,
+    /// The last Block / Unblock dispatch's outcome line (the shared
+    /// `block_verdict`), painted under the confirm surface.
+    pub block_status: Option<String>,
     /// The armed forced-rotation confirm (`admin-nest-oauth-confirm-*`), `None`
     /// while un-armed. Captured at arm time — the arm AND its folded cost — and
     /// never re-derived while armed (the seed-rotate discipline): a key-set
@@ -1054,6 +1134,13 @@ pub struct AdminState {
     pub forwarder_add_pattern: String,
     /// `admin-aliases-forwarder-add-target-input` — the new forwarder's external-target draft.
     pub forwarder_add_target: String,
+    /// The `admin-mail-reports` machine (`fauna.bridges.list_dmarc_aggregate_reports`
+    /// / `get_dmarc_aggregate_report`), built at [`init`]; it owns the window and
+    /// domain filter, so the page keeps no drafts of its own.
+    dmarc_reports: Option<Arc<DmarcReportsMachine>>,
+    /// Last `admin-mail-reports` snapshot the page painted. Boxed: it carries
+    /// the report rows and an opened report's XML.
+    pub dmarc_reports_snapshot: Option<Box<DmarcReportsSnapshot>>,
     /// The `admin-settings` tier *definitions* (`fauna.admin.tiers.list`), `None`
     /// until the nav-edge fetch lands (the stat-card `None`-while-empty shape). One
     /// `admin-settings-tier-item` row per tier.
@@ -1098,12 +1185,10 @@ pub struct AdminState {
     /// approve,reject,list_service_users,revoke_service_user}`), built at
     /// [`init`]; drives both the pending cards and the approved roster.
     bridges: Option<Arc<BridgeApprovalMachine>>,
-    /// Last `admin-bridges-pending` snapshot the page painted.
+    /// Last `admin-bridges-pending` snapshot the page painted. Its `armed`
+    /// field is which confirm dialog (reject or rotate) is open — held by the
+    /// shared machine, not here.
     pub bridges_snapshot: Option<BridgeApprovalSnapshot>,
-    /// Which approved bridge's rotate confirm is armed, if any — the inline
-    /// reveal `admin-bridges-rotate-confirm` (the factory-reset confirm shape).
-    /// `None` = no dialog painted at all.
-    pub rotate_confirm: Option<RotateConfirm>,
     /// The **nest's** log ring as `fauna.admin.logs` last delivered it,
     /// oldest-first, already converted to the render type by the shared
     /// `fauna_client_admin::log_entry_from_wire`. Distinct from this device's own
@@ -1118,6 +1203,15 @@ pub struct AdminState {
     pub log_filter: u32,
     /// A failed `fauna.admin.logs` read, surfaced on the page's `error-message`.
     pub logs_error: Option<String>,
+    /// The audit-log section below the log lines (`admin-audit-section`):
+    /// every audit entry fetched so far, the chain summary and the handle
+    /// join — the shared `fauna_client_admin::AuditLog`, which folds them into
+    /// the rows and the integrity line (`admin.md` § The admin audit log on
+    /// `admin-logs`).
+    pub audit: fauna_client_admin::AuditLog,
+    /// A failed audit read (`fauna.admin.audit.*` or the handle join), surfaced
+    /// on the page's `error-message` like `logs_error`.
+    pub audit_error: Option<String>,
     /// The **persistent** `admin-dns` DNS-management machine, built once at
     /// [`init`] with the credential store (`build_dns_management_machine_with_
     /// credentials`). Persistent — not rebuilt per dispatch — because the live
@@ -1227,6 +1321,17 @@ pub struct ArmedTakedown {
     pub view: TakedownFormView,
 }
 
+/// The armed admin-block confirm (`admin-nest-report-block-confirm-*`): the
+/// report it cites, which verb (`restore` = Unblock), and the shared summary
+/// and confirm label folded at arm time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmedBlock {
+    pub report_id: String,
+    pub restore: bool,
+    pub summary: fauna_core::localized::LocalizedText,
+    pub confirm_label: fauna_core::localized::LocalizedText,
+}
+
 /// The armed forced-rotation confirm (`admin-nest-oauth-confirm-*`): which arm,
 /// and its cost as folded when it was armed (see [`AdminState::oauth_confirm`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1250,14 +1355,6 @@ pub(crate) fn oauth_keys(state: &AdminState) -> Option<&IssuerKeyView> {
         Some(OauthKeysRead::Ready(view)) => Some(view),
         _ => None,
     }
-}
-
-/// The armed rotate confirm (`admin-bridges-rotate-confirm`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RotateConfirm {
-    /// The approved card's `admin-bridges-approved-pubkey-hex` — which **is**
-    /// the `bridge_actor_id` the shared `Rotate` action decodes.
-    pub pubkey_hex: String,
 }
 
 /// One `admin-web` render's data: the current apex designation, the actors the
@@ -1381,6 +1478,9 @@ pub fn init(
             nest.clone(),
         ))),
         forwarders: Some(Arc::new(rpc_glue::build_forwarders_machine(nest.clone()))),
+        dmarc_reports: Some(Arc::new(rpc_glue::build_dmarc_reports_machine(
+            nest.clone(),
+        ))),
         mail: Some(Arc::new(rpc_glue::build_mail_policy_machine(nest.clone()))),
         bridges: Some(Arc::new(rpc_glue::build_bridge_approval_machine(
             nest.clone(),
@@ -1579,6 +1679,7 @@ pub fn route_subpage(state: &mut AdminState, id: Option<&str>) -> Option<Op> {
         Some("admin-files") => AdminPage::Files,
         Some("admin-nest") => AdminPage::Nest,
         Some("admin-mail") => AdminPage::Mail,
+        Some("admin-mail-reports") => AdminPage::MailReports,
         Some("admin-aliases") => AdminPage::Aliases,
         // `actions/admin.py::navigate_web` sends the full ui.yaml page id.
         Some("admin-web") => AdminPage::Web,
@@ -1652,6 +1753,12 @@ fn subpage_load_op(state: &AdminState, page: AdminPage) -> Option<Op> {
             machine,
             action: MailPolicyAction::Refresh,
         }),
+        // Re-read on open (`dmarc-reporting.md` § Live refresh — no push), via
+        // `dispatch(Refresh)` so a read failure reaches `error-message`.
+        AdminPage::MailReports => state.dmarc_reports.clone().map(|machine| Op::DmarcReports {
+            machine,
+            action: DmarcReportsAction::Refresh,
+        }),
         AdminPage::Settings => state.nest.clone().map(|nest| Op::LoadTiers { nest }),
         // The Users hub reads the whole page at once (users list + tier names for
         // the pickers + invite codes + pending requests + the registration posture)
@@ -1700,6 +1807,15 @@ fn subpage_load_op(state: &AdminState, page: AdminPage) -> Option<Op> {
     }
 }
 
+/// Which `admin-bridges` confirm dialog a confirm button belongs to — the
+/// renderer's own record, so [`Action::ConfirmBridge`] can declare its act's
+/// wire kind; the act itself is whatever the shared machine holds armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeConfirmKind {
+    Reject,
+    Rotate,
+}
+
 /// An admin-shell gesture, dispatched through the one gesture door as
 /// `Gesture::Admin(Action)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1720,6 +1836,12 @@ pub enum Action {
     SaveServingPort,
     /// `admin-nest-region-save-button` — validate the region draft and declare it.
     SaveRegion,
+    /// A local edit of the nest-rules mounting's working document
+    /// (`rule-editor-add-button`, `-item-remove-button`, the per-rule pickers).
+    RuleEditor(crate::rule_editor::Edit),
+    /// `rule-editor-save-button` on `admin-nest-rules-section` — write the
+    /// working document (`fauna.admin.content_policy.set`).
+    SaveNestRules,
     /// `admin-nest-region-withdraw-button` — withdraw the declaration (the absent
     /// case on the wire), which also retires the previous region's policy document.
     WithdrawRegion,
@@ -1728,6 +1850,11 @@ pub enum Action {
     SelectWebAppOrigin(fauna_client_admin::WebAppOrigin),
     /// `admin-nest-web-app-origin-save-button` — commit the selected mode.
     SaveWebAppOrigin,
+    /// `admin-nest-update-channel-{stable,test,dev}-radio` — pick the channel
+    /// (local; no network until the save).
+    SelectUpdateChannel(fauna_client_admin::UpdateChannel),
+    /// `admin-nest-update-channel-save-button` — commit the selected channel.
+    SaveUpdateChannel,
     /// `admin-nest-feature-limits-edit-button[i]` — open the shared editor at
     /// the ADMIN tier for the member with this stable key (local; seeded from
     /// the reflective snapshot's authored read).
@@ -1810,6 +1937,19 @@ pub enum Action {
         report_id: String,
         outcome: fauna_protocol::moderation::AbuseReportOutcome,
     },
+    /// `admin-nest-report-block-button` (`restore` false, a queue row) /
+    /// `admin-nest-blocked-unblock-button` (`restore` true, a blocked-list
+    /// row) — arm the one block confirm, folding the shared summary. Local; a
+    /// press the shared form view refuses (an account subject) stays a no-op.
+    OpenBlockConfirm {
+        report_id: String,
+        restore: bool,
+    },
+    /// `admin-nest-report-block-cancel-button` — disarm, touching nothing.
+    CancelBlock,
+    /// `admin-nest-report-block-confirm-button` — dispatch the armed verb over
+    /// `fauna.moderation.admin_block` (disarm-first).
+    ConfirmBlock,
     /// `admin-nest-oauth-rotate-button` — the ordinary issuer-key rotation
     /// (`fauna.oauth.rotate_issuer_key`). No confirm: the outgoing key stays
     /// accepted for the horizon, so nothing breaks, and its cost is stated
@@ -1839,6 +1979,9 @@ pub enum Action {
     /// ring to a severity. Purely local (no refetch), which is what makes going
     /// back to "All" restore exactly the pre-filter row count.
     SetLogLevel(u32),
+    /// `admin-audit-more-button` on `admin-logs` — read the audit page older
+    /// than the oldest entry shown.
+    AuditMore,
     /// `log-copy-button` on `admin-logs` — copy the currently-filtered nest lines
     /// to the terminal clipboard over OSC 52, the same path
     /// `settings::Action::CopyLogs` uses. Local and fire-and-forget.
@@ -1850,21 +1993,18 @@ pub enum Action {
         pubkey_hex: String,
         role: String,
     },
-    /// `admin-bridges-pending-reject-button[row]` — reject the pending bridge
-    /// (`→ revoked`; the row is kept so a re-connect rejects immediately).
-    RejectBridge {
-        pubkey_hex: String,
-    },
-    /// `admin-bridges-approved-rotate-button[row]` — arm the inline rotate
-    /// confirm. Local: no network until the confirm.
-    OpenRotateConfirm {
-        pubkey_hex: String,
-    },
-    /// `admin-bridges-rotate-confirm-button` — dispatch the shared `Rotate`
-    /// action (`revoke_service_user`) for the armed bridge.
-    ConfirmRotate,
-    /// `admin-bridges-rotate-cancel-button` — drop the armed confirm, no write.
-    CancelRotate,
+    /// `admin-bridges-pending-reject-button[row]` /
+    /// `admin-bridges-approved-rotate-button[row]` — open that card's inline
+    /// confirm (the shared machine's arm). Local: no network until the confirm.
+    OpenBridgeConfirm(BridgeConfirm),
+    /// `admin-bridges-reject-confirm-button` / `admin-bridges-rotate-confirm-button`
+    /// — dispatch the shared `Confirm`, which runs the armed act
+    /// (`reject_pending_bridge` / `revoke_service_user`). Carries which dialog
+    /// it confirms only so the act's wire kind can be declared.
+    ConfirmBridge(BridgeConfirmKind),
+    /// `admin-bridges-reject-cancel-button` / `admin-bridges-rotate-cancel-button`
+    /// — close the open confirm, no write.
+    CancelBridgeConfirm,
     /// `admin-aliases-forwarder-add-submit-button` — create an external forwarder
     /// from the add-form drafts (domain + local-part + target).
     CreateForwarder,
@@ -1872,6 +2012,21 @@ pub enum Action {
     /// hex alias id (from the rendered `ForwarderView`).
     DeleteForwarder {
         alias_id_hex: String,
+    },
+    /// `admin-mail-reports-refresh-button` — re-read the window.
+    RefreshMailReports,
+    /// `admin-mail-reports-window-select` — the raw day count (`"7"` / `"30"` /
+    /// `"90"`); the machine sets it and re-reads.
+    SelectMailReportsWindow(String),
+    /// `admin-mail-reports-domain-select` — one local domain, or the empty
+    /// value for every domain; the machine sets it and re-reads.
+    SelectMailReportsDomain(String),
+    /// `admin-mail-reports-report-view-button` — open that row's report XML into
+    /// `admin-mail-reports-raw`, carrying the row's own storage key.
+    OpenMailReport {
+        our_domain: String,
+        submitter: String,
+        report_id: String,
     },
     /// `admin-settings-tier-save-button` — parse the `row`-th tier's five cap
     /// drafts and persist them (`fauna.admin.tiers.update`).
@@ -1881,6 +2036,12 @@ pub enum Action {
     /// `admin-settings-tier-add-button` — parse the add form's name + five cap
     /// drafts and define the tier (`fauna.admin.tiers.create`).
     AddTier,
+    /// `admin-settings-tier-delete-button` — delete the `row`-th tier
+    /// (`fauna.admin.tiers.delete`); no confirm dialog, the nest refuses a tier
+    /// still in use (and `free`) and the refusal reads on `error-message`.
+    DeleteTier {
+        row: usize,
+    },
     /// `admin-settings-membership-tier-select[row]` — re-point the `row`-th
     /// membership row to a different owned subscription tier (LOCAL draft;
     /// display + fix-up only — Save reads the current selection directly).
@@ -1937,9 +2098,13 @@ pub enum Action {
     SaveMailOutbound,
     /// `admin-mail-alias-save-button` — full-PUT the Alias group (`put_alias_policy`).
     SaveMailAlias,
-    /// `admin-mail-publish-spam-baseline-button` — aggregate opted-in users' models
-    /// (`publish_spam_baseline`); the reply stashes on the snapshot, no re-read.
-    PublishSpamBaseline,
+    /// `admin-mail-dmarc-fo-mode-select` — set the `fo=` draft (local wire value).
+    SetDmarcFoMode(String),
+    /// `admin-mail-dmarc-save-button` — full-PUT the DMARC group (`put_dmarc_policy`).
+    SaveMailDmarc,
+    /// `admin-mail-microsoft-save-button` — save the Microsoft-registration
+    /// drafts (`set_microsoft_registration`; both empty clears).
+    SaveMailMicrosoft,
     /// `admin-mail-spam-baseline-standing-toggle` — flip standing baseline publish
     /// (immediate, non-optimistic, like the two deployment-wide toggles: the shared
     /// machine full-PUTs the persisted Spam group with the one field flipped, then
@@ -1949,13 +2114,15 @@ pub enum Action {
     /// `MailPolicyAction::RecheckHealth` (a blocklist self-check + a diagnostics
     /// run, then a re-read of the health readout).
     RecheckMailHealth,
-    /// `admin-mail-health-warmup-reset-button` — the two-click inline confirm:
-    /// the first press arms (local), the second dispatches the shared
-    /// `MailPolicyAction::ResetWarmup` (`outbound_warmup_reset`, then a re-read).
-    ResetMailWarmup,
-    /// `admin-mail-health-delist-link` — a terminal cannot open a browser, so
-    /// the link shows the de-listing URL and copies it (OSC 52). Local.
-    CopyMailDelistUrl {
+    /// One press of an `admin-mail` confirm button — the warm-up reset or a
+    /// secret rotation — as the shared `MailPolicyAction::Press`: the machine
+    /// holds the same-button two-click (the first press arms, the second
+    /// disarms and acts), and the button relabels from `snapshot.armed`.
+    PressMailConfirm(MailPolicyConfirm),
+    /// `admin-mail-health-delist-link` and the two sender-dashboard links — a
+    /// terminal cannot open a browser, so a link shows its URL and copies it
+    /// (OSC 52). Local.
+    CopyMailLinkUrl {
         url: String,
     },
     // ── admin-users: the user-list section (`admin.md` § 2 Users → Section 4) ──
@@ -2028,8 +2195,11 @@ pub enum Action {
     /// `admin-users-admit-guardian-select` — set the admitted account's guardian
     /// draft (LOCAL; `""` = none).
     SetAdmitGuardian(String),
+    /// `admin-users-admit-age-band-select` — set the admitted account's age-band
+    /// draft (LOCAL; an option value — `not-set` or a wire token).
+    SetAdmitAgeBand(String),
     /// `admin-users-admit-button` — admit the drafted actor id under the
-    /// drafted handle + tier (+ guardian) (one `fauna.admin.users.create` call).
+    /// drafted handle + tier (+ guardian + band) (one `fauna.admin.users.create` call).
     AdmitUser,
     // ── admin-users: the invite-code section (`admin.md` § 2 → Section 3) ──
     /// `admin-settings-tier-select` — set the minted code's tier draft (LOCAL).
@@ -2095,13 +2265,21 @@ pub enum Action {
     /// (`LocalDomainAction::AddDomain` at the shared default MTA-STS knobs; the
     /// nest auto-sets `is_primary` on the first one and is idempotent).
     SubmitDnsAddDomain,
-    /// `admin-dns-domain-remove-button[row]` — soft-delete the domain, carrying its
-    /// **name** rather than the row index: the rows re-read between paint and click
-    /// (the bridges-approve lesson). The primary's button paints disabled — the
-    /// nest refuses it anyway (`cannot_remove_primary_domain`).
-    RemoveDnsDomain {
+    /// `admin-dns-domain-remove-button[row]` — open the remove-confirm dialog for
+    /// the domain (the shared `LocalDomainMachine::arm_remove_domain`; nothing
+    /// reaches the nest), carrying its **name** rather than the row index: the
+    /// rows re-read between paint and click (the bridges-approve lesson). The
+    /// primary's button paints disabled — the nest refuses it anyway
+    /// (`cannot_remove_primary_domain`).
+    OpenDnsRemoveConfirm {
         domain: String,
     },
+    /// `admin-dns-domain-remove-confirm-button` — soft-delete the domain the
+    /// dialog names (`LocalDomainAction::ConfirmRemoveDomain`).
+    ConfirmDnsRemoveDomain,
+    /// `admin-dns-domain-remove-cancel-button` — close the dialog, removing
+    /// nothing.
+    CancelDnsRemoveDomain,
     /// `admin-dns-removed-domain-restore-button[row]` — un-soft-delete within the
     /// 30-day window, likewise by name.
     RestoreDnsDomain {
@@ -2280,9 +2458,16 @@ impl Action {
             // Declare and withdraw are the same kind — withdrawal is the
             // absent case on the wire (`region: None`), not a second call.
             Action::SaveRegion | Action::WithdrawRegion => Some("fauna.admin.region.set"),
+            // The rules are one whole-document replace; editing is local.
+            Action::SaveNestRules => Some("fauna.admin.content_policy.set"),
+            // Picking a subscribed labeler reads its module, which fails soft
+            // offline: the rule keeps its missing-labeler defect.
+            Action::RuleEditor(_) => None,
             // Picking a radio is local; the save is the one kind.
             Action::SelectWebAppOrigin(_) => None,
             Action::SaveWebAppOrigin => Some("fauna.admin.web_app_origin.set"),
+            Action::SelectUpdateChannel(_) => None,
+            Action::SaveUpdateChannel => Some("fauna.admin.update_channel.set"),
             // The admin tier's feature document: save and remove are one
             // `OnlineOnly` kind (removal is the absent policy). Opening,
             // On/Off and cancelling are local.
@@ -2314,6 +2499,7 @@ impl Action {
             Action::ConfirmSeedRotate => Some("fauna.admin.deployment_seed.rotate"),
             Action::ConfirmTakedown => Some("fauna.moderation.legal_takedown"),
             Action::ResolveReport { .. } => Some("fauna.moderation.abuse_report.resolve"),
+            Action::ConfirmBlock => Some("fauna.moderation.admin_block"),
             // The issuer's controls: the ordinary arm dispatches on the press;
             // each forced arm on its confirm, whose gesture carries the arm so
             // the declared kind is the one that runs. Spelled as LITERALS, not
@@ -2333,10 +2519,14 @@ impl Action {
 
             // ── admin-bridges ───────────────────────────────────────────────
             Action::ApproveBridge { .. } => Some("fauna.bridges.approve_pending_bridge"),
-            Action::RejectBridge { .. } => Some("fauna.bridges.reject_pending_bridge"),
+            Action::ConfirmBridge(BridgeConfirmKind::Reject) => {
+                Some("fauna.bridges.reject_pending_bridge")
+            }
             // Rotating a service-user key IS a revoke — the bridge exits, the
             // supervisor restarts it, and the fresh key re-enrolls.
-            Action::ConfirmRotate => Some("fauna.bridges.revoke_service_user"),
+            Action::ConfirmBridge(BridgeConfirmKind::Rotate) => {
+                Some("fauna.bridges.revoke_service_user")
+            }
 
             // ── admin-aliases ───────────────────────────────────────────────
             Action::CreateForwarder => Some("fauna.bridges.create_forwarder"),
@@ -2345,11 +2535,12 @@ impl Action {
             // ── admin-settings (Tiers + membership designation) ─────────────
             Action::SaveTier { .. } => Some("fauna.admin.tiers.update"),
             Action::AddTier => Some("fauna.admin.tiers.create"),
+            Action::DeleteTier { .. } => Some("fauna.admin.tiers.delete"),
             Action::SaveMembership { .. } => Some("fauna.admin.membership_tiers.set"),
             Action::ClearMembership { .. } => Some("fauna.admin.membership_tiers.clear"),
 
             // ── admin-mail ──────────────────────────────────────────────────
-            // The two deployment-wide toggles dispatch immediately; the six
+            // The two deployment-wide toggles dispatch immediately; the seven
             // group saves each full-PUT their own policy sub-struct.
             Action::ToggleMailEnabled => Some("fauna.bridges.set_mail_enabled"),
             Action::ToggleMailAutoEnable => {
@@ -2361,13 +2552,21 @@ impl Action {
             Action::SaveMailImap => Some("fauna.bridges.put_imap_policy"),
             Action::SaveMailOutbound => Some("fauna.bridges.put_outbound_policy"),
             Action::SaveMailAlias => Some("fauna.bridges.put_alias_policy"),
-            Action::PublishSpamBaseline => Some("fauna.bridges.publish_spam_baseline"),
+            Action::SaveMailDmarc => Some("fauna.bridges.put_dmarc_policy"),
+            Action::SaveMailMicrosoft => Some("fauna.bridges.set_microsoft_registration"),
             Action::ToggleMailBaselineStanding => Some("fauna.bridges.put_spam_policy"),
             // The recheck runs two kinds and re-reads; the self-check is its
             // first (and the one an offline nest would refuse first).
             Action::RecheckMailHealth => Some("fauna.bridges.blocklist_self_check_run"),
-            // Named for the confirm; the arming press is local (it dispatches nothing).
-            Action::ResetMailWarmup => Some("fauna.bridges.outbound_warmup_reset"),
+            // Named for the confirm; the arming press reaches no nest kind.
+            Action::PressMailConfirm(button) => Some(match button {
+                MailPolicyConfirm::ResetWarmup => "fauna.bridges.outbound_warmup_reset",
+                MailPolicyConfirm::RotateListUnsubscribeSecret => {
+                    "fauna.bridges.rotate_list_unsubscribe_secret"
+                }
+                MailPolicyConfirm::RotateSrsSecret => "fauna.bridges.rotate_srs_secret",
+                MailPolicyConfirm::PublishSpamBaseline => "fauna.bridges.publish_spam_baseline",
+            }),
 
             // ── admin-users ─────────────────────────────────────────────────
             // The tier IS the quota, so a tier change is `users_update`.
@@ -2393,7 +2592,7 @@ impl Action {
 
             // ── admin-dns: the nest-side domain plane ───────────────────────
             Action::SubmitDnsAddDomain => Some("fauna.bridges.add_local_domain"),
-            Action::RemoveDnsDomain { .. } => Some("fauna.bridges.remove_local_domain"),
+            Action::ConfirmDnsRemoveDomain => Some("fauna.bridges.remove_local_domain"),
             Action::RestoreDnsDomain { .. } => Some("fauna.bridges.restore_local_domain"),
             Action::SelectDnsCatchAll { .. } => Some("fauna.bridges.set_catch_all_actor"),
             Action::SelectDnsDmarcPolicy { .. } => Some("fauna.bridges.update_local_domain_config"),
@@ -2451,8 +2650,14 @@ impl Action {
             // pagination steps are the same read set at another offset.
             Action::Open(_)
             | Action::RefreshDns
+            // `admin-mail-reports` only reads: its filters re-read the window.
+            | Action::RefreshMailReports
+            | Action::SelectMailReportsWindow(_)
+            | Action::SelectMailReportsDomain(_)
+            | Action::OpenMailReport { .. }
             | Action::UsersNextPage
-            | Action::UsersPrevPage => None,
+            | Action::UsersPrevPage
+            | Action::AuditMore => None,
 
             // Arming and disarming an inline confirm, and revealing or hiding
             // an inline form. Nothing dispatches until the confirm/submit,
@@ -2467,14 +2672,18 @@ impl Action {
             | Action::OpenTakedownConfirm
             | Action::CancelTakedown
             | Action::OpenReportTakedown { .. }
+            | Action::OpenBlockConfirm { .. }
+            | Action::CancelBlock
             | Action::OpenOauthForcedConfirm(_)
             | Action::CancelOauthForced
-            | Action::OpenRotateConfirm { .. }
-            | Action::CancelRotate
+            | Action::OpenBridgeConfirm(_)
+            | Action::CancelBridgeConfirm
             | Action::OpenInviteForm
             | Action::CancelInviteForm
             | Action::OpenDnsAddDomain
             | Action::CancelDnsAddDomain
+            | Action::OpenDnsRemoveConfirm { .. }
+            | Action::CancelDnsRemoveDomain
             | Action::OpenDnsAddCredential
             | Action::CancelDnsAddCredential
             | Action::OpenDnsRenameSheet { .. }
@@ -2498,10 +2707,12 @@ impl Action {
             | Action::ToggleMail(_)
             | Action::SetFcrdnsMode(_)
             | Action::SetImapDelete(_)
+            | Action::SetDmarcFoMode(_)
             | Action::SetRegistrationMode(_)
             | Action::SetAgeVerificationRequired(_)
             | Action::SetAdmitTier(_)
             | Action::SetAdmitGuardian(_)
+            | Action::SetAdmitAgeBand(_)
             | Action::SetInviteTier(_)
             | Action::SetInviteGuardian(_)
             | Action::SetInviteAgeBand(_)
@@ -2519,7 +2730,7 @@ impl Action {
             | Action::CopyLogs
             | Action::CopyMintedCode
             | Action::CopyDnsRecord { .. }
-            | Action::CopyMailDelistUrl { .. } => None,
+            | Action::CopyMailLinkUrl { .. } => None,
         }
     }
 }
@@ -2531,6 +2742,27 @@ impl Action {
 /// the mail serve-here toggle.
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     match action {
+        Action::RuleEditor(edit) => {
+            let fetch = app.admin.rules.apply(edit)?;
+            Some(Op::FetchRuleLabeler {
+                nest: app.admin.nest.clone()?,
+                fetch,
+            })
+        }
+        Action::SaveNestRules => {
+            // The button is enabled only while the crate's `can_save` holds;
+            // the guard keeps an agent click on a disabled button inert too.
+            let document = app
+                .admin
+                .rules
+                .editor
+                .as_ref()
+                .filter(|e| e.can_save())?
+                .document();
+            let nest = app.admin.nest.clone()?;
+            app.admin.rules.status = Some(fauna_i18n::strings::rule_editor::SAVING.to_string());
+            Some(Op::SaveNestRules { nest, document })
+        }
         Action::Open(page) => {
             app.admin.sub = page;
             subpage_load_op(&app.admin, page)
@@ -2669,6 +2901,29 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let mode = app.admin.web_app_origin_draft.filter(|_| settable)?;
             let nest = app.admin.nest.clone()?;
             Some(Op::SaveWebAppOrigin { nest, mode })
+        }
+        Action::SelectUpdateChannel(channel) => {
+            // The web-app origin's rule: only where the shared view says the
+            // channel can be set.
+            let settable = app
+                .admin
+                .nest_snapshot
+                .as_ref()
+                .is_some_and(|s| s.update_channel.can_set);
+            if settable {
+                app.admin.update_channel_draft = Some(channel);
+            }
+            None
+        }
+        Action::SaveUpdateChannel => {
+            let settable = app
+                .admin
+                .nest_snapshot
+                .as_ref()
+                .is_some_and(|s| s.update_channel.can_set);
+            let channel = app.admin.update_channel_draft.filter(|_| settable)?;
+            let nest = app.admin.nest.clone()?;
+            Some(Op::SaveUpdateChannel { nest, channel })
         }
         Action::OpenFeatureLimitEditor(feature) => {
             app.admin.feature_editor =
@@ -2895,6 +3150,56 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 outcome,
             })
         }
+        Action::OpenBlockConfirm { report_id, restore } => {
+            use fauna_client_moderation::block;
+            // The subject and reason come from the row the press names: a
+            // queue row for Block, a blocked-list row for Unblock.
+            let (subject, reason) = if restore {
+                let e = app
+                    .admin
+                    .blocked
+                    .iter()
+                    .find(|b| b.report_id == report_id)?;
+                (e.subject.clone(), e.reason)
+            } else {
+                let e = app
+                    .admin
+                    .reports
+                    .iter()
+                    .find(|r| r.report_id == report_id)?;
+                (e.subject.clone(), e.reason)
+            };
+            let view = block::block_form_view(&subject, restore);
+            if !view.can_submit {
+                // The button is not painted for an account subject; a
+                // driver-forced press must not arm what the fold refuses.
+                return None;
+            }
+            app.admin.block_status = None;
+            app.admin.block_confirm = Some(ArmedBlock {
+                report_id,
+                restore,
+                summary: block::block_confirm_summary(&subject, reason, restore),
+                confirm_label: view.confirm_label,
+            });
+            None
+        }
+        Action::CancelBlock => {
+            app.admin.block_confirm = None;
+            None
+        }
+        Action::ConfirmBlock => {
+            // Disarm FIRST: a double click must not dispatch a second lever on
+            // another user's content.
+            let armed = app.admin.block_confirm.take()?;
+            let nest = app.admin.nest.clone()?;
+            app.admin.block_status = Some(t::nest_page::BLOCK_WORKING.to_string());
+            Some(Op::SubmitBlock {
+                nest,
+                report_id: armed.report_id,
+                restore: armed.restore,
+            })
+        }
         Action::RotateIssuerKey => {
             // The button renders disabled until the key set has answered and
             // while a call is in flight; a driver-forced press must honour the
@@ -2955,36 +3260,39 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 action: BridgeApprovalAction::Approve { pubkey_hex, role },
             })
         }
-        Action::RejectBridge { pubkey_hex } => {
+        // Arming and cancelling are the machine's sync calls, re-snapshotted at
+        // once: the dialog paints in the same frame as the click (the
+        // inline-reveal contract, `bridges.rs` module docs).
+        Action::OpenBridgeConfirm(confirm) => {
             let machine = app.admin.bridges.clone()?;
-            Some(Op::Bridges {
-                machine,
-                action: BridgeApprovalAction::Reject { pubkey_hex },
-            })
-        }
-        Action::OpenRotateConfirm { pubkey_hex } => {
-            app.admin.rotate_confirm = Some(RotateConfirm { pubkey_hex });
+            machine.arm(confirm);
+            app.admin.bridges_snapshot = Some(machine.snapshot());
             None
         }
-        Action::ConfirmRotate => {
-            // Disarm first: the confirm is consumed by the dispatch, so a second
-            // click can't re-fire a revoke against a pubkey already rotated.
-            let confirm = app.admin.rotate_confirm.take()?;
+        Action::ConfirmBridge(_) => {
+            // The machine disarms as the dispatch starts, so a second click
+            // can't re-fire the act against a card already rejected or rotated.
             let machine = app.admin.bridges.clone()?;
             Some(Op::Bridges {
                 machine,
-                action: BridgeApprovalAction::Rotate {
-                    pubkey_hex: confirm.pubkey_hex,
-                },
+                action: BridgeApprovalAction::Confirm,
             })
         }
-        Action::CancelRotate => {
-            app.admin.rotate_confirm = None;
+        Action::CancelBridgeConfirm => {
+            let machine = app.admin.bridges.clone()?;
+            machine.disarm();
+            app.admin.bridges_snapshot = Some(machine.snapshot());
             None
         }
         Action::SetLogLevel(index) => {
             app.admin.log_filter = index;
             None
+        }
+        Action::AuditMore => {
+            // Disabled at the last page, so `None` here is only a stray gesture.
+            let before_id = app.admin.audit.view().more_before_id?;
+            let nest = app.admin.nest.clone()?;
+            Some(Op::AuditMore { nest, before_id })
         }
         Action::CopyLogs => {
             // `filtered_nest_entries` is already newest-first, and `rendered_text`
@@ -3033,6 +3341,48 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 action: ForwarderAction::Delete { alias_id_hex },
             })
         }
+        Action::RefreshMailReports => {
+            let machine = app.admin.dmarc_reports.clone()?;
+            Some(Op::DmarcReports {
+                machine,
+                action: DmarcReportsAction::Refresh,
+            })
+        }
+        Action::SelectMailReportsWindow(days) => {
+            let machine = app.admin.dmarc_reports.clone()?;
+            // A value off the picker parses to 0, which the machine refuses onto
+            // `error-message` — the one place the window catalog is checked.
+            Some(Op::DmarcReports {
+                machine,
+                action: DmarcReportsAction::SetWindow {
+                    days: days.trim().parse().unwrap_or(0),
+                },
+            })
+        }
+        Action::SelectMailReportsDomain(domain) => {
+            let machine = app.admin.dmarc_reports.clone()?;
+            Some(Op::DmarcReports {
+                machine,
+                action: DmarcReportsAction::SetDomain {
+                    domain: Some(domain).filter(|d| !d.is_empty()),
+                },
+            })
+        }
+        Action::OpenMailReport {
+            our_domain,
+            submitter,
+            report_id,
+        } => {
+            let machine = app.admin.dmarc_reports.clone()?;
+            Some(Op::DmarcReports {
+                machine,
+                action: DmarcReportsAction::OpenReport {
+                    our_domain,
+                    submitter,
+                    report_id,
+                },
+            })
+        }
         Action::SaveTier { row } => match tier_update_req(&app.admin, row) {
             // A parsed request → dispatch the update (needs the live client).
             Some(req) => app
@@ -3067,6 +3417,14 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 None
             }
         },
+        // Nothing to validate locally: the nest decides which tier is removable
+        // (in use, or `free`) and its refusal arrives as `Outcome::Failed`.
+        Action::DeleteTier { row } => tier_delete_name(&app.admin, row).and_then(|name| {
+            app.admin
+                .nest
+                .clone()
+                .map(|nest| Op::DeleteTier { nest, name })
+        }),
         // The three membership-row selects are LOCAL drafts — Save reads them
         // directly, nothing dispatches on change (the tier-cap-input precedent).
         Action::SetMembershipTierName { row, tier_name } => {
@@ -3142,6 +3500,10 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.admin.mail_drafts.imap.delete_nonempty = mode;
             None
         }
+        Action::SetDmarcFoMode(mode) => {
+            app.admin.mail_drafts.dmarc.fo_mode = mode;
+            None
+        }
         // Each Save gathers its group's drafts into the full `*View` (seeded from
         // the persisted snapshot, so unedited fields ride through unchanged — the
         // no-clobber full-PUT) and dispatches the group's put. Needs both the live
@@ -3203,11 +3565,26 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 action: MailPolicyAction::SaveAlias { policy },
             })
         }
-        Action::PublishSpamBaseline => {
+        Action::SaveMailDmarc => {
             let machine = app.admin.mail.clone()?;
+            let snapshot = app.admin.mail_snapshot.as_ref()?;
+            let policy = app.admin.mail_drafts.gather_dmarc(&snapshot.dmarc);
             Some(Op::Mail {
                 machine,
-                action: MailPolicyAction::PublishSpamBaseline,
+                action: MailPolicyAction::SaveDmarc { policy },
+            })
+        }
+        // The two drafts go out as typed; the shared machine checks them and
+        // refuses a bad pair onto `error-message` before any round trip.
+        Action::SaveMailMicrosoft => {
+            let machine = app.admin.mail.clone()?;
+            let d = &app.admin.mail_drafts.microsoft;
+            Some(Op::Mail {
+                machine,
+                action: MailPolicyAction::SetMicrosoftRegistration {
+                    client_id: d.client_id.clone(),
+                    tenant: d.tenant.clone(),
+                },
             })
         }
         Action::ToggleMailBaselineStanding => {
@@ -3222,21 +3599,11 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             machine: app.admin.mail.clone()?,
             action: MailPolicyAction::RecheckHealth,
         }),
-        Action::ResetMailWarmup => {
-            // The two-click inline confirm (the `MailSpamReset` shape): arming is
-            // local, and only the confirm reaches the machine — disarming first,
-            // so a third press cannot chain a second reset.
-            if !app.admin.mail_warmup_reset_armed {
-                app.admin.mail_warmup_reset_armed = true;
-                return None;
-            }
-            app.admin.mail_warmup_reset_armed = false;
-            Some(Op::Mail {
-                machine: app.admin.mail.clone()?,
-                action: MailPolicyAction::ResetWarmup,
-            })
-        }
-        Action::CopyMailDelistUrl { url } => {
+        Action::PressMailConfirm(button) => Some(Op::Mail {
+            machine: app.admin.mail.clone()?,
+            action: MailPolicyAction::Press { button },
+        }),
+        Action::CopyMailLinkUrl { url } => {
             crate::wizard::copy_to_clipboard(&url);
             None
         }
@@ -3305,7 +3672,15 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::SetAdmitGuardian(guardian) => {
+            // A band presupposes a guardian: clearing one clears the other.
+            if !guardian_draft_names_someone(&guardian) {
+                app.admin.users.admit_age_band_draft = AGE_BAND_NOT_SET_VALUE.to_string();
+            }
             app.admin.users.admit_guardian_draft = guardian;
+            None
+        }
+        Action::SetAdmitAgeBand(band) => {
+            app.admin.users.admit_age_band_draft = band;
             None
         }
         Action::AdmitUser => match admit_mutation(&app.admin.users) {
@@ -3421,8 +3796,24 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 },
             )
         }
-        Action::RemoveDnsDomain { domain } => {
-            local_domains_op(&app.admin, LocalDomainAction::RemoveDomain { domain })
+        // The confirm's arm lives in the shared machine and reaches no nest, so it
+        // is applied here, synchronously, and the dialog paints on this frame.
+        Action::OpenDnsRemoveConfirm { domain } => {
+            if let Some(machine) = app.admin.local_domains.as_ref() {
+                machine.arm_remove_domain(domain);
+                app.admin.local_domains_snapshot = Some(machine.snapshot());
+            }
+            None
+        }
+        Action::CancelDnsRemoveDomain => {
+            if let Some(machine) = app.admin.local_domains.as_ref() {
+                machine.cancel_remove_domain();
+                app.admin.local_domains_snapshot = Some(machine.snapshot());
+            }
+            None
+        }
+        Action::ConfirmDnsRemoveDomain => {
+            local_domains_op(&app.admin, LocalDomainAction::ConfirmRemoveDomain)
         }
         Action::RestoreDnsDomain { domain } => {
             local_domains_op(&app.admin, LocalDomainAction::RestoreDomain { domain })
@@ -3865,11 +4256,16 @@ fn admit_mutation(users: &UsersState) -> Result<UsersMutation, String> {
         .snapshot
         .as_ref()
         .and_then(|s| resolve_guardian(s, &users.admit_guardian_draft));
+    // The band rides only beside a guardian (the nest refuses it otherwise).
+    let age_band = guardian
+        .as_ref()
+        .and_then(|_| age_band_from_option_value(&users.admit_age_band_draft));
     Ok(UsersMutation::AdmitUser {
         actor,
         tier: users.admit_tier_draft.clone(),
         handle,
         guardian,
+        age_band,
     })
 }
 
@@ -4017,6 +4413,12 @@ fn mail_snapshot_bool(app: &App, pick: impl Fn(&MailPolicySnapshot) -> bool) -> 
     app.admin.mail_snapshot.as_ref().map(pick).unwrap_or(false)
 }
 
+/// The name of the `row`-th tier, which `tiers.delete` takes; `None` if the row
+/// is gone (a stale gesture after a refetch shrank the list).
+fn tier_delete_name(state: &AdminState, row: usize) -> Option<String> {
+    Some(state.tiers.as_ref()?.get(row)?.name.clone())
+}
+
 /// Build the `tiers.update` request for the `row`-th tier from its cap drafts, or
 /// `None` if the row is gone or any of its five raw-i64 caps fails to parse. Pure
 /// (no `app`, no network) so the parse/validation is unit-testable without a live
@@ -4110,6 +4512,7 @@ fn membership_save_req(state: &AdminState, row: usize) -> Option<AdminMembership
 /// contract (`tui.md` § The page-module contract).
 pub fn field(state: &AdminState, field: &AdminField) -> String {
     match field {
+        AdminField::RuleEditor(input) => state.rules.field(input),
         AdminField::CaldavPort => state.caldav_port_input.clone(),
         AdminField::ServingPort => state.serving_port_input.clone(),
         AdminField::Region => state.region_input.clone(),
@@ -4156,6 +4559,7 @@ pub fn field(state: &AdminState, field: &AdminField) -> String {
 /// returns nothing.
 pub fn set_field(state: &mut AdminState, field: AdminField, value: String) {
     match field {
+        AdminField::RuleEditor(input) => state.rules.set_field(input, value),
         AdminField::FeatureLimitCell { cell } => {
             if let Some(editor) = state.feature_editor.as_mut() {
                 editor.set_cell(cell, value);
@@ -4240,6 +4644,13 @@ pub enum Op {
         machine: Arc<ForwarderMachine>,
         action: ForwarderAction,
     },
+    /// One `admin-mail-reports` machine dispatch (`Refresh` / `SetWindow` /
+    /// `SetDomain` / `OpenReport`), then re-snapshot — one Op variant, one fold
+    /// site; a read failure rides `snapshot.error` onto `error-message`.
+    DmarcReports {
+        machine: Arc<DmarcReportsMachine>,
+        action: DmarcReportsAction,
+    },
     /// One `admin-mail` machine dispatch (`Refresh` / a group `Save*` / a `Set*`
     /// toggle / `PublishSpamBaseline`), then re-snapshot — one Op variant, one fold
     /// site (the DAV "one snapshot" discipline). A save/read failure rides
@@ -4267,6 +4678,9 @@ pub enum Op {
         nest: Arc<NestClient>,
         req: AdminTierCreateRequest,
     },
+    /// Delete a tier (`fauna.admin.tiers.delete`), then re-read the whole Tiers
+    /// page so the row disappears (non-optimistic).
+    DeleteTier { nest: Arc<NestClient>, name: String },
     /// Designate/re-point a membership row (`fauna.admin.membership_tiers.set`,
     /// an upsert), then re-read the whole Tiers page.
     SaveMembership {
@@ -4298,6 +4712,17 @@ pub enum Op {
     /// re-read the reflective snapshot.
     SaveServingPort { nest: Arc<NestClient>, port: u16 },
     /// Declare (`Some`) or withdraw (`None`) the deployment's region, then re-read.
+    /// A subscribed labeler picked in the rules editor: its module
+    /// (`fauna.labelers.inspect`), for the rule to bundle.
+    FetchRuleLabeler {
+        nest: Arc<NestClient>,
+        fetch: crate::rule_editor::LabelerFetch,
+    },
+    /// `fauna.admin.content_policy.set` with the editor's whole document.
+    SaveNestRules {
+        nest: Arc<NestClient>,
+        document: fauna_core::content_policy::ContentPolicyDocument,
+    },
     SaveRegion {
         nest: Arc<NestClient>,
         region: Option<fauna_client_admin::RegionCode>,
@@ -4306,6 +4731,11 @@ pub enum Op {
     SaveWebAppOrigin {
         nest: Arc<NestClient>,
         mode: fauna_client_admin::WebAppOrigin,
+    },
+    /// Commit the update channel, then re-read.
+    SaveUpdateChannel {
+        nest: Arc<NestClient>,
+        channel: fauna_client_admin::UpdateChannel,
     },
     /// Save the admin-tier editor's draft or remove the document
     /// (`fauna.features.policy.update`), then re-read the whole reflective
@@ -4368,6 +4798,14 @@ pub enum Op {
         report_id: String,
         outcome: fauna_protocol::moderation::AbuseReportOutcome,
     },
+    /// Block (or, `restore`, unblock) the item a report names
+    /// (`fauna.moderation.admin_block`), then re-read the queue and the blocked
+    /// list — a blocked item's report leaves the one and joins the other.
+    SubmitBlock {
+        nest: Arc<NestClient>,
+        report_id: String,
+        restore: bool,
+    },
     /// The ordinary issuer-key rotation (`fauna.oauth.rotate_issuer_key`),
     /// then a re-read of the key set so the outgoing key's countdown paints.
     RotateIssuerKey { nest: Arc<NestClient> },
@@ -4427,9 +4865,15 @@ pub enum Op {
         grant_id: Vec<u8>,
     },
     /// Fetch the nest's `fauna-log` ring for `admin-logs` (`fauna.admin.logs`,
-    /// Admin-class). Read-only and replay-safe, so the page re-fetches freely on
-    /// every entry.
+    /// Admin-class) and the newest page of the audit log below it
+    /// (`fauna_client_admin::audit_log_page`). Read-only and replay-safe, so the
+    /// page re-fetches freely on every entry.
     LoadLogs { nest: Arc<NestClient> },
+    /// `admin-audit-more-button` — the audit page older than `before_id`.
+    AuditMore {
+        nest: Arc<NestClient>,
+        before_id: i64,
+    },
     /// The `admin-dns` whole-page read: the local-domain rows, the DNS record
     /// matrix + live public-DNS verdicts, and the actor list the per-row pickers
     /// offer — one Op, one `DnsLoaded` fold (a row painted before its records, or
@@ -4536,9 +4980,11 @@ pub enum UsersMutation {
         tier: String,
         handle: Option<String>,
         /// The supervised designation (`admin-users-admit-guardian-select`);
-        /// `None` admits an ordinary account. The Admit section sends no band
-        /// yet — the typed `age_band` seam is open, the select awaits sign-off.
+        /// `None` admits an ordinary account.
         guardian: Option<Vec<u8>>,
+        /// The ward's age band (`admin-users-admit-age-band-select`); only ever
+        /// `Some` beside a guardian.
+        age_band: Option<AgeBand>,
     },
     /// `invite_codes_create` — mint an invite code (empty code ⇒ the nest mints); the
     /// reply's token is threaded to `admin-users-invite-code-copy-btn` via
@@ -4594,6 +5040,13 @@ pub enum Outcome {
     /// A resolve dispatched — its verdict line (the shared `resolve_verdict`)
     /// and the re-read queue.
     ReportResolved(String, ReportsRead),
+    /// A Block / Unblock dispatched — its verdict line (the shared
+    /// `block_verdict`), the re-read queue and the re-read blocked list.
+    BlockDone {
+        status: String,
+        reports: ReportsRead,
+        blocked: BlockedRead,
+    },
     /// An issuer control's verdict (already worded by the shared fold) and the
     /// key set as re-read after it — only the section's own leg, so a rotation
     /// does not re-seed the port or region drafts the admin may be typing in.
@@ -4610,6 +5063,9 @@ pub enum Outcome {
     /// (hydrate / create / delete). The machine reports success and failure on the
     /// snapshot's `error`, surfaced on the page-scoped `admin-aliases-action-error`.
     ForwardersSnapshot(ForwardersSnapshot),
+    /// A fresh `admin-mail-reports` snapshot — the single fold for every reports
+    /// op. Boxed: the rows and an opened report's XML ride it.
+    DmarcReportsSnapshot(Box<DmarcReportsSnapshot>),
     /// A fresh `admin-mail` snapshot — the single fold for every mail op (hydrate /
     /// group save / toggle / publish-baseline). The machine reports success and
     /// failure on the snapshot's `error`, bridged to the global `error-message`.
@@ -4639,6 +5095,19 @@ pub enum Outcome {
         /// The reports queue, read in the same load — its own `Result`, so a
         /// refused queue read never blanks the rest of the page.
         reports: ReportsRead,
+        /// The blocked list, read in the same load — its own `Result` too.
+        blocked: BlockedRead,
+        /// The nest's rules, read in the same load — its own `Result` too.
+        rules: RulesRead,
+    },
+    /// A nest-rules write's answer: the stored record, or the nest's named
+    /// refusal (`AdminContentPolicySetReply::defect`).
+    NestRulesSaved(Result<fauna_protocol::content_policy::AdminContentPolicySetReply, String>),
+    /// A picked labeler's module, or `None` when it is not a usable one or
+    /// the read failed.
+    RuleLabelerFetched {
+        fetch: crate::rule_editor::LabelerFetch,
+        module: Option<Vec<u8>>,
     },
     /// A re-read of the `admin-nest` reflective snapshot only (after a pairing /
     /// serving-port / restart mutation) — the NAT machine is untouched. Boxed
@@ -4683,6 +5152,16 @@ pub enum Outcome {
     /// The nest log ring (`Ok`) or the read failure (`Err`) — one fold for both,
     /// so a failure clears nothing the admin was already reading.
     LogsLoaded(Result<Vec<fauna_log::LogEntry>, String>),
+    /// The `admin-logs` entry load: the ring and the newest audit page, each
+    /// with its own failure, folded as [`Self::LogsLoaded`] and
+    /// [`Self::AuditLoaded`] would fold them.
+    LogsPageLoaded {
+        logs: Result<Vec<fauna_log::LogEntry>, String>,
+        audit: Result<fauna_client_admin::AuditLogPage, String>,
+    },
+    /// An older audit page (`Ok`) or the read failure (`Err`). A failure clears
+    /// nothing already shown.
+    AuditLoaded(Result<fauna_client_admin::AuditLogPage, String>),
     /// An `admin-bridges-pending` refresh or mutation resolved. `Box`ed for the
     /// `clippy::large_enum_variant` reason the mail snapshot is.
     BridgesSnapshot(Box<BridgeApprovalSnapshot>),
@@ -4755,6 +5234,11 @@ impl Op {
                 let _ = machine.dispatch(action).await;
                 Outcome::ForwardersSnapshot(machine.snapshot())
             }
+            // Same shape: a failed read rides `snapshot.error`, bridged by the fold.
+            Op::DmarcReports { machine, action } => {
+                let _ = machine.dispatch(action).await;
+                Outcome::DmarcReportsSnapshot(Box::new(machine.snapshot()))
+            }
             // Same shape as the DAV/forwarder dispatches: run the mail action, drop
             // its `Result` (a failure — e.g. the nest's out-of-order spam-threshold
             // rejection — rides `snapshot.error`, which `apply_outcome` bridges to
@@ -4790,6 +5274,17 @@ impl Op {
                     Err(e) => Outcome::Failed(format!("reload admin tiers: {e}")),
                 }
             }
+            Op::DeleteTier { nest, name } => {
+                if let Err(e) = AdminClient::new(nest.clone()).tiers_delete(name).await {
+                    let message = fauna_client_admin::tier_delete_refusal(&e)
+                        .map_or_else(|| e.to_string(), str::to_string);
+                    return Outcome::Failed(t::settings_page::delete_tier_error(&message));
+                }
+                match load_settings_snapshot(&nest).await {
+                    Ok(outcome) => outcome,
+                    Err(e) => Outcome::Failed(format!("reload admin tiers: {e}")),
+                }
+            }
             Op::SaveMembership { nest, req } => {
                 if let Err(e) = AdminClient::new(nest.clone())
                     .membership_tiers_set(req)
@@ -4822,6 +5317,8 @@ impl Op {
                         reflective: Box::new(reflective),
                         nat: nat.snapshot(),
                         reports: read_reports(&nest).await,
+                        blocked: read_blocked(&nest).await,
+                        rules: read_rules(&nest).await,
                     }
                 }
                 Err(e) => Outcome::Failed(e),
@@ -4841,6 +5338,16 @@ impl Op {
                 }
                 reflect_outcome(&nest).await
             }
+            Op::FetchRuleLabeler { nest, fetch } => {
+                let module = crate::rule_editor::fetch_labeler(&nest, &fetch).await;
+                Outcome::RuleLabelerFetched { fetch, module }
+            }
+            Op::SaveNestRules { nest, document } => Outcome::NestRulesSaved(
+                AdminClient::new(nest.clone())
+                    .set_content_policy(document)
+                    .await
+                    .map_err(|e| format!("save nest rules: {e}")),
+            ),
             Op::SaveRegion { nest, region } => {
                 if let Err(e) = AdminClient::new(nest.clone()).set_region(region).await {
                     return Outcome::Failed(format!("set declared region: {e}"));
@@ -4853,6 +5360,15 @@ impl Op {
                     .await
                 {
                     return Outcome::Failed(format!("set web-app origin: {e}"));
+                }
+                reflect_outcome(&nest).await
+            }
+            Op::SaveUpdateChannel { nest, channel } => {
+                if let Err(e) = AdminClient::new(nest.clone())
+                    .set_update_channel(channel)
+                    .await
+                {
+                    return Outcome::Failed(format!("set update channel: {e}"));
                 }
                 reflect_outcome(&nest).await
             }
@@ -4955,6 +5471,24 @@ impl Op {
                     &fauna_client_moderation::report::resolve_verdict(outcome, error),
                 );
                 Outcome::ReportResolved(verdict, read_reports(&nest).await)
+            }
+            Op::SubmitBlock {
+                nest,
+                report_id,
+                restore,
+            } => {
+                let error = ModerationClient::new(Arc::clone(&nest))
+                    .admin_block(report_id, restore)
+                    .await
+                    .err()
+                    .map(|e| e.to_string());
+                Outcome::BlockDone {
+                    status: crate::wizard::localized(
+                        &fauna_client_moderation::block::block_verdict(restore, error),
+                    ),
+                    reports: read_reports(&nest).await,
+                    blocked: read_blocked(&nest).await,
+                }
             }
             Op::RotateIssuerKey { nest } => {
                 let verdict = AdminClient::new(nest.clone())
@@ -5131,8 +5665,9 @@ impl Op {
                 }
                 Outcome::DnsSnapshotOnly(Box::new(machine.snapshot()))
             }
-            Op::LoadLogs { nest } => Outcome::LogsLoaded(
-                AdminClient::new(nest)
+            Op::LoadLogs { nest } => {
+                let client = AdminClient::new(nest);
+                let logs = client
                     .logs()
                     .await
                     .map(|reply| {
@@ -5142,7 +5677,16 @@ impl Op {
                             .map(fauna_client_admin::log_entry_from_wire)
                             .collect()
                     })
-                    .map_err(|e| format!("load nest logs: {e}")),
+                    .map_err(|e| format!("load nest logs: {e}"));
+                let audit = fauna_client_admin::audit_log_page(&client, None)
+                    .await
+                    .map_err(|e| format!("load audit log: {e}"));
+                Outcome::LogsPageLoaded { logs, audit }
+            }
+            Op::AuditMore { nest, before_id } => Outcome::AuditLoaded(
+                fauna_client_admin::audit_log_page(&AdminClient::new(nest), Some(before_id))
+                    .await
+                    .map_err(|e| format!("load audit log: {e}")),
             ),
             Op::SetApexActor { nest, actor } => {
                 // A write failure paints on the page's own `error-message` and
@@ -5254,8 +5798,9 @@ impl Op {
                         tier,
                         handle,
                         guardian,
+                        age_band,
                     } => client
-                        .users_create(actor, tier, String::new(), handle, guardian, None)
+                        .users_create(actor, tier, String::new(), handle, guardian, age_band)
                         .await
                         .map_err(|e| format!("admit user: {e}")),
                     UsersMutation::DeleteInvite { code } => client
@@ -5429,6 +5974,116 @@ async fn read_reports(nest: &Arc<NestClient>) -> ReportsRead {
         .map_err(|e| format!("load reports: {e}"))
 }
 
+/// One read of the blocked list, as the page's folds take it.
+pub type BlockedRead = Result<Vec<fauna_protocol::moderation::AdminBlockEntry>, String>;
+
+/// The blocked-list read (`fauna.moderation.admin_block.list`, Admin).
+async fn read_blocked(nest: &Arc<NestClient>) -> BlockedRead {
+    ModerationClient::new(Arc::clone(nest))
+        .admin_block_list()
+        .await
+        .map(|reply| reply.items)
+        .map_err(|e| format!("load blocked items: {e}"))
+}
+
+/// Fold a blocked-list read — the [`apply_reports`] discipline: a failure
+/// lands on `error-message` and leaves `blocked_loaded` alone.
+fn apply_blocked(app: &mut App, blocked: BlockedRead) {
+    match blocked {
+        Ok(blocked) => {
+            app.admin.blocked = blocked;
+            app.admin.blocked_loaded = true;
+        }
+        Err(e) => {
+            app.errors.insert(Page::Admin, e);
+        }
+    }
+}
+
+/// One read of the nest's rules, as the page's fold takes it: the nest's
+/// domain (the publisher the rules are written under), the document in
+/// force (`None` before the admin has written one), and the admin's
+/// subscribed labelers a rule may name (hex ids — the labeler picker's list).
+pub type RulesRead = Result<
+    (
+        String,
+        Option<fauna_core::content_policy::ContentPolicyDocument>,
+        Vec<String>,
+    ),
+    String,
+>;
+
+/// The rules read (`fauna.admin.content_policy.get`, Admin) beside the
+/// self-description's domain (the connection's one `fauna.nest.info`).
+async fn read_rules(nest: &Arc<NestClient>) -> RulesRead {
+    let domain = fauna_protocol::read_nest_info(nest.as_ref())
+        .await
+        .map_err(|e| format!("load nest rules: {e}"))?
+        .domain;
+    let reply = AdminClient::new(Arc::clone(nest))
+        .content_policy()
+        .await
+        .map_err(|e| format!("load nest rules: {e}"))?;
+    let document = reply
+        .policy
+        .map(|signed| fauna_core::content_policy::decode_document(&signed.document))
+        .transpose()
+        .map_err(|e| format!("load nest rules: {e:?}"))?;
+    let labelers = crate::rule_editor::read_labelers(nest).await;
+    Ok((domain, document, labelers))
+}
+
+/// Fold a rules read into the editor. A failure lands on the editor's status
+/// line, never blanking the rest of the page.
+fn apply_rules(app: &mut App, rules: RulesRead) {
+    match rules {
+        Ok((domain, document, labelers)) => {
+            app.admin.rules.load(fauna_client_policy::RuleEditor::load(
+                document,
+                fauna_core::content_policy::Publisher::Nest(domain),
+            ));
+            app.admin.rules.labelers = labelers;
+            app.admin.rules.status = None;
+        }
+        Err(e) => app.admin.rules.status = Some(e),
+    }
+}
+
+/// Fold a rules write: the stored record re-seeds the editor and says which
+/// version is in force; a refusal names its defect.
+fn apply_rules_saved(
+    app: &mut App,
+    saved: Result<fauna_protocol::content_policy::AdminContentPolicySetReply, String>,
+) {
+    use fauna_i18n::strings::rule_editor as t;
+    let reply = match saved {
+        Ok(reply) => reply,
+        Err(e) => {
+            app.admin.rules.status = Some(e);
+            return;
+        }
+    };
+    if let Some(defect) = reply.defect {
+        app.admin.rules.status = Some(defect);
+        return;
+    }
+    let Some(signed) = reply.policy else {
+        app.admin.rules.status = Some(t::SAVED.to_string());
+        return;
+    };
+    if let (Ok(document), Some(editor)) = (
+        fauna_core::content_policy::decode_document(&signed.document),
+        app.admin.rules.editor.as_ref(),
+    ) {
+        let publisher = editor.publisher().clone();
+        app.admin.rules.load(fauna_client_policy::RuleEditor::load(
+            Some(document),
+            publisher,
+        ));
+    }
+    app.admin.rules.status = Some(t::saved_version(&signed.sequence.to_string()));
+}
+
 /// Fold a queue read. A failure lands on `error-message` and leaves
 /// `reports_loaded` alone, so a refused read never paints "No open reports".
 fn apply_reports(app: &mut App, reports: ReportsRead) {
@@ -5566,14 +6221,21 @@ async fn reflect_nest(nest: &Arc<NestClient>) -> Result<NestPageSnapshot, String
         .web_app_origin()
         .await
         .map_err(|e| format!("load web-app origin: {e}"))?;
+    // Same: `Ok(None)` is a nest predating the choice.
+    let update_channel = AdminClient::new(nest.clone())
+        .update_channel()
+        .await
+        .map_err(|e| format!("load update channel: {e}"))?;
     Ok(NestPageSnapshot {
         pairing_enabled,
         serving_port: status.serving_port,
         fronted_by_router: status.fronted_by_router,
+        os_host_status_present: status.os_host_status_present,
         os_security_updates_pending: status.os_security_updates_pending,
         os_reboot_pending: status.os_reboot_pending,
         region: fauna_client_admin::admin_region_view(&region),
         web_app_origin: fauna_client_admin::admin_web_app_origin_view(web_app_origin.as_ref()),
+        update_channel: fauna_client_admin::admin_update_channel_view(update_channel.as_ref()),
         oauth: read_oauth_keys(nest).await,
         feature_limits: read_feature_limits(nest).await,
     })
@@ -5701,6 +6363,15 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.reports_status = Some(status);
             apply_reports(app, reports);
         }
+        Outcome::BlockDone {
+            status,
+            reports,
+            blocked,
+        } => {
+            app.admin.block_status = Some(status);
+            apply_reports(app, reports);
+            apply_blocked(app, blocked);
+        }
         Outcome::OauthDone { status, keys } => {
             app.admin.oauth_in_flight = false;
             app.admin.oauth_status = Some(status);
@@ -5743,6 +6414,12 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             }
             app.admin.forwarders_snapshot = Some(snapshot);
         }
+        Outcome::DmarcReportsSnapshot(snapshot) => {
+            // The page's errors are the app-wide `error-message` (ui.yaml
+            // `admin-mail-reports.errors`), the DAV-page bridge.
+            bridge_admin_error(app, &snapshot.error);
+            app.admin.dmarc_reports_snapshot = Some(snapshot);
+        }
         Outcome::MailSnapshot(snapshot) => {
             // Bridge a machine dispatch/read error onto the global `error-message`
             // (admin.md § 6 — mail errors surface there, unlike the page-scoped
@@ -5753,9 +6430,6 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             let snapshot = *snapshot;
             bridge_admin_error(app, &snapshot.error);
             app.admin.mail_drafts.seed(&snapshot);
-            // A confirm never stays armed across a re-read (page entry, any act):
-            // a second press must mean "yes, now", never land on a stale arm.
-            app.admin.mail_warmup_reset_armed = false;
             app.admin.mail_snapshot = Some(snapshot);
         }
         Outcome::TierAdded(reloaded) => {
@@ -5792,7 +6466,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             reflective,
             nat,
             reports,
+            blocked,
+            rules,
         } => {
+            apply_rules(app, rules);
             // Re-seed the port draft from the persisted value (the field mirrors
             // nest state, like the DAV port).
             app.admin.serving_port_input = reflective.serving_port.to_string();
@@ -5802,10 +6479,16 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.region_input = reflective.region.declared.clone().unwrap_or_default();
             // The radios mirror the nest's choice, like the drafts above.
             app.admin.web_app_origin_draft = reflective.web_app_origin.selected;
+            app.admin.update_channel_draft = reflective.update_channel.selected;
             app.admin.nest_snapshot = Some(*reflective);
             app.admin.nat_snapshot = Some(nat);
             app.errors.remove(&Page::Admin);
             apply_reports(app, reports);
+            apply_blocked(app, blocked);
+        }
+        Outcome::NestRulesSaved(saved) => apply_rules_saved(app, saved),
+        Outcome::RuleLabelerFetched { fetch, module } => {
+            app.admin.rules.labeler_fetched(&fetch, module);
         }
         Outcome::NestReflect(reflective) => {
             app.admin.serving_port_input = reflective.serving_port.to_string();
@@ -5815,6 +6498,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.admin.region_input = reflective.region.declared.clone().unwrap_or_default();
             // The radios mirror the nest's choice, like the drafts above.
             app.admin.web_app_origin_draft = reflective.web_app_origin.selected;
+            app.admin.update_channel_draft = reflective.update_channel.selected;
             app.admin.nest_snapshot = Some(*reflective);
             app.errors.remove(&Page::Admin);
         }
@@ -5903,6 +6587,17 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             // Keep the last-painted rows: a transient read failure should say so
             // on `error-message`, not blank a view the admin was reading.
             Err(message) => app.admin.logs_error = Some(message),
+        },
+        Outcome::LogsPageLoaded { logs, audit } => {
+            apply_outcome(app, Outcome::LogsLoaded(logs));
+            apply_outcome(app, Outcome::AuditLoaded(audit));
+        }
+        Outcome::AuditLoaded(result) => match result {
+            Ok(page) => {
+                app.admin.audit.absorb(page);
+                app.admin.audit_error = None;
+            }
+            Err(message) => app.admin.audit_error = Some(message),
         },
         Outcome::UsersActionFailed(message) => {
             // A hub mutation failed — surface on the page-scoped `admin-users-action-error`
@@ -5998,6 +6693,7 @@ pub fn elements(app: &App) -> Vec<Element> {
         AdminPage::Nest => nest::nest_elements(state),
         AdminPage::Mail => mail::mail_elements(state),
         AdminPage::Aliases => aliases::aliases_elements(state),
+        AdminPage::MailReports => mail_reports::mail_reports_elements(state),
         AdminPage::Settings => settings::settings_elements(state),
         AdminPage::Web => web::web_elements(state),
         AdminPage::Dns => dns::dns_elements(state),
@@ -6901,6 +7597,8 @@ mod tests {
             Action::WithdrawRegion,
             Action::SelectWebAppOrigin(fauna_client_admin::WebAppOrigin::Central),
             Action::SaveWebAppOrigin,
+            Action::SelectUpdateChannel(fauna_client_admin::UpdateChannel::Dev),
+            Action::SaveUpdateChannel,
             Action::SelectNatMode(NodeMode::Public),
             Action::SaveNatMode,
             Action::RestartHost,
@@ -6929,19 +7627,30 @@ mod tests {
             Action::SelectForwarderDomain(s()),
             Action::SelectApexActor(s()),
             Action::SetLogLevel(0),
+            Action::AuditMore,
             Action::CopyLogs,
             Action::ApproveBridge {
                 pubkey_hex: s(),
                 role: s(),
             },
-            Action::RejectBridge { pubkey_hex: s() },
-            Action::OpenRotateConfirm { pubkey_hex: s() },
-            Action::ConfirmRotate,
-            Action::CancelRotate,
+            Action::OpenBridgeConfirm(BridgeConfirm::Reject { pubkey_hex: s() }),
+            Action::OpenBridgeConfirm(BridgeConfirm::Rotate { pubkey_hex: s() }),
+            Action::ConfirmBridge(BridgeConfirmKind::Reject),
+            Action::ConfirmBridge(BridgeConfirmKind::Rotate),
+            Action::CancelBridgeConfirm,
             Action::CreateForwarder,
             Action::DeleteForwarder { alias_id_hex: s() },
+            Action::RefreshMailReports,
+            Action::SelectMailReportsWindow(s()),
+            Action::SelectMailReportsDomain(s()),
+            Action::OpenMailReport {
+                our_domain: s(),
+                submitter: s(),
+                report_id: s(),
+            },
             Action::SaveTier { row: 0 },
             Action::AddTier,
+            Action::DeleteTier { row: 0 },
             Action::SetMembershipTierName {
                 row: 0,
                 tier_name: s(),
@@ -6955,17 +7664,22 @@ mod tests {
             Action::ToggleMail(MailToggle::SpamRejectNoRdns),
             Action::SetFcrdnsMode(s()),
             Action::SetImapDelete(s()),
+            Action::SetDmarcFoMode(s()),
             Action::SaveMailSpam,
             Action::SaveMailAuth,
             Action::SaveMailSubmission,
             Action::SaveMailImap,
             Action::SaveMailOutbound,
             Action::SaveMailAlias,
-            Action::PublishSpamBaseline,
+            Action::SaveMailDmarc,
+            Action::SaveMailMicrosoft,
             Action::ToggleMailBaselineStanding,
             Action::RecheckMailHealth,
-            Action::ResetMailWarmup,
-            Action::CopyMailDelistUrl { url: s() },
+            Action::PressMailConfirm(MailPolicyConfirm::ResetWarmup),
+            Action::PressMailConfirm(MailPolicyConfirm::RotateListUnsubscribeSecret),
+            Action::PressMailConfirm(MailPolicyConfirm::RotateSrsSecret),
+            Action::PressMailConfirm(MailPolicyConfirm::PublishSpamBaseline),
+            Action::CopyMailLinkUrl { url: s() },
             // The feature-limit editor and the report resolution, missing from
             // this corpus since they landed (their declarations went unchecked).
             Action::OpenFeatureLimitEditor(s()),
@@ -6978,6 +7692,12 @@ mod tests {
                 report_id: s(),
                 outcome: fauna_protocol::moderation::AbuseReportOutcome::Acted,
             },
+            Action::OpenBlockConfirm {
+                report_id: s(),
+                restore: false,
+            },
+            Action::CancelBlock,
+            Action::ConfirmBlock,
             Action::SetUserTier { row: 0, tier: s() },
             Action::EvictUser { row: 0 },
             Action::SuspendUser { row: 0 },
@@ -6993,6 +7713,7 @@ mod tests {
             Action::SaveRegistration,
             Action::SetAdmitTier(s()),
             Action::SetAdmitGuardian(s()),
+            Action::SetAdmitAgeBand(s()),
             Action::AdmitUser,
             Action::SetInviteTier(s()),
             Action::SetInviteGuardian(s()),
@@ -7014,7 +7735,9 @@ mod tests {
             Action::OpenDnsAddDomain,
             Action::CancelDnsAddDomain,
             Action::SubmitDnsAddDomain,
-            Action::RemoveDnsDomain { domain: s() },
+            Action::OpenDnsRemoveConfirm { domain: s() },
+            Action::ConfirmDnsRemoveDomain,
+            Action::CancelDnsRemoveDomain,
             Action::RestoreDnsDomain { domain: s() },
             Action::ToggleDnsDomainMode {
                 domain: s(),
@@ -7075,7 +7798,7 @@ mod tests {
     /// added to the enum and never to the corpus, so their declarations went
     /// unchecked until the issuer controls' pass re-derived it. Re-count from
     /// the enum when adding one, never by incrementing.
-    const ACTION_COUNT: usize = 137;
+    const ACTION_COUNT: usize = 152;
 
     #[test]
     fn every_admin_action_is_in_the_corpus() {
@@ -7145,6 +7868,7 @@ mod tests {
             (Action::CreateForwarder, "fauna.bridges.create_forwarder"),
             (Action::SaveTier { row: 0 }, "fauna.admin.tiers.update"),
             (Action::AddTier, "fauna.admin.tiers.create"),
+            (Action::DeleteTier { row: 0 }, "fauna.admin.tiers.delete"),
             (Action::SaveMailSpam, "fauna.bridges.put_spam_policy"),
             (Action::SaveMailAuth, "fauna.bridges.put_auth_policy"),
             (Action::EvictUser { row: 0 }, "fauna.admin.users.evict"),
@@ -7283,9 +8007,13 @@ mod tests {
             Action::SetRegistrationMode(String::new()),
             Action::OpenFactoryResetConfirm,
             Action::CancelFactoryReset,
-            Action::OpenRotateConfirm {
+            Action::OpenBridgeConfirm(BridgeConfirm::Reject {
                 pubkey_hex: String::new(),
-            },
+            }),
+            Action::OpenBridgeConfirm(BridgeConfirm::Rotate {
+                pubkey_hex: String::new(),
+            }),
+            Action::CancelBridgeConfirm,
             Action::CopyDnsRecord {
                 value: String::new(),
             },

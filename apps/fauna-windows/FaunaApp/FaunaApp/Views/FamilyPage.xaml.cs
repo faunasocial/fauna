@@ -3,6 +3,7 @@ using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using FaunaApp.Controls;
 using FaunaApp.Core.Services;
 using FaunaApp.Core.ViewModels;
 using uniffi.fauna_core;
@@ -42,6 +43,7 @@ public sealed partial class FamilyPage : Page
         {
             _vm = new FamilyViewModel(clients.Rpc!);
             _vm.PropertyChanged += ViewModel_PropertyChanged;
+            _vm.FeatureLimits.Changed += QueueFeatureLimitsRepaint;
             _vm.Wards.CollectionChanged += (_, _) => UpdateGuardianSectionVisibility();
             _vm.Approvals.CollectionChanged += (_, _) => UpdateNoApprovalsText();
             _vm.IncomingTransfers.CollectionChanged += (_, _) => UpdateIncomingTransfersSectionVisibility();
@@ -125,6 +127,12 @@ public sealed partial class FamilyPage : Page
                 break;
             case nameof(FamilyViewModel.SelectedWardActorId):
                 UpdatePolicyEditorVisibility();
+                // The guardian Feature limits host is one ward's: drop the previous
+                // ward's rows and editor, then re-read for this one (the authored
+                // read re-joins the nest's capability set on every family load).
+                _vm.FeatureLimits.Reset();
+                if (_vm.SelectedWardActorId is not null)
+                    _ = _vm.FeatureLimits.RefreshAsync();
                 // Unconditional resync of the whole policy editor. Each Policy*
                 // property's own case below only fires on a real value CHANGE
                 // (the CommunityToolkit.Mvvm [ObservableProperty] equality
@@ -402,6 +410,48 @@ public sealed partial class FamilyPage : Page
     {
         if (_vm is null) return;
         IncomingTransfersSection.Visibility = _vm.IncomingTransfers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // ── Feature limits — the guardian host (family-safety.md § App surface →
+    //     Feature limits) ──────────────────────────────────────────────────────
+
+    private bool _featureRepaintQueued;
+    private string? _hostError;
+
+    /// <summary>The guardian authoring host changed shape: repaint once, off the
+    /// stack of whatever raised it (a radio's <c>Checked</c> handler would
+    /// otherwise replace the very control it is running on). Coalesced — a save
+    /// raises several notifications in a row.</summary>
+    private void QueueFeatureLimitsRepaint()
+    {
+        if (_featureRepaintQueued) return;
+        _featureRepaintQueued = true;
+        DispatcherQueue.TryEnqueue(RenderFeatureLimits);
+    }
+
+    /// <summary>
+    /// Paint the SELECTED ward's feature-limits rows and open editor from the VM's
+    /// authoring host. This paints; it decides nothing — the rows (already folded
+    /// over the nest's capability set), the editor and the verdict lines are the
+    /// shared editor's (<see cref="FeatureAuthoringPainter"/>). A refused cell or a
+    /// failed write lands on <c>error-message</c>, exactly as on tui.
+    /// </summary>
+    private void RenderFeatureLimits()
+    {
+        _featureRepaintQueued = false;
+        if (_vm is null) return;
+        var host = _vm.FeatureLimits;
+
+        FeatureLimitsRowsHost.Children.Clear();
+        FeatureLimitsRowsHost.Children.Add(FeatureAuthoringPainter.BuildRows(host, FeatureHostIds.Guardian));
+
+        // Only a CHANGE of the host's own line touches the page's error banner.
+        var error = host.State.Error ?? host.State.ReadError;
+        if (error != _hostError)
+        {
+            _hostError = error;
+            _vm.ActionError = error;
+        }
     }
 
     // ── Fixed-value-set ComboBoxes (allow/hold/reject, allow/block) ─────────

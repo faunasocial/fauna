@@ -42,6 +42,13 @@ pub const SCOPE_FEED_READ_ACCOUNT: &str = "fauna:feed:read:account";
 /// never the client's or the user's.
 const FEED_ACCOUNT_QUALIFIER: &str = "account";
 
+/// `fauna:feed:read:author` — one author's public posts on this server.
+pub const SCOPE_FEED_READ_AUTHOR: &str = "fauna:feed:read:author";
+
+/// The fixed qualifier of [`FaunaScopeArm::FeedReadAuthor`] — the server's,
+/// never the client's or the user's.
+const FEED_AUTHOR_QUALIFIER: &str = "author";
+
 /// `fauna:identity:op:nostr.sign_event` — ask the nest to sign Nostr events
 /// with the user's deposited key (`key-material-hierarchy.md` § *The oracle*).
 pub const SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT: &str = "fauna:identity:op:nostr.sign_event";
@@ -63,11 +70,28 @@ pub const SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG: &str = "fauna:identity:op:acti
 /// retired `fauna:post:write`).
 pub const SCOPE_IDENTITY_OP_POST_AUTHOR: &str = "fauna:identity:op:post.author";
 
+/// `fauna:identity:op:profile.author` — ask the nest to edit the display
+/// fields of the user's profile as the user, signed with the account's
+/// delegated authoring sub-key (`authorization-server.md` § Scope grammar →
+/// *The profile arm*: the write is this class, never an arm).
+pub const SCOPE_IDENTITY_OP_PROFILE_AUTHOR: &str = "fauna:identity:op:profile.author";
+
 /// `fauna:identity:op:atproto.service_auth` — ask the atproto bridge's
 /// custodian for a service-auth token, bounded by the manifest's declared
 /// `service_auth` set (`third-party.md` § The manifest); the resolver refuses
 /// a document asking for it without declaring the set.
 pub const SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH: &str = "fauna:identity:op:atproto.service_auth";
+
+/// `fauna:identity:op:conversation.read` — ask the Fauna app open on the
+/// user's device to list, read and search the account's rooms for the
+/// principal, through the conversations oracle's local door
+/// (`conversations-oracle.md` § The two classes). Refused to the remote form.
+pub const SCOPE_IDENTITY_OP_CONVERSATION_READ: &str = "fauna:identity:op:conversation.read";
+
+/// `fauna:identity:op:conversation.send` — ask the Fauna app open on the
+/// user's device to send a text message as the account into a room.
+/// Refused to the remote form.
+pub const SCOPE_IDENTITY_OP_CONVERSATION_SEND: &str = "fauna:identity:op:conversation.send";
 
 /// `fauna:records:rw` — the `records` arm's plane and verb, as discovery
 /// advertises it. Never grantable as written: the arm requires its qualifier
@@ -104,6 +128,402 @@ pub const SCOPE_EVENTS_SUBSCRIBE: &str = "fauna:events:subscribe";
 /// `followers` tier only (`authorization-server.md` § Scope grammar → *The
 /// sixth arm*).
 pub const SCOPE_FOLLOW_WRITE: &str = "fauna:follow:write";
+
+/// `fauna:admin:read` — the admin plane's read verb, bare: the plane and verb
+/// discovery names as the family's shape and no grant takes as written
+/// (`authorization-server.md` § Scope grammar → *The admin arms*). The
+/// qualifier is REQUIRED and is the server's: one built [`AdminPage`].
+pub const SCOPE_ADMIN_READ: &str = "fauna:admin:read";
+
+/// `fauna:admin:read:dashboard` — read the server's admin dashboard as its
+/// admin: the member, storage and connection counts and the running version
+/// (`fauna.admin.stats`, `fauna.admin.status`). The first admin string built.
+pub const SCOPE_ADMIN_READ_DASHBOARD: &str = "fauna:admin:read:dashboard";
+
+/// `fauna:admin:read:users` — read the server's members as its admin: the
+/// member list, evictions, invitations and invite requests, the tiers, the
+/// admin roster and the pending admin actions.
+pub const SCOPE_ADMIN_READ_USERS: &str = "fauna:admin:read:users";
+
+/// `fauna:admin:rw` — the admin plane's read-and-write verb, bare: the shape
+/// discovery names and no grant takes as written. The qualifier is REQUIRED
+/// and is one built [`AdminPage`] that has writes ([`AdminPage::has_writes`]).
+pub const SCOPE_ADMIN_RW: &str = "fauna:admin:rw";
+
+/// `fauna:admin:rw:users` — administer the server's members as its admin:
+/// the users page's reads and its non-sovereign writes (admitting,
+/// suspending and reinstating, tiers, invitations, invite requests and the
+/// registration posture). The first `rw` string built.
+pub const SCOPE_ADMIN_RW_USERS: &str = "fauna:admin:rw:users";
+
+/// `fauna:admin:read:settings` — read the server's tier settings as its
+/// admin: the membership designations linking the admin's subscription tiers
+/// to quota tiers (the tier list itself is `read:users`').
+pub const SCOPE_ADMIN_READ_SETTINGS: &str = "fauna:admin:read:settings";
+
+/// `fauna:admin:rw:settings` — define the server's tiers as its admin:
+/// create, edit and delete a tier, and set or clear a membership designation.
+pub const SCOPE_ADMIN_RW_SETTINGS: &str = "fauna:admin:rw:settings";
+
+/// `fauna:admin:read:nest` — read the server's nest-wide settings as its
+/// admin: region, web-app origin, update channel, services, transport and
+/// feature and content policies, the worker and cluster status, the public
+/// sign-in key set, and the reports queue and blocked list.
+pub const SCOPE_ADMIN_READ_NEST: &str = "fauna:admin:read:nest";
+
+/// `fauna:admin:rw:nest` — operate the server's nest-wide settings as its
+/// admin: those reads and their writes, a host restart, garbage collection,
+/// resolving reports and blocking a reported item. Never the factory reset,
+/// the deployment seed, a key rotation, a legal takedown or custody hosting.
+pub const SCOPE_ADMIN_RW_NEST: &str = "fauna:admin:rw:nest";
+
+/// `fauna:admin:read:logs` — read the server's logs and its admin audit log
+/// (and the audit chain's integrity) as its admin. A page of reads only.
+pub const SCOPE_ADMIN_READ_LOGS: &str = "fauna:admin:read:logs";
+
+/// `fauna:admin:read:web` — read which member's site the server's apex
+/// address serves, as its admin.
+pub const SCOPE_ADMIN_READ_WEB: &str = "fauna:admin:read:web";
+
+/// `fauna:admin:rw:web` — designate or clear the apex actor as the server's
+/// admin.
+pub const SCOPE_ADMIN_RW_WEB: &str = "fauna:admin:rw:web";
+
+/// `fauna:admin:read:dns` — read the server's DNS as its admin: the record
+/// matrix, a live verify, a TXT visibility probe, the served TLS
+/// certificates' health, the local domains, the DKIM selectors and the
+/// primary-domain rename's state.
+pub const SCOPE_ADMIN_READ_DNS: &str = "fauna:admin:read:dns";
+
+/// `fauna:admin:rw:dns` — operate the server's domains as its admin: those
+/// reads, adding, removing and restoring a local domain and its settings, the
+/// catch-all and role addresses and the DKIM rotation interval. Never the host
+/// address, the primary-domain rename, a DKIM rotation or revocation, or a
+/// certificate write.
+pub const SCOPE_ADMIN_RW_DNS: &str = "fauna:admin:rw:dns";
+
+/// `fauna:admin:read:mail` — read the server's mail configuration as its
+/// admin: the effective policies, the alias and DMARC policies, the mail
+/// health readout, the warm-up and the spam-baseline state.
+pub const SCOPE_ADMIN_READ_MAIL: &str = "fauna:admin:read:mail";
+
+/// `fauna:admin:rw:mail` — the mail page's reads and its non-sovereign
+/// writes: enabling mail, the new-user default, every policy, the
+/// deliverability checks, the warm-up reset and the spam baseline. The
+/// secret rotations and the Microsoft registration stay out.
+pub const SCOPE_ADMIN_RW_MAIL: &str = "fauna:admin:rw:mail";
+
+/// `fauna:admin:read:mail-reports` — read the reports the server received
+/// and ran: DMARC aggregate and forensic, TLS reports, the blocklist and
+/// diagnostic histories. Reads only, so no `rw` string.
+pub const SCOPE_ADMIN_READ_MAIL_REPORTS: &str = "fauna:admin:read:mail-reports";
+
+/// `fauna:admin:read:aliases` — read the server's external forwarders.
+pub const SCOPE_ADMIN_READ_ALIASES: &str = "fauna:admin:read:aliases";
+
+/// `fauna:admin:rw:aliases` — list, create and delete external forwarders.
+pub const SCOPE_ADMIN_RW_ALIASES: &str = "fauna:admin:rw:aliases";
+
+/// `fauna:admin:read:calendar` — read the CalDAV port.
+pub const SCOPE_ADMIN_READ_CALENDAR: &str = "fauna:admin:read:calendar";
+
+/// `fauna:admin:rw:calendar` — turn CalDAV on or off and set its port.
+pub const SCOPE_ADMIN_RW_CALENDAR: &str = "fauna:admin:rw:calendar";
+
+/// `fauna:admin:rw:contacts` — turn CardDAV on or off. A page of one write
+/// and no read of its own, so no `read` string ([`AdminPage::has_reads`]).
+pub const SCOPE_ADMIN_RW_CONTACTS: &str = "fauna:admin:rw:contacts";
+
+/// `fauna:admin:rw:files` — turn WebDAV on or off; the files twin of
+/// [`SCOPE_ADMIN_RW_CONTACTS`].
+pub const SCOPE_ADMIN_RW_FILES: &str = "fauna:admin:rw:files";
+
+/// `fauna:admin:read:bridges-pending` — read the bridges waiting for
+/// approval and the approved service users. Approving, rejecting, revoking
+/// and re-keying are the grant plane, sovereign, so no `rw` string.
+pub const SCOPE_ADMIN_READ_BRIDGES_PENDING: &str = "fauna:admin:read:bridges-pending";
+
+/// The admin plane's qualifier set — one member per BUILT non-sovereign
+/// `admin-*` ui.yaml page, named by the page minus its `admin-` prefix
+/// (`authorization-server.md` § Scope grammar → *The admin arms*). A closed
+/// set of the server's, like the oracle's classes: a page no slice has built
+/// matches no arm and is `invalid_scope` at PAR, and the nest's sweep test
+/// holds every member to at least one ceiling kind. The string says what the
+/// admin consented to; whether the account may still administer is read per
+/// RPC on the nest (`apps/bridges.md` § Capability-allowlist enforcement →
+/// rule (e)), never from the string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AdminPage {
+    /// `admin-dashboard` — the counts and the running version; reads only.
+    Dashboard,
+    /// `admin-users` — the member lifecycle: reads, and the non-sovereign
+    /// writes (deletion, eviction, handles and the admin roster stay out).
+    Users,
+    /// `admin-settings` (nav label "Tiers") — tier definitions and the
+    /// membership designations.
+    Settings,
+    /// `admin-nest` — the nest-wide settings and the moderation queue (the
+    /// factory reset, the deployment seed, key rotations and the legal
+    /// takedown stay out).
+    Nest,
+    /// `admin-logs` — the log lines and the admin audit log; reads only.
+    Logs,
+    /// `admin-web` — the apex-actor designation.
+    Web,
+    /// `admin-dns` — the record matrix, certificate health and the local
+    /// domains (the host address, the primary-domain rename, DKIM rotation
+    /// and certificate writes stay out).
+    Dns,
+    /// `admin-mail` — the deployment's mail switch, policies and health
+    /// (the secret rotations and the Microsoft registration stay out).
+    Mail,
+    /// `admin-mail-reports` — the received and run reports; reads only.
+    MailReports,
+    /// `admin-aliases` — the external forwarders.
+    Aliases,
+    /// `admin-calendar` — the CalDAV switch and port.
+    Calendar,
+    /// `admin-contacts` — the CardDAV switch; one write, no read.
+    Contacts,
+    /// `admin-files` — the WebDAV switch; one write, no read.
+    Files,
+    /// `admin-bridges-pending` — the pending and approved bridge rosters'
+    /// reads; every write of the page is the grant plane, sovereign.
+    BridgesPending,
+}
+
+impl AdminPage {
+    /// Every built page, in the order discovery advertises their strings.
+    pub const ALL: &'static [AdminPage] = &[
+        AdminPage::Dashboard,
+        AdminPage::Users,
+        AdminPage::Settings,
+        AdminPage::Nest,
+        AdminPage::Logs,
+        AdminPage::Web,
+        AdminPage::Dns,
+        AdminPage::Mail,
+        AdminPage::MailReports,
+        AdminPage::Aliases,
+        AdminPage::Calendar,
+        AdminPage::Contacts,
+        AdminPage::Files,
+        AdminPage::BridgesPending,
+    ];
+
+    /// The qualifier: the ui.yaml page minus its `admin-` prefix.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            AdminPage::Dashboard => "dashboard",
+            AdminPage::Users => "users",
+            AdminPage::Settings => "settings",
+            AdminPage::Nest => "nest",
+            AdminPage::Logs => "logs",
+            AdminPage::Web => "web",
+            AdminPage::Dns => "dns",
+            AdminPage::Mail => "mail",
+            AdminPage::MailReports => "mail-reports",
+            AdminPage::Aliases => "aliases",
+            AdminPage::Calendar => "calendar",
+            AdminPage::Contacts => "contacts",
+            AdminPage::Files => "files",
+            AdminPage::BridgesPending => "bridges-pending",
+        }
+    }
+
+    /// The ui.yaml page the qualifier names.
+    #[must_use]
+    pub const fn ui_page(self) -> &'static str {
+        match self {
+            AdminPage::Dashboard => "admin-dashboard",
+            AdminPage::Users => "admin-users",
+            AdminPage::Settings => "admin-settings",
+            AdminPage::Nest => "admin-nest",
+            AdminPage::Logs => "admin-logs",
+            AdminPage::Web => "admin-web",
+            AdminPage::Dns => "admin-dns",
+            AdminPage::Mail => "admin-mail",
+            AdminPage::MailReports => "admin-mail-reports",
+            AdminPage::Aliases => "admin-aliases",
+            AdminPage::Calendar => "admin-calendar",
+            AdminPage::Contacts => "admin-contacts",
+            AdminPage::Files => "admin-files",
+            AdminPage::BridgesPending => "admin-bridges-pending",
+        }
+    }
+
+    /// Whether the page has reads of its own — whether
+    /// `fauna:admin:read:<page>` is a string at all. A page whose only kinds
+    /// are writes (the CardDAV and WebDAV switches) takes no `read` string:
+    /// an arm exists only while a ceiling kind names it.
+    #[must_use]
+    pub const fn has_reads(self) -> bool {
+        !matches!(self, AdminPage::Contacts | AdminPage::Files)
+    }
+
+    /// Whether the page has non-sovereign writes — whether
+    /// `fauna:admin:rw:<page>` is a string at all. A page of reads only takes
+    /// no `rw` string: an arm exists only while a ceiling kind names it.
+    #[must_use]
+    pub const fn has_writes(self) -> bool {
+        !matches!(
+            self,
+            AdminPage::Dashboard
+                | AdminPage::Logs
+                | AdminPage::MailReports
+                | AdminPage::BridgesPending
+        )
+    }
+
+    /// The page a qualifier names; `None` for a page no slice has built.
+    #[must_use]
+    pub fn parse(qualifier: &str) -> Option<Self> {
+        AdminPage::ALL
+            .iter()
+            .copied()
+            .find(|p| p.name() == qualifier)
+    }
+
+    /// The read verb's card row: what an admin consents to when the string
+    /// is `fauna:admin:read:<page>` — every row says it acts as this server's
+    /// admin and that no keys are shared, because nothing on the admin plane
+    /// is sealed. `None` for a page with no reads, whose `read` string
+    /// matches no arm.
+    #[must_use]
+    pub const fn read_card_row(self) -> Option<&'static str> {
+        match self {
+            AdminPage::Dashboard => Some(
+                "As this server's admin, read its dashboard: member, storage and connection \
+                 counts and the running version (no keys are shared)",
+            ),
+            AdminPage::Users => Some(
+                "As this server's admin, read its members: the member list, invitations and \
+                 invite requests, tiers, the admin roster and pending admin actions (no keys \
+                 are shared)",
+            ),
+            AdminPage::Settings => Some(
+                "As this server's admin, read its membership designations: which of your \
+                 subscription tiers admits members at which quota tier (no keys are shared)",
+            ),
+            AdminPage::Nest => Some(
+                "As this server's admin, read its nest settings: region, web-app origin, \
+                 update channel, services, transport, feature and content policies, worker and \
+                 cluster status, the public sign-in keys, and the reports queue and blocked \
+                 list (no keys are shared)",
+            ),
+            AdminPage::Logs => Some(
+                "As this server's admin, read its logs and its admin audit log (no keys are \
+                 shared)",
+            ),
+            AdminPage::Web => Some(
+                "As this server's admin, read whose site its main address shows (no keys are \
+                 shared)",
+            ),
+            AdminPage::Dns => Some(
+                "As this server's admin, read its domains and their DNS records, check them \
+                 live and read its certificates' health (no keys are shared)",
+            ),
+            AdminPage::Mail => Some(
+                "As this server's admin, read its mail settings: whether mail is on, its spam, \
+                 sender, submission, IMAP, outbound, alias and DMARC policies, and its mail \
+                 health (no keys are shared)",
+            ),
+            AdminPage::MailReports => Some(
+                "As this server's admin, read the mail reports it received and ran: DMARC and \
+                 TLS reports and the blocklist and deliverability check history (no keys are \
+                 shared)",
+            ),
+            AdminPage::Aliases => Some(
+                "As this server's admin, read the addresses it forwards to outside mailboxes \
+                 (no keys are shared)",
+            ),
+            AdminPage::Calendar => Some(
+                "As this server's admin, read the port its calendar server listens on (no keys \
+                 are shared)",
+            ),
+            AdminPage::Contacts | AdminPage::Files => None,
+            AdminPage::BridgesPending => Some(
+                "As this server's admin, read the bridges waiting for approval and the bridges \
+                 already approved — never approve, reject or re-key one (no keys are shared)",
+            ),
+        }
+    }
+
+    /// The `rw` verb's card row — `None` for a page of reads only, whose
+    /// `rw` string matches no arm. Each row names what the string never
+    /// does, the sovereign acts of its page (`apps/cli.md` § The
+    /// sovereign-act boundary → *The admin plane's sovereign acts*).
+    #[must_use]
+    pub const fn rw_card_row(self) -> Option<&'static str> {
+        match self {
+            AdminPage::Dashboard => None,
+            AdminPage::Users => Some(
+                "As this server's admin, administer its members: admit, suspend and reinstate \
+                 them, their tiers, invitations and invite requests, and who may register — \
+                 never delete one, clear a handle or change who is an admin (no keys are \
+                 shared)",
+            ),
+            AdminPage::Settings => Some(
+                "As this server's admin, define its tiers: create, edit and delete a tier and \
+                 set which subscription tier admits members at which quota tier (no keys are \
+                 shared)",
+            ),
+            AdminPage::Nest => Some(
+                "As this server's admin, operate its nest settings: region, web-app origin, \
+                 update channel, services, ports and policies, a host restart and cleanup, and \
+                 resolving reports and blocking a reported item — never a factory reset, a key \
+                 or seed rotation or a legal takedown (no keys are shared)",
+            ),
+            AdminPage::Web => Some(
+                "As this server's admin, choose whose site its main address shows (no keys are \
+                 shared)",
+            ),
+            AdminPage::Dns => Some(
+                "As this server's admin, operate its domains: add, remove and restore one, its \
+                 catch-all and role addresses and how often its DKIM keys rotate — never rename \
+                 the main domain, rotate a key or change a certificate or the server's address \
+                 (no keys are shared)",
+            ),
+            AdminPage::Mail => Some(
+                "As this server's admin, run its mail: turn mail on or off, set its policies, \
+                 run its deliverability checks, reset the warm-up and publish the spam \
+                 baseline — never rotate a mail secret or change the Microsoft sign-in (no \
+                 keys are shared)",
+            ),
+            AdminPage::Aliases => Some(
+                "As this server's admin, add and remove the addresses it forwards to outside \
+                 mailboxes (no keys are shared)",
+            ),
+            AdminPage::Calendar => Some(
+                "As this server's admin, turn its calendar server on or off and set its port \
+                 (no keys are shared)",
+            ),
+            AdminPage::Contacts => Some(
+                "As this server's admin, turn its contacts server on or off (no keys are \
+                 shared)",
+            ),
+            AdminPage::Files => {
+                Some("As this server's admin, turn its files server on or off (no keys are shared)")
+            }
+            AdminPage::Logs | AdminPage::MailReports | AdminPage::BridgesPending => None,
+        }
+    }
+}
+/// `fauna:profile:read` — the public profile records this nest holds, the
+/// account's own and anyone's (`authorization-server.md` § Scope grammar →
+/// *The profile arm*).
+pub const SCOPE_PROFILE_READ: &str = "fauna:profile:read";
+
+/// `fauna:notifications:read` — list the account's notifications and read its
+/// unread count (`authorization-server.md` § Scope grammar → *The
+/// notifications arms*).
+pub const SCOPE_NOTIFICATIONS_READ: &str = "fauna:notifications:read";
+
+/// `fauna:notifications:write` — mark the account's notifications read, never
+/// dismiss or clear them (`authorization-server.md` § Scope grammar → *The
+/// notifications arms*).
+pub const SCOPE_NOTIFICATIONS_WRITE: &str = "fauna:notifications:write";
 
 /// The BridgeMda relay kind that admits a `fauna:folder:read` token at the
 /// MDA's WebDAV door (`webdav-server.md` § Key model → *A principal's read*):
@@ -144,6 +564,14 @@ pub enum FaunaScopeArm {
     /// ([`reads_feed_as_account`]). Public posts only on every kind: a gated
     /// or room-restricted post never appears.
     FeedReadAccount,
+    /// `fauna:feed:read:author` — the qualifier is REQUIRED and is the fixed
+    /// word `author`; no grant twin (nothing it reads is sealed), any
+    /// execution form. The one kind `fauna.feed.author.posts`: the posts of
+    /// the one author the request names, public posts only
+    /// (`authorization-server.md` § Scope grammar → *The author arm*). The
+    /// account arm refines it as it refines the two public timelines
+    /// ([`reads_feed_as_account`]).
+    FeedReadAuthor,
     /// `fauna:identity:op:<class>` — the keyless oracle arm
     /// (`key-material-hierarchy.md` § Audience: deployment infrastructure →
     /// *The oracle*). The qualifier names one built
@@ -209,6 +637,38 @@ pub enum FaunaScopeArm {
     /// encapsulation key the author wraps to is read from the account's
     /// published registry entry, never held by the principal.
     FollowWrite,
+    /// `fauna:admin:read:<page>` — read one admin page as the server's admin
+    /// (`authorization-server.md` § Scope grammar → *The admin arms*). The
+    /// qualifier is REQUIRED and is the server's: one built [`AdminPage`].
+    /// No grant twin (the admin plane is nest-level state in the clear), any
+    /// execution form. The string carries the admin's consent; the account's
+    /// admin authority is a fourth predicate the nest reads per RPC
+    /// (`apps/bridges.md` § Capability-allowlist enforcement → rule (e)) —
+    /// a member's principal holding the string is served nothing, and a
+    /// demoted admin's grant serves nothing until the role returns.
+    AdminRead,
+    /// `fauna:admin:rw:<page>` — read and administer one admin page as the
+    /// server's admin: its reads and its non-sovereign writes, a superset
+    /// string of its own as `records:rw` is. The qualifier is REQUIRED: one
+    /// built [`AdminPage`] that [has writes](AdminPage::has_writes). The rest
+    /// is [`FaunaScopeArm::AdminRead`]'s — no grant twin, any form, the
+    /// nest's door, the account's admin authority read per RPC.
+    AdminRw,
+    /// `fauna:profile:read` — no qualifier, no grant twin, any execution
+    /// form. The one kind `fauna.profile.get`, for any actor this nest holds
+    /// a profile of: the public signed record, served verbatim. A profile
+    /// carries no viewer state, so no `account` refinement exists; the write
+    /// is the oracle's class `profile.author`, never an arm.
+    ProfileRead,
+    /// `fauna:notifications:read` — no qualifier, no grant twin, any
+    /// execution form. `fauna.notifications.list` and `.count` over the
+    /// account's inbox, read as its own apps read it: nest-side rows in the
+    /// clear, nothing of a sealed plane.
+    NotificationsRead,
+    /// `fauna:notifications:write` — no qualifier, no grant twin, any
+    /// execution form. Exactly `fauna.notifications.mark_read`: dismissal and
+    /// clearing are destruction, the owner's affordance, and stay `User`.
+    NotificationsWrite,
 }
 
 impl FaunaScopeArm {
@@ -216,6 +676,7 @@ impl FaunaScopeArm {
     pub const ALL: &'static [FaunaScopeArm] = &[
         FaunaScopeArm::FeedRead,
         FaunaScopeArm::FeedReadAccount,
+        FaunaScopeArm::FeedReadAuthor,
         FaunaScopeArm::IdentityOp,
         FaunaScopeArm::Records,
         FaunaScopeArm::ConversationsBridge,
@@ -224,13 +685,20 @@ impl FaunaScopeArm {
         FaunaScopeArm::PersonalizationRw,
         FaunaScopeArm::EventsSubscribe,
         FaunaScopeArm::FollowWrite,
+        FaunaScopeArm::AdminRead,
+        FaunaScopeArm::AdminRw,
+        FaunaScopeArm::ProfileRead,
+        FaunaScopeArm::NotificationsRead,
+        FaunaScopeArm::NotificationsWrite,
     ];
 
     /// The arm's plane and verb.
     #[must_use]
     pub const fn plane_verb(self) -> (&'static str, &'static str) {
         match self {
-            FaunaScopeArm::FeedRead | FaunaScopeArm::FeedReadAccount => ("feed", "read"),
+            FaunaScopeArm::FeedRead
+            | FaunaScopeArm::FeedReadAccount
+            | FaunaScopeArm::FeedReadAuthor => ("feed", "read"),
             FaunaScopeArm::IdentityOp => ("identity", "op"),
             FaunaScopeArm::Records => ("records", "rw"),
             FaunaScopeArm::ConversationsBridge => ("conversations", "bridge"),
@@ -239,6 +707,11 @@ impl FaunaScopeArm {
             FaunaScopeArm::PersonalizationRw => ("personalization", "rw"),
             FaunaScopeArm::EventsSubscribe => ("events", "subscribe"),
             FaunaScopeArm::FollowWrite => ("follow", "write"),
+            FaunaScopeArm::AdminRead => ("admin", "read"),
+            FaunaScopeArm::AdminRw => ("admin", "rw"),
+            FaunaScopeArm::ProfileRead => ("profile", "read"),
+            FaunaScopeArm::NotificationsRead => ("notifications", "read"),
+            FaunaScopeArm::NotificationsWrite => ("notifications", "write"),
         }
     }
 
@@ -253,13 +726,19 @@ impl FaunaScopeArm {
             },
             FaunaScopeArm::FeedRead
             | FaunaScopeArm::FeedReadAccount
+            | FaunaScopeArm::FeedReadAuthor
             | FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::ConversationsBridge
             | FaunaScopeArm::FolderDeposit
             | FaunaScopeArm::PersonalizationRw
             | FaunaScopeArm::EventsSubscribe
-            | FaunaScopeArm::FollowWrite => Door::Nest,
+            | FaunaScopeArm::FollowWrite
+            | FaunaScopeArm::AdminRead
+            | FaunaScopeArm::AdminRw
+            | FaunaScopeArm::ProfileRead
+            | FaunaScopeArm::NotificationsRead
+            | FaunaScopeArm::NotificationsWrite => Door::Nest,
         }
     }
 
@@ -288,12 +767,18 @@ impl FaunaScopeArm {
             | FaunaScopeArm::ConversationsBridge
             | FaunaScopeArm::PersonalizationRw
             | FaunaScopeArm::EventsSubscribe
-            | FaunaScopeArm::FollowWrite => false,
+            | FaunaScopeArm::FollowWrite
+            | FaunaScopeArm::ProfileRead
+            | FaunaScopeArm::NotificationsRead
+            | FaunaScopeArm::NotificationsWrite => false,
             FaunaScopeArm::FeedReadAccount
+            | FaunaScopeArm::FeedReadAuthor
             | FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::FolderDeposit
-            | FaunaScopeArm::FolderRead => true,
+            | FaunaScopeArm::FolderRead
+            | FaunaScopeArm::AdminRead
+            | FaunaScopeArm::AdminRw => true,
         }
     }
 
@@ -310,10 +795,14 @@ impl FaunaScopeArm {
                 | FaunaScopeArm::ConversationsBridge
                 | FaunaScopeArm::PersonalizationRw
                 | FaunaScopeArm::EventsSubscribe
-                | FaunaScopeArm::FollowWrite,
+                | FaunaScopeArm::FollowWrite
+                | FaunaScopeArm::ProfileRead
+                | FaunaScopeArm::NotificationsRead
+                | FaunaScopeArm::NotificationsWrite,
                 q,
             ) => q.is_none(),
             (FaunaScopeArm::FeedReadAccount, q) => q == Some(FEED_ACCOUNT_QUALIFIER),
+            (FaunaScopeArm::FeedReadAuthor, q) => q == Some(FEED_AUTHOR_QUALIFIER),
             (FaunaScopeArm::IdentityOp, None) => false,
             (FaunaScopeArm::IdentityOp, Some(q)) => {
                 fauna_core::identity_op::IdentityOpClass::parse(q).is_ok()
@@ -326,6 +815,14 @@ impl FaunaScopeArm {
             (FaunaScopeArm::FolderDeposit | FaunaScopeArm::FolderRead, Some(q)) => {
                 parse_folder_id(q).is_some()
             }
+            (FaunaScopeArm::AdminRead, None) => false,
+            (FaunaScopeArm::AdminRead, Some(q)) => {
+                AdminPage::parse(q).is_some_and(AdminPage::has_reads)
+            }
+            (FaunaScopeArm::AdminRw, None) => false,
+            (FaunaScopeArm::AdminRw, Some(q)) => {
+                AdminPage::parse(q).is_some_and(AdminPage::has_writes)
+            }
         }
     }
 
@@ -334,7 +831,7 @@ impl FaunaScopeArm {
     /// declare (`authorization-server.md` § Scope grammar → *The folder
     /// plane's qualifier is the user's*). The folder plane's two arms; every
     /// other qualifier is the client's (`records`) or the server's
-    /// (`identity:op`, `feed:read:account`).
+    /// (`identity:op`, `feed:read:account`, `feed:read:author`).
     /// Such an arm is declared and may be requested **bare**
     /// ([`user_qualified_bare_arm`]); the user's choice at consent qualifies
     /// it ([`qualify_bare`]).
@@ -366,9 +863,15 @@ impl FaunaScopeArm {
         match self {
             FaunaScopeArm::FeedRead
             | FaunaScopeArm::FeedReadAccount
+            | FaunaScopeArm::FeedReadAuthor
             | FaunaScopeArm::ConversationsBridge
             | FaunaScopeArm::EventsSubscribe
-            | FaunaScopeArm::FollowWrite => false,
+            | FaunaScopeArm::FollowWrite
+            | FaunaScopeArm::AdminRead
+            | FaunaScopeArm::AdminRw
+            | FaunaScopeArm::ProfileRead
+            | FaunaScopeArm::NotificationsRead
+            | FaunaScopeArm::NotificationsWrite => false,
             FaunaScopeArm::IdentityOp
             | FaunaScopeArm::Records
             | FaunaScopeArm::FolderDeposit
@@ -386,12 +889,16 @@ impl FaunaScopeArm {
         match self {
             FaunaScopeArm::FeedRead => &[SCOPE_FEED_READ],
             FaunaScopeArm::FeedReadAccount => &[SCOPE_FEED_READ_ACCOUNT],
+            FaunaScopeArm::FeedReadAuthor => &[SCOPE_FEED_READ_AUTHOR],
             FaunaScopeArm::IdentityOp => &[
                 SCOPE_IDENTITY_OP_NOSTR_SIGN_EVENT,
                 SCOPE_IDENTITY_OP_NOSTR_NIP44,
                 SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG,
                 SCOPE_IDENTITY_OP_POST_AUTHOR,
+                SCOPE_IDENTITY_OP_PROFILE_AUTHOR,
                 SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
+                SCOPE_IDENTITY_OP_CONVERSATION_READ,
+                SCOPE_IDENTITY_OP_CONVERSATION_SEND,
             ],
             FaunaScopeArm::Records => &[SCOPE_RECORDS_RW],
             FaunaScopeArm::ConversationsBridge => &[SCOPE_CONVERSATIONS_BRIDGE],
@@ -400,6 +907,35 @@ impl FaunaScopeArm {
             FaunaScopeArm::PersonalizationRw => &[SCOPE_PERSONALIZATION_RW],
             FaunaScopeArm::EventsSubscribe => &[SCOPE_EVENTS_SUBSCRIBE],
             FaunaScopeArm::FollowWrite => &[SCOPE_FOLLOW_WRITE],
+            FaunaScopeArm::AdminRead => &[
+                SCOPE_ADMIN_READ_DASHBOARD,
+                SCOPE_ADMIN_READ_USERS,
+                SCOPE_ADMIN_READ_SETTINGS,
+                SCOPE_ADMIN_READ_NEST,
+                SCOPE_ADMIN_READ_LOGS,
+                SCOPE_ADMIN_READ_WEB,
+                SCOPE_ADMIN_READ_DNS,
+                SCOPE_ADMIN_READ_MAIL,
+                SCOPE_ADMIN_READ_MAIL_REPORTS,
+                SCOPE_ADMIN_READ_ALIASES,
+                SCOPE_ADMIN_READ_CALENDAR,
+                SCOPE_ADMIN_READ_BRIDGES_PENDING,
+            ],
+            FaunaScopeArm::AdminRw => &[
+                SCOPE_ADMIN_RW_USERS,
+                SCOPE_ADMIN_RW_SETTINGS,
+                SCOPE_ADMIN_RW_NEST,
+                SCOPE_ADMIN_RW_WEB,
+                SCOPE_ADMIN_RW_DNS,
+                SCOPE_ADMIN_RW_MAIL,
+                SCOPE_ADMIN_RW_ALIASES,
+                SCOPE_ADMIN_RW_CALENDAR,
+                SCOPE_ADMIN_RW_CONTACTS,
+                SCOPE_ADMIN_RW_FILES,
+            ],
+            FaunaScopeArm::ProfileRead => &[SCOPE_PROFILE_READ],
+            FaunaScopeArm::NotificationsRead => &[SCOPE_NOTIFICATIONS_READ],
+            FaunaScopeArm::NotificationsWrite => &[SCOPE_NOTIFICATIONS_WRITE],
         }
     }
 
@@ -516,6 +1052,28 @@ pub fn folder_read_qualifier(scope: &str) -> Option<i64> {
     parse_folder_id(parse(scope)?.qualifier?)
 }
 
+/// The admin page a `fauna:admin:read:<page>` string names; `None` for any
+/// other string, a bare or unbuilt-page one and a page with no reads
+/// included.
+#[must_use]
+pub fn admin_read_qualifier(scope: &str) -> Option<AdminPage> {
+    if arm_of(scope)? != FaunaScopeArm::AdminRead {
+        return None;
+    }
+    AdminPage::parse(parse(scope)?.qualifier?)
+}
+
+/// The admin page a `fauna:admin:rw:<page>` string names; `None` for any
+/// other string, a bare one, an unbuilt page and a page of reads only
+/// included.
+#[must_use]
+pub fn admin_rw_qualifier(scope: &str) -> Option<AdminPage> {
+    if arm_of(scope)? != FaunaScopeArm::AdminRw {
+        return None;
+    }
+    AdminPage::parse(parse(scope)?.qualifier?)
+}
+
 /// The operation class a `fauna:identity:op:<class>` scope names — `None`
 /// for any other string, a sovereign or unknown name included (the arm
 /// accepts only a built class). What the approving app's consent mint reads
@@ -541,7 +1099,10 @@ pub const fn identity_op_scope(class: fauna_core::identity_op::IdentityOpClass) 
         IdentityOpClass::NostrNip44 => SCOPE_IDENTITY_OP_NOSTR_NIP44,
         IdentityOpClass::ActivityPubHttpSig => SCOPE_IDENTITY_OP_ACTIVITYPUB_HTTP_SIG,
         IdentityOpClass::PostAuthor => SCOPE_IDENTITY_OP_POST_AUTHOR,
+        IdentityOpClass::ProfileAuthor => SCOPE_IDENTITY_OP_PROFILE_AUTHOR,
         IdentityOpClass::AtprotoServiceAuth => SCOPE_IDENTITY_OP_ATPROTO_SERVICE_AUTH,
+        IdentityOpClass::ConversationRead => SCOPE_IDENTITY_OP_CONVERSATION_READ,
+        IdentityOpClass::ConversationSend => SCOPE_IDENTITY_OP_CONVERSATION_SEND,
     }
 }
 
@@ -550,13 +1111,18 @@ pub const fn identity_op_scope(class: fauna_core::identity_op::IdentityOpClass) 
 /// qualified, or the bare plane and verb a card-qualified request carries
 /// (`authorization-server.md` § Scope grammar → *The folder plane's
 /// qualifier is the user's*: the form gate fires on a bare request as on the
-/// qualified string).
+/// qualified string) — or a `fauna:identity:op:<class>` string whose class a
+/// device custodian performs. That gate is per class, not per arm: the second
+/// arm stays admitted to the remote form for the nest's and the bridges'
+/// classes, while a remote process has no device door to reach and TP4
+/// reserves conversations for device apps and nest-hosted code
+/// (`conversations-oracle.md` § The two classes).
 #[must_use]
 pub fn refused_to_remote_form(scope: &str) -> bool {
     FaunaScopeArm::ALL.iter().any(|arm| {
         arm.refused_to_remote_form()
             && (arm_of(scope) == Some(*arm) || arm.advertised().contains(&scope))
-    })
+    }) || identity_op_qualifier(scope).is_some_and(|class| class.custodian().is_device())
 }
 
 /// The user-qualified arm `scope` names **bare** — its plane and verb with no
@@ -645,6 +1211,10 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
             "Read your feeds and which posts you liked and reposted (public posts only; no keys \
              are shared)",
         ),
+        FaunaScopeArm::FeedReadAuthor => Some(
+            "Read any one author's public posts on this server (public posts only; no keys are \
+             shared)",
+        ),
         FaunaScopeArm::IdentityOp => {
             fauna_core::identity_op::IdentityOpClass::parse(parse(scope)?.qualifier?)
                 .ok()
@@ -677,6 +1247,20 @@ pub fn card_row(scope: &str) -> Option<&'static str> {
         FaunaScopeArm::FollowWrite => {
             Some("Follow and unfollow accounts as you (no keys are shared)")
         }
+        FaunaScopeArm::AdminRead => AdminPage::parse(parse(scope)?.qualifier?)?.read_card_row(),
+        FaunaScopeArm::AdminRw => AdminPage::parse(parse(scope)?.qualifier?)?.rw_card_row(),
+        FaunaScopeArm::ProfileRead => Some(
+            "Read your profile and the public profile of anyone this server knows (no keys are \
+             shared)",
+        ),
+        FaunaScopeArm::NotificationsRead => Some(
+            "Read your notifications — who liked, replied to, followed or messaged you, and your \
+             security notices — and your unread count (no keys are shared)",
+        ),
+        FaunaScopeArm::NotificationsWrite => Some(
+            "Mark your notifications as read on every device (never dismisses or clears them; no \
+             keys are shared)",
+        ),
     }
 }
 
@@ -885,6 +1469,48 @@ mod tests {
         assert!(!reads_feed_as_account(&["fauna:feed:read:home"]));
     }
 
+    /// The author arm (`authorization-server.md` § Scope grammar → *The
+    /// author arm*): the qualifier is required and is the fixed word
+    /// `author` — the server's, as `account` is — with no grant twin, any
+    /// execution form and a card row of its own; holding it never reads as
+    /// the account.
+    #[test]
+    fn the_author_arm_takes_exactly_the_word_author() {
+        assert_eq!(
+            arm_of(SCOPE_FEED_READ_AUTHOR),
+            Some(FaunaScopeArm::FeedReadAuthor)
+        );
+        for near in [
+            "fauna:feed:read:authorx",
+            "fauna:feed:read:Author",
+            "fauna:feed:read:authors",
+            "fauna:feed:read:author.x",
+            "fauna:feed:write:author",
+        ] {
+            assert_eq!(arm_of(near), None, "{near:?} is not the arm");
+        }
+        assert_eq!(arm_of(SCOPE_FEED_READ), Some(FaunaScopeArm::FeedRead));
+        let arm = FaunaScopeArm::FeedReadAuthor;
+        assert!(arm.takes_qualifier());
+        assert!(!arm.accepts_qualifier(None));
+        assert!(!arm.has_grant_twin());
+        assert!(!arm.qualifier_is_users());
+        assert!(!arm.refused_to_remote_form());
+        assert_eq!(arm.door(), Door::Nest);
+        assert_eq!(arm.plane_verb(), ("feed", "read"));
+        assert_eq!(arm.advertised(), &[SCOPE_FEED_READ_AUTHOR]);
+        let row = card_row(SCOPE_FEED_READ_AUTHOR);
+        assert_ne!(row, card_row(SCOPE_FEED_READ));
+        assert_ne!(row, card_row(SCOPE_FEED_READ_ACCOUNT));
+        assert!(row.is_some_and(|r| r.contains("public posts only") && r.contains("no keys")));
+
+        assert!(!reads_feed_as_account(&[SCOPE_FEED_READ_AUTHOR]));
+        assert!(reads_feed_as_account(&[
+            SCOPE_FEED_READ_AUTHOR,
+            SCOPE_FEED_READ_ACCOUNT
+        ]));
+    }
+
     /// Every plane the goal doc's table lists but no slice has built matches
     /// no arm — `invalid_scope` at PAR until its own slice adds it.
     #[test]
@@ -1063,6 +1689,152 @@ mod tests {
         }
     }
 
+    /// The admin arm (`authorization-server.md` § Scope grammar → *The admin
+    /// arms*): the qualifier is required and is one BUILT page of the
+    /// server's closed set; a bare string, an unbuilt page and a verb no
+    /// slice has built match no arm, so each is `invalid_scope` at PAR. No
+    /// grant twin, not form-gated, the nest's door.
+    #[test]
+    fn the_admin_read_arm_takes_exactly_one_built_page() {
+        assert_eq!(
+            arm_of(SCOPE_ADMIN_READ_DASHBOARD),
+            Some(FaunaScopeArm::AdminRead)
+        );
+        assert_eq!(
+            admin_read_qualifier(SCOPE_ADMIN_READ_DASHBOARD),
+            Some(AdminPage::Dashboard)
+        );
+        assert_eq!(AdminPage::Dashboard.ui_page(), "admin-dashboard");
+        let row = card_row(SCOPE_ADMIN_READ_DASHBOARD).expect("a card row");
+        assert!(row.starts_with("As this server's admin"), "{row}");
+        assert!(row.contains("no keys are shared"), "{row}");
+        for bad in [
+            SCOPE_ADMIN_READ,
+            "fauna:admin:read:custody-hosting",
+            "fauna:admin:read:admin-dashboard",
+            "fauna:admin:read:dashboard.stats",
+        ] {
+            assert!(parse(bad).is_some(), "{bad:?} is well-formed");
+            assert_eq!(arm_of(bad), None, "{bad:?} matches no arm");
+            assert_eq!(admin_read_qualifier(bad), None, "{bad:?}");
+        }
+        assert!(!FaunaScopeArm::AdminRead.has_grant_twin());
+        assert!(!FaunaScopeArm::AdminRead.qualifier_is_users());
+        assert!(!refused_to_remote_form(SCOPE_ADMIN_READ_DASHBOARD));
+        for page in AdminPage::ALL {
+            assert_eq!(AdminPage::parse(page.name()), Some(*page));
+            assert_eq!(page.ui_page(), format!("admin-{}", page.name()));
+            let advertised = format!("{SCOPE_ADMIN_READ}:{}", page.name());
+            assert_eq!(
+                FaunaScopeArm::AdminRead
+                    .advertised()
+                    .contains(&advertised.as_str()),
+                page.has_reads(),
+                "{page:?}: a read string is advertised iff the page has reads"
+            );
+            assert_eq!(page.read_card_row().is_some(), page.has_reads(), "{page:?}");
+            assert_eq!(
+                arm_of(&advertised).is_some(),
+                page.has_reads(),
+                "{page:?}: a read string matches the arm iff the page has reads"
+            );
+            // Every built page reaches at least one kind under some verb.
+            assert!(page.has_reads() || page.has_writes(), "{page:?}");
+        }
+    }
+
+    /// The mail-side pages (`authorization-server.md` § Scope grammar → *The
+    /// admin arms*): the reports and the pending-bridge roster are reads
+    /// only, the CardDAV and WebDAV switches writes only, and the
+    /// pending-bridge roster's card row says it never approves.
+    #[test]
+    fn the_mail_side_pages_take_the_verbs_their_kinds_have() {
+        for (scope, page) in [
+            (SCOPE_ADMIN_READ_MAIL, AdminPage::Mail),
+            (SCOPE_ADMIN_READ_MAIL_REPORTS, AdminPage::MailReports),
+            (SCOPE_ADMIN_READ_ALIASES, AdminPage::Aliases),
+            (SCOPE_ADMIN_READ_CALENDAR, AdminPage::Calendar),
+            (SCOPE_ADMIN_READ_BRIDGES_PENDING, AdminPage::BridgesPending),
+        ] {
+            assert_eq!(admin_read_qualifier(scope), Some(page), "{scope}");
+        }
+        for (scope, page) in [
+            (SCOPE_ADMIN_RW_MAIL, AdminPage::Mail),
+            (SCOPE_ADMIN_RW_ALIASES, AdminPage::Aliases),
+            (SCOPE_ADMIN_RW_CALENDAR, AdminPage::Calendar),
+            (SCOPE_ADMIN_RW_CONTACTS, AdminPage::Contacts),
+            (SCOPE_ADMIN_RW_FILES, AdminPage::Files),
+        ] {
+            assert_eq!(admin_rw_qualifier(scope), Some(page), "{scope}");
+        }
+        for bad in [
+            "fauna:admin:rw:mail-reports",
+            "fauna:admin:rw:bridges-pending",
+            "fauna:admin:read:contacts",
+            "fauna:admin:read:files",
+            "fauna:admin:read:bridges",
+        ] {
+            assert_eq!(arm_of(bad), None, "{bad:?} matches no arm");
+            assert_eq!(card_row(bad), None, "{bad:?}");
+            assert_eq!(admin_read_qualifier(bad), None, "{bad:?}");
+            assert_eq!(admin_rw_qualifier(bad), None, "{bad:?}");
+        }
+        let roster = card_row(SCOPE_ADMIN_READ_BRIDGES_PENDING).expect("a card row");
+        assert!(roster.contains("never approve"), "{roster}");
+        let mail = card_row(SCOPE_ADMIN_RW_MAIL).expect("a card row");
+        assert!(mail.contains("never rotate a mail secret"), "{mail}");
+    }
+
+    /// The admin plane's `rw` verb: one string per built page WITH writes —
+    /// a page of reads only (the dashboard) takes no `rw` string, and a bare
+    /// or unbuilt one matches no arm. Its card row names the sovereign acts
+    /// it never performs; the rest is the read verb's shape.
+    #[test]
+    fn the_admin_rw_arm_takes_exactly_one_built_page_with_writes() {
+        assert_eq!(arm_of(SCOPE_ADMIN_RW_USERS), Some(FaunaScopeArm::AdminRw));
+        assert_eq!(
+            admin_rw_qualifier(SCOPE_ADMIN_RW_USERS),
+            Some(AdminPage::Users)
+        );
+        assert_eq!(admin_read_qualifier(SCOPE_ADMIN_RW_USERS), None);
+        assert_eq!(admin_rw_qualifier(SCOPE_ADMIN_READ_USERS), None);
+        assert_eq!(
+            arm_of(SCOPE_ADMIN_READ_USERS),
+            Some(FaunaScopeArm::AdminRead)
+        );
+        let row = card_row(SCOPE_ADMIN_RW_USERS).expect("a card row");
+        assert!(row.starts_with("As this server's admin"), "{row}");
+        assert!(row.contains("no keys are shared"), "{row}");
+        assert!(row.contains("never delete"), "{row}");
+        for bad in [
+            SCOPE_ADMIN_RW,
+            "fauna:admin:rw:dashboard",
+            "fauna:admin:rw:custody-hosting",
+            "fauna:admin:rw:logs",
+            "fauna:admin:rw:users.pending",
+        ] {
+            assert!(parse(bad).is_some(), "{bad:?} is well-formed");
+            assert_eq!(arm_of(bad), None, "{bad:?} matches no arm");
+            assert_eq!(admin_rw_qualifier(bad), None, "{bad:?}");
+            assert_eq!(card_row(bad), None, "{bad:?}");
+        }
+        assert!(!FaunaScopeArm::AdminRw.has_grant_twin());
+        assert!(!FaunaScopeArm::AdminRw.qualifier_is_users());
+        assert_eq!(FaunaScopeArm::AdminRw.door(), Door::Nest);
+        assert!(!refused_to_remote_form(SCOPE_ADMIN_RW_USERS));
+        for page in AdminPage::ALL {
+            let advertised = format!("{SCOPE_ADMIN_RW}:{}", page.name());
+            assert_eq!(
+                FaunaScopeArm::AdminRw
+                    .advertised()
+                    .contains(&advertised.as_str()),
+                page.has_writes(),
+                "{page:?}: an rw string is advertised iff the page has writes"
+            );
+            assert_eq!(page.rw_card_row().is_some(), page.has_writes(), "{page:?}");
+        }
+    }
+
     /// Only the read arm is bridge-doored; every other arm is the nest's.
     #[test]
     fn exactly_one_door_per_arm() {
@@ -1218,6 +1990,35 @@ mod tests {
         }
     }
 
+    /// The conversations oracle's two classes (`conversations-oracle.md`
+    /// § The two classes) are refused to the remote form PER CLASS: the arm
+    /// itself stays admitted to it for every class the nest or a bridge
+    /// performs, since only a device custodian has no door a remote process
+    /// reaches.
+    #[test]
+    fn the_device_classes_are_refused_to_the_remote_form_and_the_arm_is_not() {
+        use fauna_core::identity_op::IdentityOpClass;
+        assert!(!FaunaScopeArm::IdentityOp.refused_to_remote_form());
+        for class in IdentityOpClass::ALL {
+            let scope = identity_op_scope(*class);
+            assert_eq!(arm_of(scope), Some(FaunaScopeArm::IdentityOp), "{scope}");
+            assert_eq!(
+                refused_to_remote_form(scope),
+                class.custodian().is_device(),
+                "{scope}"
+            );
+        }
+        assert!(refused_to_remote_form(SCOPE_IDENTITY_OP_CONVERSATION_READ));
+        assert!(refused_to_remote_form(SCOPE_IDENTITY_OP_CONVERSATION_SEND));
+        assert!(!refused_to_remote_form(SCOPE_IDENTITY_OP_POST_AUTHOR));
+        // A near miss is no class at all, so it is invalid_scope at PAR on
+        // its own grounds rather than form-gated.
+        assert!(!refused_to_remote_form(
+            "fauna:identity:op:conversation.write"
+        ));
+        assert_eq!(arm_of("fauna:identity:op:conversation.write"), None);
+    }
+
     /// The fifth arm (`authorization-server.md` § Scope grammar → *The fifth
     /// arm*): exactly its one string, a keyed twin, the nest's door, and
     /// refused to a remote-form client.
@@ -1279,6 +2080,45 @@ mod tests {
             assert_eq!(arm_of(near), None, "{near:?} is not the arm");
         }
         assert!(card_row(SCOPE_FOLLOW_WRITE).is_some());
+    }
+
+    /// The profile arm and the two notifications arms
+    /// (`authorization-server.md` § Scope grammar → *The profile arm*, *The
+    /// notifications arms*): no qualifier, no grant twin, any execution form,
+    /// the nest's door — each advertised as written, with its own card row.
+    #[test]
+    fn the_profile_and_notifications_arms_take_no_qualifier_and_share_no_keys() {
+        for (scope, arm) in [
+            (SCOPE_PROFILE_READ, FaunaScopeArm::ProfileRead),
+            (SCOPE_NOTIFICATIONS_READ, FaunaScopeArm::NotificationsRead),
+            (SCOPE_NOTIFICATIONS_WRITE, FaunaScopeArm::NotificationsWrite),
+        ] {
+            assert_eq!(arm_of(scope), Some(arm), "{scope}");
+            assert!(!arm.takes_qualifier(), "{scope}");
+            assert!(!arm.has_grant_twin(), "{scope}");
+            assert!(!arm.refused_to_remote_form(), "{scope}");
+            assert_eq!(arm.door(), Door::Nest, "{scope}");
+            assert_eq!(arm.advertised(), &[scope], "{scope}");
+            assert!(card_row(scope).is_some(), "{scope}");
+        }
+        for near in [
+            "fauna:profile:read:account",
+            "fauna:profile:write",
+            "fauna:profile:rw",
+            "fauna:profiles:read",
+            "fauna:notifications:read:account",
+            "fauna:notifications:rw",
+            "fauna:notifications:dismiss",
+            "fauna:notification:read",
+        ] {
+            assert_eq!(arm_of(near), None, "{near:?} is not an arm");
+        }
+        // The write arm's row says what it never does.
+        assert!(
+            card_row(SCOPE_NOTIFICATIONS_WRITE)
+                .unwrap()
+                .contains("never dismisses or clears")
+        );
     }
 
     /// The filter both events doors apply: the events arm plus a `records`

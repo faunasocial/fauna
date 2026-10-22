@@ -2,9 +2,10 @@ package com.fauna.app.ui.screen.settings
 
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
-import com.fauna.app.ui.viewmodel.FilterPrefill
+import com.fauna.app.ui.viewmodel.FilterForm
 import com.fauna.ffi.FfiEmailFilter
 import com.fauna.ffi.FfiFilterActionInputs
+import com.fauna.ffi.FfiFilterRuleInputs
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,7 +37,7 @@ class PrivacySettingsContentTest {
         bandKeyFor: (Float) -> String = { "moderate" },
         emailFilters: List<FfiEmailFilter> = emptyList(),
         editingFilterId: Long? = null,
-        editFilterPrefill: FilterPrefill? = null,
+        editFilterPrefill: FilterForm? = null,
         isFilterEditable: (FfiEmailFilter) -> Boolean = { true },
         filterMarks: List<Long> = emptyList(),
         onKeepFilterMark: (Long) -> Unit = {},
@@ -62,9 +63,9 @@ class PrivacySettingsContentTest {
                 onBack = {},
                 onInboxModeChange = {},
                 onDeleteFilter = onDeleteFilter,
-                onCreateFilter = { _, _, _, _ -> },
+                onCreateFilter = {},
                 onEditFilter = {},
-                onSaveFilter = { _, _, _, _ -> },
+                onSaveFilter = {},
                 onCancelEditFilter = {},
                 onSpamThresholdChange = {},
                 onPhishingThresholdChange = {},
@@ -192,7 +193,7 @@ class PrivacySettingsContentTest {
     private fun sampleFilter(id: Long = 1) = com.fauna.ffi.FfiEmailFilter(
         id = id,
         name = "Block spam",
-        rules = listOf(com.fauna.ffi.FfiEmailFilterRule.SenderIs(address = "spammer@evil.com")),
+        rules = listOf(com.fauna.ffi.FfiEmailFilterRule.SenderIs(address = "spammer@example.com")),
         combination = "all",
         action = com.fauna.ffi.FfiEmailFilterAction.Discard,
         priority = 0,
@@ -228,13 +229,14 @@ class PrivacySettingsContentTest {
         render(
             emailFilters = listOf(sampleFilter()),
             editingFilterId = 1L,
-            editFilterPrefill = FilterPrefill(
+            editFilterPrefill = FilterForm(
                 name = "Block spam",
-                ruleType = "SenderIs",
-                ruleValue = "spammer@evil.com",
+                rule = FfiFilterRuleInputs(kind = "SenderIs", value = "spammer@example.com"),
                 action = FfiFilterActionInputs(
                     kind = "Discard", rejectReason = "", forwardAddress = "", keepLocalCopy = true,
                 ),
+                priority = "0",
+                continueOnMatch = false,
             ),
         )
         // save-filter (not create-filter) is the submit action while editing —
@@ -244,7 +246,7 @@ class PrivacySettingsContentTest {
         composeTestRule.onNodeWithTag("filter-name-input")
             .assert(hasText("Block spam", substring = true))
         composeTestRule.onNodeWithTag("filter-rule-value")
-            .assert(hasText("spammer@evil.com", substring = true))
+            .assert(hasText("spammer@example.com", substring = true))
     }
 
     // -- The post-succession review (succession-aftermath.md § Adjudicating

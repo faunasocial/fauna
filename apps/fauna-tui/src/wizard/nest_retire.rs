@@ -765,7 +765,10 @@ fn running(view: &RetireView, snap: &RetireSnapshot, out: &mut Vec<Element>) {
     }
     if snap.force_server_offered {
         // The dangling-record warning, repeated where the choice is made.
-        out.push(Element::chrome(t::FORCE_SERVER_WARNING));
+        out.push(Element::label(
+            ids::RETIRE_FORCE_SERVER_WARNING,
+            t::FORCE_SERVER_WARNING,
+        ));
         out.push(gesture_button(
             ids::RETIRE_FORCE_SERVER_BUTTON,
             t::FORCE_SERVER_BUTTON,

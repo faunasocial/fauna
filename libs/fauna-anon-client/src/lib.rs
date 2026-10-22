@@ -18,6 +18,7 @@ pub mod cert_binding;
 pub mod client;
 mod dispatch;
 pub mod error;
+mod principal_client;
 pub mod tls_dial;
 pub mod tls_verify;
 mod token_client;
@@ -35,6 +36,7 @@ pub use cert_binding::{
 };
 pub use client::{AnonymousNestClient, FirstContactOutcome};
 pub use error::AnonClientError;
+pub use principal_client::{PRINCIPAL_WS_PATH, PrincipalNestClient};
 pub use tls_verify::{CaptureHandle, CapturedCert};
 pub use token_client::TokenNestClient;
 pub use trust::{

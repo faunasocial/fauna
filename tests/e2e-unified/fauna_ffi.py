@@ -2828,6 +2828,61 @@ def harness_mail_import(
     }
 
 
+_HAS_MAIL_IMPORT_OUTLOOK = hasattr(_lib, "fauna_harness_mail_import_outlook")
+if _HAS_MAIL_IMPORT_OUTLOOK:
+    _lib.fauna_harness_mail_import_outlook.argtypes = [
+        ctypes.c_char_p,                                   # nest base URL
+        ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32,   # secret (32-byte Ed25519 seed), len
+        ctypes.c_char_p,                                   # the Microsoft account's address
+        ctypes.POINTER(_FfiBuffer),                        # out: {"ok": [step, imported, skipped, errored, error, log]}
+    ]
+    _lib.fauna_harness_mail_import_outlook.restype = ctypes.c_int32
+
+
+def harness_mail_import_outlook(
+    nest_url: str,
+    secret: bytes,
+    *,
+    username: str,
+    authority: str,
+    host_map: str,
+    ca_pem: str,
+) -> dict:
+    """:func:`harness_mail_import`'s Outlook twin: the same app-free machine,
+    signing in with Microsoft for ``username`` and importing every mailbox
+    over ``AUTHENTICATE XOAUTH2``.
+
+    BLOCKS while the sign-in polls — the caller approves the code on its fake
+    identity authority from another thread (ctypes releases the GIL for the
+    call). ``authority``, ``host_map`` and ``ca_pem`` are the three gated
+    seeds' values (`FAUNA_E2E_MICROSOFT_AUTHORITY`, `FAUNA_E2E_IMAP_HOST_MAP`,
+    `FAUNA_E2E_IMAP_EXTRA_CA_PEM`), seeded into this process's environment,
+    where the flow and the native connector read them.
+
+    Returns the machine's final snapshot, shaped as :func:`harness_mail_import`'s."""
+    if not _HAS_MAIL_IMPORT_OUTLOOK:
+        raise RuntimeError(
+            "libfauna_ffi has no `fauna_harness_mail_import_outlook` — it is stale, or "
+            "not the `e2e-harness` flavor. Run `just e2e-ffi` to rebuild it."
+        )
+    if len(secret) != 32:
+        raise ValueError("secret must be 32 bytes")
+    os.environ[_IMAP_EXTRA_CA_ENV] = ca_pem
+    os.environ["FAUNA_E2E_MICROSOFT_AUTHORITY"] = authority
+    os.environ["FAUNA_E2E_IMAP_HOST_MAP"] = host_map
+    sec_arr = (ctypes.c_uint8 * 32)(*secret)
+    out = _FfiBuffer()
+    rc = _lib.fauna_harness_mail_import_outlook(
+        nest_url.encode("utf-8"), sec_arr, 32, username.encode("utf-8"), ctypes.byref(out),
+    )
+    step, imported, skipped, errored, error, log = cbor2.loads(
+        _take_buffer(rc, out, "fauna_harness_mail_import_outlook"))["ok"]
+    return {
+        "step": step, "imported": imported, "skipped": skipped,
+        "errored": errored, "error": error, "log": list(log),
+    }
+
+
 _HAS_DNS_DISPATCH = hasattr(_lib, "fauna_harness_dns_dispatch")
 if _HAS_DNS_DISPATCH:
     _lib.fauna_harness_dns_dispatch.argtypes = [

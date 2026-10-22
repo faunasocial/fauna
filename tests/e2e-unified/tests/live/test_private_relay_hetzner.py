@@ -98,6 +98,7 @@ from helpers.live_provision import (
     await_provisioning,
     drive_provisioning,
     finish_provisioned_wizard,
+    hetzner_token,
     retry_get,
     skip_unless_fresh_box_reach_app,
 )
@@ -235,7 +236,10 @@ def _ensure_admin_mail_enabled(app, timeout: float = 45.0) -> None:
     time.sleep(3.0)  # MailPolicyMachine hydrate (get_mail_config round-trip)
 
     def _state() -> str:
-        return (app.driver.get_attr("admin-mail-enabled-toggle", "state") or "").strip().lower()
+        # The toggle's `state` reads on/off (ui.yaml), or the unmarked-switch
+        # true/false fallback — one on/off answer either way.
+        raw = (app.driver.get_attr("admin-mail-enabled-toggle", "state") or "").strip().lower()
+        return {"on": "true", "off": "false"}.get(raw, raw)
 
     if _state() == "true":
         app.admin.toggle_mail_enabled()  # fallback-ON → persist explicit false
@@ -623,7 +627,7 @@ def _submit_via_live_box(auth_username: str, password: str, mail_from: str,
 @pytest.mark.feature("home-nest-behind-a-relay")
 def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, request):
     skip_unless_fresh_box_reach_app(app.driver, surface="the private-relay live e2e drive")
-    token = os.environ["HETZNER_API_TOKEN"].strip()
+    token, dns_token = hetzner_token(), hetzner_token(purpose="dns")
     secret_hex = box.identity_secret_hex
     handle = box.handle  # admin@e2e-<runid>.<zone> — ONE identity claims both boxes
 
@@ -651,7 +655,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     # Fresh launch — the provisioning drive runs on a clean onboarding machine.
     _relaunch(app)
     print(f"[relay-live] provisioning public relay {box.subdomain} (mail box) ...")
-    drive_provisioning(app, box, token)
+    drive_provisioning(app, box, token, dns_token=dns_token)
     snap = await_provisioning(app, PROVISION_TIMEOUT_S)
     assert snap.get("overall") == "Succeeded", (
         f"provisioning did not succeed: overall={snap.get('overall')!r} "
@@ -776,7 +780,7 @@ def test_private_relay_behind_hetzner_public_node(app, box, ghcr_latest_image, r
     private_url = f"https://127.0.0.1:{priv_http}"
     start_container_with_ports(
         priv_name,
-        {3000: priv_http, 993: priv_993},
+        {443: priv_http, 993: priv_993},
         env={
             "FAUNA_MODE": "private",
             "FAUNA_LAN_BIND_IP": "0.0.0.0",

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { wrapMarkdownSelection } from '$lib/wasm';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { wrapMarkdownSelection } from '#lib/wasm';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   interface Props {
     textarea?: HTMLTextAreaElement | null;

@@ -22,6 +22,25 @@ use super::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
+/// Clamp a caller's page window into the wire contract's bounds
+/// (`[MIN_LIMIT, MAX_LIMIT]`, `[0, MAX_OFFSET]`), so no query can make the nest
+/// fetch the whole corpus whatever its caller did.
+fn clamp_window(limit: i64, offset: i64) -> (i64, i64) {
+    (
+        limit.clamp(
+            fauna_protocol::search::MIN_LIMIT,
+            fauna_protocol::search::MAX_LIMIT,
+        ),
+        offset.clamp(0, fauna_protocol::search::MAX_OFFSET),
+    )
+}
+
+/// The per-sub-query SQL `LIMIT` for an already-clamped window; never exceeds
+/// `MAX_LIMIT + MAX_OFFSET`.
+fn fetch_window(limit: i64, offset: i64) -> i64 {
+    limit.saturating_add(offset)
+}
+
 impl CacheDb {
     /// Index a document in the unified FTS5 search index.
     /// Idempotent: re-indexing the same (content_type, content_id) replaces the old entry.
@@ -202,10 +221,11 @@ impl CacheDb {
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
         // Fetch (limit + offset) from each sub-query so we can merge-sort correctly,
-        // then apply offset after merging.
-        // Saturating: the handler clamps both, but this is a storage-layer entry
-        // point and an overflow here would panic the request task.
-        let fetch = limit.saturating_add(offset);
+        // then apply offset after merging. The bound lives here, in the
+        // consumer, not only in the handler: a caller that forgets its clamp
+        // must not be able to fetch the whole corpus.
+        let (limit, offset) = clamp_window(limit, offset);
+        let fetch = fetch_window(limit, offset);
 
         // Phase 1: public content. A bridge-corpus row (`bridge.<id>`) is
         // public content by the policy's own class split — a bridge's PUBLIC
@@ -637,6 +657,110 @@ mod profile_row_tests {
             .await
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    /// The corpus bound is pinned at the consumer: whatever window a caller
+    /// passes, the SQL `LIMIT` stays within `MAX_LIMIT + MAX_OFFSET`.
+    #[test]
+    fn the_fetch_window_is_bounded_whatever_the_caller_passes() {
+        use fauna_protocol::search::{MAX_LIMIT, MAX_OFFSET};
+        for (l, o) in [
+            (i64::MAX, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (-5, -5),
+            (0, 0),
+            (100, i64::MAX),
+            (i64::MAX, 0),
+        ] {
+            let (limit, offset) = clamp_window(l, o);
+            let fetch = fetch_window(limit, offset);
+            assert!((1..=MAX_LIMIT + MAX_OFFSET).contains(&fetch), "{l},{o}");
+        }
+        assert_eq!(
+            fetch_window(
+                clamp_window(i64::MAX, i64::MAX).0,
+                clamp_window(i64::MAX, i64::MAX).1
+            ),
+            MAX_LIMIT + MAX_OFFSET
+        );
+    }
+
+    /// The same bound, pinned THROUGH `search_with_scoping`: the helper test
+    /// above stays green when the consumer stops calling `clamp_window`, and so
+    /// did every other test, because an out-of-range window is only visible
+    /// against a corpus longer than `MAX_OFFSET`. Over such
+    /// a corpus an unclamped consumer serves the whole corpus for a huge or a
+    /// negative `limit` (SQLite reads `LIMIT -1` as no limit), and an empty
+    /// page for an offset past `MAX_OFFSET`; the clamped one serves at most
+    /// `MAX_LIMIT` hits, one hit, and the page at `MAX_OFFSET`.
+    #[tokio::test]
+    async fn search_with_scoping_clamps_a_window_its_caller_left_unclamped() {
+        use fauna_protocol::search::{MAX_LIMIT, MAX_OFFSET};
+        let db = open().await;
+        let corpus = MAX_OFFSET + 2;
+        {
+            let mut conn = db.conn.lock().await;
+            let tx = conn.transaction().unwrap();
+            for i in 0..corpus {
+                CacheDb::index_document_inner(
+                    &tx,
+                    "post",
+                    &format!("{i:064x}"),
+                    "",
+                    "pagebound",
+                    "",
+                    "",
+                    1,
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let db = &db;
+        let hits = |limit: i64, offset: i64| async move {
+            db.search_with_scoping("pagebound", &ACTOR, Some("post"), None, None, limit, offset)
+                .await
+                .unwrap()
+                .len() as i64
+        };
+        assert_eq!(
+            hits(MAX_LIMIT, 0).await,
+            MAX_LIMIT,
+            "the corpus is searchable"
+        );
+        assert_eq!(hits(i64::MAX, 0).await, MAX_LIMIT, "limit over MAX_LIMIT");
+        assert_eq!(hits(-1, 0).await, 1, "a negative limit");
+        assert_eq!(
+            hits(MAX_LIMIT, i64::MAX).await,
+            corpus - MAX_OFFSET,
+            "an offset past MAX_OFFSET serves the page at MAX_OFFSET"
+        );
+    }
+
+    /// The search arms (and `feeds.rs`'s hashtag reads) join `content_fts_map`
+    /// on `fts_rowid` from the FTS side. Without an index there SQLite scans the
+    /// whole map once per matched row, so the window bound above bounds rows
+    /// but not cost: one query at `MAX_OFFSET` was `MAX_OFFSET × corpus` row
+    /// visits, all under the connection lock.
+    #[tokio::test]
+    async fn the_fts_map_join_is_an_index_lookup_not_a_scan() {
+        let db = open().await;
+        let conn = db.conn.lock().await;
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT m.content_id FROM content_fts f \
+                 JOIN content_fts_map m ON m.fts_rowid = f.rowid \
+                 WHERE content_fts MATCH 'pagebound' ORDER BY f.rank",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter().any(|d| d.starts_with("SEARCH m USING INDEX")),
+            "{plan:?}"
+        );
     }
 
     #[tokio::test]

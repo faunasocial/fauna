@@ -16,16 +16,16 @@
   // snapshot() after each dispatch. The deployment mail.enabled toggle is NOT on
   // this page (onboarding + mail-settings own it). UX/IDs: tests/e2e-unified/
   // ui.yaml `admin-bridges-pending` page + `admin-bridges-pending-card` component.
-  import { identity } from '$lib/store';
-  import { bridgeApprovalMachine } from '$lib/rpc';
-  import { ensureWasm, bridgeDisplayName } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { localTimestamp } from '$lib/value-format';
+  import { identity } from '#lib/store';
+  import { bridgeApprovalMachine } from '#lib/rpc';
+  import { ensureWasm, bridgeDisplayName } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { localTimestamp } from '#lib/value-format';
   import { onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Shapes mirror the shared serde JSON (snake_case across serde_wasm_bindgen;
   // the status enum serializes as its variant-name string).
@@ -49,16 +49,20 @@
     mail_enabled: boolean | null;
     status: string; // "Idle" | "Loading" | "Working"
     error: string | null;
+    // The confirm the machine has open (`BridgeConfirm`), or null.
+    armed: { Reject: { pubkey_hex: string } } | { Rotate: { pubkey_hex: string } } | null;
   }
 
   let machine: Awaited<ReturnType<typeof bridgeApprovalMachine>> | null = null;
   let snap = $state<BridgeApprovalSnapshot | null>(null);
   let error = $state('');
-  // Which approved card's rotate-confirm is open (pubkey_hex), or null. Inline
-  // reveal — matches the linux modal/other-app sheet at the same IDs (ui.yaml
+  // Which card's confirm is open lives in the shared machine
+  // (`snapshot().armed`, opened by its sync `arm`), not here. Inline reveal —
+  // matches the linux modal/other-app sheet at the same IDs (ui.yaml
   // admin-bridges-rotate-confirm notes: "route on web"; precedent:
   // mail-rotate-keys-confirm in MailSettingsSection.svelte renders inline too).
-  let rotatingPubkeyHex = $state<string | null>(null);
+  const rejectingPubkeyHex = $derived(snap?.armed && 'Reject' in snap.armed ? snap.armed.Reject.pubkey_hex : null);
+  const rotatingPubkeyHex = $derived(snap?.armed && 'Rotate' in snap.armed ? snap.armed.Rotate.pubkey_hex : null);
 
   const busy = $derived(snap?.status === 'Working');
 
@@ -128,17 +132,21 @@
     return v.approved_at ? localTimestamp(v.approved_at) : '—';
   }
 
-  function openRotateConfirm(pubkeyHex: string): void {
-    rotatingPubkeyHex = pubkeyHex;
+  // `arm` / `disarm` are sync, so the confirm paints in the click's own frame.
+  function openConfirm(confirm: { Reject: { pubkey_hex: string } } | { Rotate: { pubkey_hex: string } }): void {
+    if (!machine) return;
+    machine.arm(confirm);
+    applySnapshot();
   }
 
-  function closeRotateConfirm(): void {
-    rotatingPubkeyHex = null;
+  function closeConfirm(): void {
+    if (!machine) return;
+    machine.disarm();
+    applySnapshot();
   }
 
-  async function confirmRotate(pubkeyHex: string): Promise<void> {
-    await dispatch({ Rotate: { pubkey_hex: pubkeyHex } });
-    rotatingPubkeyHex = null;
+  async function confirmArmed(): Promise<void> {
+    await dispatch('Confirm');
   }
 
   // Friendly per-role display name (admin.md § Bridge display naming; canonical
@@ -190,7 +198,7 @@
           class="btn small danger"
           data-testid={IDS.ADMIN_BRIDGES_PENDING_REJECT_BUTTON}
           disabled={busy}
-          onclick={() => dispatch({ Reject: { pubkey_hex: v.pubkey_hex } })}
+          onclick={() => openConfirm({ Reject: { pubkey_hex: v.pubkey_hex } })}
         >
           {t.admin.bridges_pending.reject}
         </button>
@@ -203,6 +211,30 @@
           {t.admin.bridges_pending.approve}
         </button>
       </div>
+      {#if rejectingPubkeyHex === v.pubkey_hex}
+        <div class="confirm-box" data-testid={IDS.ADMIN_BRIDGES_REJECT_CONFIRM}>
+          <strong>{t.admin.bridges_reject.title}</strong>
+          <p class="muted small" data-testid={IDS.ADMIN_BRIDGES_REJECT_WARNING_TEXT}>{t.admin.bridges_reject.warning}</p>
+          <div class="actions">
+            <button
+              class="btn small"
+              data-testid={IDS.ADMIN_BRIDGES_REJECT_CANCEL_BUTTON}
+              disabled={busy}
+              onclick={closeConfirm}
+            >
+              {t.admin.bridges_reject.cancel}
+            </button>
+            <button
+              class="btn small danger"
+              data-testid={IDS.ADMIN_BRIDGES_REJECT_CONFIRM_BUTTON}
+              disabled={busy}
+              onclick={confirmArmed}
+            >
+              {t.admin.bridges_reject.confirm}
+            </button>
+          </div>
+        </div>
+      {/if}
     </div>
   {/each}
 </div>
@@ -234,7 +266,7 @@
           class="btn small danger"
           data-testid={IDS.ADMIN_BRIDGES_APPROVED_ROTATE_BUTTON}
           disabled={busy}
-          onclick={() => openRotateConfirm(v.pubkey_hex)}
+          onclick={() => openConfirm({ Rotate: { pubkey_hex: v.pubkey_hex } })}
         >
           {t.admin.bridges_pending.rotate}
         </button>
@@ -248,7 +280,7 @@
               class="btn small"
               data-testid={IDS.ADMIN_BRIDGES_ROTATE_CANCEL_BUTTON}
               disabled={busy}
-              onclick={closeRotateConfirm}
+              onclick={closeConfirm}
             >
               {t.admin.bridges_rotate.cancel}
             </button>
@@ -256,7 +288,7 @@
               class="btn small danger"
               data-testid={IDS.ADMIN_BRIDGES_ROTATE_CONFIRM_BUTTON}
               disabled={busy}
-              onclick={() => confirmRotate(v.pubkey_hex)}
+              onclick={confirmArmed}
             >
               {t.admin.bridges_rotate.confirm}
             </button>

@@ -914,42 +914,42 @@ mod tests {
 
     #[tokio::test]
     async fn lists_hydrate_projects_domains() {
-        let m = lists_machine(&["example.com", "other.test"]);
+        let m = lists_machine(&["example.org", "other.test"]);
         m.hydrate().await.unwrap();
         let snap = m.snapshot();
         assert!(snap.lists.is_empty());
-        assert_eq!(snap.local_domains, vec!["example.com", "other.test"]);
+        assert_eq!(snap.local_domains, vec!["example.org", "other.test"]);
         assert_eq!(snap.status, ListsStatus::Idle);
     }
 
     #[tokio::test]
     async fn lists_create_computes_address_and_relists() {
-        let m = lists_machine(&["example.com"]);
+        let m = lists_machine(&["example.org"]);
         m.hydrate().await.unwrap();
         m.dispatch(MailListsAction::Create {
-            draft: draft("Bob's Weekly", "bob-weekly", "example.com"),
+            draft: draft("Bob's Weekly", "bob-weekly", "example.org"),
         })
         .await
         .unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.lists.len(), 1);
-        assert_eq!(snap.lists[0].address, "bob-weekly@example.com");
+        assert_eq!(snap.lists[0].address, "bob-weekly@example.org");
         assert_eq!(snap.lists[0].friendly_name, "Bob's Weekly");
         assert!(snap.error.is_none());
     }
 
     #[tokio::test]
     async fn lists_create_collision_surfaces_error_and_keeps_list() {
-        let m = lists_machine(&["example.com"]);
+        let m = lists_machine(&["example.org"]);
         m.hydrate().await.unwrap();
         m.dispatch(MailListsAction::Create {
-            draft: draft("A", "news", "example.com"),
+            draft: draft("A", "news", "example.org"),
         })
         .await
         .unwrap();
         let err = m
             .dispatch(MailListsAction::Create {
-                draft: draft("B", "news", "example.com"),
+                draft: draft("B", "news", "example.org"),
             })
             .await
             .unwrap_err();
@@ -961,15 +961,15 @@ mod tests {
 
     #[tokio::test]
     async fn lists_update_then_delete() {
-        let m = lists_machine(&["example.com"]);
+        let m = lists_machine(&["example.org"]);
         m.hydrate().await.unwrap();
         m.dispatch(MailListsAction::Create {
-            draft: draft("Old", "news", "example.com"),
+            draft: draft("Old", "news", "example.org"),
         })
         .await
         .unwrap();
         let id = m.snapshot().lists[0].list_id_hex.clone();
-        let mut d = draft("New name", "news", "example.com");
+        let mut d = draft("New name", "news", "example.org");
         d.description = "now described".into();
         m.dispatch(MailListsAction::Update {
             list_id_hex: id.clone(),
@@ -987,7 +987,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_delete_malformed_hex_surfaces_wrap() {
-        let m = lists_machine(&["example.com"]);
+        let m = lists_machine(&["example.org"]);
         let err = m
             .dispatch(MailListsAction::Delete {
                 list_id_hex: "zz".into(),

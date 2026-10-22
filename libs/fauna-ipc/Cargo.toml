@@ -23,6 +23,8 @@ test-helpers = []
 serde.workspace = true
 fauna-cbor.workspace = true
 thiserror.workspace = true
+# Shared platform path floors (`platform_ids`): the no-`/tmp`-fallback home rule.
+fauna-core.workspace = true
 toml = "0.8"
 serde_bytes = "0.11"
 zeroize = { workspace = true }

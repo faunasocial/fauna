@@ -44,7 +44,7 @@ use crate::error::WsRpcError;
 const SHARED_RPC_PORT_TS: &'static str = r#"
 /**
  * The SPA core chunk's one authenticated WS-RPC socket, lent to another wasm
- * chunk as pure data in / pure data out. Implemented once by `$lib/rpc`
+ * chunk as pure data in / pure data out. Implemented once by `#lib/rpc`
  * (`sharedRpcPort`) over the singleton `WsRpcClient`; consumed by every
  * page-machine chunk's constructor.
  */

@@ -29,7 +29,7 @@ public enum BarrierTestCommand {
     // MARK: - The cross-app names, mirrored (not imported)
     //
     // apple cannot link `fauna-e2e-agent` (it is a Rust crate the two Rust apps
-    // use directly), so — exactly as web's `$lib/barrier-e2e.ts` does — the four
+    // use directly), so — exactly as web's `#lib/barrier-e2e.ts` does — the four
     // constants are re-spelled here against their one documented home. Any drift
     // is caught by `test_agent_barrier.py`, which spells the same values a third
     // time and asserts across the wire.

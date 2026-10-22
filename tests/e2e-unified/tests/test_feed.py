@@ -692,7 +692,8 @@ def test_a_repost_names_the_reposter_shows_the_original_and_opens_it(
     original's author; the embed must carry the original's words (the repost
     itself has none); and the detail it opens must be the original's — its
     author and its words — not the empty repost post. Authors are compared in
-    whatever shape this app paints them (tui: the hex actor id), never assumed.
+    whatever shape this app paints them (a handled neighbour reads by handle
+    or published name, `peer_display_label`'s chain), never assumed.
     """
     app = logged_in_app
     feed = app.feed
@@ -1583,7 +1584,7 @@ def test_post_image_shows_c2pa_badge_when_uploaded_with_provenance(logged_in_app
     ``c2pa-badge`` reachable on that post's card.
 
     Web is both the uploader (browser-side detection at upload,
-    ``$lib/c2pa.ts::readProvenanceFromBytes``) and the viewer
+    ``#lib/c2pa.ts::readProvenanceFromBytes``) and the viewer
     (``C2paImage.svelte``'s own re-check, ``readProvenanceFromUrl``) for the
     same image. tui, linux, apple (macos/ios), and windows upload through the
     same shared `fauna-media` `c2pa-detect` pipeline every native app uses

@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.ui.components.TokenSelect
 import com.fauna.app.ui.viewmodel.MutedWordsVM
 import social.fauna.generated.Ids
 
@@ -36,35 +37,66 @@ fun MutedWordsScreen(
 ) {
     val page by vm.page.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val busy by vm.busy.collectAsState()
+
+    // The picker's two options come from the shared catalog (`muted_keyword_levels`),
+    // each token the level's own spelling; only the label is this app's.
+    val hideLabel = stringResource(R.string.muted_words_level_hide)
+    val showLessLabel = stringResource(R.string.muted_words_level_show_less)
+    val levels = remember { com.fauna.ffi.mutedKeywordLevels() }
+    val options = levels.map { level ->
+        com.fauna.ffi.mutedKeywordLevelValue(level) to
+            if (level == uniffi.fauna_core.MutedKeywordLevel.SHOW_LESS) showLessLabel else hideLabel
+    }
 
     MutedWordsContent(
-        words = page.keywords.map { it.keyword },
+        rows = page.keywords.map {
+            MutedWordRowState(
+                term = it.keyword,
+                level = com.fauna.ffi.mutedKeywordLevelValue(com.fauna.ffi.mutedKeywordLevel(it.weight)),
+            )
+        },
+        levelOptions = options,
         loaded = page.loaded,
+        busy = busy,
         error = errorMessage,
         onBack = { navController.popBackStack() },
         onAdd = vm::add,
         onRemove = vm::remove,
+        onSetLevel = { term, token ->
+            com.fauna.ffi.mutedKeywordLevelFromValue(token)?.let { vm.setLevel(term, it) }
+        },
     )
 }
+
+/** One `muted-word-item` row's state: the term and its level's token
+ *  (`hide` | `show-less`, `fauna_core::scoring::MutedKeywordLevel::value`). */
+data class MutedWordRowState(val term: String, val level: String)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MutedWordsContent(
-    words: List<String>,
+    rows: List<MutedWordRowState>,
+    /** The level picker's `(token, label)` options in paint order. */
+    levelOptions: List<Pair<String, String>>,
     /**
      * Whether the read has returned — the second painting condition of
      * `muted-word-empty` (`docs/goal/ui/README.md` § *List pages: loading is not
-     * empty*). `words` is empty both before the first read returns and after one
+     * empty*). `rows` is empty both before the first read returns and after one
      * that found nothing, so gating on its size alone announces "you haven't
      * muted any words yet" over a list nobody has read. Defaults to `true` so a
-     * caller passing terms reads naturally; the real screen always passes the
+     * caller passing rows reads naturally; the real screen always passes the
      * shared record's bit.
      */
     loaded: Boolean = true,
+    /** A mutation's round trip is in flight — the add button, every remove
+     *  button and every level picker wait for the returned record. */
+    busy: Boolean = false,
     error: String?,
     onBack: () -> Unit,
     onAdd: (String) -> Unit,
     onRemove: (String) -> Unit,
+    onSetLevel: (term: String, token: String) -> Unit,
 ) {
     var input by remember { mutableStateOf("") }
 
@@ -128,6 +160,7 @@ fun MutedWordsContent(
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = { submit() },
+                    enabled = !busy,
                     modifier = Modifier.testTag(Ids.MUTED_WORD_ADD_BUTTON),
                 ) {
                     Text(stringResource(R.string.muted_words_add))
@@ -147,7 +180,7 @@ fun MutedWordsContent(
 
             Spacer(Modifier.height(12.dp))
 
-            if (loaded && words.isEmpty()) {
+            if (loaded && rows.isEmpty()) {
                 Text(
                     stringResource(R.string.muted_words_empty),
                     style = MaterialTheme.typography.bodyMedium,
@@ -156,8 +189,14 @@ fun MutedWordsContent(
                 )
             } else {
                 LazyColumn(modifier = Modifier.testTag(Ids.MUTED_WORD_LIST)) {
-                    items(words, key = { it }) { term ->
-                        MutedWordRow(term = term, onRemove = { onRemove(term) })
+                    items(rows, key = { it.term }) { row ->
+                        MutedWordRow(
+                            row = row,
+                            levelOptions = levelOptions,
+                            enabled = !busy,
+                            onSetLevel = { onSetLevel(row.term, it) },
+                            onRemove = { onRemove(row.term) },
+                        )
                         HorizontalDivider()
                     }
                 }
@@ -166,10 +205,16 @@ fun MutedWordsContent(
     }
 }
 
-/** One `muted-word-item` row: the term ([muted-word-text]) + a remove button
- *  ([muted-word-remove-button]). */
+/** One `muted-word-item` row: the term ([muted-word-text]), its level picker
+ *  ([muted-word-level-select]) + a remove button ([muted-word-remove-button]). */
 @Composable
-private fun MutedWordRow(term: String, onRemove: () -> Unit) {
+private fun MutedWordRow(
+    row: MutedWordRowState,
+    levelOptions: List<Pair<String, String>>,
+    enabled: Boolean,
+    onSetLevel: (String) -> Unit,
+    onRemove: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -178,14 +223,22 @@ private fun MutedWordRow(term: String, onRemove: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            term,
+            row.term,
             style = MaterialTheme.typography.bodyLarge,
             modifier = Modifier
                 .weight(1f)
                 .testTag(Ids.MUTED_WORD_TEXT),
         )
+        TokenSelect(
+            testTagValue = Ids.MUTED_WORD_LEVEL_SELECT,
+            selected = row.level,
+            options = levelOptions,
+            onSelect = onSetLevel,
+            enabled = enabled,
+        )
         IconButton(
             onClick = onRemove,
+            enabled = enabled,
             modifier = Modifier.testTag(Ids.MUTED_WORD_REMOVE_BUTTON),
         ) {
             Icon(

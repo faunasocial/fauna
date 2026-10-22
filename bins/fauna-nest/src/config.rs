@@ -30,20 +30,15 @@ pub struct NestConfig {
     // was REMOVED 2026-10-01 with the algorithm-service mesh it configured;
     // ranking is the labeler registry's, chosen in the apps. A `nest.toml`
     // still carrying the section parses unchanged, for the same reason.
-    #[serde(default)]
-    pub update: UpdateSection,
-}
-
-#[derive(Debug, Deserialize, Clone, Default)]
-pub struct UpdateSection {
-    #[serde(default = "default_update_check")]
-    pub check: bool,
-    #[serde(default)]
-    pub github_token: Option<String>,
-}
-
-fn default_update_check() -> bool {
-    true
+    //
+    // `[update]` (`check`, `github_token`) was REMOVED 2026-10-19 under
+    // `principles.md` § One configuration surface: the daily release check is
+    // always on — a bucket-1 constant, since the apps' once-per-sign-in look
+    // reads its answer from the nest and a switch here would blind every app
+    // behind it (`installers/README.md` § Knowing a newer version is out → *The
+    // nest's newest-release field*) — and the token was a constant's stand-in
+    // (the check is anonymous). A `nest.toml` still carrying the table parses
+    // unchanged.
 }
 
 /// The nest's NAT mode (`public` / `private`). One enum, one home:

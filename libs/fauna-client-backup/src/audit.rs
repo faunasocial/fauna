@@ -222,6 +222,17 @@ pub struct DestinationAuditState {
     /// state file written before the notice existed, which loads as none.
     #[serde(default)]
     pub accepted_regressions: BTreeMap<String, AcceptedRegression>,
+    /// **The retained arm's clock** — per covered folder set and
+    /// index path, the head this device's replica named while the destination
+    /// held it only as a *retained* generation, and the pass that first saw
+    /// it so. A retained match is custody only until the replica has been
+    /// re-confirmed past the slack after that sighting while still naming the
+    /// same head ([`reconcile_with_folder_indexes`] owns the rule): the
+    /// destination's own `superseded_at` cannot date that, since it may be
+    /// re-stamped fresh every pass. Re-built by every pass that reaches the
+    /// inclusion arm; absent from an older state file, which loads as none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub retained_head_sightings: RetainedHeadSightings,
     /// **The bound identity this destination's writer seat was last settled
     /// under** — hex of the source box's identity at the pass whose seat
     /// carry ([`crate::seat_carry`]) reached a verdict here: carried, already
@@ -266,6 +277,21 @@ pub struct AcceptedRegression {
     #[serde(default)]
     pub recoverable_until: Option<i64>,
 }
+
+/// One covered-folder index head the destination listed as retained but not
+/// live, and when this device first saw it so
+/// ([`DestinationAuditState::retained_head_sightings`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedHeadSighting {
+    /// The head's manifest hash, as the replica index names it.
+    pub manifest_hash_hex: String,
+    /// Unix seconds of the pass that first found the head retained-not-live.
+    pub first_seen_at: i64,
+}
+
+/// Retained-head sightings by covered folder set, then by index path
+/// (`hex(path_hash)`) — one head per path, as the index holds one.
+pub type RetainedHeadSightings = BTreeMap<String, BTreeMap<String, RetainedHeadSighting>>;
 
 /// One pinned ledger: the generation this device last verified, and when it
 /// last saw the ledger row **listed live** — the clock the vanished-ledger
@@ -318,6 +344,31 @@ impl<'de> Deserialize<'de> for LedgerPin {
 /// `__mail/<scope-hex>/manifest.mail`.
 pub fn ledger_key(folder_name: &str, path: &str) -> String {
     format!("{folder_name}/{path}")
+}
+
+/// The reserved set a ledger key (`<set>/<mirror path>`, [`ledger_key`]) names,
+/// read **structurally**, or `None` when the key is not one a ledger writes.
+///
+/// A set name may itself contain a `/` — a conv set is
+/// `__conv/<channel-hex>` — so the set is not the text before the first `/`.
+/// It is the prefix at which the reserved set name parses
+/// ([`fauna_protocol::segments::parse_reserved_backup_set_name`]) *and* the
+/// remainder is that set's own mirror path, content or placement family
+/// ([`SegmentFamily::parse_mirror_path`], of the same kind, under the
+/// remainder's first component). A key for which no such split exists is
+/// skipped (`None`), never read by a first-`/` fallback: the record is the
+/// destination's and the store's own text, and a key that is no ledger's must
+/// not stand for a set, be recovered, or be cleared as one.
+pub fn ledger_key_set(key: &str) -> Option<&str> {
+    key.match_indices('/').find_map(|(at, _)| {
+        let (set, path) = (&key[..at], &key[at + 1..]);
+        let (kind, _) = fauna_protocol::segments::parse_reserved_backup_set_name(set)?;
+        let scope_hex = path.split('/').next()?;
+        let is_mirror = [SegmentFamily::Content, SegmentFamily::Placement]
+            .into_iter()
+            .any(|family| family.parse_mirror_path(scope_hex, path) == Some(kind));
+        is_mirror.then_some(set)
+    })
 }
 
 /// One destination's audit result: the verdict plus the state to persist.
@@ -1020,6 +1071,7 @@ pub async fn evaluate_inclusion(
         now,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &RetainedHeadSightings::new(),
         fauna_protocol::backup::BACKUP_CUSTODY_GRACE_SECS,
         &NoSourceVouch,
     )
@@ -1037,6 +1089,9 @@ pub struct InclusionOutcome {
     pub verdict: AuditVerdict,
     pub ledger_generations: BTreeMap<String, LedgerPin>,
     pub accepted_regressions: BTreeMap<String, AcceptedRegression>,
+    /// The retained-head sightings that stand after this pass
+    /// ([`DestinationAuditState::retained_head_sightings`]).
+    pub retained_head_sightings: RetainedHeadSightings,
 }
 
 /// [`evaluate_inclusion`] with the **generation pin**: `pins` is what this device remembers verifying at this destination
@@ -1073,6 +1128,11 @@ pub struct InclusionOutcome {
 /// its deadline refreshed, while the destination still holds something the
 /// source lost, dropped when nothing remains — and a standing record whose
 /// floor has not landed asks again.
+///
+/// `sightings` is the retained arm's clock as the last pass left it
+/// ([`DestinationAuditState::retained_head_sightings`]); the ones that stand
+/// after this pass come back in the outcome ([`reconcile_with_folder_indexes`]
+/// owns the rule).
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_inclusion_pinned(
     inclusion: &dyn BackupInclusionSource,
@@ -1083,20 +1143,24 @@ pub async fn evaluate_inclusion_pinned(
     now: i64,
     pins: &BTreeMap<String, LedgerPin>,
     accepted: &BTreeMap<String, AcceptedRegression>,
+    sightings: &RetainedHeadSightings,
     grace_secs: i64,
     source: &dyn SourceLedgerVouch,
 ) -> InclusionOutcome {
     let mut ledger_generations = pins.clone();
-    if custody.is_empty() && pins.is_empty() {
+    if custody.is_empty() && pins.is_empty() && attached_mirror_sets.is_empty() {
         // Nothing claimed and nothing remembered ⇒ nothing to disprove. An
         // empty destination is a freshness question, and freshness has
         // already answered it. A pinned ledger, though, is this device's own
         // claim about what the destination held, and an empty list does not
-        // answer it — the vanished-ledger rule below does.
+        // answer it — the vanished-ledger rule below does; nor does it answer
+        // an attached folder's replica index, whose heads an empty live list
+        // may hold only as retained generations.
         return InclusionOutcome {
             verdict: AuditVerdict::Passed,
             ledger_generations,
             accepted_regressions: BTreeMap::new(),
+            retained_head_sightings: sightings.clone(),
         };
     }
 
@@ -1115,6 +1179,7 @@ pub async fn evaluate_inclusion_pinned(
     // sampling population below. The covered-folder mirror plane has no
     // ledger; its anchor is the client's own replica index, reconciled by the
     // same rule into the same tallies.
+    let floored_grace = grace_secs.max(fauna_protocol::backup::BACKUP_CUSTODY_GRACE_SECS);
     let mut ledger = reconcile_with_ledgers(
         fetcher.as_ref(),
         &keys,
@@ -1122,14 +1187,16 @@ pub async fn evaluate_inclusion_pinned(
         retained,
         pins,
         now,
-        grace_secs.max(fauna_protocol::backup::BACKUP_CUSTODY_GRACE_SECS),
+        floored_grace,
     )
     .await;
-    reconcile_with_folder_indexes(
+    let retained_head_sightings = reconcile_with_folder_indexes(
         inclusion,
         custody,
         retained,
         attached_mirror_sets,
+        sightings,
+        floored_grace,
         now,
         &mut ledger,
     );
@@ -1275,6 +1342,7 @@ pub async fn evaluate_inclusion_pinned(
         verdict,
         ledger_generations,
         accepted_regressions,
+        retained_head_sightings,
     }
 }
 
@@ -1579,6 +1647,8 @@ async fn reconcile_with_ledgers<'a>(
             }
             continue;
         };
+        // A key is recorded only after its path parsed as a mirror path, so a
+        // colliding (folder, path) join can never mark a pin listed.
         listed_ledgers.insert(ledger_key(&item.folder_name, path));
 
         let Ok(mirror) = open_ledger(fetcher, keys, item).await else {
@@ -1606,25 +1676,29 @@ async fn reconcile_with_ledgers<'a>(
             continue;
         }
         // Retained: the newest generation of the ledger row anchors the set.
+        // The stand-in is chosen only among key-equal rows whose path parses
+        // as a mirror path under its own scope, as the live loop requires:
+        // `ledger_key` is a plain join, so a destination-authored retained row
+        // with a slash in `folder_name` can collide with a real ledger's key
+        // and must not shadow it (or, parse-failing, skip the judgment).
         let newest_retained = retained_by_path.iter().find_map(|((folder, path), g)| {
-            (ledger_key(folder, path) == *key).then_some((*folder, *path, *g))
-        });
-        if let Some((folder, path, g)) = newest_retained {
+            if ledger_key(folder, path) != *key {
+                return None;
+            }
             // The kind-scope is the path's first component, as `scope_key`
             // reads it off a custody row of the same set.
             let scope = path.split('/').next().unwrap_or("");
-            let Some((family, kind)) =
-                SegmentFamily::PASS_ORDER
-                    .iter()
-                    .copied()
-                    .find_map(|family| {
-                        family
-                            .parse_mirror_path(scope, path)
-                            .map(|kind| (family, kind))
-                    })
-            else {
-                continue;
-            };
+            SegmentFamily::PASS_ORDER
+                .iter()
+                .copied()
+                .find_map(|family| {
+                    family
+                        .parse_mirror_path(scope, path)
+                        .map(|kind| (family, kind))
+                })
+                .map(|(family, kind)| (*folder, *path, *g, scope, family, kind))
+        });
+        if let Some((folder, path, g, scope, family, kind)) = newest_retained {
             let stand_in = retained_as_custody(g);
             match open_ledger(fetcher, keys, &stand_in).await {
                 Ok(mirror) => anchor_on_ledger(
@@ -1645,6 +1719,10 @@ async fn reconcile_with_ledgers<'a>(
             continue;
         }
         // Absent from both lists: the set's own live rows, then the clock.
+        // `families_with_live_segments` holds only (set, scope, family) triples a
+        // live row parsed as segments of, and the key is rebuilt from them — a
+        // forged folder name can only make a pin read as still live (a certain
+        // miss), never hide one.
         let family_still_live =
             families_with_live_segments
                 .iter()
@@ -1773,7 +1851,23 @@ fn retained_as_custody(g: &GenerationItem) -> CustodyItem {
 /// - **retained** — a generation of that path with that manifest (`retained`,
 ///   the destination's `fauna.backup.generation.list`): the head was
 ///   superseded since the replica recorded it and the older bytes rest in the
-///   grace window. Custody, and its bytes join the sampling population;
+///   grace window. Custody, and its bytes join the sampling population —
+///   **bounded by both halves of that sentence**, since both lists
+///   are the audited party's word and a destination could otherwise serve a
+///   substituted or older head live (or nothing) with the real head
+///   "retained" for ever: the generation's `superseded_at` must lie inside
+///   the floored grace window (`grace_secs`; a stamp further in the future
+///   than [`OBSERVATION_MAX_FUTURE_SKEW_SECS`] is no credit), and the
+///   supersession must be one the replica has not yet caught up with. The second is this device's own clock: the pass that
+///   first finds an index head retained-not-live records it
+///   (`sightings`, [`DestinationAuditState::retained_head_sightings`]), and
+///   once the replica is consistent more than [`FRESHNESS_SLACK_SECS`] after
+///   that sighting and still names the same head, a legitimate supersession
+///   would have reached it — the retained match is then a certain miss. The
+///   destination's `superseded_at` cannot date this, since it can be
+///   re-stamped fresh every pass. A sighting is forgotten when its head goes
+///   live again or leaves the index; a set whose replica did not witness this
+///   pass keeps its sightings as they were;
 /// - **not yet expected** — the source recorded the head, or the folder was
 ///   attached, less than [`FRESHNESS_SLACK_SECS`] ago: the coordinator's next
 ///   sweep may not have run. Not a miss — the same slack freshness grants the
@@ -1795,14 +1889,19 @@ fn retained_as_custody(g: &GenerationItem) -> CustodyItem {
 /// Rows the index does not name (a head another device recorded that this
 /// replica has not pulled yet) stay in the population and are sampled as
 /// before; a set the client never attached is never asked for an index.
+///
+/// Returns the retained-head sightings that stand after this pass.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_with_folder_indexes(
     inclusion: &dyn BackupInclusionSource,
     custody: &[CustodyItem],
     retained: &[GenerationItem],
     attached_mirror_sets: &AttachedMirrorSets,
+    sightings: &RetainedHeadSightings,
+    grace_secs: i64,
     now: i64,
     out: &mut LedgerReconciliation<'_>,
-) {
+) -> RetainedHeadSightings {
     // (set, path) → manifest the destination lists live under it.
     let live: BTreeMap<(&str, &str), &str> = custody
         .iter()
@@ -1813,12 +1912,19 @@ fn reconcile_with_folder_indexes(
         })
         .collect();
     // (set, path, manifest) → the newest retained generation holding exactly
-    // those bytes.
+    // those bytes, among those the grace window still covers: superseded no
+    // longer than `grace_secs` ago, and never in the future beyond the
+    // honest-drift cushion.
     let mut retained_by_head: BTreeMap<(&str, &str, &str), &GenerationItem> = BTreeMap::new();
     for g in retained {
         let Some(path) = g.path.as_deref() else {
             continue;
         };
+        if g.superseded_at > now.saturating_add(OBSERVATION_MAX_FUTURE_SKEW_SECS)
+            || now.saturating_sub(g.superseded_at) >= grace_secs
+        {
+            continue;
+        }
         retained_by_head
             .entry((g.folder_name.as_str(), path, g.manifest_hash.as_str()))
             .and_modify(|held| {
@@ -1829,13 +1935,21 @@ fn reconcile_with_folder_indexes(
             .or_insert(g);
     }
 
+    // A set whose replica does not witness this pass keeps its sightings as
+    // they were; a witnessed set's are re-built below from this pass alone.
+    let mut standing = RetainedHeadSightings::new();
     for (set, added_at) in attached_mirror_sets {
-        let Some(index) = inclusion.folder_index(set) else {
+        let prior = sightings.get(set);
+        let index = inclusion
+            .folder_index(set)
+            .filter(|index| now.saturating_sub(index.consistent_at) <= FRESHNESS_SLACK_SECS);
+        let Some(index) = index else {
+            if let Some(prior) = prior {
+                standing.insert(set.clone(), prior.clone());
+            }
             continue;
         };
-        if now.saturating_sub(index.consistent_at) > FRESHNESS_SLACK_SECS {
-            continue;
-        }
+        let mut seen: BTreeMap<String, RetainedHeadSighting> = BTreeMap::new();
         for entry in &index.entries {
             let key = (set.as_str(), entry.path_hash_hex.as_str());
             if live.get(&key) == Some(&entry.manifest_hash_hex.as_str()) {
@@ -1846,7 +1960,25 @@ fn reconcile_with_folder_indexes(
                 entry.path_hash_hex.as_str(),
                 entry.manifest_hash_hex.as_str(),
             )) {
-                out.retained_rows.push(retained_as_custody(g));
+                let first_seen_at = prior
+                    .and_then(|p| p.get(&entry.path_hash_hex))
+                    .filter(|s| s.manifest_hash_hex == entry.manifest_hash_hex)
+                    .map_or(now, |s| s.first_seen_at.min(now));
+                seen.insert(
+                    entry.path_hash_hex.clone(),
+                    RetainedHeadSighting {
+                        manifest_hash_hex: entry.manifest_hash_hex.clone(),
+                        first_seen_at,
+                    },
+                );
+                // The replica re-confirmed past the slack since the sighting
+                // and still names this head: a real supersession would have
+                // reached it, so the "retained" head is the lie.
+                if index.consistent_at > first_seen_at.saturating_add(FRESHNESS_SLACK_SECS) {
+                    out.certain_misses += 1;
+                } else {
+                    out.retained_rows.push(retained_as_custody(g));
+                }
                 continue;
             }
             let expected_by = entry
@@ -1858,7 +1990,11 @@ fn reconcile_with_folder_indexes(
             }
             out.certain_misses += 1;
         }
+        if !seen.is_empty() {
+            standing.insert(set.clone(), seen);
+        }
     }
+    standing
 }
 
 /// Fetch one reserved set's ledger from the destination, open it under the
@@ -2001,6 +2137,9 @@ pub async fn audit_destination(
         // The recovery notice's records likewise: only the inclusion arm can
         // say whether the destination still holds what the source lost.
         accepted_regressions: prior.accepted_regressions.clone(),
+        // The retained arm's clock likewise: kept by a pass that never
+        // reaches the replica indexes.
+        retained_head_sightings: prior.retained_head_sightings.clone(),
         seat_settled_under: prior.seat_settled_under.clone(),
     };
 
@@ -2031,6 +2170,7 @@ pub async fn audit_destination(
             now,
             &prior.verified_ledger_generations,
             &prior.accepted_regressions,
+            &prior.retained_head_sightings,
             grace_secs,
             source,
         )
@@ -2040,6 +2180,7 @@ pub async fn audit_destination(
         // The records that stand after this pass: the prior ones re-judged,
         // this pass's acceptances joined, the recovered and reclaimed gone.
         state.accepted_regressions = outcome.accepted_regressions;
+        state.retained_head_sightings = outcome.retained_head_sightings;
     }
     if verdict == AuditVerdict::Passed {
         state.last_passed_at = Some(now);
@@ -2406,7 +2547,6 @@ pub fn clear_accepted_regressions(
     set_name: &str,
 ) -> Result<bool, String> {
     let mut snapshot = store.load()?;
-    let prefix = ledger_key(set_name, "");
     let mut cleared = false;
     for record in &mut snapshot.records {
         if record.state.destination_id != destination_id {
@@ -2416,7 +2556,7 @@ pub fn clear_accepted_regressions(
         record
             .state
             .accepted_regressions
-            .retain(|key, _| !key.starts_with(&prefix));
+            .retain(|key, _| ledger_key_set(key) != Some(set_name));
         cleared |= record.state.accepted_regressions.len() != before;
     }
     if cleared {
@@ -2718,6 +2858,7 @@ mod tests {
             last_attempt_at: None,
             verified_ledger_generations: Default::default(),
             accepted_regressions: Default::default(),
+            retained_head_sightings: Default::default(),
             // Settled under the pass's bound identity, so the debounce is
             // what decides — the carry's own trigger is pinned on its own.
             seat_settled_under: Some(bound_hex()),
@@ -4120,6 +4261,42 @@ mod tests {
         ));
     }
 
+    /// The audit opens a destination through the shared door
+    /// too: a box answering the enrolled URL but proving another identity is
+    /// never read, so its custody list — however healthy — cannot pass the
+    /// destination; the row degrades exactly as an unreachable one does.
+    #[test]
+    fn a_destination_proving_another_identity_is_never_audited_as_passed() {
+        struct Impostor(Arc<MockDestination>);
+        #[async_trait]
+        impl BackupDestinationConnector for Impostor {
+            async fn connect(&self, _url: &str) -> Result<DestinationConnection, String> {
+                Ok(DestinationConnection {
+                    seam: self.0.clone() as Arc<dyn BackupNestSeam>,
+                    bound_nest_id: [9u8; 32],
+                })
+            }
+        }
+        let connector = Impostor(Arc::new(reachable(vec![custody(NOW - HOUR)])));
+        let dests = vec![destination(
+            "d1",
+            "wss://d.example",
+            (NOW - 30 * DAY) as u64,
+        )];
+        let out = block_on(audit_all_t(&connector, &dests, &[], Some(NOW), NOW));
+
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(
+                out[0].verdict,
+                AuditVerdict::Unreachable { .. } | AuditVerdict::Overdue { .. }
+            ),
+            "an impostor's custody list must not pass the destination: {:?}",
+            out[0].verdict
+        );
+        assert_eq!(out[0].state.last_passed_at, None);
+    }
+
     /// A destination inside its debounce window is skipped entirely — no
     /// connection is opened, which is why the mock would panic if it were.
     #[test]
@@ -4138,6 +4315,7 @@ mod tests {
             last_attempt_at: Some(NOW - HOUR),
             verified_ledger_generations: Default::default(),
             accepted_regressions: Default::default(),
+            retained_head_sightings: Default::default(),
             seat_settled_under: Some(bound_hex()),
         }];
         let out = block_on(audit_all_t(&connector, &dests, &prior, Some(NOW), NOW));
@@ -5419,6 +5597,7 @@ mod tests {
                     last_attempt_at: Some(NOW),
                     verified_ledger_generations: Default::default(),
                     accepted_regressions: Default::default(),
+                    retained_head_sightings: Default::default(),
                     seat_settled_under: Some("ab".repeat(32)),
                 },
                 verdict: Some(AuditVerdict::InclusionFailure {
@@ -6398,6 +6577,389 @@ mod tests {
         ));
     }
 
+    // ── The retained arm's clock ──────────────────────────────
+    //
+    // A retained match is the destination's word twice over (both lists are
+    // its own), so it is custody only while it is plausibly a supersession the
+    // replica has not caught up with: inside the floored grace window, and not
+    // once the replica has re-confirmed the same head past the slack after
+    // this device first saw it retained-not-live.
+
+    /// One pass of the pinned arm with the retained-head sightings threaded
+    /// through, the replica index re-confirmed an hour before `now`.
+    fn index_pass(
+        corpus: Corpus,
+        index: FolderIndex,
+        custody: &[CustodyItem],
+        retained: &[GenerationItem],
+        now: i64,
+        sightings: &RetainedHeadSightings,
+    ) -> InclusionOutcome {
+        let (set, attached) = indexed_set();
+        let inclusion = CorpusInclusion::new(corpus).with_index(&set, index);
+        block_on(evaluate_inclusion_pinned(
+            &inclusion,
+            DEST_URL,
+            custody,
+            retained,
+            &attached,
+            now,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            sightings,
+            fauna_protocol::backup::BACKUP_CUSTODY_GRACE_SECS,
+            &NoSourceVouch,
+        ))
+    }
+
+    /// `replica_index(n)` re-confirmed by the replica an hour before `now`.
+    fn replica_index_at(n: u32, now: i64) -> FolderIndex {
+        let mut index = replica_index(n);
+        index.consistent_at = now - HOUR;
+        index
+    }
+
+    /// Arm A of the review probe, the rollback shape: the destination lists an
+    /// older genuine generation of file 0 live and the real head the replica
+    /// names only as "retained", stamped `superseded_at` — every byte present.
+    fn rollback_destination(superseded_at: i64) -> (Corpus, Vec<CustodyItem>, Vec<GenerationItem>) {
+        let set = covered_folder_set();
+        let mut corpus = Corpus::default();
+        let older = corpus.add(b"file 0, an older genuine generation");
+        let custody = vec![mirror_row(&set, &mirror_path(0), older)];
+        let head = corpus.add(&file_payload(0));
+        let mut retained = mirror_retained(&set, &mirror_path(0), head);
+        retained.superseded_at = superseded_at;
+        (corpus, custody, vec![retained])
+    }
+
+    /// The probe's literal arm A: the real head "retained" 400 days, far past
+    /// the 30-day floor — the destination's own retention promise cannot
+    /// cover it, so it is no custody even on the first sighting. A stamp in
+    /// the future is no credit either.
+    #[test]
+    fn a_retained_head_outside_the_grace_window_is_no_custody() {
+        for stamp in [NOW - 400 * DAY, NOW + DAY] {
+            let (corpus, custody, retained) = rollback_destination(stamp);
+            let out = index_pass(
+                corpus,
+                replica_index_at(1, NOW),
+                &custody,
+                &retained,
+                NOW,
+                &RetainedHeadSightings::new(),
+            );
+            assert!(
+                matches!(
+                    out.verdict,
+                    AuditVerdict::InclusionFailure { missing: 1, .. }
+                ),
+                "superseded_at {stamp}: got {:?}",
+                out.verdict
+            );
+        }
+    }
+
+    /// Arm A with every stamp forged fresh each pass: the first sighting is a
+    /// supersession the replica may not have pulled yet, so it passes and is
+    /// remembered — and once the replica has re-confirmed the same head past
+    /// the slack after that, the head the destination keeps only as
+    /// "retained" is a certain miss: the live list a restore reads is a
+    /// rollback.
+    #[test]
+    fn a_rollback_behind_a_retained_real_head_fails_once_the_replica_reconfirms_it() {
+        let (corpus, custody, retained) = rollback_destination(NOW - HOUR);
+        let first = index_pass(
+            corpus,
+            replica_index_at(1, NOW),
+            &custody,
+            &retained,
+            NOW,
+            &RetainedHeadSightings::new(),
+        );
+        assert_eq!(first.verdict, AuditVerdict::Passed);
+
+        let later = NOW + 3 * DAY;
+        let (corpus, custody, retained) = rollback_destination(later - HOUR);
+        let out = index_pass(
+            corpus,
+            replica_index_at(1, later),
+            &custody,
+            &retained,
+            later,
+            &first.retained_head_sightings,
+        );
+        assert!(
+            matches!(
+                out.verdict,
+                AuditVerdict::InclusionFailure { missing: 1, .. }
+            ),
+            "got {:?}",
+            out.verdict
+        );
+        assert_eq!(
+            out.retained_head_sightings, first.retained_head_sightings,
+            "the first sighting stands, so the alarm holds every later pass"
+        );
+    }
+
+    /// Arm B of the probe: nothing live at all, every one of the 40 indexed
+    /// heads "retained" with fresh stamps — the folder would restore empty.
+    /// Caught the same way, one miss per head.
+    #[test]
+    fn a_destination_retaining_every_head_and_listing_none_live_fails_once_reconfirmed() {
+        let all_retained = |stamp: i64| {
+            let set = covered_folder_set();
+            let mut corpus = Corpus::default();
+            let retained: Vec<GenerationItem> = (0..40)
+                .map(|i| {
+                    let mut g =
+                        mirror_retained(&set, &mirror_path(i), corpus.add(&file_payload(i)));
+                    g.superseded_at = stamp;
+                    g
+                })
+                .collect();
+            (corpus, retained)
+        };
+        let (corpus, retained) = all_retained(NOW - HOUR);
+        let first = index_pass(
+            corpus,
+            replica_index_at(40, NOW),
+            &[],
+            &retained,
+            NOW,
+            &RetainedHeadSightings::new(),
+        );
+        assert_eq!(first.verdict, AuditVerdict::Passed);
+
+        let later = NOW + 3 * DAY;
+        let (corpus, retained) = all_retained(later - HOUR);
+        let out = index_pass(
+            corpus,
+            replica_index_at(40, later),
+            &[],
+            &retained,
+            later,
+            &first.retained_head_sightings,
+        );
+        assert!(
+            matches!(
+                out.verdict,
+                AuditVerdict::InclusionFailure { missing: 40, .. }
+            ),
+            "got {:?}",
+            out.verdict
+        );
+    }
+
+    /// The honest control over passes: a head superseded at the source stays
+    /// custody while the replica has not been re-confirmed past the slack
+    /// since the sighting, and once the replica pulls the newer head — live
+    /// at the destination — the sighting is forgotten.
+    #[test]
+    fn an_honest_supersession_stays_custody_until_the_replica_catches_up() {
+        let honest = || {
+            let set = covered_folder_set();
+            let mut corpus = Corpus::default();
+            let newer = corpus.add(b"file 0, newer");
+            let custody = vec![mirror_row(&set, &mirror_path(0), newer.clone())];
+            let retained = vec![mirror_retained(
+                &set,
+                &mirror_path(0),
+                corpus.add(&file_payload(0)),
+            )];
+            (corpus, custody, retained, newer)
+        };
+        let (corpus, custody, retained, _) = honest();
+        let first = index_pass(
+            corpus,
+            replica_index_at(1, NOW),
+            &custody,
+            &retained,
+            NOW,
+            &RetainedHeadSightings::new(),
+        );
+        assert_eq!(first.verdict, AuditVerdict::Passed);
+        assert_eq!(first.retained_head_sightings.len(), 1);
+
+        // A day on, the replica re-confirmed but still inside the slack of
+        // the sighting: not yet the lie.
+        let (corpus, custody, retained, newer) = honest();
+        let next = index_pass(
+            corpus,
+            replica_index_at(1, NOW + DAY),
+            &custody,
+            &retained,
+            NOW + DAY,
+            &first.retained_head_sightings,
+        );
+        assert_eq!(next.verdict, AuditVerdict::Passed);
+
+        // The replica pulled the newer head: live, and the sighting goes.
+        let mut caught_up = replica_index_at(1, NOW + 3 * DAY);
+        caught_up.entries[0].manifest_hash_hex = newer;
+        let (corpus, custody, retained, _) = honest();
+        let out = index_pass(
+            corpus,
+            caught_up,
+            &custody,
+            &retained,
+            NOW + 3 * DAY,
+            &next.retained_head_sightings,
+        );
+        assert_eq!(out.verdict, AuditVerdict::Passed);
+        assert!(out.retained_head_sightings.is_empty());
+    }
+
+    /// A pass whose replica does not witness (not consistent inside the
+    /// slack) keeps the set's sightings as they were: the clock does not
+    /// restart because the device's own replica went quiet for a while.
+    #[test]
+    fn a_pass_the_replica_does_not_witness_keeps_the_retained_heads_clock() {
+        let (corpus, custody, retained) = rollback_destination(NOW - HOUR);
+        let first = index_pass(
+            corpus,
+            replica_index_at(1, NOW),
+            &custody,
+            &retained,
+            NOW,
+            &RetainedHeadSightings::new(),
+        );
+        assert_eq!(
+            first.retained_head_sightings.len(),
+            1,
+            "the sighting is recorded"
+        );
+
+        let quiet = NOW + 5 * DAY;
+        let mut stale = replica_index(1);
+        stale.consistent_at = quiet - FRESHNESS_SLACK_SECS - HOUR;
+        let (corpus, custody, retained) = rollback_destination(quiet - HOUR);
+        let kept = index_pass(
+            corpus,
+            stale,
+            &custody,
+            &retained,
+            quiet,
+            &first.retained_head_sightings,
+        );
+        assert_eq!(kept.retained_head_sightings, first.retained_head_sightings);
+
+        let later = NOW + 6 * DAY;
+        let (corpus, custody, retained) = rollback_destination(later - HOUR);
+        let out = index_pass(
+            corpus,
+            replica_index_at(1, later),
+            &custody,
+            &retained,
+            later,
+            &kept.retained_head_sightings,
+        );
+        assert!(
+            matches!(
+                out.verdict,
+                AuditVerdict::InclusionFailure { missing: 1, .. }
+            ),
+            "got {:?}",
+            out.verdict
+        );
+    }
+
+    /// A sighting dates only the head it was taken of: once the replica has
+    /// moved to a newer head, which the destination honestly holds retained
+    /// under a newer live one still, that head starts its own clock.
+    #[test]
+    fn a_head_the_replica_moved_to_starts_its_own_sighting() {
+        let (corpus, custody, retained) = rollback_destination(NOW - HOUR);
+        let first = index_pass(
+            corpus,
+            replica_index_at(1, NOW),
+            &custody,
+            &retained,
+            NOW,
+            &RetainedHeadSightings::new(),
+        );
+        assert_eq!(
+            first.retained_head_sightings.len(),
+            1,
+            "the sighting is recorded"
+        );
+
+        let later = NOW + 3 * DAY;
+        let set = covered_folder_set();
+        let mut corpus = Corpus::default();
+        let newest = corpus.add(b"file 0, newest");
+        let custody = vec![mirror_row(&set, &mirror_path(0), newest)];
+        let newer = corpus.add(b"file 0, newer");
+        let mut retained = mirror_retained(&set, &mirror_path(0), newer.clone());
+        retained.superseded_at = later - HOUR;
+        let mut index = replica_index_at(1, later);
+        index.entries[0].manifest_hash_hex = newer;
+        let out = index_pass(
+            corpus,
+            index,
+            &custody,
+            &[retained],
+            later,
+            &first.retained_head_sightings,
+        );
+        assert_eq!(out.verdict, AuditVerdict::Passed);
+    }
+
+    /// End to end through `audit_destination`: the sighting rides the
+    /// persisted per-destination state, and a pass that never reaches the
+    /// inclusion arm keeps it.
+    #[test]
+    fn the_retained_head_sighting_rides_the_persisted_destination_state() {
+        let (set, attached) = indexed_set();
+        let (corpus, custody, retained) = rollback_destination(NOW - HOUR);
+        let (verdict, after) = block_on(audit_destination(
+            &MockDestination {
+                custody: Ok(custody),
+                generations: Ok(retained),
+            },
+            &CorpusInclusion::new(corpus).with_index(&set, replica_index_at(1, NOW)),
+            DEST_URL,
+            &inputs(Some(NOW), NOW - 30 * DAY),
+            &state("d1", None),
+            &attached,
+            &NoSourceVouch,
+            NOW,
+        ));
+        assert_eq!(verdict, AuditVerdict::Passed);
+        assert_eq!(after.retained_head_sightings.len(), 1);
+
+        let (verdict, kept) = block_on(audit_destination(
+            &dead(),
+            &all_present(),
+            DEST_URL,
+            &inputs(Some(NOW), NOW - 30 * DAY),
+            &after,
+            &attached,
+            &NoSourceVouch,
+            NOW + DAY,
+        ));
+        assert!(matches!(verdict, AuditVerdict::Unreachable { .. }));
+        assert_eq!(kept.retained_head_sightings, after.retained_head_sightings);
+
+        let later = NOW + 3 * DAY;
+        let (corpus, custody, retained) = rollback_destination(later - HOUR);
+        let (verdict, _) = block_on(audit_destination(
+            &MockDestination {
+                custody: Ok(custody),
+                generations: Ok(retained),
+            },
+            &CorpusInclusion::new(corpus).with_index(&set, replica_index_at(1, later)),
+            DEST_URL,
+            &inputs(None, NOW - 30 * DAY),
+            &kept,
+            &attached,
+            &NoSourceVouch,
+            later,
+        ));
+        assert!(matches!(verdict, AuditVerdict::InclusionFailure { .. }));
+    }
+
     /// A replica not known consistent with the source inside the slack cannot
     /// witness — its heads may have been superseded so long ago that the
     /// destination legitimately no longer retains them — so that set falls
@@ -6588,6 +7150,7 @@ mod tests {
             now,
             pins,
             &BTreeMap::new(),
+            &RetainedHeadSightings::new(),
             grace_secs,
             vouch,
         ))
@@ -7241,6 +7804,7 @@ mod tests {
             NOW + 40 * DAY,
             &accepted.verified_ledger_generations,
             &accepted.accepted_regressions,
+            &RetainedHeadSightings::new(),
             30 * DAY,
             &NoSourceVouch,
         ));
@@ -7258,6 +7822,7 @@ mod tests {
             NOW + 2 * DAY,
             &accepted.verified_ledger_generations,
             &accepted.accepted_regressions,
+            &RetainedHeadSightings::new(),
             30 * DAY,
             &NoSourceVouch,
         ));
@@ -7431,6 +7996,67 @@ mod tests {
         assert_eq!(broken.saves(), 0);
     }
 
+    /// A landing set (`reserved-folders.md` § __mail Sync → *The landing set*)
+    /// is ignored by shape: its mirror paths are no ledger's, so the audit never
+    /// reads a delivered copy on a home nest as a destination's custody.
+    #[test]
+    fn a_landing_sets_mirror_is_no_ledger_key() {
+        for kind in ["mail", "post", "calendar", "card"] {
+            let landing = fauna_protocol::segments::landing_set_name(kind, &[0u8; 32]).unwrap();
+            for family in [SegmentFamily::Content, SegmentFamily::Placement] {
+                let key = ledger_key(&landing, &family.mirror_path(SCOPE, kind));
+                assert_eq!(ledger_key_set(&key), None, "{key}");
+            }
+        }
+    }
+
+    /// A conv set is `__conv/<channel-hex>`: clearing one channel's regression
+    /// clears only that channel's records, and the bare `__conv` names no set.
+    #[test]
+    fn clearing_one_conv_channel_leaves_the_others() {
+        let channel_a = format!("__conv/{}", "ab".repeat(32));
+        let channel_b = format!("__conv/{}", "cd".repeat(32));
+        let key_a = ledger_key(
+            &channel_a,
+            &SegmentFamily::Content.mirror_path(SCOPE, "conv"),
+        );
+        let key_b = ledger_key(
+            &channel_b,
+            &SegmentFamily::Content.mirror_path(SCOPE, "conv"),
+        );
+        assert_eq!(ledger_key_set(&key_a), Some(channel_a.as_str()));
+        assert_eq!(ledger_key_set(&key_b), Some(channel_b.as_str()));
+
+        let mut record = DestinationAuditRecord::never("d1");
+        for key in [&key_a, &key_b] {
+            record
+                .state
+                .accepted_regressions
+                .insert(key.clone(), regression_until(None));
+        }
+        let store = MemStore::with(AuditStateSnapshot {
+            records: vec![record],
+            observed_high_water: Some(NOW),
+        });
+
+        assert_eq!(
+            clear_accepted_regressions(&store, "d1", "__conv"),
+            Ok(false)
+        );
+        assert_eq!(
+            clear_accepted_regressions(&store, "d1", &channel_a),
+            Ok(true)
+        );
+        assert_eq!(
+            store.saved().records[0]
+                .state
+                .accepted_regressions
+                .keys()
+                .collect::<Vec<_>>(),
+            vec![&key_b]
+        );
+    }
+
     // ── the vanished-ledger rule ────────────────
 
     /// The pins a first verified pass at generation `counter` leaves, all seen
@@ -7498,6 +8124,76 @@ mod tests {
         let custody = without_ledger(custody);
         let out = pinned_inclusion(corpus, &custody, &BTreeMap::new(), &NoSourceVouch);
         assert_eq!(out.verdict, AuditVerdict::Passed);
+    }
+
+    /// A forged retained row never unpins a set: `ledger_key` is a plain join, so a retained row the
+    /// destination authored as `("__mail/<scope>", "manifest.mail")` carries
+    /// the real ledger's key. It must not stand in for the de-listed ledger —
+    /// the arm used to take it, fail to parse its path and skip the pin
+    /// silently, so a de-listed ledger plus 8 dropped segments passed.
+    #[test]
+    fn a_forged_slash_in_folder_retained_row_does_not_unpin_the_set() {
+        let pins = pins_after_verifying(40);
+        let (corpus, custody) = genuine_destination(32, 32);
+        let custody = without_ledger(custody);
+        let mut forged = retained("manifest.mail", "00".repeat(32));
+        forged.folder_name = format!("__mail/{SCOPE}");
+        let out = pinned_inclusion_at(
+            corpus,
+            &custody,
+            &[forged],
+            &pins,
+            30 * DAY,
+            NOW + DAY,
+            &NoSourceVouch,
+        );
+        assert!(
+            matches!(
+                out.verdict,
+                AuditVerdict::InclusionFailure { missing: 1, .. }
+            ),
+            "the forged row is no stand-in: the missing anchor is one certain miss — got {:?}",
+            out.verdict
+        );
+        assert_eq!(out.ledger_generations, pins, "the pin is kept unchanged");
+    }
+
+    /// The same forged row beside a genuine retained ledger: the genuine one
+    /// still anchors the set (its 8 de-listed segments are named misses).
+    #[test]
+    fn a_forged_row_beside_a_genuine_retained_ledger_still_anchors_on_the_genuine_one() {
+        let pins = pins_after_verifying(40);
+        let mirror = SegmentFamily::Content.mirror_path(SCOPE, "mail");
+        let (corpus, custody) = genuine_destination(40, 40);
+        let ledger_row = custody
+            .iter()
+            .find(|row| row.path.as_deref() == Some(mirror.as_str()))
+            .cloned()
+            .unwrap();
+        let mut forged = retained("manifest.mail", "00".repeat(32));
+        forged.folder_name = format!("__mail/{SCOPE}");
+        let history = vec![forged, retained(&mirror, ledger_row.manifest_hash.clone())];
+        let custody: Vec<CustodyItem> = without_ledger(custody)
+            .into_iter()
+            .filter(|row| row.path.as_deref() < Some(&SegmentFamily::Content.dat_path(SCOPE, 32)))
+            .collect();
+        let out = pinned_inclusion_at(
+            corpus,
+            &custody,
+            &history,
+            &pins,
+            30 * DAY,
+            NOW + DAY,
+            &NoSourceVouch,
+        );
+        assert!(
+            matches!(
+                out.verdict,
+                AuditVerdict::InclusionFailure { missing: 16, .. }
+            ),
+            "the genuine retained ledger names segments 32..40 — got {:?}",
+            out.verdict
+        );
     }
 
     /// A ledger the destination no longer lists live but still retains —

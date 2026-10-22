@@ -52,6 +52,7 @@ echo "Removing binaries..."
 rm -f /usr/local/bin/fauna-nest-daemon
 rm -f /usr/local/bin/fauna-sync-agent
 rm -f /usr/local/bin/fauna-tui
+rm -f /usr/local/bin/fauna-cli
 rm -f /usr/local/bin/fauna-bridge-supervisor
 rm -f /usr/local/bin/fauna-mail-bridge
 rm -f /usr/local/bin/libfauna_ffi.dylib

@@ -188,3 +188,49 @@ def test_roster_filter_narrows_by_handle(handled_logged_in_app):
         "the no-matches message must not show once the query is cleared: "
         f"{app.driver.diagnose('contacts-no-matches')}"
     )
+
+
+@pytest.mark.feature("profile")
+def test_find_result_open_profile_button_opens_the_found_actor(logged_in_app, nest_instance):
+    """Door (1) into another actor's Profile (`contacts.md` § Layout & flow
+    region 3; `profile.md` § Layout & flow → *Reaching another actor's
+    profile*): a Find User hit's `contact-actor-id-open-profile-button` opens
+    the found actor's `profile-view`, in OTHER shape, carrying the lookup's
+    nest URL as its home — none for a same-nest hit, so the page's home slot
+    (`profile.home_nest_url`) reads this nest. The cross-nest witness (the
+    carried home reaching the follow) is the two-nest journey's.
+    """
+    from common.auth import create_actor_and_register
+
+    app = logged_in_app
+    app.contacts.require_find_result_opens_profile()
+    other = create_actor_and_register(
+        nest_instance["port"],
+        base_url=nest_instance["url"],
+        admin_signing_key=nest_instance["admin"]["signing_key"],
+    )
+    other_id = other["actor_id_hex"]
+
+    app.contacts.navigate()
+    app.contacts.find_by_actor_id(other_id)
+    assert app.contacts.actor_id_result_text() == other_id, (
+        f"the raw actor-id lookup should resolve; find-error="
+        f"{app.contacts.find_error_text()!r} "
+        f"{app.driver.diagnose('contact-actor-id-result')}"
+    )
+    app.contacts.open_found_profile()
+
+    viewed = app.profile.wait_for_viewed_actor(other_id)
+    assert viewed == other_id, (
+        f"the button should open the found actor's profile; profile.actor_id="
+        f"{viewed!r}, error={app.profile.error_text()!r}"
+    )
+    assert app.profile.wait_for_follow_button(), (
+        "the found actor's profile should render in OTHER shape "
+        f"(profile-follow-button); {app.driver.diagnose('profile-follow-button')}"
+    )
+    home = app.profile.wait_for_home_nest_url(None)
+    assert home is None, (
+        f"a same-nest hit carries no home: the actor lives on this nest; "
+        f"profile.home_nest_url={home!r}"
+    )

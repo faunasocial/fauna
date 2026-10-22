@@ -29,7 +29,7 @@ for real, under ward A's own (correct) identity, before the test ever reaches th
 a nondeterministic verdict, but just as unusable. `familyNotify.ts`'s `ensureTimer()`
 now skips arming the real interval under the Playwright e2e agent (mirroring
 `conversations.ts`'s `pollIntervalMs()` "hasAgent" idiom); the new
-`family_notify_check_now` e2e command (`$lib/family-notify-e2e.ts`, mirroring
+`family_notify_check_now` e2e command (`#lib/family-notify-e2e.ts`, mirroring
 `backup-audit-e2e.ts`'s `backup_audit_run_now`) is the only thing that ever checks
 during a test, so this test controls exactly when (and whether) a flush happens.
 

@@ -271,6 +271,33 @@
                             Click="SavePolicy_Click"
                             Content="{loc:Localize Key=family/policy_save_button}" />
 
+                    <!-- ── Feature limits — the guardian host of the shared
+                         feature-policy-editor (family-safety.md § App surface →
+                         Feature limits; dynamic-features.md § Authoring surfaces) ──
+                         One family-policy-feature-limits-row per gated feature the
+                         nest carries, for the SELECTED ward, directly after the policy
+                         save button: its name, the guardian's AUTHORED document for
+                         this ward in words, and an Edit button that opens the shared
+                         editor at the guardian tier right under the row. Like the
+                         screen-time knobs this lives inside the per-ward editor, so
+                         the row index space belongs to exactly one ward; unlike them
+                         it is NOT batched behind Save — the editor has its own Save
+                         (fauna.family.policy.update, whose `features` sub-document
+                         only this editor writes). Rows + editor are painted in
+                         code-behind from the shared authoring host (FamilyPage.xaml.cs
+                         RenderFeatureLimits via FeatureAuthoringPainter); the rows
+                         appear only once the authored read — joined with the nest's
+                         capability set — has answered. -->
+                    <StackPanel x:Name="FeatureLimitsSection" Spacing="8"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.FamilyPolicyFeatureLimitsSection}"
+                                AutomationProperties.Name="family-policy-feature-limits-section">
+                        <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                                   Text="{loc:Localize Key=features/guardian_section_title}" />
+                        <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                                   Text="{loc:Localize Key=features/guardian_section_desc}" />
+                        <StackPanel x:Name="FeatureLimitsRowsHost" />
+                    </StackPanel>
+
                     <!-- ── Guardian device marking (family-safety.md § Full visibility
                          for young children, Slice F) — one family-device-mark-item per
                          device of the SELECTED ward. Lives inside this editor, not on

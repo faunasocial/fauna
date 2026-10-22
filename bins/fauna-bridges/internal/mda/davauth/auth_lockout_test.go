@@ -11,6 +11,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/authlock"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 )
 
@@ -277,5 +278,41 @@ func TestCalDAVBareUsernameResolvesByHandleWithoutPrimaryDomain(t *testing.T) {
 	}
 	if d, _ := got["domain"].(string); d != "" {
 		t.Errorf("validate_recipient domain = %q, want \"\" (empty ⇒ handle fallback)", d)
+	}
+}
+
+// A busy credential-KDF gate checked no password, so it is a 503 the
+// client retries, never the user's wrong password: no lockout failure and no
+// result=fail audit row. A limit-1 lockout makes "no failure recorded"
+// observable — one booked failure would lock the correct-password retry. The
+// unknown-user dummy KDF answers the same 503. Not t.Parallel: it holds the
+// process-wide gate.
+func TestCalDAVBusyKDFIs503NotAFailure(t *testing.T) {
+	lockout := &atomic.Pointer[authlock.Lockout]{}
+	lockout.Store(authlock.New(1, time.Minute, nil))
+	newMW := func(caller *mockCaller) http.Handler {
+		return NewMiddleware("fauna-caldav", okProbe(), caller, slog.Default(), lockout, nil)
+	}
+	known := resolvableCaller(t)
+	unknown := &mockCaller{} // validate_recipient rejects
+
+	restore := mailfauna.SaturateKDFGateForTest(20 * time.Millisecond)
+	recKnown := caldavAuthReq(newMW(known), string(fixturePlainPassword), "203.0.113.7")
+	recUnknown := caldavAuthReq(newMW(unknown), "any", "203.0.113.8")
+	restore()
+
+	for name, rec := range map[string]*httptest.ResponseRecorder{"known": recKnown, "unknown": recUnknown} {
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("busy gate (%s user): got %d, want 503", name, rec.Code)
+		}
+		if rec.Header().Get("Retry-After") == "" {
+			t.Errorf("busy gate (%s user): 503 carries no Retry-After", name)
+		}
+	}
+	if got := len(known.callsOf(wsrpc.MethodReportAuthEvent)) + len(unknown.callsOf(wsrpc.MethodReportAuthEvent)); got != 0 {
+		t.Fatalf("busy gate fired %d report_auth_event rows, want 0", got)
+	}
+	if rec := caldavAuthReq(newMW(resolvableCaller(t)), string(fixturePlainPassword), "203.0.113.7"); rec.Code != http.StatusOK {
+		t.Fatalf("correct password after a busy gate: got %d (the busy attempt was booked as a failure)", rec.Code)
 	}
 }

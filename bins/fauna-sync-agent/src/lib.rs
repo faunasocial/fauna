@@ -26,6 +26,8 @@ mod custodian;
 mod engine_driver;
 #[cfg(target_os = "linux")]
 mod fuse_host;
+#[cfg(test)]
+mod log_redaction_test;
 mod path_map;
 mod peer_files;
 mod pin_reaction;
@@ -33,6 +35,7 @@ mod pipe_server;
 mod push_arm;
 mod renewal;
 mod service;
+mod share_target;
 mod state;
 /// Install-scoped TLS trust (`security.md` § Pin custody across processes).
 /// `pub` so the agent's own pin-custody integration test can drive the same
@@ -94,6 +97,22 @@ struct Args {
     /// (`docs/goal/behavior/file-sync.md` § Per-file sync-status display).
     #[arg(long)]
     cleanup_roots: bool,
+
+    /// Print where the app should open to share `<path>` — the route, then the
+    /// Share leaf's label — asking the running agent, and exit: non-zero with
+    /// nothing printed when there is no target. The GNOME Files extension's
+    /// helper (`docs/goal/architecture/apps/linux.md` § The file manager's
+    /// Share entry (GNOME Files)); never starts the agent.
+    #[arg(long, value_name = "PATH")]
+    share_target: Option<std::path::PathBuf>,
+
+    /// With `--share-target`: also launch the printed route the way a
+    /// notification tap does, and launch nothing when there is no target —
+    /// KDE Dolphin's service menu, which cannot itself open a printed URI
+    /// (`apps/linux.md` § The file manager's Share entry (GNOME Files) →
+    /// *The KDE Dolphin leg*).
+    #[arg(long, requires = "share_target")]
+    open: bool,
 }
 
 /// Entry point for every platform shell (the `fauna-sync-agent` binary and the
@@ -108,6 +127,12 @@ pub fn run_main() -> anyhow::Result<()> {
         return fuse_host::run_guard_from_env();
     }
     let args = Args::parse();
+
+    // A client of the running agent, not the agent: no data dir, no log file —
+    // a right-click must not grow the agent's log.
+    if let Some(path) = &args.share_target {
+        std::process::exit(share_target::run(path, args.open));
+    }
 
     // Install the shared logging stack: the in-memory ring + a daily-rolling file
     // `<data_dir>/logs/fauna.log.<date>` + stderr, all gated by `RUST_LOG` (default

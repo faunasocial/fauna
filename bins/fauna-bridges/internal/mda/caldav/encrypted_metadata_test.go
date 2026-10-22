@@ -64,6 +64,7 @@ func fixtureRecordOpener(t *testing.T, fx reportFixture) *mailfauna.MailRecordOp
 	cap, err := mailfauna.UnwrapMLSBlob(
 		blob, fixturePlainPassword,
 		fixtureActorID, fixtureCredentialID, mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)

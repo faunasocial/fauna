@@ -46,6 +46,7 @@ import uuid
 import pytest
 
 from helpers.app_surface import app_name, skip_unbuilt
+from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -58,12 +59,12 @@ pytestmark = [
     pytest.mark.ios,
 ]
 
-_BUILT_APPS = ("tui", "web", "linux", "android")
+_BUILT_APPS = ("tui", "web", "linux", "android", "windows", "macos", "ios")
 
 # The console's + the queue's own wording (i18n, en.yaml) — the shared verdicts
 # every app renders (`fauna_client_moderation::{takedown,appeal}`).
 WORKING = "Submitting…"
-DONE_TAKEDOWN = "Taken down. A tombstone is served in its place and the author can appeal."
+DONE_TAKEDOWN = S.admin.nest_page.takedown_done
 APPEAL_RECORDED = "Appeal recorded. An administrator will review it."
 APPEAL_BLOCKED_NO_REASON = "Enter a reason before submitting the appeal."
 # A takedown row's three facts: the `illegal` enforcement descriptor, a
@@ -239,6 +240,8 @@ def test_the_author_appeals_a_takedown_through_the_app(admin_app):
 @pytest.mark.linux
 @pytest.mark.windows
 @pytest.mark.android
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("moderation-queue")
 def test_a_queue_row_shows_its_category_confidence_and_action(admin_app):
     """A nest-issued row shows what it was flagged as, how confident the flag

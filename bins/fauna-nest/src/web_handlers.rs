@@ -657,6 +657,23 @@ fn files_prune_sealed_handler() -> RpcHandler {
 
 // ── Registration entry point ────────────────────────────────────────────────
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the web page's apex-actor designation — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        ("fauna.web.get_apex_actor", get_apex_actor_handler()),
+        ("fauna.web.set_apex_actor", set_apex_actor_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 /// Register the authenticated web-content-publishing surface on the **bearer**
 /// router. Per-kind replay semantics + rationale: see
 /// `KindRegistry::register_web_kinds`. Reads + idempotent publish mutations are

@@ -9,7 +9,7 @@
 // serde JSON (snake_case across the serde_json boundary). The enum fields ride as
 // their Rust serde variant names — PascalCase (e.g. the wizard step `"Name"` /
 // `"Devices"` / `"Review"`).
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 // One folder this device holds a place in, with that place's three flags
 // (`fauna_protocol::folders::PlaceFlags` owns what each means). The Devices page
@@ -538,5 +538,5 @@ export interface CustodyFacetView {
 }
 
 // The canonical short id (12-char prefix + `…`) is the shared
-// `fauna_core::format::short_id` — import `shortId` from `$lib/wasm`. This module
+// `fauna_core::format::short_id` — import `shortId` from `#lib/wasm`. This module
 // stays types-only (value-formatting.md § Short id).

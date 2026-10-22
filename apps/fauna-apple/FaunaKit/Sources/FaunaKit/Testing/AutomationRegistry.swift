@@ -407,6 +407,12 @@ public final class AutomationRegistry {
         /// and for an `automationSelect` call site that hasn't been converted
         /// yet) keeps today's unchecked write-through behaviour.
         public var options: (() -> [String])?
+        /// The stable keys behind `options`, for a picker whose painted text is
+        /// not its wire value (a trained topic painted by its name, stored as
+        /// `topic:<hex>`): `/element/select` accepts a key here as well as a
+        /// painted text, while the `options` read stays what the user sees —
+        /// the split windows makes between an item's AutomationId and Name.
+        public var optionKeys: (() -> [String])?
         public var isEnabled: (() -> Bool)?
         /// The element's **rendered** text, when that differs from its source `text` —
         /// backs `/element/attr?attr=visible`, which the cross-app e2e
@@ -1274,11 +1280,13 @@ public extension View {
         text: (() -> String?)? = nil,
         value: (() -> String?)? = nil,
         isEnabled: (() -> Bool)? = nil,
-        attributes: (() -> [String: String])? = nil
+        attributes: (() -> [String: String])? = nil,
+        pressKey: ((String) -> String?)? = nil
     ) -> some View {
         #if DEBUG
         modifier(_AutomationRegister(id: id, entry: .init(
-            text: text, value: value, isEnabled: isEnabled, attributes: attributes)))
+            text: text, value: value, isEnabled: isEnabled,
+            pressKey: pressKey, attributes: attributes)))
         #else
         self
         #endif
@@ -1347,16 +1355,20 @@ public extension View {
     /// `nil` keeps a not-yet-converted call site's existing write-through
     /// behaviour; every call site should gain one as it's converted (tracked in
     /// `e2e-conventions.md` § Implementation status today).
+    ///
+    /// `optionKeys` is the stable keys behind painted `options` (`Entry.optionKeys`).
     func automationSelect(
         _ id: String,
         value: @escaping () -> String?,
         options: (() -> [String])? = nil,
+        optionKeys: (() -> [String])? = nil,
         isEnabled: (() -> Bool)? = nil,
         set: @escaping (String) -> Void
     ) -> some View {
         #if DEBUG
         modifier(_AutomationRegister(id: id, entry: .init(
-            value: value, setValue: set, options: options, isEnabled: isEnabled)))
+            value: value, setValue: set, options: options, optionKeys: optionKeys,
+            isEnabled: isEnabled)))
         #else
         self
         #endif

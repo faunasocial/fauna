@@ -320,11 +320,13 @@ struct MacFeedDetailView: View {
         .task(id: vm.pendingPostOpen) {
             guard let postId = vm.pendingPostOpen else { return }
             vm.pendingPostOpen = nil
+            let home = vm.pendingPostOpenHome
+            vm.pendingPostOpenHome = nil
             if let post = vm.findPost(postId: postId) {
                 selectedPost = post
                 return
             }
-            await vm.resolvePost(postId)
+            await vm.resolvePost(postId, from: home)
             // `.unavailable`/no snapshot hit degrades to a no-op — the same
             // posture every pre-existing stale-id open takes.
             if let post = vm.findPost(postId: postId) {
@@ -369,7 +371,14 @@ private struct PostDetailSheet: View {
         .padding(24)
         .frame(width: 500, height: 400)
         .accessibilityIdentifier(Ids.feedPostDetailDialog)
-        .automationValue(Ids.feedPostDetailDialog, text: { "" })
+        .automationValue(Ids.feedPostDetailDialog, text: { "" }, pressKey: { key in
+            // ui.yaml gives `post_detail` no dismiss element; the way back is the
+            // Escape the sheet/push already answers (`.cancelAction`, the back
+            // gesture). The driver's `press_key(…, "Escape")` takes the same door.
+            guard key == "Escape" else { return "post detail takes only Escape, got \(key)" }
+            dismiss()
+            return nil
+        })
         // A scope container, so `scope="feed-post-detail-dialog"` reads THIS detail's
         // `post-image` rather than falling back to a flat index that can land on a
         // list card's still-registered image beneath the sheet. Outside the reply
@@ -464,6 +473,13 @@ private struct PostDetailSheet: View {
                 // rationale as the badge above: the detail pane paints what the list
                 // card paints, off the same live snapshot.
                 DelegatedOriginBadge(authoringOrigin: livePost.authoringOrigin)
+                // Per-row content-label verdict (moderation.md § Per-row badge data path) — the
+                // detail paints what the list card paints, off the same live snapshot, so a room
+                // labeler's verdict folded onto an opened post (room-restricted-posts.md outcome 21)
+                // reaches the detail it was opened in.
+                if let label = primaryContentLabel(labels: livePost.labels) {
+                    ContentLabelBadge(category: label.category)
+                }
                 Spacer()
                 Text(ValueFormat.relativeTime(thenMs: post.timestamp))
                     .font(.caption)
@@ -494,7 +510,8 @@ private struct PostDetailSheet: View {
             // sealed item becomes openable; `vm.documentPostImage` picks the source
             // (`ui/media.md` § Encryption at rest), or a bridged post's `ProxiedImage`
             // (render-model.md § D6c) when it has no blob image.
-            let mediaSource = vm.documentPostImage(livePost.document)
+            let blobHome = postBlobHome(post: livePost)
+            let mediaSource = vm.documentPostImage(livePost.document, home: blobHome)
             if let mediaSource, !mediaSource.isUnavailable {
                 PostImage(source: mediaSource)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -503,7 +520,7 @@ private struct PostDetailSheet: View {
             // mutually exclusive with the image branch above, same fold. A tap plays it in
             // place off the shared `playback_source` (§ D6c → Inline playback).
             if let hash = documentMediaVideoHash(livePost.document) {
-                VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash) })
+                VideoThumbnailView(hash: hash, resolve: { await vm.videoPlaybackURL(hash, home: blobHome) })
             } else if let path = documentMediaProxiedVideoPath(livePost.document) {
                 // A bridged post's `ProxiedVideo` (§ D6c → Proxied video): glyph + path, inert.
                 VideoThumbnailView(proxiedPath: path)

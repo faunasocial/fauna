@@ -541,7 +541,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_func_room_notice_for()
 		})
-		if checksum != 23452 {
+		if checksum != 6628 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_func_room_notice_for: UniFFI API checksum mismatch")
 		}
@@ -944,6 +944,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_close_room_search()
+		})
+		if checksum != 270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_close_room_search: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_confirm_add_participant()
 		})
 		if checksum != 28485 {
@@ -1133,6 +1142,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_open_room_search()
+		})
+		if checksum != 60330 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_open_room_search: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_page_error_diagnostic()
 		})
 		if checksum != 50878 {
@@ -1151,11 +1169,38 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_delivered_aliases()
+		})
+		if checksum != 27761 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_delivered_aliases: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_list_send()
 		})
 		if checksum != 20817 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_list_send: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_message_scan_results()
+		})
+		if checksum != 56383 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_message_scan_results: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_withheld_messages()
+		})
+		if checksum != 45086 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_refresh_withheld_messages: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1273,6 +1318,15 @@ func uniffiCheckChecksums() {
 		if checksum != 39634 {
 			// If this happens try cleaning and rebuilding your project
 			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_reveal_remote_images: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_fauna_conversations_checksum_method_conversationsmanager_room_search()
+		})
+		if checksum != 32094 {
+			// If this happens try cleaning and rebuilding your project
+			panic("fauna_conversations: uniffi_fauna_conversations_checksum_method_conversationsmanager_room_search: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2165,6 +2219,9 @@ type ConversationsManagerInterface interface {
 	// set, so the common path costs no observer tick.
 	ClearPageError()
 	ClearSelection()
+	// Esc, or `room-search-button` again — close the strip on thread `id`,
+	// dropping its query and results; the message stream returns.
+	CloseRoomSearch(id ThreadId)
 	// Confirm the add-participant overlay (`thread-add-participant-button` →
 	// confirm). Snapshot: a `(FaunaMls, OneToOne)` add forks a fresh
 	// participant-keyed group thread (Signal semantics) and selects it; every
@@ -2457,6 +2514,11 @@ type ConversationsManagerInterface interface {
 	// no client has to re-derive it
 	// ([`AddParticipantState::in_place_mls_group`]).
 	OpenAddParticipant(id ThreadId)
+	// `room-search-button` — open the community room's search strip on
+	// thread `id`, with nothing submitted (`room-search.md` § The surface).
+	// A strip already open on this thread is left as it stands. Only a
+	// thread whose `capabilities.can_search_room` holds paints the button.
+	OpenRoomSearch(id ThreadId)
 	// The page error the last membership/label gesture reported, as a plain
 	// `key: message` diagnostic — for a **test agent**, not for paint.
 	//
@@ -2488,6 +2550,16 @@ type ConversationsManagerInterface interface {
 	// Lock-free, so a page render can never panic on a lock the dead pass
 	// poisoned.
 	ReceiveStopped() bool
+	// Read the account's alias rows for the "Delivered to" tag of every
+	// received mail message in thread `id` (`mail-aliases.md` § Label) —
+	// `fauna.bridges.list_account_aliases` through the thread's rail — and
+	// notify when they changed, so the next [`thread_detail`](Self::thread_detail)
+	// paints each bubble's `dm-message-delivered-to-alias`. Apps call it when
+	// a thread opens, beside [`Self::refresh_message_scan_results`]. Read on
+	// every open, not once: a label edited on the aliases page must reach the
+	// tag. A no-op on every thread with no stamped received message; a failed
+	// read keeps what the last one said.
+	RefreshDeliveredAliases(id ThreadId)
 	// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
 	// or the new-thread compose's when `None` — from the nest's current
 	// figures (`mail-mass-mailing.md` § Composing a list message): set when
@@ -2496,6 +2568,35 @@ type ConversationsManagerInterface interface {
 	// opens; [`Self::send`] calls it after every send. The rail answers
 	// ([`RailBackend::list_send_view`]); only SMTP has lists.
 	RefreshListSend(id *ThreadId)
+	// Read the scan verdict of every received mail message in thread `id`
+	// that has none yet (`mail-content-scanning.md` § User sees their own
+	// message's row) — `fauna.bridges.get_message_scan_result` through the
+	// thread's rail, one read per message — and notify when any came back
+	// with lines, so the next [`thread_detail`](Self::thread_detail) paints
+	// each bubble's `dm-message-scan-result`. Apps call it when a thread
+	// opens, beside [`Self::refresh_list_send`]. A message already answered
+	// is not asked again, so a repeat call is a no-op with no notify; a read
+	// that failed is asked again on the next call. A no-op on every thread
+	// with no received mail.
+	//
+	// First it reads the account's `mail.account.scan_result_visible`
+	// switch (`mail-content-scanning.md` § Per-account opt-out for visible
+	// scan details): off, it reads no verdict and the projection paints no
+	// row — so no app decides it — notifying when that hides rows already
+	// painted; back on, the kept verdicts reappear. A failed switch read
+	// keeps the last one known.
+	RefreshMessageScanResults(id ThreadId)
+	// Read the account's own queue rows for the withheld-message badge of
+	// every own fauna-native message in thread `id` (`moderation.md` § Legal
+	// takedown → *App render*) — `fauna.moderation.actions` through the
+	// thread's rail — and notify when they changed, so the next
+	// [`thread_detail`](Self::thread_detail) paints each matched bubble's
+	// `dm-message-withheld-badge`. Apps call it when a thread opens, beside
+	// [`Self::refresh_delivered_aliases`]. Read on every open, not once: a
+	// takedown or a block lands while no app is looking. A no-op on every
+	// thread with no own record on the plane; a failed read keeps what the
+	// last one said.
+	RefreshWithheldMessages(id ThreadId)
 	// Remove the staged attachment at `index` from `id`'s compose draft (the
 	// `dm-attachment-*` remove affordance on the compose bar). The cached bytes
 	// are left in the store — harmless (in-memory, cleared on next login) and
@@ -2651,6 +2752,22 @@ type ConversationsManagerInterface interface {
 	// does not survive a restart. Idempotent: a repeat tap is a no-op insert
 	// plus a harmless re-emit.
 	RevealRemoteImages(messageId MessageId)
+	// Enter in `room-search-field`, or `room-search-submit-button` — search
+	// the community room thread `id` is, through its home nest
+	// (`room-search.md` § Where logic lives). Submit-driven: a blank query is
+	// dropped here with no round-trip. The leg is the channel's recorded
+	// home's — the same-nest `room.search` or the `room.search_remote` relay
+	// — and the manager always asks for the room's posts and one default
+	// page. The results replace the stream until the strip closes; a refusal
+	// lands on the page's `error-message` and the result region stays blank.
+	//
+	// A reply that arrives after the strip was closed, or after another query
+	// was submitted, is dropped: the strip shows only what it last asked.
+	//
+	// Once the hits paint, each post hit's envelope is read through the
+	// post-read seam, one read per post, and its row repaints with the words;
+	// a read that fails leaves that row word-less and the search standing.
+	RoomSearch(id ThreadId, query string)
 	// The address to seat for a roster actor id — the **one** resolution path
 	// both roster seating sites use (`conversation-rooms.md` § Implementation
 	// status today: "resolving a seated actor id to a handle — one follow-on
@@ -3332,6 +3449,18 @@ func (_self *ConversationsManager) ClearSelection() {
 	})
 }
 
+// Esc, or `room-search-button` again — close the strip on thread `id`,
+// dropping its query and results; the message stream returns.
+func (_self *ConversationsManager) CloseRoomSearch(id ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_close_room_search(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id), _uniffiStatus)
+		return false
+	})
+}
+
 // Confirm the add-participant overlay (`thread-add-participant-button` →
 // confirm). Snapshot: a `(FaunaMls, OneToOne)` add forks a fresh
 // participant-keyed group thread (Signal semantics) and selects it; every
@@ -3965,6 +4094,20 @@ func (_self *ConversationsManager) OpenAddParticipant(id ThreadId) {
 	})
 }
 
+// `room-search-button` — open the community room's search strip on
+// thread `id`, with nothing submitted (`room-search.md` § The surface).
+// A strip already open on this thread is left as it stands. Only a
+// thread whose `capabilities.can_search_room` holds paints the button.
+func (_self *ConversationsManager) OpenRoomSearch(id ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_open_room_search(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id), _uniffiStatus)
+		return false
+	})
+}
+
 // The page error the last membership/label gesture reported, as a plain
 // `key: message` diagnostic — for a **test agent**, not for paint.
 //
@@ -4014,6 +4157,41 @@ func (_self *ConversationsManager) ReceiveStopped() bool {
 	}))
 }
 
+// Read the account's alias rows for the "Delivered to" tag of every
+// received mail message in thread `id` (`mail-aliases.md` § Label) —
+// `fauna.bridges.list_account_aliases` through the thread's rail — and
+// notify when they changed, so the next [`thread_detail`](Self::thread_detail)
+// paints each bubble's `dm-message-delivered-to-alias`. Apps call it when
+// a thread opens, beside [`Self::refresh_message_scan_results`]. Read on
+// every open, not once: a label edited on the aliases page must reach the
+// tag. A no-op on every thread with no stamped received message; a failed
+// read keeps what the last one said.
+func (_self *ConversationsManager) RefreshDeliveredAliases(id ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_delivered_aliases(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
+}
+
 // Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
 // or the new-thread compose's when `None` — from the nest's current
 // figures (`mail-mass-mailing.md` § Composing a list message): set when
@@ -4035,6 +4213,85 @@ func (_self *ConversationsManager) RefreshListSend(id *ThreadId) {
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_list_send(
 			_pointer, FfiConverterOptionalTypeThreadIdINSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
+}
+
+// Read the scan verdict of every received mail message in thread `id`
+// that has none yet (`mail-content-scanning.md` § User sees their own
+// message's row) — `fauna.bridges.get_message_scan_result` through the
+// thread's rail, one read per message — and notify when any came back
+// with lines, so the next [`thread_detail`](Self::thread_detail) paints
+// each bubble's `dm-message-scan-result`. Apps call it when a thread
+// opens, beside [`Self::refresh_list_send`]. A message already answered
+// is not asked again, so a repeat call is a no-op with no notify; a read
+// that failed is asked again on the next call. A no-op on every thread
+// with no received mail.
+//
+// First it reads the account's `mail.account.scan_result_visible`
+// switch (`mail-content-scanning.md` § Per-account opt-out for visible
+// scan details): off, it reads no verdict and the projection paints no
+// row — so no app decides it — notifying when that hides rows already
+// painted; back on, the kept verdicts reappear. A failed switch read
+// keeps the last one known.
+func (_self *ConversationsManager) RefreshMessageScanResults(id ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_message_scan_results(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
+}
+
+// Read the account's own queue rows for the withheld-message badge of
+// every own fauna-native message in thread `id` (`moderation.md` § Legal
+// takedown → *App render*) — `fauna.moderation.actions` through the
+// thread's rail — and notify when they changed, so the next
+// [`thread_detail`](Self::thread_detail) paints each matched bubble's
+// `dm-message-withheld-badge`. Apps call it when a thread opens, beside
+// [`Self::refresh_delivered_aliases`]. Read on every open, not once: a
+// takedown or a block lands while no app is looking. A no-op on every
+// thread with no own record on the plane; a failed read keeps what the
+// last one said.
+func (_self *ConversationsManager) RefreshWithheldMessages(id ThreadId) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_refresh_withheld_messages(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
@@ -4414,6 +4671,47 @@ func (_self *ConversationsManager) RevealRemoteImages(messageId MessageId) {
 			_pointer, FfiConverterTypeMessageIdINSTANCE.Lower(messageId), _uniffiStatus)
 		return false
 	})
+}
+
+// Enter in `room-search-field`, or `room-search-submit-button` — search
+// the community room thread `id` is, through its home nest
+// (`room-search.md` § Where logic lives). Submit-driven: a blank query is
+// dropped here with no round-trip. The leg is the channel's recorded
+// home's — the same-nest `room.search` or the `room.search_remote` relay
+// — and the manager always asks for the room's posts and one default
+// page. The results replace the stream until the strip closes; a refusal
+// lands on the page's `error-message` and the result region stays blank.
+//
+// A reply that arrives after the strip was closed, or after another query
+// was submitted, is dropped: the strip shows only what it last asked.
+//
+// Once the hits paint, each post hit's envelope is read through the
+// post-read seam, one read per post, and its row repaints with the words;
+// a read that fails leaves that row word-less and the search standing.
+func (_self *ConversationsManager) RoomSearch(id ThreadId, query string) {
+	_pointer := _self.ffiObject.incrementPointer("*ConversationsManager")
+	defer _self.ffiObject.decrementPointer()
+	uniffiRustCallAsync[error](
+		nil,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_fauna_conversations_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_fauna_conversations_fn_method_conversationsmanager_room_search(
+			_pointer, FfiConverterTypeThreadIdINSTANCE.Lower(id), FfiConverterStringINSTANCE.Lower(query)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_fauna_conversations_rust_future_free_void(handle)
+		},
+	)
+
 }
 
 // The address to seat for a roster actor id — the **one** resolution path
@@ -6429,6 +6727,59 @@ func (_ FfiDestroyerListSendView) Destroy(value ListSendView) {
 	value.Destroy()
 }
 
+// The fresh-IP warm-up's hold on one of the user's own sent messages, as the
+// nest's `Sent` read reports it (`InboxMessage.warmup_hold`;
+// `mail-deliverability.md` § Enforcement at submission time): when the ramp
+// lets it go and how many held messages are ahead of it. Painted as
+// `dm-message-warmup-deferred` under the message's bubble, worded by the
+// shared [`crate::message::warmup_deferred_text`].
+type MailWarmupHold struct {
+	// When the message will be delivered — epoch **seconds** (the next
+	// 00:00 UTC after it was submitted).
+	ReleaseAtSecs int64
+	// Held messages submitted before this one (`0` = next in line).
+	MessagesAhead uint32
+}
+
+func (r *MailWarmupHold) Destroy() {
+	FfiDestroyerInt64{}.Destroy(r.ReleaseAtSecs)
+	FfiDestroyerUint32{}.Destroy(r.MessagesAhead)
+}
+
+type FfiConverterMailWarmupHold struct{}
+
+var FfiConverterMailWarmupHoldINSTANCE = FfiConverterMailWarmupHold{}
+
+func (c FfiConverterMailWarmupHold) Lift(rb RustBufferI) MailWarmupHold {
+	return LiftFromRustBuffer[MailWarmupHold](c, rb)
+}
+
+func (c FfiConverterMailWarmupHold) Read(reader io.Reader) MailWarmupHold {
+	return MailWarmupHold{
+		FfiConverterInt64INSTANCE.Read(reader),
+		FfiConverterUint32INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterMailWarmupHold) Lower(value MailWarmupHold) C.RustBuffer {
+	return LowerIntoRustBuffer[MailWarmupHold](c, value)
+}
+
+func (c FfiConverterMailWarmupHold) LowerExternal(value MailWarmupHold) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[MailWarmupHold](c, value))
+}
+
+func (c FfiConverterMailWarmupHold) Write(writer io.Writer, value MailWarmupHold) {
+	FfiConverterInt64INSTANCE.Write(writer, value.ReleaseAtSecs)
+	FfiConverterUint32INSTANCE.Write(writer, value.MessagesAhead)
+}
+
+type FfiDestroyerMailWarmupHold struct{}
+
+func (_ FfiDestroyerMailWarmupHold) Destroy(value MailWarmupHold) {
+	value.Destroy()
+}
+
 // Whole-message crypto badges. Content credentials are not one of them: a
 // C2PA verdict belongs to the bytes it was probed over, so it rides each
 // attachment ([`AttachmentSnapshot::c2pa`]), never the message.
@@ -6538,6 +6889,21 @@ type MessageSnapshot struct {
 	// byte-identical for a normal message (`version-compatibility.md`;
 	// no-user-data-loss).
 	LegalTakedownRef *string
+	// `Some(reason_token)` iff this nest's admin **blocked** this message after
+	// a report (`moderation.md` § Admin block of a reported item) — the report
+	// reason's wire token. For every viewer but the author the relay withheld
+	// the sealed envelope, so [`document`](Self::document) / [`body`](Self::body)
+	// are empty and every app renders the shared `adminBlockNotice(reason)`
+	// (`fauna_core::obligation::admin_block_notice`) **in place of the
+	// bubble** — the [`legal_takedown_ref`](Self::legal_takedown_ref) twin,
+	// with the same best-effort boundary (a copy synced before the block
+	// stands). On the author's own devices the nest serves the body (its
+	// attested author, decision 4): the message carries its body AND this
+	// reason, and the notice paints **beside the bubble**
+	// ([`admin_block_in_place`](Self::admin_block_in_place) tells the two
+	// apart). Additive, and absent from the at-rest blob for every other
+	// message.
+	AdminBlockReason *string
 	// Per-category content-label verdicts (`moderation.md` § Per-row badge
 	// data path, ratified 2026-07-16) — the client-side twin of
 	// `fauna_feed::PostSummary::labels`. Populated post-decrypt by
@@ -6577,6 +6943,69 @@ type MessageSnapshot struct {
 	// stale one. Additive (`serde` + UniFFI defaults), so the at-rest slice
 	// stays byte-identical and no app constructor has to name it.
 	CanDelete bool
+	// Whether this is the viewer's **own message that its bridge never
+	// took**: the bridge that carried the room was disconnected with the
+	// message still queued, and the nest deleted the undeliverable item and
+	// stamped the Sent copy (`apps/bridges.md` § Phase G → *When the bridge
+	// stops serving*, consequence 3). Painted as `dm-message-undelivered`
+	// under the body, which stays in view so the user can send it again.
+	// Projected on every [`crate::ConversationsManager::thread_detail`] from
+	// the rail's answer ([`crate::backend::RailBackend::message_undelivered`]),
+	// like [`Self::can_delete`]: the stamp can land long after this device
+	// stored the message. Additive (`serde` + UniFFI defaults), so the
+	// at-rest slice stays byte-identical for every other message.
+	Undelivered bool
+	// The fresh-IP warm-up's hold on the viewer's **own sent mail**: the nest
+	// accepted it but will deliver it only when the ramp allows
+	// (`mail-deliverability.md` § Enforcement at submission time). Painted as
+	// `dm-message-warmup-deferred` under the body, worded by
+	// [`warmup_deferred_text`] — which also drops it once the release time
+	// has passed. Projected on every
+	// [`crate::ConversationsManager::thread_detail`] from what the latest
+	// `Sent` read said, like [`Self::undelivered`]. Additive (`serde` + UniFFI
+	// defaults), so the at-rest slice stays byte-identical for every other
+	// message.
+	WarmupHold *MailWarmupHold
+	// The perimeter scan verdict of a **received** mail message, as the
+	// lines its `dm-message-scan-result` row paints — ClamAV, rspamd, the
+	// action taken, each a [`fauna_core::localized::LocalizedText`] from the
+	// shared [`fauna_core::mail_scan::scan_result_lines`]
+	// (`mail-content-scanning.md` § User sees their own message's row).
+	// Empty — and the row absent — for every other message, and for a
+	// received one whose scan row has not been read yet or does not exist.
+	// Projected on every [`crate::ConversationsManager::thread_detail`] from
+	// the manager's cache, which
+	// [`crate::ConversationsManager::refresh_message_scan_results`] fills
+	// when the thread opens; never stored, so the at-rest slice stays
+	// byte-identical.
+	ScanResultLines []fauna_core.LocalizedText
+	// The "Delivered to: <address> [<label>]" tag of a **received** mail
+	// message — the alias it arrived on, as its `dm-message-delivered-to-alias`
+	// paints it ([`delivered_to_text`]; `mail-aliases.md` § Label). `None` —
+	// and the tag absent — for every other message, for one with no
+	// delivery stamp, and until the account's alias rows have been read.
+	// Projected on every [`crate::ConversationsManager::thread_detail`] from
+	// the stamps kept at ingest and the rows
+	// [`crate::ConversationsManager::refresh_delivered_aliases`] reads when
+	// the thread opens; never stored, so the at-rest slice stays
+	// byte-identical.
+	DeliveredTo *string
+	// The nest's withholding of the viewer's **own** fauna-native message —
+	// its legal takedown or its admin block, as the author's moderation
+	// queue row records it — painted as `dm-message-withheld-badge` beside
+	// the body, whose tap opens that row's appeal (`moderation.md` § Legal
+	// takedown → *App render*, the fourth surface). The author's devices
+	// keep the real copy and never receive the tombstone, so without it the
+	// thread says nothing. Matched by record digest: the queue row's
+	// `content_id` is this message's [`PlaneRef::record_digest`]. Projected
+	// on every [`crate::ConversationsManager::thread_detail`] from the rows
+	// [`crate::ConversationsManager::refresh_withheld_messages`] reads when
+	// the thread opens; never stored, so the at-rest slice stays
+	// byte-identical — and never through
+	// [`legal_takedown_ref`](Self::legal_takedown_ref) (which collapses the
+	// bubble) or [`admin_block_reason`](Self::admin_block_reason) (which
+	// names one ground only).
+	Withheld *WithheldOwnMessage
 }
 
 func (r *MessageSnapshot) Destroy() {
@@ -6593,9 +7022,15 @@ func (r *MessageSnapshot) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.Deleted)
 	FfiDestroyerBool{}.Destroy(r.IsOwn)
 	FfiDestroyerOptionalString{}.Destroy(r.LegalTakedownRef)
+	FfiDestroyerOptionalString{}.Destroy(r.AdminBlockReason)
 	FfiDestroyerSequenceContentLabelEntry{}.Destroy(r.Labels)
 	FfiDestroyerOptionalPlaneRef{}.Destroy(r.PlaneRef)
 	FfiDestroyerBool{}.Destroy(r.CanDelete)
+	FfiDestroyerBool{}.Destroy(r.Undelivered)
+	FfiDestroyerOptionalMailWarmupHold{}.Destroy(r.WarmupHold)
+	FfiDestroyerSequenceLocalizedText{}.Destroy(r.ScanResultLines)
+	FfiDestroyerOptionalString{}.Destroy(r.DeliveredTo)
+	FfiDestroyerOptionalWithheldOwnMessage{}.Destroy(r.Withheld)
 }
 
 type FfiConverterMessageSnapshot struct{}
@@ -6621,9 +7056,15 @@ func (c FfiConverterMessageSnapshot) Read(reader io.Reader) MessageSnapshot {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterSequenceContentLabelEntryINSTANCE.Read(reader),
 		FfiConverterOptionalPlaneRefINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalMailWarmupHoldINSTANCE.Read(reader),
+		FfiConverterSequenceLocalizedTextINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalWithheldOwnMessageINSTANCE.Read(reader),
 	}
 }
 
@@ -6649,9 +7090,15 @@ func (c FfiConverterMessageSnapshot) Write(writer io.Writer, value MessageSnapsh
 	FfiConverterBoolINSTANCE.Write(writer, value.Deleted)
 	FfiConverterBoolINSTANCE.Write(writer, value.IsOwn)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LegalTakedownRef)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.AdminBlockReason)
 	FfiConverterSequenceContentLabelEntryINSTANCE.Write(writer, value.Labels)
 	FfiConverterOptionalPlaneRefINSTANCE.Write(writer, value.PlaneRef)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanDelete)
+	FfiConverterBoolINSTANCE.Write(writer, value.Undelivered)
+	FfiConverterOptionalMailWarmupHoldINSTANCE.Write(writer, value.WarmupHold)
+	FfiConverterSequenceLocalizedTextINSTANCE.Write(writer, value.ScanResultLines)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.DeliveredTo)
+	FfiConverterOptionalWithheldOwnMessageINSTANCE.Write(writer, value.Withheld)
 }
 
 type FfiDestroyerMessageSnapshot struct{}
@@ -6743,6 +7190,14 @@ type RailInboundMessage struct {
 	// `legalTakedownTombstone(reference)` in place of the bubble body. `None`
 	// for every normal message.
 	LegalTakedownRef *string
+	// `Some(reason_token)` iff this nest's admin blocked this message after a
+	// report (`moderation.md` § Admin block of a reported item) — the
+	// [`legal_takedown_ref`](Self::legal_takedown_ref) twin: the envelope was
+	// withheld, the driver builds a notice inbound carrying only the reason,
+	// and the client renders the shared `adminBlockNotice(reason)` — or, on
+	// the author's own devices (whom the nest serves the body, decision 4),
+	// the decoded message carrying the reason, painted beside the bubble.
+	AdminBlockReason *string
 	// This record's account-data-plane identity, when the rail has one — see
 	// [`crate::message::MessageSnapshot::plane_ref`]. Set by the FaunaMls
 	// driver, which is the layer that holds all three inputs the derivation
@@ -6764,6 +7219,7 @@ func (r *RailInboundMessage) Destroy() {
 	FfiDestroyerSequenceAttachmentSnapshot{}.Destroy(r.Attachments)
 	FfiDestroyerMessageBadges{}.Destroy(r.Badges)
 	FfiDestroyerOptionalString{}.Destroy(r.LegalTakedownRef)
+	FfiDestroyerOptionalString{}.Destroy(r.AdminBlockReason)
 	FfiDestroyerOptionalPlaneRef{}.Destroy(r.PlaneRef)
 }
 
@@ -6788,6 +7244,7 @@ func (c FfiConverterRailInboundMessage) Read(reader io.Reader) RailInboundMessag
 		FfiConverterOptionalTypeMessageIdINSTANCE.Read(reader),
 		FfiConverterSequenceAttachmentSnapshotINSTANCE.Read(reader),
 		FfiConverterMessageBadgesINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterOptionalPlaneRefINSTANCE.Read(reader),
 	}
@@ -6814,6 +7271,7 @@ func (c FfiConverterRailInboundMessage) Write(writer io.Writer, value RailInboun
 	FfiConverterSequenceAttachmentSnapshotINSTANCE.Write(writer, value.Attachments)
 	FfiConverterMessageBadgesINSTANCE.Write(writer, value.Badges)
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LegalTakedownRef)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.AdminBlockReason)
 	FfiConverterOptionalPlaneRefINSTANCE.Write(writer, value.PlaneRef)
 }
 
@@ -7312,6 +7770,134 @@ func (_ FfiDestroyerRoomPolicySnapshot) Destroy(value RoomPolicySnapshot) {
 	value.Destroy()
 }
 
+// One row of the room's search results. Every word on it is this device's
+// own — the nest sends positions, ids and ranks and no text.
+type RoomSearchResultSnapshot struct {
+	Kind RoomSearchResultKind
+	// The sender of a message hit this device holds. `None` on a message it
+	// has not received yet, and on a post hit until the post-read seam lands
+	// (`room-search.md` § Implementation status today).
+	SenderDisplay *string
+	// When it was sent, epoch millis; `None` exactly when `sender_display` is.
+	SentAtMs *int64
+	// The row's words: a held message's first line, or the shared
+	// *not on this device yet* copy for a position this device has not
+	// received (`pending`). Empty on a post hit until the post-read seam
+	// lands.
+	Text string
+	// A message hit whose position this device has not received yet. It
+	// still opens: the selection lights on the emit that fetches it.
+	Pending    bool
+	Navigation RoomSearchNav
+}
+
+func (r *RoomSearchResultSnapshot) Destroy() {
+	FfiDestroyerRoomSearchResultKind{}.Destroy(r.Kind)
+	FfiDestroyerOptionalString{}.Destroy(r.SenderDisplay)
+	FfiDestroyerOptionalInt64{}.Destroy(r.SentAtMs)
+	FfiDestroyerString{}.Destroy(r.Text)
+	FfiDestroyerBool{}.Destroy(r.Pending)
+	FfiDestroyerRoomSearchNav{}.Destroy(r.Navigation)
+}
+
+type FfiConverterRoomSearchResultSnapshot struct{}
+
+var FfiConverterRoomSearchResultSnapshotINSTANCE = FfiConverterRoomSearchResultSnapshot{}
+
+func (c FfiConverterRoomSearchResultSnapshot) Lift(rb RustBufferI) RoomSearchResultSnapshot {
+	return LiftFromRustBuffer[RoomSearchResultSnapshot](c, rb)
+}
+
+func (c FfiConverterRoomSearchResultSnapshot) Read(reader io.Reader) RoomSearchResultSnapshot {
+	return RoomSearchResultSnapshot{
+		FfiConverterRoomSearchResultKindINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalInt64INSTANCE.Read(reader),
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterRoomSearchNavINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterRoomSearchResultSnapshot) Lower(value RoomSearchResultSnapshot) C.RustBuffer {
+	return LowerIntoRustBuffer[RoomSearchResultSnapshot](c, value)
+}
+
+func (c FfiConverterRoomSearchResultSnapshot) LowerExternal(value RoomSearchResultSnapshot) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RoomSearchResultSnapshot](c, value))
+}
+
+func (c FfiConverterRoomSearchResultSnapshot) Write(writer io.Writer, value RoomSearchResultSnapshot) {
+	FfiConverterRoomSearchResultKindINSTANCE.Write(writer, value.Kind)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.SenderDisplay)
+	FfiConverterOptionalInt64INSTANCE.Write(writer, value.SentAtMs)
+	FfiConverterStringINSTANCE.Write(writer, value.Text)
+	FfiConverterBoolINSTANCE.Write(writer, value.Pending)
+	FfiConverterRoomSearchNavINSTANCE.Write(writer, value.Navigation)
+}
+
+type FfiDestroyerRoomSearchResultSnapshot struct{}
+
+func (_ FfiDestroyerRoomSearchResultSnapshot) Destroy(value RoomSearchResultSnapshot) {
+	value.Destroy()
+}
+
+// The room's search strip, as the thread view paints it — view state on the
+// detail, never a draft (`room-search.md` § The surface). Present while the
+// strip is open on this thread; selecting another thread clears it.
+type RoomSearchSnapshot struct {
+	// The query submitted last, empty while none has been.
+	Query  string
+	Status RoomSearchStatus
+	// The hits, in the order the home nest served them — best first, message
+	// and post hits interleaved on one rank scale, never re-sorted. Empty
+	// unless `status` is `Done`; `Done` with no rows is the empty state
+	// (`room-search-no-results`).
+	Results []RoomSearchResultSnapshot
+}
+
+func (r *RoomSearchSnapshot) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Query)
+	FfiDestroyerRoomSearchStatus{}.Destroy(r.Status)
+	FfiDestroyerSequenceRoomSearchResultSnapshot{}.Destroy(r.Results)
+}
+
+type FfiConverterRoomSearchSnapshot struct{}
+
+var FfiConverterRoomSearchSnapshotINSTANCE = FfiConverterRoomSearchSnapshot{}
+
+func (c FfiConverterRoomSearchSnapshot) Lift(rb RustBufferI) RoomSearchSnapshot {
+	return LiftFromRustBuffer[RoomSearchSnapshot](c, rb)
+}
+
+func (c FfiConverterRoomSearchSnapshot) Read(reader io.Reader) RoomSearchSnapshot {
+	return RoomSearchSnapshot{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterRoomSearchStatusINSTANCE.Read(reader),
+		FfiConverterSequenceRoomSearchResultSnapshotINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterRoomSearchSnapshot) Lower(value RoomSearchSnapshot) C.RustBuffer {
+	return LowerIntoRustBuffer[RoomSearchSnapshot](c, value)
+}
+
+func (c FfiConverterRoomSearchSnapshot) LowerExternal(value RoomSearchSnapshot) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RoomSearchSnapshot](c, value))
+}
+
+func (c FfiConverterRoomSearchSnapshot) Write(writer io.Writer, value RoomSearchSnapshot) {
+	FfiConverterStringINSTANCE.Write(writer, value.Query)
+	FfiConverterRoomSearchStatusINSTANCE.Write(writer, value.Status)
+	FfiConverterSequenceRoomSearchResultSnapshotINSTANCE.Write(writer, value.Results)
+}
+
+type FfiDestroyerRoomSearchSnapshot struct{}
+
+func (_ FfiDestroyerRoomSearchSnapshot) Destroy(value RoomSearchSnapshot) {
+	value.Destroy()
+}
+
 // The `room_settings` editor's staged state, seeded from the projected room
 // and diffed back to [`RoomSettingsEdit`]s on Save.
 //
@@ -7551,6 +8137,16 @@ type RoomSnapshot struct {
 	// session). Painted as `thread-room-notice`'s `moderation-unverified`
 	// state ([`RoomSnapshot::notice`]), which yields to `awaiting_key`.
 	ModerationUnverified bool
+	// Whether this is a **bridged room no live bridge serves**: the
+	// principal that carried it was revoked, or re-consented without the
+	// bridge — the nest's `rooms.list` `disconnected`
+	// (`apps/bridges.md` § Phase G → *When the bridge stops serving*). The
+	// room stays readable and is never writable until a bridge declaring the
+	// same id adopts it: [`RoomSnapshot::gate`] withholds the reply bar on it
+	// (`ThreadCapabilities::can_send`), and this is what says why. `false`
+	// for every other class. Painted as `thread-room-notice`'s `bridge-disconnected`
+	// state ([`RoomSnapshot::notice`]).
+	BridgeDisconnected bool
 	// The invitations pending on this room that the viewer may withdraw,
 	// oldest first (`conversation-rooms.md` § Join rules and invites →
 	// *Pending invitations are visible to whoever may withdraw them*). The
@@ -7567,6 +8163,11 @@ type RoomSnapshot struct {
 	// guess. Not painted by any app yet: it needs element ids ui.yaml does
 	// not carry (rule A).
 	PendingInvites *[]RoomPendingInviteSnapshot
+	// The room's search strip while it is open on this thread
+	// (`ConversationsManager::room_search`, `close_room_search`); `None`
+	// while it is closed. View state, projected by the manager on every emit
+	// — never the rail's answer.
+	Search *RoomSearchSnapshot
 }
 
 func (r *RoomSnapshot) Destroy() {
@@ -7578,7 +8179,9 @@ func (r *RoomSnapshot) Destroy() {
 	FfiDestroyerOptionalSequenceString{}.Destroy(r.Labelers)
 	FfiDestroyerBool{}.Destroy(r.AwaitingKey)
 	FfiDestroyerBool{}.Destroy(r.ModerationUnverified)
+	FfiDestroyerBool{}.Destroy(r.BridgeDisconnected)
 	FfiDestroyerOptionalSequenceRoomPendingInviteSnapshot{}.Destroy(r.PendingInvites)
+	FfiDestroyerOptionalRoomSearchSnapshot{}.Destroy(r.Search)
 }
 
 type FfiConverterRoomSnapshot struct{}
@@ -7599,7 +8202,9 @@ func (c FfiConverterRoomSnapshot) Read(reader io.Reader) RoomSnapshot {
 		FfiConverterOptionalSequenceStringINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalSequenceRoomPendingInviteSnapshotINSTANCE.Read(reader),
+		FfiConverterOptionalRoomSearchSnapshotINSTANCE.Read(reader),
 	}
 }
 
@@ -7620,7 +8225,9 @@ func (c FfiConverterRoomSnapshot) Write(writer io.Writer, value RoomSnapshot) {
 	FfiConverterOptionalSequenceStringINSTANCE.Write(writer, value.Labelers)
 	FfiConverterBoolINSTANCE.Write(writer, value.AwaitingKey)
 	FfiConverterBoolINSTANCE.Write(writer, value.ModerationUnverified)
+	FfiConverterBoolINSTANCE.Write(writer, value.BridgeDisconnected)
 	FfiConverterOptionalSequenceRoomPendingInviteSnapshotINSTANCE.Write(writer, value.PendingInvites)
+	FfiConverterOptionalRoomSearchSnapshotINSTANCE.Write(writer, value.Search)
 }
 
 type FfiDestroyerRoomSnapshot struct{}
@@ -7687,6 +8294,24 @@ type ThreadCapabilities struct {
 	// ([`crate::manager::ConversationsManager::remove_participant`] draws the
 	// same line).
 	CanLeaveRoom bool
+	// Search this room's words through its home nest — `room-search-button`
+	// (`room-search.md` § The surface). True exactly for a **community** room
+	// whose floor seats this account: the home nest's search door refuses
+	// every other class, because an end-to-end room's words rest only on its
+	// members' devices. Derived from the room, never declared by a rail or a
+	// bridge — like `encryption` — so no app branches on class.
+	CanSearchRoom bool
+	// Whether the reply bar is offered at all — `dm-text-field` and
+	// `dm-send-button`. `true` on every rail; narrowed only where a send
+	// could not leave: a bridged room no live bridge serves
+	// ([`crate::room::RoomSnapshot::gate`] on
+	// [`crate::room::RoomSnapshot::bridge_disconnected`]; `apps/bridges.md`
+	// § Phase G → *When the bridge stops serving*, "readable, never
+	// writable"), and a bridged thread whose bridge is not in the registry,
+	// whose send the backend refuses. Derived from the room and the
+	// registry, never declared by a bridge — like `encryption` — so an app
+	// withholds the bar on `!can_send` and never branches on a rail.
+	CanSend bool
 }
 
 func (r *ThreadCapabilities) Destroy() {
@@ -7707,6 +8332,8 @@ func (r *ThreadCapabilities) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.CanAppointAdmins)
 	FfiDestroyerBool{}.Destroy(r.CanTransferOwnership)
 	FfiDestroyerBool{}.Destroy(r.CanLeaveRoom)
+	FfiDestroyerBool{}.Destroy(r.CanSearchRoom)
+	FfiDestroyerBool{}.Destroy(r.CanSend)
 }
 
 type FfiConverterThreadCapabilities struct{}
@@ -7730,6 +8357,8 @@ func (c FfiConverterThreadCapabilities) Read(reader io.Reader) ThreadCapabilitie
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterDeliveryModeINSTANCE.Read(reader),
 		FfiConverterThreadEncryptionINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
@@ -7765,6 +8394,8 @@ func (c FfiConverterThreadCapabilities) Write(writer io.Writer, value ThreadCapa
 	FfiConverterBoolINSTANCE.Write(writer, value.CanAppointAdmins)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanTransferOwnership)
 	FfiConverterBoolINSTANCE.Write(writer, value.CanLeaveRoom)
+	FfiConverterBoolINSTANCE.Write(writer, value.CanSearchRoom)
+	FfiConverterBoolINSTANCE.Write(writer, value.CanSend)
 }
 
 type FfiDestroyerThreadCapabilities struct{}
@@ -8041,6 +8672,67 @@ func (c FfiConverterUnreachableSeat) Write(writer io.Writer, value UnreachableSe
 type FfiDestroyerUnreachableSeat struct{}
 
 func (_ FfiDestroyerUnreachableSeat) Destroy(value UnreachableSeat) {
+	value.Destroy()
+}
+
+// The projection behind `dm-message-withheld-badge` (see
+// [`MessageSnapshot::withheld`]).
+type WithheldOwnMessage struct {
+	// The matched queue row's `content_id` — what the appeal names.
+	ContentId string
+	Ground    WithheldGround
+	// The deciding nest's handle domain, on a row another nest delivered.
+	IssuerNest *string
+	// The badge's words, side by side: the ground — the block notice with
+	// its reason when this copy carries one, so the bubble paints ONE notice
+	// and never the badge beside a second — then the shared "decided by
+	// {nest}" suffix when another nest decided, then the appeal entry. The
+	// ground line's argument is itself a key: resolve nested.
+	Lines []fauna_core.LocalizedText
+}
+
+func (r *WithheldOwnMessage) Destroy() {
+	FfiDestroyerString{}.Destroy(r.ContentId)
+	FfiDestroyerWithheldGround{}.Destroy(r.Ground)
+	FfiDestroyerOptionalString{}.Destroy(r.IssuerNest)
+	FfiDestroyerSequenceLocalizedText{}.Destroy(r.Lines)
+}
+
+type FfiConverterWithheldOwnMessage struct{}
+
+var FfiConverterWithheldOwnMessageINSTANCE = FfiConverterWithheldOwnMessage{}
+
+func (c FfiConverterWithheldOwnMessage) Lift(rb RustBufferI) WithheldOwnMessage {
+	return LiftFromRustBuffer[WithheldOwnMessage](c, rb)
+}
+
+func (c FfiConverterWithheldOwnMessage) Read(reader io.Reader) WithheldOwnMessage {
+	return WithheldOwnMessage{
+		FfiConverterStringINSTANCE.Read(reader),
+		FfiConverterWithheldGroundINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterSequenceLocalizedTextINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterWithheldOwnMessage) Lower(value WithheldOwnMessage) C.RustBuffer {
+	return LowerIntoRustBuffer[WithheldOwnMessage](c, value)
+}
+
+func (c FfiConverterWithheldOwnMessage) LowerExternal(value WithheldOwnMessage) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[WithheldOwnMessage](c, value))
+}
+
+func (c FfiConverterWithheldOwnMessage) Write(writer io.Writer, value WithheldOwnMessage) {
+	FfiConverterStringINSTANCE.Write(writer, value.ContentId)
+	FfiConverterWithheldGroundINSTANCE.Write(writer, value.Ground)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.IssuerNest)
+	FfiConverterSequenceLocalizedTextINSTANCE.Write(writer, value.Lines)
+}
+
+type FfiDestroyerWithheldOwnMessage struct{}
+
+func (_ FfiDestroyerWithheldOwnMessage) Destroy(value WithheldOwnMessage) {
 	value.Destroy()
 }
 
@@ -8781,7 +9473,7 @@ func (_ FfiDestroyerRoomClass) Destroy(value RoomClass) {
 
 // The room's standing notice — what `thread-room-notice` states on the
 // thread header while one holds (`ui/conversations.md` § Element IDs).
-// Derived from two shared room facts, so no app re-decides which one speaks.
+// Derived from three shared room facts, so no app re-decides which one speaks.
 type RoomNotice uint
 
 const (
@@ -8793,6 +9485,10 @@ const (
 	// ([`RoomSnapshot::moderation_unverified`]; `conversation-rooms.md` §
 	// Roles and authorization → *Members verify what they paint*).
 	RoomNoticeModerationUnverified RoomNotice = 2
+	// A bridged room no live bridge serves — readable, never writable
+	// ([`RoomSnapshot::bridge_disconnected`]; `apps/bridges.md` § Phase G →
+	// *When the bridge stops serving*).
+	RoomNoticeBridgeDisconnected RoomNotice = 3
 )
 
 type FfiConverterRoomNotice struct{}
@@ -8860,6 +9556,175 @@ func (FfiConverterRoomRole) Write(writer io.Writer, value RoomRole) {
 type FfiDestroyerRoomRole struct{}
 
 func (_ FfiDestroyerRoomRole) Destroy(value RoomRole) {
+}
+
+// Where a room-search row opens — a typed target, the Search page's
+// `SearchNav` shape (`room-search.md` § The surface → *Opening a hit*).
+type RoomSearchNav interface {
+	Destroy()
+}
+
+// Open through `ConversationsManager::select_thread_and_message`.
+type RoomSearchNavMessage struct {
+	ThreadId  ThreadId
+	MessageId MessageId
+}
+
+func (e RoomSearchNavMessage) Destroy() {
+	FfiDestroyerTypeThreadId{}.Destroy(e.ThreadId)
+	FfiDestroyerTypeMessageId{}.Destroy(e.MessageId)
+}
+
+// Open through the feed manager's deep-link door: `resolve_post_from`
+// with `home_nest_url` when it is `Some` — the room's recorded home when
+// that is another nest — else `resolve_post`.
+type RoomSearchNavPost struct {
+	PostId      string
+	HomeNestUrl *string
+}
+
+func (e RoomSearchNavPost) Destroy() {
+	FfiDestroyerString{}.Destroy(e.PostId)
+	FfiDestroyerOptionalString{}.Destroy(e.HomeNestUrl)
+}
+
+type FfiConverterRoomSearchNav struct{}
+
+var FfiConverterRoomSearchNavINSTANCE = FfiConverterRoomSearchNav{}
+
+func (c FfiConverterRoomSearchNav) Lift(rb RustBufferI) RoomSearchNav {
+	return LiftFromRustBuffer[RoomSearchNav](c, rb)
+}
+
+func (c FfiConverterRoomSearchNav) Lower(value RoomSearchNav) C.RustBuffer {
+	return LowerIntoRustBuffer[RoomSearchNav](c, value)
+}
+
+func (c FfiConverterRoomSearchNav) LowerExternal(value RoomSearchNav) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RoomSearchNav](c, value))
+}
+func (FfiConverterRoomSearchNav) Read(reader io.Reader) RoomSearchNav {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return RoomSearchNavMessage{
+			FfiConverterTypeThreadIdINSTANCE.Read(reader),
+			FfiConverterTypeMessageIdINSTANCE.Read(reader),
+		}
+	case 2:
+		return RoomSearchNavPost{
+			FfiConverterStringINSTANCE.Read(reader),
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterRoomSearchNav.Read()", id))
+	}
+}
+
+func (FfiConverterRoomSearchNav) Write(writer io.Writer, value RoomSearchNav) {
+	switch variant_value := value.(type) {
+	case RoomSearchNavMessage:
+		writeInt32(writer, 1)
+		FfiConverterTypeThreadIdINSTANCE.Write(writer, variant_value.ThreadId)
+		FfiConverterTypeMessageIdINSTANCE.Write(writer, variant_value.MessageId)
+	case RoomSearchNavPost:
+		writeInt32(writer, 2)
+		FfiConverterStringINSTANCE.Write(writer, variant_value.PostId)
+		FfiConverterOptionalStringINSTANCE.Write(writer, variant_value.HomeNestUrl)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterRoomSearchNav.Write", value))
+	}
+}
+
+type FfiDestroyerRoomSearchNav struct{}
+
+func (_ FfiDestroyerRoomSearchNav) Destroy(value RoomSearchNav) {
+	value.Destroy()
+}
+
+// What a room-search hit points at — `room-search-result-item[i]`'s `kind`
+// attribute.
+type RoomSearchResultKind uint
+
+const (
+	RoomSearchResultKindMessage RoomSearchResultKind = 1
+	RoomSearchResultKindPost    RoomSearchResultKind = 2
+)
+
+type FfiConverterRoomSearchResultKind struct{}
+
+var FfiConverterRoomSearchResultKindINSTANCE = FfiConverterRoomSearchResultKind{}
+
+func (c FfiConverterRoomSearchResultKind) Lift(rb RustBufferI) RoomSearchResultKind {
+	return LiftFromRustBuffer[RoomSearchResultKind](c, rb)
+}
+
+func (c FfiConverterRoomSearchResultKind) Lower(value RoomSearchResultKind) C.RustBuffer {
+	return LowerIntoRustBuffer[RoomSearchResultKind](c, value)
+}
+
+func (c FfiConverterRoomSearchResultKind) LowerExternal(value RoomSearchResultKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RoomSearchResultKind](c, value))
+}
+func (FfiConverterRoomSearchResultKind) Read(reader io.Reader) RoomSearchResultKind {
+	id := readInt32(reader)
+	return RoomSearchResultKind(id)
+}
+
+func (FfiConverterRoomSearchResultKind) Write(writer io.Writer, value RoomSearchResultKind) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerRoomSearchResultKind struct{}
+
+func (_ FfiDestroyerRoomSearchResultKind) Destroy(value RoomSearchResultKind) {
+}
+
+// Where a room search stands. No element paints `Searching`: an e2e waits on
+// a row, the empty state or the error, never on a timer (`room-search.md`
+// § Errors & edge cases).
+type RoomSearchStatus uint
+
+const (
+	// The strip is open and nothing has been submitted.
+	RoomSearchStatusIdle RoomSearchStatus = 1
+	// A query is out at the home nest.
+	RoomSearchStatusSearching RoomSearchStatus = 2
+	// The nest answered; `results` is its answer.
+	RoomSearchStatusDone RoomSearchStatus = 3
+	// The nest refused or could not be reached; the message is on the page's
+	// `error-message`, and the result region stays blank.
+	RoomSearchStatusFailed RoomSearchStatus = 4
+)
+
+type FfiConverterRoomSearchStatus struct{}
+
+var FfiConverterRoomSearchStatusINSTANCE = FfiConverterRoomSearchStatus{}
+
+func (c FfiConverterRoomSearchStatus) Lift(rb RustBufferI) RoomSearchStatus {
+	return LiftFromRustBuffer[RoomSearchStatus](c, rb)
+}
+
+func (c FfiConverterRoomSearchStatus) Lower(value RoomSearchStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[RoomSearchStatus](c, value)
+}
+
+func (c FfiConverterRoomSearchStatus) LowerExternal(value RoomSearchStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[RoomSearchStatus](c, value))
+}
+func (FfiConverterRoomSearchStatus) Read(reader io.Reader) RoomSearchStatus {
+	id := readInt32(reader)
+	return RoomSearchStatus(id)
+}
+
+func (FfiConverterRoomSearchStatus) Write(writer io.Writer, value RoomSearchStatus) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerRoomSearchStatus struct{}
+
+func (_ FfiDestroyerRoomSearchStatus) Destroy(value RoomSearchStatus) {
 }
 
 // One staged change of the room policy editor, in the manager's own terms.
@@ -9477,6 +10342,48 @@ type FfiDestroyerUnreachableSeatClass struct{}
 func (_ FfiDestroyerUnreachableSeatClass) Destroy(value UnreachableSeatClass) {
 }
 
+// Why the nest withholds a message from the conversation — the two
+// enforcement acts that write the author's queue row for a conversation
+// record (`moderation.md` § Legal takedown → *Conversations*, § Admin block
+// of a reported item).
+type WithheldGround uint
+
+const (
+	// A legal takedown (`ObligationAction::TakenDown`).
+	WithheldGroundTakenDown WithheldGround = 1
+	// An admin block after a report (`ObligationAction::Blocked`).
+	WithheldGroundBlocked WithheldGround = 2
+)
+
+type FfiConverterWithheldGround struct{}
+
+var FfiConverterWithheldGroundINSTANCE = FfiConverterWithheldGround{}
+
+func (c FfiConverterWithheldGround) Lift(rb RustBufferI) WithheldGround {
+	return LiftFromRustBuffer[WithheldGround](c, rb)
+}
+
+func (c FfiConverterWithheldGround) Lower(value WithheldGround) C.RustBuffer {
+	return LowerIntoRustBuffer[WithheldGround](c, value)
+}
+
+func (c FfiConverterWithheldGround) LowerExternal(value WithheldGround) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[WithheldGround](c, value))
+}
+func (FfiConverterWithheldGround) Read(reader io.Reader) WithheldGround {
+	id := readInt32(reader)
+	return WithheldGround(id)
+}
+
+func (FfiConverterWithheldGround) Write(writer io.Writer, value WithheldGround) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerWithheldGround struct{}
+
+func (_ FfiDestroyerWithheldGround) Destroy(value WithheldGround) {
+}
+
 type FfiConverterOptionalUint32 struct{}
 
 var FfiConverterOptionalUint32INSTANCE = FfiConverterOptionalUint32{}
@@ -9515,6 +10422,47 @@ type FfiDestroyerOptionalUint32 struct{}
 func (_ FfiDestroyerOptionalUint32) Destroy(value *uint32) {
 	if value != nil {
 		FfiDestroyerUint32{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalInt64 struct{}
+
+var FfiConverterOptionalInt64INSTANCE = FfiConverterOptionalInt64{}
+
+func (c FfiConverterOptionalInt64) Lift(rb RustBufferI) *int64 {
+	return LiftFromRustBuffer[*int64](c, rb)
+}
+
+func (_ FfiConverterOptionalInt64) Read(reader io.Reader) *int64 {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterInt64INSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalInt64) Lower(value *int64) C.RustBuffer {
+	return LowerIntoRustBuffer[*int64](c, value)
+}
+
+func (c FfiConverterOptionalInt64) LowerExternal(value *int64) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*int64](c, value))
+}
+
+func (_ FfiConverterOptionalInt64) Write(writer io.Writer, value *int64) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterInt64INSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalInt64 struct{}
+
+func (_ FfiDestroyerOptionalInt64) Destroy(value *int64) {
+	if value != nil {
+		FfiDestroyerInt64{}.Destroy(*value)
 	}
 }
 
@@ -9764,6 +10712,47 @@ func (_ FfiDestroyerOptionalListSendView) Destroy(value *ListSendView) {
 	}
 }
 
+type FfiConverterOptionalMailWarmupHold struct{}
+
+var FfiConverterOptionalMailWarmupHoldINSTANCE = FfiConverterOptionalMailWarmupHold{}
+
+func (c FfiConverterOptionalMailWarmupHold) Lift(rb RustBufferI) *MailWarmupHold {
+	return LiftFromRustBuffer[*MailWarmupHold](c, rb)
+}
+
+func (_ FfiConverterOptionalMailWarmupHold) Read(reader io.Reader) *MailWarmupHold {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterMailWarmupHoldINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalMailWarmupHold) Lower(value *MailWarmupHold) C.RustBuffer {
+	return LowerIntoRustBuffer[*MailWarmupHold](c, value)
+}
+
+func (c FfiConverterOptionalMailWarmupHold) LowerExternal(value *MailWarmupHold) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*MailWarmupHold](c, value))
+}
+
+func (_ FfiConverterOptionalMailWarmupHold) Write(writer io.Writer, value *MailWarmupHold) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterMailWarmupHoldINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalMailWarmupHold struct{}
+
+func (_ FfiDestroyerOptionalMailWarmupHold) Destroy(value *MailWarmupHold) {
+	if value != nil {
+		FfiDestroyerMailWarmupHold{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalPlaneRef struct{}
 
 var FfiConverterOptionalPlaneRefINSTANCE = FfiConverterOptionalPlaneRef{}
@@ -9928,6 +10917,47 @@ func (_ FfiDestroyerOptionalRoomPolicySnapshot) Destroy(value *RoomPolicySnapsho
 	}
 }
 
+type FfiConverterOptionalRoomSearchSnapshot struct{}
+
+var FfiConverterOptionalRoomSearchSnapshotINSTANCE = FfiConverterOptionalRoomSearchSnapshot{}
+
+func (c FfiConverterOptionalRoomSearchSnapshot) Lift(rb RustBufferI) *RoomSearchSnapshot {
+	return LiftFromRustBuffer[*RoomSearchSnapshot](c, rb)
+}
+
+func (_ FfiConverterOptionalRoomSearchSnapshot) Read(reader io.Reader) *RoomSearchSnapshot {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterRoomSearchSnapshotINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalRoomSearchSnapshot) Lower(value *RoomSearchSnapshot) C.RustBuffer {
+	return LowerIntoRustBuffer[*RoomSearchSnapshot](c, value)
+}
+
+func (c FfiConverterOptionalRoomSearchSnapshot) LowerExternal(value *RoomSearchSnapshot) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*RoomSearchSnapshot](c, value))
+}
+
+func (_ FfiConverterOptionalRoomSearchSnapshot) Write(writer io.Writer, value *RoomSearchSnapshot) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterRoomSearchSnapshotINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalRoomSearchSnapshot struct{}
+
+func (_ FfiDestroyerOptionalRoomSearchSnapshot) Destroy(value *RoomSearchSnapshot) {
+	if value != nil {
+		FfiDestroyerRoomSearchSnapshot{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalRoomSettingsDraft struct{}
 
 var FfiConverterOptionalRoomSettingsDraftINSTANCE = FfiConverterOptionalRoomSettingsDraft{}
@@ -10048,6 +11078,47 @@ type FfiDestroyerOptionalThreadDetail struct{}
 func (_ FfiDestroyerOptionalThreadDetail) Destroy(value *ThreadDetail) {
 	if value != nil {
 		FfiDestroyerThreadDetail{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalWithheldOwnMessage struct{}
+
+var FfiConverterOptionalWithheldOwnMessageINSTANCE = FfiConverterOptionalWithheldOwnMessage{}
+
+func (c FfiConverterOptionalWithheldOwnMessage) Lift(rb RustBufferI) *WithheldOwnMessage {
+	return LiftFromRustBuffer[*WithheldOwnMessage](c, rb)
+}
+
+func (_ FfiConverterOptionalWithheldOwnMessage) Read(reader io.Reader) *WithheldOwnMessage {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterWithheldOwnMessageINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalWithheldOwnMessage) Lower(value *WithheldOwnMessage) C.RustBuffer {
+	return LowerIntoRustBuffer[*WithheldOwnMessage](c, value)
+}
+
+func (c FfiConverterOptionalWithheldOwnMessage) LowerExternal(value *WithheldOwnMessage) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*WithheldOwnMessage](c, value))
+}
+
+func (_ FfiConverterOptionalWithheldOwnMessage) Write(writer io.Writer, value *WithheldOwnMessage) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterWithheldOwnMessageINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalWithheldOwnMessage struct{}
+
+func (_ FfiDestroyerOptionalWithheldOwnMessage) Destroy(value *WithheldOwnMessage) {
+	if value != nil {
+		FfiDestroyerWithheldOwnMessage{}.Destroy(*value)
 	}
 }
 
@@ -11019,6 +12090,53 @@ func (FfiDestroyerSequenceRoomPendingInviteSnapshot) Destroy(sequence []RoomPend
 	}
 }
 
+type FfiConverterSequenceRoomSearchResultSnapshot struct{}
+
+var FfiConverterSequenceRoomSearchResultSnapshotINSTANCE = FfiConverterSequenceRoomSearchResultSnapshot{}
+
+func (c FfiConverterSequenceRoomSearchResultSnapshot) Lift(rb RustBufferI) []RoomSearchResultSnapshot {
+	return LiftFromRustBuffer[[]RoomSearchResultSnapshot](c, rb)
+}
+
+func (c FfiConverterSequenceRoomSearchResultSnapshot) Read(reader io.Reader) []RoomSearchResultSnapshot {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]RoomSearchResultSnapshot, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterRoomSearchResultSnapshotINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceRoomSearchResultSnapshot) Lower(value []RoomSearchResultSnapshot) C.RustBuffer {
+	return LowerIntoRustBuffer[[]RoomSearchResultSnapshot](c, value)
+}
+
+func (c FfiConverterSequenceRoomSearchResultSnapshot) LowerExternal(value []RoomSearchResultSnapshot) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]RoomSearchResultSnapshot](c, value))
+}
+
+func (c FfiConverterSequenceRoomSearchResultSnapshot) Write(writer io.Writer, value []RoomSearchResultSnapshot) {
+	if len(value) > math.MaxInt32 {
+		panic("[]RoomSearchResultSnapshot is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterRoomSearchResultSnapshotINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceRoomSearchResultSnapshot struct{}
+
+func (FfiDestroyerSequenceRoomSearchResultSnapshot) Destroy(sequence []RoomSearchResultSnapshot) {
+	for _, value := range sequence {
+		FfiDestroyerRoomSearchResultSnapshot{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceThreadSummary struct{}
 
 var FfiConverterSequenceThreadSummaryINSTANCE = FfiConverterSequenceThreadSummary{}
@@ -11204,6 +12322,53 @@ type FfiDestroyerSequenceContentLabelEntry struct{}
 func (FfiDestroyerSequenceContentLabelEntry) Destroy(sequence []fauna_core.ContentLabelEntry) {
 	for _, value := range sequence {
 		fauna_core.FfiDestroyerContentLabelEntry{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceLocalizedText struct{}
+
+var FfiConverterSequenceLocalizedTextINSTANCE = FfiConverterSequenceLocalizedText{}
+
+func (c FfiConverterSequenceLocalizedText) Lift(rb RustBufferI) []fauna_core.LocalizedText {
+	return LiftFromRustBuffer[[]fauna_core.LocalizedText](c, rb)
+}
+
+func (c FfiConverterSequenceLocalizedText) Read(reader io.Reader) []fauna_core.LocalizedText {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]fauna_core.LocalizedText, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, fauna_core.FfiConverterLocalizedTextINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceLocalizedText) Lower(value []fauna_core.LocalizedText) C.RustBuffer {
+	return LowerIntoRustBuffer[[]fauna_core.LocalizedText](c, value)
+}
+
+func (c FfiConverterSequenceLocalizedText) LowerExternal(value []fauna_core.LocalizedText) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]fauna_core.LocalizedText](c, value))
+}
+
+func (c FfiConverterSequenceLocalizedText) Write(writer io.Writer, value []fauna_core.LocalizedText) {
+	if len(value) > math.MaxInt32 {
+		panic("[]fauna_core.LocalizedText is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		fauna_core.FfiConverterLocalizedTextINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceLocalizedText struct{}
+
+func (FfiDestroyerSequenceLocalizedText) Destroy(sequence []fauna_core.LocalizedText) {
+	for _, value := range sequence {
+		fauna_core.FfiDestroyerLocalizedText{}.Destroy(value)
 	}
 }
 
@@ -11813,12 +12978,12 @@ func RoomNoticeAttrToken(notice RoomNotice) string {
 }
 
 // FFI-exported twin of [`RoomNotice::for_facts`] — which notice, if any,
-// `thread-room-notice` states for a room's `awaiting_key` and
-// `moderation_unverified`.
-func RoomNoticeFor(awaitingKey bool, moderationUnverified bool) *RoomNotice {
+// `thread-room-notice` states for a room's `awaiting_key`,
+// `moderation_unverified` and `bridge_disconnected`.
+func RoomNoticeFor(awaitingKey bool, moderationUnverified bool, bridgeDisconnected bool) *RoomNotice {
 	return FfiConverterOptionalRoomNoticeINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
 		return GoRustBuffer{
-			inner: C.uniffi_fauna_conversations_fn_func_room_notice_for(FfiConverterBoolINSTANCE.Lower(awaitingKey), FfiConverterBoolINSTANCE.Lower(moderationUnverified), _uniffiStatus),
+			inner: C.uniffi_fauna_conversations_fn_func_room_notice_for(FfiConverterBoolINSTANCE.Lower(awaitingKey), FfiConverterBoolINSTANCE.Lower(moderationUnverified), FfiConverterBoolINSTANCE.Lower(bridgeDisconnected), _uniffiStatus),
 		}
 	}))
 }

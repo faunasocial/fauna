@@ -59,6 +59,8 @@ const ENDS_HOLDER_KEY: &str = "connected_apps.consent_ends_holder";
 const ENDS_WRITER_KEY: &str = "connected_apps.consent_ends_writer";
 /// "Failed to block the app: {message}".
 const BLOCK_ERROR_KEY: &str = "connected_apps.error_block";
+/// "Failed to connect the plugin: {message}".
+const BIND_ERROR_KEY: &str = "connected_apps.error_bind";
 /// Fallback name for a row with no resolved name and no client id.
 const UNNAMED_KEY: &str = "connected_apps.unnamed";
 /// A signer client still waiting for the app to connect.
@@ -75,6 +77,8 @@ const MAIL_SCOPE_KEY: &str = "connected_apps.scope_mail";
 const SECRET_ERROR_KEY: &str = "connected_apps.error_secret";
 /// "Could not read what your nest did for this app: {message}".
 const RECORD_ERROR_KEY: &str = "connected_apps.error_record";
+/// "Failed to change the external-apps switch: {message}".
+const EXTERNAL_APPS_ERROR_KEY: &str = "connected_apps.error_external_apps";
 
 /// Row-key prefixes. The key is how the machine — never the app — picks the
 /// revoke verb for a row (`connected-apps.md` § User actions).
@@ -191,6 +195,7 @@ impl ConnectedAppsMachine {
             requests: s.requests.clone(),
             principals: s.principals.clone(),
             blocked: s.blocked.clone(),
+            external_apps_off: s.external_apps_off,
             record: s.record.clone(),
             error: s.error.clone(),
         }
@@ -242,6 +247,26 @@ impl ConnectedAppsMachine {
             Err(e) => {
                 tracing::warn!(target: "fauna_connected_apps", "open_handoff: {}", e.detail());
                 self.set_error(LocalizedText::key(HANDOFF_EXPIRED_KEY));
+                self.reload_keeping_error().await;
+            }
+        }
+        self.observer.on_changed();
+    }
+
+    /// *Connect* on a hosted plugin's settings card (`fauna.plugins.bind`):
+    /// open this account's bind card for the plugin whose install row is
+    /// `principal_id` and show it in the tray, where it is answered through
+    /// [`Self::resolve_request`] like every card — never a second approve
+    /// path (`third-party.md` § The principal model → *Hosted principals*).
+    pub async fn bind_plugin(&self, principal_id: Vec<u8>) {
+        match self.nest_api.bind_plugin(principal_id).await {
+            Ok(row) => {
+                self.state.lock().unwrap().error = None;
+                self.reload().await;
+                self.ensure_request(row).await;
+            }
+            Err(e) => {
+                self.set_error(keyed(BIND_ERROR_KEY, e.detail()));
                 self.reload_keeping_error().await;
             }
         }
@@ -390,6 +415,42 @@ impl ConnectedAppsMachine {
             // `false` is "already gone" — the end state the user asked for.
             Ok(_) => self.state.lock().unwrap().error = None,
             Err(e) => self.set_error(keyed(REVOKE_ERROR_KEY, e.detail())),
+        }
+        self.reload_keeping_error().await;
+        self.observer.on_changed();
+    }
+
+    /// Revoke one principal by its row id — a plugin settings card's
+    /// *Disconnect*, the roster's one verb reached from outside this page.
+    /// The roster is read first when this machine has not listed the row, so
+    /// the revoke records its ended grants exactly as [`Self::revoke`] does
+    /// from the page itself.
+    pub async fn revoke_principal(&self, principal_id: Vec<u8>) {
+        let key = format!("{PRINCIPAL}{}", hex::encode(&principal_id));
+        let listed = self
+            .state
+            .lock()
+            .unwrap()
+            .principal_keys
+            .iter()
+            .any(|r| r.key == key);
+        if !listed {
+            self.reload().await;
+        }
+        self.revoke(key).await;
+    }
+
+    /// Flip the account's external-apps switch (`atproto-external-apps-enable`)
+    /// and re-read the page. Non-destructive both ways: OFF pauses every
+    /// connected app but keeps each row listed and individually revocable, ON
+    /// restores them with nothing to redo (`atproto-pds-full.md` § F1 detail).
+    /// Non-optimistic like every gesture here: the toggle paints what the
+    /// nest's re-read says, so a refused write leaves it where it was and sets
+    /// the page error.
+    pub async fn set_external_apps_enabled(&self, enabled: bool) {
+        match self.nest_api.set_external_apps_enabled(enabled).await {
+            Ok(()) => self.state.lock().unwrap().error = None,
+            Err(e) => self.set_error(keyed(EXTERNAL_APPS_ERROR_KEY, e.detail())),
         }
         self.reload_keeping_error().await;
         self.observer.on_changed();
@@ -1007,6 +1068,14 @@ fn principal_row(
         signer_burned: false,
         oracle: p.oracle.as_ref().map(oracle_summary_row),
     }
+}
+
+/// Whether `row` links to its settings card (`connected-apps.md` § Layout &
+/// flow, region 3): a hosted plugin's row, and only that — the card on the
+/// Bridges page is the whole of a plugin's surface (`third-party.md` TP2).
+#[must_use]
+pub fn opens_settings_card(row: &ConnectedAppRow) -> bool {
+    is_hosted(&row.class)
 }
 
 /// A hosted plugin's binding (`wasm` / `container`) holds no token and so no

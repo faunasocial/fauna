@@ -7,6 +7,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import com.fauna.ffi.FfiAuditLog
+import com.fauna.ffi.FfiAuditLogView
 import uniffi.fauna_log.LogEntry
 import javax.inject.Inject
 
@@ -32,11 +34,35 @@ class AdminLogsVM @Inject constructor(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
+    /** The admin audit log section below the log lines: the shared fold, held
+     *  in Rust ([FfiAuditLog]); a failed read keeps the rows already shown. */
+    private val audit: FfiAuditLog by lazy { api.adminAuditLog() }
+    private val _auditView = MutableStateFlow<FfiAuditLogView?>(null)
+    val auditView: StateFlow<FfiAuditLogView?> = _auditView
+
     fun load() {
         viewModelScope.launch {
             _error.value = null
             try {
                 _entries.value = api.adminLogs()
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+        viewModelScope.launch {
+            try {
+                _auditView.value = audit.load()
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    /** `admin-audit-more-button` — page older entries in. */
+    fun auditMore() {
+        viewModelScope.launch {
+            try {
+                _auditView.value = audit.more()
             } catch (e: Exception) {
                 _error.value = e.message
             }

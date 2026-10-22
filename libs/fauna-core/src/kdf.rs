@@ -131,9 +131,27 @@ pub fn derive_key_argon2id(
     Ok(out)
 }
 
+/// Derive a 32-byte AEAD key from a high-entropy secret an authenticator
+/// handed back — a WebAuthn PRF output — with BLAKE3's `derive_key` under a
+/// versioned `context` (`key-material-hierarchy.md` § Architectural rules,
+/// rule 3). No stretching: the input is not guessable, unlike a passphrase,
+/// which goes through [`derive_key_argon2id`].
+#[must_use]
+pub fn derive_key_blake3(context: &str, input: &[u8]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(blake3::derive_key(context, input))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blake3_derivation_is_deterministic_and_context_separated() {
+        let a = derive_key_blake3("fauna.test.a.v1", &[7; 32]);
+        assert_eq!(*a, *derive_key_blake3("fauna.test.a.v1", &[7; 32]));
+        assert_ne!(*a, *derive_key_blake3("fauna.test.b.v1", &[7; 32]));
+        assert_ne!(*a, *derive_key_blake3("fauna.test.a.v1", &[8; 32]));
+    }
 
     /// The interactive default must stay the spec triple — every consumer's
     /// provisioning default couples to it.

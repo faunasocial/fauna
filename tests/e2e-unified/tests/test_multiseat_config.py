@@ -344,7 +344,7 @@ def test_a_probe_that_cannot_answer_keeps_the_old_wall_clock_settle():
 # --- The live admin seed resolves PER BOX (testing.md § Default app and nest
 # mode, *Live mode*): FAUNA_LIVE_SECRET_HEX > the staging box's own provisioning
 # identity for the live URL's host > ~/.fauna-id. A live run against
-# dev.example.com that signed in with the former live nest's ~/.fauna-id was refused
+# the dev nest (2026-10-04) that signed in with the former live nest's ~/.fauna-id was refused
 # `not_registered` and skipped the whole run as "box not ready" — the
 # misdiagnosis this pins away.
 
@@ -373,42 +373,42 @@ def _write_box(home, domain, body=None):
 
 
 def test_the_env_seed_beats_the_box_file(_seed_home, monkeypatch):
-    _write_box(_seed_home, "dev.example.com")
+    _write_box(_seed_home, "dev.fauna.build")
     (_seed_home / ".fauna-id").write_text(_HOME_SEED)
     monkeypatch.setenv("FAUNA_LIVE_SECRET_HEX", _ENV_SEED)
-    assert cfg.resolve_secret("https://dev.example.com") == (_ENV_SEED, "FAUNA_LIVE_SECRET_HEX")
+    assert cfg.resolve_secret("https://dev.fauna.build") == (_ENV_SEED, "FAUNA_LIVE_SECRET_HEX")
 
 
 def test_the_box_file_for_the_live_host_beats_the_home_seed(_seed_home):
-    _write_box(_seed_home, "dev.example.com")
+    _write_box(_seed_home, "dev.fauna.build")
     (_seed_home / ".fauna-id").write_text(_HOME_SEED)
-    assert cfg.resolve_secret("https://dev.example.com") == (
+    assert cfg.resolve_secret("https://dev.fauna.build") == (
         _BOX_SEED,
-        "~/.config/fauna/staging-box/dev.example.com.json",
+        "~/.config/fauna/staging-box/dev.fauna.build.json",
     )
 
 
 def test_another_hosts_box_file_is_never_used(_seed_home):
     _write_box(_seed_home, "other.example.net")
     (_seed_home / ".fauna-id").write_text(_HOME_SEED)
-    assert cfg.resolve_secret("https://dev.example.com") == (_HOME_SEED, "~/.fauna-id")
+    assert cfg.resolve_secret("https://dev.fauna.build") == (_HOME_SEED, "~/.fauna-id")
 
 
-@pytest.mark.parametrize("body", ['{"domain": "dev.example.com"}', "{not json", '["x"]'])
+@pytest.mark.parametrize("body", ['{"domain": "dev.fauna.build"}', "{not json", '["x"]'])
 def test_a_box_file_without_a_usable_seed_falls_through(_seed_home, body):
-    _write_box(_seed_home, "dev.example.com", body)
+    _write_box(_seed_home, "dev.fauna.build", body)
     (_seed_home / ".fauna-id").write_text(_HOME_SEED)
-    assert cfg.resolve_secret("https://dev.example.com") == (_HOME_SEED, "~/.fauna-id")
+    assert cfg.resolve_secret("https://dev.fauna.build") == (_HOME_SEED, "~/.fauna-id")
 
 
 def test_the_dotted_home_alias_is_still_read(_seed_home):
     (_seed_home / ".fauna.id").write_text(_HOME_SEED + "\n")
-    assert cfg.resolve_secret("https://dev.example.com") == (_HOME_SEED, "~/.fauna.id")
+    assert cfg.resolve_secret("https://dev.fauna.build") == (_HOME_SEED, "~/.fauna.id")
 
 
 def test_no_seed_anywhere_is_none(_seed_home):
-    assert cfg.resolve_secret("https://dev.example.com") == (None, None)
-    assert cfg.load_secret("https://dev.example.com") is None
+    assert cfg.resolve_secret("https://dev.fauna.build") == (None, None)
+    assert cfg.load_secret("https://dev.fauna.build") is None
 
 
 def test_without_a_url_the_default_live_nest_is_the_host(_seed_home, monkeypatch):
@@ -419,5 +419,5 @@ def test_without_a_url_the_default_live_nest_is_the_host(_seed_home, monkeypatch
 
 
 def test_a_live_url_with_a_port_resolves_by_host(_seed_home):
-    _write_box(_seed_home, "dev.example.com")
-    assert cfg.load_secret("https://dev.example.com:8443/") == _BOX_SEED
+    _write_box(_seed_home, "dev.fauna.build")
+    assert cfg.load_secret("https://dev.fauna.build:8443/") == _BOX_SEED

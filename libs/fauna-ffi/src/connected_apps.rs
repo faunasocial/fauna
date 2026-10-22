@@ -88,6 +88,24 @@ pub fn connected_apps_request_card_lines(consent: ConsentCardRow) -> Vec<Compose
     fauna_client_connected_apps::compose::request_card_lines(&consent)
 }
 
+/// An admin's hosted-plugin install card's install section, composed once in
+/// shared Rust (`compose::request_install_text`): one [`ComposedText`] (or a list
+/// of them, joined with [`connected_apps_line_separator`]) per
+/// `connected-apps-request-install-*` leaf. `None` on every card but a
+/// hosted-plugin install card.
+#[uniffi::export]
+pub fn connected_apps_request_install_text(
+    consent: ConsentCardRow,
+) -> Option<fauna_client_connected_apps::compose::InstallSectionText> {
+    fauna_client_connected_apps::compose::request_install_text(&consent)
+}
+
+/// What the install section's multi-line leaves put between their lines.
+#[uniffi::export]
+pub fn connected_apps_line_separator() -> String {
+    fauna_client_connected_apps::compose::LINE_SEPARATOR.to_string()
+}
+
 /// What a roster row's facts line puts between its facts.
 #[uniffi::export]
 pub fn connected_apps_facts_separator() -> String {

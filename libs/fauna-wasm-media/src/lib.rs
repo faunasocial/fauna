@@ -1,7 +1,7 @@
 //! WASM bindings for the Fauna Media page — the page-level `MediaMachine` (the
 //! cross-set all-media browser). The web Media route renders off the shared
-//! `MediaMachine` via `$lib/wasm-media`, exactly as the Devices route renders off
-//! `DevicesMachine` via `$lib/wasm-folders` — one shared surface, all 7 apps
+//! `MediaMachine` via `#lib/wasm-media`, exactly as the Devices route renders off
+//! `DevicesMachine` via `#lib/wasm-folders` — one shared surface, all 7 apps
 //! (priority #1/#2/#4; `docs/goal/ui/media.md` rule 2). Mirrors the page-level
 //! wrapper half of `fauna-wasm-folders`.
 
@@ -73,12 +73,23 @@ extern "C" {
     pub type JsMlsQuery;
     #[wasm_bindgen(method, js_name = isJoinedSharedSet)]
     fn is_joined_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
+    /// The channel's MLS-recorded folder owner (hex actor id), or nothing —
+    /// the member-row declassification anchor, backed by the MAIN bundle's
+    /// `WasmConversationsManager.foldersChannelOwner`.
+    #[wasm_bindgen(method, js_name = folderChannelOwner)]
+    fn folder_channel_owner(this: &JsMlsQuery, channel_id: &[u8]) -> Option<String>;
 }
 
 struct MlsQueryShim(JsMlsQuery);
 // SAFETY: wasm32 is single-threaded; the JS object never crosses a thread.
 unsafe impl Send for MlsQueryShim {}
 unsafe impl Sync for MlsQueryShim {}
+impl fauna_media_machine::FolderChannelOwners for MlsQueryShim {
+    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        let owner = self.0.folder_channel_owner(channel_id)?;
+        fauna_core::identity::ActorId::from_hex(&owner).ok()
+    }
+}
 impl fauna_media_machine::MlsQuery for MlsQueryShim {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
         self.0.is_joined_shared_set(mls_group_id_hex)
@@ -98,7 +109,7 @@ pub struct MediaMachine(Arc<InnerMedia>, fauna_rpc_wasm::WsRpcClient);
 #[wasm_bindgen]
 impl MediaMachine {
     /// Build the page machine over the SPA core chunk's socket, lent as
-    /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's
+    /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's
     /// `requestRaw` runs every request this machine makes, so web keeps one
     /// WebSocket per actor; the blob legs ride the port's `bearer` + `nestUrl`).
     /// Throws on an object that is not a port. State starts empty (all-media
@@ -200,7 +211,7 @@ impl MediaMachine {
     /// mirroring `uploadSelected`/`fetchThumbnail`, so the raw key never
     /// crosses into JS.
     ///
-    /// Web hands this over inside `$lib/wasm-media::createMediaMachine`, so a
+    /// Web hands this over inside `#lib/wasm-media::createMediaMachine`, so a
     /// keyless machine is unrepresentable rather than merely discouraged — the
     /// construction-seam half of `file-sync.md`'s CONSUMER-WIRING RULE.
     ///
@@ -257,7 +268,7 @@ impl MediaMachine {
         let keypair = fauna_core::identity::ActorKeypair::from_secret_hex(secret_hex.trim())
             .map_err(|e| JsValue::from_str(&format!("bad secret hex: {e}")))?;
         let registry = fauna_client_accounts::AccountRegistry::new(std::sync::Arc::new(
-            fauna_client_accounts::LocalStorageSecretStore,
+            fauna_client_accounts::WebIdentityStore,
         ));
         let keys: Vec<Vec<u8>> = registry
             .predecessor_backup_keys(&keypair.actor_id_hex())

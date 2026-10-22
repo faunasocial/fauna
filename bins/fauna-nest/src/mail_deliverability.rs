@@ -601,14 +601,25 @@ impl DailyPassSchedule {
     pub fn at_boot(offset_secs: i64, now: i64, newest_nest_run: Option<i64>) -> Self {
         Self {
             offset_secs,
+            // A cover from the future (a forward clock excursion, or a store
+            // carried over from a `test-hooks` mail-clock override) counts as
+            // `now`: left as read it would silence the pass, and every prune
+            // riding it, until real time caught up.
             covered_through: newest_nest_run
+                .map(|ran_at| ran_at.min(now))
                 .unwrap_or_else(|| latest_daily_pass_slot(now, offset_secs)),
         }
     }
 
     /// Whether a pass is due at `now` (mail clock): the newest slot at or
-    /// before `now` is later than the last pass's cover.
-    pub fn due(&self, now: i64) -> bool {
+    /// before `now` is later than the last pass's cover. The cover is clamped
+    /// to `now` on every poll, not only at boot: a pass that ran on a forward
+    /// clock excursion stored a future cover, and left as stored it would
+    /// silence the pass, and every prune riding it, after the clock stepped
+    /// back. The clamp cannot spin: the newest slot at or before `now` is
+    /// never later than `now`.
+    pub fn due(&mut self, now: i64) -> bool {
+        self.covered_through = self.covered_through.min(now);
         latest_daily_pass_slot(now, self.offset_secs) > self.covered_through
     }
 
@@ -857,7 +868,7 @@ mod tests {
     #[test]
     fn a_fresh_nest_runs_its_first_pass_at_the_next_slot_not_at_boot() {
         let boot = MIDNIGHT + 10 * HOUR;
-        let s = DailyPassSchedule::at_boot(600, boot, None);
+        let mut s = DailyPassSchedule::at_boot(600, boot, None);
         assert!(!s.due(boot));
         assert!(!s.due(MIDNIGHT + DAY + 3 * HOUR + 599));
         assert!(s.due(MIDNIGHT + DAY + 3 * HOUR + 600));
@@ -880,7 +891,7 @@ mod tests {
     fn a_restart_after_todays_pass_does_not_run_it_again() {
         let slot = MIDNIGHT + 3 * HOUR + 600;
         let ran = slot + 120;
-        let s = DailyPassSchedule::at_boot(600, slot + 2 * HOUR, Some(ran));
+        let mut s = DailyPassSchedule::at_boot(600, slot + 2 * HOUR, Some(ran));
         assert!(!s.due(slot + 2 * HOUR));
         assert!(!s.due(slot + DAY - 1));
         assert!(s.due(slot + DAY));
@@ -890,16 +901,50 @@ mod tests {
     fn a_nest_down_across_its_slot_catches_up_at_boot() {
         let slot = MIDNIGHT + 3 * HOUR + 600;
         // Yesterday's pass ran; the nest was down across today's slot.
-        let s = DailyPassSchedule::at_boot(600, slot + 5 * HOUR, Some(slot - DAY + 60));
+        let mut s = DailyPassSchedule::at_boot(600, slot + 5 * HOUR, Some(slot - DAY + 60));
         assert!(s.due(slot + 5 * HOUR));
     }
 
     #[test]
     fn a_restart_before_todays_slot_waits_for_it() {
         let slot = MIDNIGHT + 3 * HOUR + 600;
-        let s = DailyPassSchedule::at_boot(600, slot - HOUR, Some(slot - DAY + 60));
+        let mut s = DailyPassSchedule::at_boot(600, slot - HOUR, Some(slot - DAY + 60));
         assert!(!s.due(slot - HOUR));
         assert!(s.due(slot));
+    }
+
+    #[test]
+    fn a_cover_from_the_future_counts_as_now_and_does_not_silence_the_pass() {
+        let boot = MIDNIGHT + 10 * HOUR;
+        // A forward clock excursion (or a `test-hooks` mail-clock override)
+        // left a diagnostics run stamped 30 days ahead.
+        let mut s = DailyPassSchedule::at_boot(600, boot, Some(boot + 30 * DAY));
+        assert!(!s.due(boot));
+        assert!(!s.due(MIDNIGHT + DAY + 3 * HOUR + 599));
+        assert!(s.due(MIDNIGHT + DAY + 3 * HOUR + 600));
+    }
+
+    #[test]
+    fn a_clock_step_back_in_flight_does_not_silence_the_pass() {
+        let boot = MIDNIGHT + 10 * HOUR;
+        let mut s = DailyPassSchedule::at_boot(600, boot, None);
+        // A forward excursion lands on a poll: the pass runs and stores the
+        // mail clock as read, 30 days ahead.
+        s.ran(boot + 30 * DAY);
+        // The clock steps back to real time. The cover counts as now, so the
+        // polls in between are not due (no spin) and the next real slot is.
+        assert!(!s.due(boot));
+        assert!(!s.due(MIDNIGHT + DAY + 3 * HOUR + 599));
+        assert!(s.due(MIDNIGHT + DAY + 3 * HOUR + 600));
+    }
+
+    #[test]
+    fn an_honest_past_cover_still_waits_for_its_next_slot() {
+        let boot = MIDNIGHT + 10 * HOUR;
+        let mut s = DailyPassSchedule::at_boot(600, boot, Some(MIDNIGHT + 3 * HOUR + 700));
+        assert!(!s.due(boot));
+        assert!(!s.due(MIDNIGHT + DAY + 3 * HOUR + 599));
+        assert!(s.due(MIDNIGHT + DAY + 3 * HOUR + 600));
     }
 
     #[test]

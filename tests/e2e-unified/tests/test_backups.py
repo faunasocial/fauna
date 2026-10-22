@@ -338,6 +338,87 @@ def test_last_backed_up_is_the_selected_set_s_newest_snapshot(
     )
 
 
+# The Mail kind entry's selector value: its i18n label key, the locale-stable
+# selection key the shared machine mints (`fauna_backups_machine::KIND_ENTRIES`).
+MAIL_KIND_ENTRY = "backups.reseed_set_mail"
+
+
+def _kind_snapshot_ids_from_nest(nest_instance, owner, kind: str) -> set[int]:
+    """The ids the nest's own message-kind list serves for `kind` — the split
+    verdict (convention 5) for which row a create added."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
+    client = WsRpcAdminClient(
+        nest_instance["url"],
+        actor_id=owner["actor_id_bytes"],
+        signing_key=bytes(owner["signing_key"]),
+    )
+    with client:
+        rows = client.call("fauna.filesync.snapshot.list", {"message_kind": kind})["rows"]
+    return {row["id"] for row in rows}
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.android
+@pytest.mark.feature("snapshots")
+def test_a_mail_snapshot_taken_from_its_kind_entry_is_offered_for_restore(
+    logged_in_app, nest_instance, test_user
+):
+    """The Mail entry of `backup-folder-selector` takes a mail snapshot, and the
+    local restore picker on the same page offers it.
+
+    `ui/backups.md` § Snapshot-list shape → *Kind entries*: after the folders
+    the selector lists one entry per message kind, labelled with the existing
+    navigation string; create on a kind entry is
+    `SnapshotsClient::create_message_kind`, and its row restores from the
+    Restore section below — so the picker there must list it without a page
+    re-entry. Before the entries existed nothing on the user's own nest
+    created a message-kind snapshot, and that picker was always empty.
+
+    Barriers are causal (convention 14): the nest's own list says which id the
+    create added, and the page is then waited on for that id, in the snapshot
+    list and in the restore picker.
+    """
+    app = logged_in_app
+    before = _kind_snapshot_ids_from_nest(nest_instance, test_user, "mail")
+    app.backups.navigate()
+
+    labels = app.driver.option_texts("backup-folder-selector")
+    assert labels is None or S.backups.reseed_set_mail in labels, (
+        f"the selector must offer the Mail entry under its existing label; "
+        f"options painted: {labels!r}"
+    )
+
+    app.backups.select_folder(MAIL_KIND_ENTRY)
+    if before:
+        app.backups.wait_for_snapshot_row(max(before))
+    else:
+        app.backups.wait_for_no_snapshots()
+    app.backups.create_snapshot()
+
+    added = _kind_snapshot_ids_from_nest(nest_instance, test_user, "mail") - before
+    assert added, (
+        "snapshot-create-button on the Mail entry added no mail snapshot on the "
+        f"nest. error-message: {app.error_text()!r}"
+    )
+    snapshot_id = max(added)
+    app.backups.wait_for_snapshot_row(snapshot_id)
+
+    marker = f"(#{snapshot_id})"
+    wait_until(
+        lambda: any(marker in option for option in (
+            app.driver.option_texts("restore-snapshot-select") or []
+        )),
+        30,
+        diagnose=lambda: (
+            f"restore-snapshot-select never offered snapshot {snapshot_id}: "
+            f"{app.driver.option_texts('restore-snapshot-select')!r} "
+            f"error={app.error_text()!r} "
+            f"{app.driver.diagnose('restore-snapshot-select')}"
+        ),
+    )
 
 
 @pytest.mark.feature("snapshots")
@@ -2515,6 +2596,8 @@ def _wait_for_backlog_text(app, accept, budget_s: float = 30.0) -> str:
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_destination_that_refuses_this_box_reads_refused_not_queued(
     logged_in_app, nest_instance, second_nest, test_user, request
@@ -3140,6 +3223,99 @@ def test_snapshot_file_download_button_downloads_sealed_bytes(
     )
 
 
+
+# The whole-snapshot restore is a desktop + tui surface (ui.yaml `backups`
+# platform_elements; user-approved 2026-10-16). tui leads and linux has joined;
+# macos and windows join this mark list as their trickle-down lands. Web, ios
+# and android declare the absence — they keep the per-file download above.
+@pytest.mark.feature("snapshots")
+@pytest.mark.tui
+@pytest.mark.linux
+def test_snapshot_restore_writes_the_whole_tree_byte_identically(
+    logged_in_app, nest_instance, test_user
+):
+    """`snapshot-restore-button` restores EVERY file of a sealed snapshot into a
+    fresh directory, byte for byte, through the shared client-side walk
+    (`backup-restore.md` § 4. Restore: Full Snapshot; `ui/backups.md`
+    § Whole-snapshot restore).
+
+    The snapshot holds a nested path and a multi-chunk file — over 8 MiB of
+    incompressible bytes, so the walk reassembles it from several sealed chunks
+    — beside a small top-level file. Seeded by the harness's signed writer as
+    the same `test_user` the app is signed in as, exactly as the per-file
+    download test above seeds its one file, so every chunk is owner-sealed and
+    only the client holding the identity can open it.
+    """
+    secret_key = test_user["signing_key"].encode().hex()
+    folder = f"restore-proof-{secrets.token_hex(4)}"
+    user_create_folder(
+        nest_instance["port"], folder,
+        secret_key=secret_key,
+        base_url=nest_instance["url"],
+    )
+    writer = HarnessWriter(
+        nest_instance["url"], secret_key,
+        user_folder_ref(
+            nest_instance["port"], folder, secret_key=secret_key,
+            base_url=nest_instance["url"],
+        ),
+        tempfile.mkdtemp(prefix="fauna-snapshot-restore-"),
+    )
+    expected = {
+        "top.txt": f"whole restore proof {secrets.token_hex(16)}\n".encode(),
+        "nested/deeper/note.md": f"# nested {secrets.token_hex(8)}\n".encode(),
+        "nested/big.bin": os.urandom(12 * 1024 * 1024),
+    }
+    for rel, body in expected.items():
+        writer.write(rel, body)
+    writer.sync(expect=list(expected))
+
+    snap = create_folder_snapshot(
+        nest_instance["port"], folder, secret_key=secret_key,
+        base_url=nest_instance["url"],
+    )
+    assert snap is not None and snap.get("file_count", 0) >= len(expected), (
+        f"the writer recorded {sorted(expected)!r}, so the snapshot should "
+        f"capture all of them: {snap!r}"
+    )
+
+    logged_in_app.backups.navigate()
+    logged_in_app.backups.select_folder(folder)
+    row = logged_in_app.backups.wait_for_snapshot_row(snap["id"])
+    logged_in_app.backups.open_snapshot(index=row)
+    assert logged_in_app.backups.wait_for_snapshot_files(min_count=len(expected)) >= len(expected), (
+        f"the open snapshot should list its {len(expected)} files: "
+        f"{logged_in_app.driver.diagnose('snapshot-detail-files')}"
+    )
+
+    # A directory that does not exist yet: the restore creates it.
+    destination = os.path.join(
+        tempfile.mkdtemp(prefix="fauna-restore-dest-"), "restored"
+    )
+    try:
+        result = logged_in_app.backups.restore_snapshot_to(destination)
+        restored = {}
+        for base, _dirs, names in os.walk(destination):
+            for name in names:
+                full = os.path.join(base, name)
+                with open(full, "rb") as fh:
+                    restored[os.path.relpath(full, destination).replace(os.sep, "/")] = fh.read()
+        assert sorted(restored) == sorted(expected), (
+            f"the restore should write exactly the snapshot's files into "
+            f"{destination}: wrote {sorted(restored)!r}, result line {result!r}"
+        )
+        for rel, body in expected.items():
+            assert restored[rel] == body, (
+                f"{rel} should restore byte for byte ({len(body)} bytes), got "
+                f"{len(restored[rel])} bytes; result line {result!r}"
+            )
+        assert str(len(expected)) in result and destination in result, (
+            f"snapshot-restore-result should report the {len(expected)} files "
+            f"written and where: {result!r}"
+        )
+    finally:
+        shutil.rmtree(os.path.dirname(destination), ignore_errors=True)
+
 def _inbox_count(nest, owner) -> int:
     """How many INBOX messages `owner` has on `nest`, read over the owner's own
     authenticated WS-RPC (convention 5: the nest-side half of a restore verdict,
@@ -3383,7 +3559,9 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
 
     # Nest-side, independent of the page (convention 5): the owner's mail scope
     # on the rebuilt box now holds live records, which is exactly what makes a
-    # second materialize answer `target_not_empty` before it reads a byte.
+    # second materialize answer `target_not_empty` before it reads a byte. The
+    # verb is named under the landing set the restore delivered into, never the
+    # rail's `__mail` (`reserved-folders.md` § __mail Sync → *The landing set*).
     from clients._ws_rpc_core import RpcCallError
     from clients.ws_rpc_admin_client import WsRpcAdminClient
 
@@ -3393,7 +3571,7 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         signing_key=bytes(owner["signing_key"]),
     ) as client:
         with pytest.raises(RpcCallError) as refused:
-            client.call("fauna.backup.custody.materialize", {"set_name": "__mail"})
+            client.call("fauna.backup.custody.materialize", {"set_name": "__landing/mail"})
     assert refused.value.code == "fauna.backup.target_not_empty", (
         f"NEST-SIDE failure: the page says {result!r}, but the rebuilt box's mail "
         f"scope does not read as live: {refused.value!r}"
@@ -3439,6 +3617,170 @@ def test_after_losing_the_nest_the_devices_copy_restores_the_mail_onto_the_rebui
         f"box; INBOX holds {restored} message(s). A live record in no mailbox "
         f"means the placement journal was not restored with the content."
     )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.web
+@pytest.mark.feature("backup-destinations-and-restore")
+def test_after_losing_the_nest_a_surviving_nest_destination_restores_the_mail(
+    app, request, nest_mode, tmp_path_factory
+):
+    """**After losing the nest, the owner restores from the copy another nest
+    holds, from the app** — the nest-held pull-back (`ui/backups.md` § Restore
+    after losing the nest, the gesture on a nest-kind row; the ceremony
+    `behavior/backup-destinations.md` § Re-seed; the leg
+    `client-device-custodian.md` § *The nest-held pull-back*).
+
+    The box is really lost, as in the custodian journey above: its process is
+    killed and the rebuild starts from an empty data directory with only the
+    deployment seed. No device holds a copy; the only one is the off-site nest's.
+
+    Flow under test::
+
+        box A claimed by the owner  -> one mail message in the owner's INBOX
+        enroll nest D (UI)          -> D is A's backup destination
+        A's sweep                   -> D holds A's mail custody (nest-side check)
+        kill A; provision A'        -> same FAUNA_DEPLOYMENT_SEED, empty /data
+        owner re-claims A'          -> same identity, INBOX empty (pre-state)
+        the app signs in to A'      -> the list survives -> D's row carries the
+                                       gesture
+        press "Restore my data..."  -> in the app: grant, pull D's custody onto A'
+                                       as-is, materialize (the shared driver)
+        result view                 -> the driver's whole verdict
+        INBOX on A'                 -> the message is back
+        A''s next sweep             -> D accepts it: re-enrolled, its writer seat
+                                       A''s (post-ceremony duty)
+
+    Latency-independent (convention 14): every wait is a deadline poll on the
+    state it waits for, and each sweep is the synchronous run-now barrier.
+
+    tui leads; linux, android and web run it (2026-10-18); the other three
+    follow in their batched lifts and skip as unbuilt until then
+    (`require_pull_back_supported`).
+
+    On web a browser reaches its own nest only through an SPA proxy (CORS), so
+    each box the owner signs in to gets its own — A's, then the rebuilt A′'s.
+    D needs none: the pull-back dials D's WebSocket and its CORS-open byte
+    routes directly, as the audit and the recovery do.
+    """
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+    from common.auth import claim_admin
+    from conftest import _login_app_as, _start_dedicated_nest
+
+    box_a, cleanup_a = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "pullback-box-a")
+    request.addfinalizer(cleanup_a)
+    box_d, cleanup_d = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "pullback-dest")
+    request.addfinalizer(cleanup_d)
+    owner = box_a["admin"]
+    seed_hex = owner["deployment_seed"]
+    assert seed_hex, "the claim reply must carry the deployment seed the rebuild needs"
+    register_user(
+        box_d["port"], owner["actor_id_hex"], admin_signing_key=box_d["admin"]["signing_key"]
+    )
+
+    _login_app_as(app, request, box_a, owner, spa_url=_spa_proxy_for(app, request, box_a))
+    app.backups.require_destination_management_supported()
+    app.backups.require_pull_back_supported()
+    _seed_one_mail_segment(app, box_a, owner)
+    assert _inbox_count(box_a, owner) == 1
+
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(0)
+    app.backups.add_destination(box_d["url"], name="Off-site")
+    app.backups.wait_for_destination_count(1)
+    _push_backup(box_a)
+
+    def held_at_d() -> list:
+        with WsRpcAdminClient(
+            box_d["url"],
+            actor_id=owner["actor_id_bytes"],
+            signing_key=bytes(owner["signing_key"]),
+        ) as client:
+            return client.call("fauna.backup.custody.list", {}).get("items", [])
+
+    held = held_at_d()
+    assert any(i.get("folder_name") == "__mail" for i in held), (
+        f"NEST-SIDE precondition: D must hold A's mail before A is lost: {held!r}"
+    )
+
+    # ── Total loss, and the rebuild ──────────────────────────────────────────
+    box_a["proc"].kill()
+    box_a["proc"].wait()
+    box_a2, cleanup_a2 = _start_dedicated_nest(
+        request, nest_mode, tmp_path_factory, "pullback-box-a2", unclaimed=True,
+        extra_env={"FAUNA_DEPLOYMENT_SEED": seed_hex})
+    request.addfinalizer(cleanup_a2)
+    assert box_a2["nest_id"] == box_a["nest_id"], "the rebuild re-presents the same identity"
+    with open(os.path.join(box_a2["tmp_dir"], "claim-code")) as f:
+        claim_code = f.read().strip()
+    claim_admin(box_a2["port"], claim_code, base_url=box_a2["url"],
+                handle=owner.get("handle") or "admin", signing_key=owner["signing_key"])
+    assert _inbox_count(box_a2, owner) == 0, "pre-state: the rebuilt box holds no mail"
+
+    assert app.driver.preserve_state_across_relaunch()
+    _login_app_as(app, request, box_a2, owner, spa_url=_spa_proxy_for(app, request, box_a2))
+
+    # The list is keyed on the box's identity, which the rebuild re-presents, so
+    # D's row is still the owner's (`behavior/backup-destinations.md`
+    # § *A rebuilt box keeps its list too*) — and it carries the gesture.
+    app.backups.navigate()
+    app.backups.wait_for_destination_count(1)
+    wait_until(lambda: app.backups.reseed_button_on_row_visible(0), 60.0,
+               diagnose=lambda: f"the surviving nest's row must carry the re-seed "
+                                f"gesture on the rebuilt box; error={app.error_text()!r}")
+
+    # ── The gesture under test ───────────────────────────────────────────────
+    app.backups.reseed_from_nest_row(0)
+    wait_until(
+        lambda: app.backups.reseed_result_text() not in ("", S.backups.backup_reseed_running)
+        or bool(app.error_text()),
+        300.0,
+        diagnose=lambda: f"the pull-back never reached a verdict; "
+                         f"result={app.backups.reseed_result_text()!r} "
+                         f"error={app.error_text()!r}",
+    )
+    result = app.backups.reseed_result_text()
+    assert result.startswith(S.backups.reseed_result_whole), (
+        f"the restore must report the corpus whole: result={result!r} "
+        f"error={app.error_text()!r}"
+    )
+    assert app.error_text() == "", (
+        f"a whole restore re-enrolls D; the page reports it did not: "
+        f"{app.error_text()!r}"
+    )
+
+    # The post-ceremony duty, nest-side (convention 5): D accepts the restored
+    # box's own pass, which a destination whose seat or registration were left
+    # behind would refuse.
+    _push_backup(box_a2)
+    app.backups.wait_for_destination_count(1)
+
+    # LAST: the restored message is back in the mailbox it was in.
+    restored = _inbox_count(box_a2, owner)
+    assert restored == 1, (
+        f"the restored mail must land back in the owner's INBOX on the rebuilt "
+        f"box; INBOX holds {restored} message(s)."
+    )
+
+
+def _spa_proxy_for(app, request, nest):
+    """The URL a web app signs in to ``nest`` through — its own SPA proxy, shut
+    down with the test — or ``None`` for a native app, which dials the nest
+    directly (``_login_app_as``)."""
+    if not app.driver.is_web():
+        return None
+    from conftest import _serve_spa_proxy
+
+    spa_url, spa_server = _serve_spa_proxy(request.getfixturevalue("static_dir"), nest["url"])
+    request.addfinalizer(spa_server.shutdown)
+    return spa_url
 
 
 def _push_backup(nest) -> dict:
@@ -3489,6 +3831,8 @@ def _banner_texts(app) -> list[str]:
 @pytest.mark.tui
 @pytest.mark.web
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 # The other apps follow in their batched trickle-down lifts; each adds its
 # marker here, and `require_recover_supported` names the gap meanwhile.
 @pytest.mark.feature("backup-destinations-and-restore")
@@ -3668,10 +4012,11 @@ def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_the_backup(
 
 @pytest.mark.tui
 @pytest.mark.linux
-# The other five apps follow in their batched trickle-down lifts; each adds its
-# marker here, and `require_recover_supported` names the gap meanwhile. web is
-# never a custodian, so it is never marked. android's witness is its Robolectric
-# test (no e2e lane).
+@pytest.mark.macos
+@pytest.mark.ios
+# windows follows in its batched trickle-down lift; it adds its marker here, and
+# `require_recover_supported` names the gap meanwhile. web is never a custodian,
+# so it is never marked. android's witness is its Robolectric test (no e2e lane).
 @pytest.mark.real_sync_agent
 @pytest.mark.feature("backup-destinations-and-restore")
 def test_a_nest_that_went_back_in_time_gets_its_lost_mail_back_from_this_devices_copy(

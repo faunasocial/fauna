@@ -6,6 +6,7 @@ import com.fauna.ffi.FfiFamilyContactRequest
 import com.fauna.ffi.FfiFamilyFeedRequest
 import com.fauna.ffi.FfiFeedRequestState
 import com.fauna.ffi.FfiFeedSourceOperation
+import com.fauna.ffi.FfiReachPolicy
 import com.fauna.ffi.feedSourceOperationWire
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -47,16 +48,44 @@ class WardAsksTest {
             approvedAt = if (approved) 2L else null,
         )
 
+    private fun policy(contactApproval: Boolean) = FfiReachPolicy(
+        contactApproval = contactApproval,
+        unknownSenderMail = "allow",
+        federationContact = true,
+        feedSources = "allow",
+        contentPolicy = null,
+        screenTime = null,
+        contentNotify = null,
+        unknownPeerDm = null,
+    )
+
     // ── The durable store (rule (c)) ────────────────────────────────────────
+
+    /** Contact approval on the ward's own policy marks every knock row
+     *  (`knock-guardian-pending`); approval off, graduation or an identity change
+     *  clears it. */
+    @Test
+    fun contactApprovalMarksTheKnocksUntilGraduation() {
+        val asks = WardAsks()
+        asks.setFromStatus(true, policy(contactApproval = false), emptyList(), emptyList())
+        assertFalse(asks.knocksAwaitGuardian.value)
+        asks.setFromStatus(true, policy(contactApproval = true), emptyList(), emptyList())
+        assertTrue(asks.knocksAwaitGuardian.value)
+        asks.setFromStatus(false, policy(contactApproval = true), emptyList(), emptyList())
+        assertFalse("no guardian, no wait", asks.knocksAwaitGuardian.value)
+        asks.setFromStatus(true, policy(contactApproval = true), emptyList(), emptyList())
+        asks.clear()
+        assertFalse(asks.knocksAwaitGuardian.value)
+    }
 
     /** A graduated account's read drops the leftovers: no guardian to be
      *  waiting on (the client half of the nest's own graduation drop). */
     @Test
     fun anUnsupervisedReadDropsStaleAsks() {
         val asks = WardAsks()
-        asks.setFromStatus(true, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", true)))
+        asks.setFromStatus(true, null, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", true)))
         assertTrue(asks.contactAskPending(peer))
-        asks.setFromStatus(false, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", true)))
+        asks.setFromStatus(false, null, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", true)))
         assertFalse(asks.contactAskPending(peer))
         assertTrue(asks.feedRequests.value.isEmpty())
     }
@@ -66,7 +95,7 @@ class WardAsksTest {
     @Test
     fun anEmptyRereadKeepsTheHeldAsks_andClearDropsThem() {
         val asks = WardAsks()
-        asks.setFromStatus(true, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", false)))
+        asks.setFromStatus(true, null, listOf(contactAsk(0xcd)), listOf(feedAsk("follow", "npub1abc", false)))
         asks.noteFeedRefusal(FeedTriple("activitypub", opFollow, "npub1abc"))
         asks.replaceContactRequests(emptyList())
         asks.replaceFeedRequests(emptyList())
@@ -147,7 +176,7 @@ class WardAsksTest {
     @Test
     fun anOutstandingAskRendersPendingWithoutARefusal() {
         val asks = WardAsks()
-        asks.setFromStatus(true, listOf(contactAsk(0xcd)), emptyList())
+        asks.setFromStatus(true, null, listOf(contactAsk(0xcd)), emptyList())
         assertEquals(ContactAskRender.PENDING, contactAskRender(asks.contactAskPending(peer), KnockAskState.forPeer(peer)))
         assertEquals(ContactAskRender.PENDING, contactAskRender(asks.contactAskPending(peer.uppercase()), KnockAskState.forPeer(peer)))
         assertNull(

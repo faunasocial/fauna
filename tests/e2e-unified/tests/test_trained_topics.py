@@ -309,10 +309,12 @@ def _post_index(app, needle: str, timeout: float = 15.0) -> int:
         time.sleep(0.3)
 
 
-# tui leads (the lead-app rule). The sheet's tui shape is one picker under the
-# sheet's own id; the other six apps paint per-topic buttons with no ids of
-# their own, so they join once the sheet's row family is settled.
+# tui leads (the lead-app rule): the sheet's ratified row shape (2026-10-16)
+# landed there first; each other app joins as its per-app repaint lands.
 @pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.web
 @pytest.mark.feature("trained-topics")
 def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
     logged_in_app, nest_instance, test_user
@@ -325,8 +327,8 @@ def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
     Two legs, both on the chronological General feed, whose composition names
     no trained factor:
 
-    1. the sheet lists the user's topic and the new-topic entry; choosing the
-       topic and tapping the verb trains the post into it;
+    1. the sheet lists the user's topic and the new-topic entry; tapping the
+       topic's row trains the post into it with the verb that opened the sheet;
     2. "New trained topic…" leads to the Trained-topics facet, where the topic
        is created by name; back on the feed the sheet now lists it, and a
        second post trains into it.
@@ -357,7 +359,7 @@ def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
         f"painted {options!r}"
     )
 
-    app.feed.train_into_target("more", first_key)
+    app.feed.train_into_target(first_key)
     reply = _wait_sample_count(port, test_user, first_key, 1)
     assert reply["sample_count"] == 1, (
         f"the sheet's pick never trained {first_key}: {reply!r}; "
@@ -386,7 +388,7 @@ def test_target_sheet_trains_an_existing_or_a_new_topic_outside_a_topic_feed(
     assert any(second in o for o in options), (
         f"the new topic is missing from the sheet; painted {options!r}"
     )
-    app.feed.train_into_target("more", second_key)
+    app.feed.train_into_target(second_key)
     reply = _wait_sample_count(port, test_user, second_key, 1)
     assert reply["sample_count"] == 1, (
         f"the new topic never trained: {reply!r}; error={app.error_text()!r}"
@@ -1616,6 +1618,7 @@ def test_untrained_topic_keeps_the_order_less_like_this_sinks_and_marks_switch_a
     assert app.personalization.wait_for_topic_count(0) == 0
 
 
+@pytest.mark.android
 @pytest.mark.linux
 @pytest.mark.web
 @pytest.mark.tui
@@ -1748,6 +1751,8 @@ def test_publish_name_starts_blank_every_open_and_a_thin_model_is_refused(
 @pytest.mark.windows
 @pytest.mark.android
 @pytest.mark.web
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("custom-feeds")
 def test_the_factor_picker_offers_a_trained_topic_by_its_name(logged_in_app):
     """`feed-factor-select` lists the user's trained topics by the names they

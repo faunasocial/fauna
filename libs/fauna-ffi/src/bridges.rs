@@ -18,11 +18,11 @@
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_bridges::BridgesClient;
 use fauna_client_bridges::bridges_ui::{
     BridgeFollow, BridgeIdentity, BridgeLinkField, BridgeLinkMode, BridgeSetting,
     BridgeSettingOption, BridgeStatus, FeedSubscription, LinkReply,
 };
+use fauna_client_bridges::{BridgesClient, FollowRequestRow, follow_request_row};
 
 use crate::cbor::FfiCborValue;
 use crate::{FfiError, stringify};
@@ -96,6 +96,39 @@ pub fn nostr_content_toggle_options() -> Vec<FfiBridgeToggleOption> {
 #[uniffi::export]
 pub fn is_unified_bridges_page_bridge(id: String) -> bool {
     fauna_client_bridges::is_unified_bridges_page_bridge(&id)
+}
+
+/// UniFFI face of [`fauna_client_bridges::SettingControl`] — which control a
+/// bridge setting paints.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiSettingControl {
+    Toggle,
+    Select,
+    Number,
+    Text,
+    /// A `setting_type` this build predates: a read-only "label: value" line.
+    Unknown,
+}
+
+impl From<fauna_client_bridges::SettingControl> for FfiSettingControl {
+    fn from(c: fauna_client_bridges::SettingControl) -> Self {
+        use fauna_client_bridges::SettingControl as C;
+        match c {
+            C::Toggle => Self::Toggle,
+            C::Select => Self::Select,
+            C::Number => Self::Number,
+            C::Text => Self::Text,
+            C::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// UniFFI face of [`fauna_client_bridges::setting_control`] — the shared
+/// `BridgeSetting.setting_type` → control classifier (`bridges.md` § Bridge
+/// settings), so no app hand-lists the spellings providers use.
+#[uniffi::export]
+pub fn setting_control(setting_type: String) -> FfiSettingControl {
+    fauna_client_bridges::setting_control(&setting_type).into()
 }
 
 /// UniFFI face of [`fauna_client_bridges::LinkBlock`] — why a bridge's Link
@@ -327,6 +360,9 @@ pub struct FfiBridgeStatus {
     pub mode: Option<String>,
     pub settings: Vec<FfiBridgeSetting>,
     pub supports_follows: bool,
+    /// `BridgeStatus.supports_follow_requests` — gates the card's *Follow
+    /// requests* section (`bridges.md` § Follow requests).
+    pub supports_follow_requests: bool,
     pub link_modes: Option<Vec<FfiBridgeLinkMode>>,
     pub error: Option<String>,
 }
@@ -348,6 +384,7 @@ impl TryFrom<BridgeStatus> for FfiBridgeStatus {
                 .map(FfiBridgeSetting::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
             supports_follows: s.supports_follows,
+            supports_follow_requests: s.supports_follow_requests,
             link_modes: s
                 .link_modes
                 .map(|modes| modes.into_iter().map(Into::into).collect()),
@@ -393,6 +430,30 @@ impl TryFrom<BridgeFollow> for FfiBridgeFollow {
             created_at: f.created_at,
             extra: f.extra.map(FfiCborValue::try_from).transpose()?,
         })
+    }
+}
+
+/// One row of a bridge card's *Follow requests* list — the UniFFI face of
+/// [`fauna_client_bridges::FollowRequestRow`]. `display` is the one line a row
+/// paints ([`FollowRequestRow::display`]); `id` is what Approve and Refuse hand
+/// back.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiFollowRequestRow {
+    pub id: String,
+    pub address: String,
+    pub name: Option<String>,
+    pub display: String,
+}
+
+impl From<FollowRequestRow> for FfiFollowRequestRow {
+    fn from(r: FollowRequestRow) -> Self {
+        let display = r.display();
+        FfiFollowRequestRow {
+            id: r.id,
+            address: r.address,
+            name: r.name,
+            display,
+        }
     }
 }
 
@@ -524,6 +585,51 @@ impl FfiBridgesClient {
             .map_err(stringify)
     }
 
+    /// `fauna.bridges.list_follow_requests` — the requests waiting on the
+    /// account, one row per request. Ask only a bridge whose
+    /// [`FfiBridgeStatus::supports_follow_requests`] is true.
+    pub async fn list_follow_requests(
+        &self,
+        bridge_id: String,
+    ) -> Result<Vec<FfiFollowRequestRow>, FfiError> {
+        let reply = self
+            .client()
+            .list_follow_requests(bridge_id)
+            .await
+            .map_err(stringify)?;
+        Ok(reply
+            .requests
+            .iter()
+            .map(|r| follow_request_row(r).into())
+            .collect())
+    }
+
+    /// `fauna.bridges.resolve_follow_request` with `approve: true` —
+    /// idempotent; re-read the list before painting.
+    pub async fn approve_follow_request(
+        &self,
+        bridge_id: String,
+        id: String,
+    ) -> Result<(), FfiError> {
+        self.client()
+            .approve_follow_request(bridge_id, id)
+            .await
+            .map_err(stringify)
+    }
+
+    /// `fauna.bridges.resolve_follow_request` with `approve: false` —
+    /// idempotent; the requester may ask again.
+    pub async fn refuse_follow_request(
+        &self,
+        bridge_id: String,
+        id: String,
+    ) -> Result<(), FfiError> {
+        self.client()
+            .refuse_follow_request(bridge_id, id)
+            .await
+            .map_err(stringify)
+    }
+
     /// `fauna.bridges.feeds.list`
     pub async fn feeds_list(&self) -> Result<Vec<FfiFeedSubscription>, FfiError> {
         let reply = self.client().feeds_list().await.map_err(stringify)?;
@@ -546,6 +652,182 @@ impl FfiBridgesClient {
     /// `fauna.bridges.feeds.delete`
     pub async fn feeds_delete(&self, id: i64) -> Result<(), FfiError> {
         self.client().feeds_delete(id).await.map_err(stringify)
+    }
+}
+
+/// UniFFI face of [`fauna_client_bridges::InstalledPluginText`] — one installed
+/// plugin on the admin's Bridges-page list (`bridges.md` § Hosted plugins on
+/// this page), its publisher and status lines already composed in shared Rust
+/// as [`LocalizedText`](fauna_core::localized::LocalizedText)s each app resolves
+/// through its own i18n runtime. `principal_id_hex` is what
+/// [`FfiBridgesClient::plugins_uninstall`] takes back.
+///
+/// Gated behind `value-format` for the SAME reason as
+/// [`nostr_key_source_label`]: a bare `LocalizedText` crosses the boundary,
+/// which `uniffi-bindgen-go` emits as an uncompilable cross-namespace import in
+/// the Go mail-bridge's `--no-default-features` build (no Bridges page there).
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiInstalledPlugin {
+    pub principal_id_hex: String,
+    pub name: String,
+    pub client_id: String,
+    pub state: String,
+    pub publisher: fauna_core::localized::LocalizedText,
+    pub status: Vec<fauna_core::localized::LocalizedText>,
+}
+
+#[cfg(feature = "value-format")]
+impl From<fauna_client_bridges::InstalledPluginText> for FfiInstalledPlugin {
+    fn from(t: fauna_client_bridges::InstalledPluginText) -> Self {
+        FfiInstalledPlugin {
+            principal_id_hex: t.principal_id_hex,
+            name: t.name,
+            client_id: t.client_id,
+            state: t.state,
+            publisher: t.publisher,
+            status: t.status,
+        }
+    }
+}
+
+/// UniFFI face of [`fauna_client_bridges::PluginCardText`] — one installed
+/// plugin's settings card on the Bridges page, for EVERY account (`third-party.md`
+/// § The principal model → *Hosted principals*): the badge and publisher
+/// already composed in shared Rust, the settings as the bridge cards' own rows.
+/// `principal_id_hex` is what `ConnectedAppsMachine::bind_plugin` and
+/// [`FfiBridgesClient::plugins_set_setting`] take; `binding_principal_id_hex`
+/// (bound only) is what `ConnectedAppsMachine::revoke_principal` takes.
+///
+/// Gated behind `value-format` for the reason [`FfiInstalledPlugin`] is.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiPluginCard {
+    pub principal_id_hex: String,
+    pub name: String,
+    pub client_id: String,
+    pub badge: fauna_core::localized::LocalizedText,
+    pub publisher: fauna_core::localized::LocalizedText,
+    pub bound: bool,
+    pub binding_principal_id_hex: Option<String>,
+    pub settings: Vec<FfiBridgeSetting>,
+}
+
+#[cfg(feature = "value-format")]
+impl TryFrom<fauna_client_bridges::PluginCardText> for FfiPluginCard {
+    type Error = FfiError;
+
+    fn try_from(t: fauna_client_bridges::PluginCardText) -> Result<Self, FfiError> {
+        Ok(FfiPluginCard {
+            principal_id_hex: t.principal_id_hex,
+            name: t.name,
+            client_id: t.client_id,
+            badge: t.badge,
+            publisher: t.publisher,
+            bound: t.bound,
+            binding_principal_id_hex: t.binding_principal_id_hex,
+            settings: t
+                .settings
+                .into_iter()
+                .map(FfiBridgeSetting::try_from)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+/// The account's half of the hosted plugins (`fauna.plugins.{available,
+/// set_settings}`) — the settings cards on the Bridges page. Each card is
+/// composed once by the shared `fauna_client_bridges::plugin_card`; *Connect*
+/// and *Disconnect* are the connected-apps machine's `bind_plugin` and
+/// `revoke_principal`.
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+impl FfiBridgesClient {
+    /// `fauna.plugins.available` — every installed plugin as this account's
+    /// settings card, oldest install first.
+    pub async fn plugins_available(&self) -> Result<Vec<FfiPluginCard>, FfiError> {
+        fauna_client_bridges::PluginsClient::new(Arc::clone(&self.nest))
+            .available()
+            .await
+            .map_err(stringify)?
+            .into_iter()
+            .map(|p| {
+                FfiPluginCard::try_from(fauna_client_bridges::plugin_card_text(
+                    fauna_client_bridges::plugin_card(p),
+                ))
+            })
+            .collect()
+    }
+
+    /// `fauna.plugins.set_settings` — set one of this account's own settings
+    /// for a plugin it has bound. `principal_id_hex` is
+    /// [`FfiPluginCard::principal_id_hex`].
+    pub async fn plugins_set_setting(
+        &self,
+        principal_id_hex: String,
+        key: String,
+        value: FfiCborValue,
+    ) -> Result<(), FfiError> {
+        let principal_id = fauna_client_bridges::principal_id_from_hex(&principal_id_hex)
+            .ok_or_else(|| FfiError::General {
+                msg: "not a plugin id".into(),
+            })?;
+        fauna_client_bridges::PluginsClient::new(Arc::clone(&self.nest))
+            .set_settings(
+                principal_id,
+                std::collections::BTreeMap::from([(key, value.into())]),
+            )
+            .await
+            .map(|_| ())
+            .map_err(stringify)
+    }
+}
+
+/// The admin's half of the hosted plugins (`fauna.plugins.{list,install,
+/// uninstall}`) — the installed-plugins list and install entry on the Bridges
+/// page. Each row is composed once by the shared
+/// `fauna_client_bridges::installed_plugin_row` / `installed_plugin_text`.
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+impl FfiBridgesClient {
+    /// `fauna.plugins.list` — ADMIN: every installed plugin with its runner's
+    /// state, oldest install first.
+    pub async fn plugins_list(&self) -> Result<Vec<FfiInstalledPlugin>, FfiError> {
+        let listed = fauna_client_bridges::PluginsClient::new(Arc::clone(&self.nest))
+            .list()
+            .await
+            .map_err(stringify)?;
+        Ok(listed
+            .into_iter()
+            .map(fauna_client_bridges::installed_plugin_row)
+            .map(|row| fauna_client_bridges::installed_plugin_text(&row).into())
+            .collect())
+    }
+
+    /// `fauna.plugins.install` — ADMIN: the nest resolves and verifies the
+    /// plugin's document and opens the install card in Connected apps →
+    /// Requests, which the admin answers like any card.
+    pub async fn plugins_install(&self, document_url: String) -> Result<(), FfiError> {
+        fauna_client_bridges::PluginsClient::new(Arc::clone(&self.nest))
+            .install(document_url)
+            .await
+            .map(|_| ())
+            .map_err(stringify)
+    }
+
+    /// `fauna.plugins.uninstall` — ADMIN: every user's binding ends and the
+    /// plugin's runner stops. `principal_id_hex` is
+    /// [`FfiInstalledPlugin::principal_id_hex`].
+    pub async fn plugins_uninstall(&self, principal_id_hex: String) -> Result<(), FfiError> {
+        let principal_id = fauna_client_bridges::principal_id_from_hex(&principal_id_hex)
+            .ok_or_else(|| FfiError::General {
+                msg: "not a plugin id".into(),
+            })?;
+        fauna_client_bridges::PluginsClient::new(Arc::clone(&self.nest))
+            .uninstall(principal_id)
+            .await
+            .map(|_| ())
+            .map_err(stringify)
     }
 }
 
@@ -590,13 +872,14 @@ mod tests {
                 extra: Default::default(),
             }],
             supports_follows: true,
-            supports_follow_requests: false,
+            supports_follow_requests: true,
             link_modes: None,
             glyph: None,
             error: None,
             extra: Default::default(),
         };
         let ffi = FfiBridgeStatus::try_from(proto).unwrap();
+        assert!(ffi.supports_follow_requests);
         assert_eq!(ffi.id, "bluesky");
         assert_eq!(ffi.settings.len(), 1);
         assert_eq!(ffi.settings[0].value, FfiCborValue::Integer { v: 1 });
@@ -616,6 +899,18 @@ mod tests {
             follow_display("did:plc:abc".into(), Some("   ".into())),
             "did:plc:abc"
         );
+    }
+
+    #[test]
+    fn a_follow_request_row_carries_the_shared_display_line_and_the_answer_id() {
+        let row: FfiFollowRequestRow = FollowRequestRow {
+            id: "https://remote.example/users/bob".into(),
+            address: "@bob@remote.example".into(),
+            name: Some("Bob".into()),
+        }
+        .into();
+        assert_eq!(row.display, "Bob (@bob@remote.example)");
+        assert_eq!(row.id, "https://remote.example/users/bob");
     }
 
     #[test]

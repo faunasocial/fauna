@@ -32,6 +32,9 @@ data class AftermathProgress(
     val mlsReseal: LocalizedText? = null,
     /** Leg 4 — the capability-grant re-mint. */
     val grantRemint: LocalizedText? = null,
+    /** Leg 8 — the subscriber-tier period-key rotation, rendered right after leg 4.
+     *  Its "nest too old" line is an exposure still open, so it must show. */
+    val periodRotation: LocalizedText? = null,
     /** Leg 5 — the file corpus. Reports from the sync agent's own process, in no
      *  FFI app's sink (`FfiAftermathLeg` has no such case): **always `null`**
      *  here, like apple's, and the render path for it is unreachable. */
@@ -66,6 +69,7 @@ class AftermathProgressStore @Inject constructor(accountStores: AccountStores) {
                 FfiAftermathLeg.BACKUP_REGRANT -> p.copy(backupRegrant = line)
                 FfiAftermathLeg.MLS_RESEAL -> p.copy(mlsReseal = line)
                 FfiAftermathLeg.GRANT_REMINT -> p.copy(grantRemint = line)
+                FfiAftermathLeg.PERIOD_ROTATION -> p.copy(periodRotation = line)
                 FfiAftermathLeg.DRAFTS_RESEAL -> p.copy(draftsReseal = line)
                 FfiAftermathLeg.MAIL_BURN -> p.copy(mailBurn = line)
             }

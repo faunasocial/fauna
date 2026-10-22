@@ -366,15 +366,57 @@ async fn linode_find_server_by_name_skips_an_instance_with_no_ipv4_yet() {
 // OVH — signed GET /1.0/cloud/project/{pid}/instance
 // --------------------------------------------------------------------------
 
-fn ovh_with_project(uri: String) -> Ovh {
-    let mut ovh = Ovh::with_base_url(
+/// An adapter over an account whose credential sees `projects`; the search
+/// walks every one of them.
+async fn ovh_with_projects(mock: &MockServer, projects: &[&str]) -> Ovh {
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(projects)))
+        .mount(mock)
+        .await;
+    Ovh::with_base_url(
         "app-key".into(),
         "app-secret".into(),
         "consumer-key".into(),
-        uri,
-    );
-    ovh.project_id = "proj-1".into();
-    ovh
+        mock.uri(),
+    )
+}
+
+#[tokio::test]
+async fn ovh_find_server_by_name_walks_every_project() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/auth/time"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("1700000000"))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project/proj-1/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "ovh-9", "name": "someone-else",
+              "ipAddresses": [ { "ip": "198.51.100.1", "version": 4, "type": "public" } ] }
+        ])))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project/proj-2/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            { "id": "ovh-1", "name": "nest-example",
+              "ipAddresses": [ { "ip": "198.51.100.9", "version": 4, "type": "public" } ] }
+        ])))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let ovh = ovh_with_projects(&mock, &["proj-1", "proj-2"]).await;
+    let inst = ovh
+        .find_server_by_name(&reqwest::Client::new(), "nest-example")
+        .await
+        .unwrap()
+        .expect("found in the second project");
+    assert_eq!(inst.server_id, "proj-2/ovh-1");
+    assert_eq!(inst.ipv4, "198.51.100.9");
 }
 
 #[tokio::test]
@@ -401,14 +443,14 @@ async fn ovh_find_server_by_name_matches_the_public_ipv4() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_with_projects(&mock, &["proj-1"]).await;
     let client = reqwest::Client::new();
     let inst = ovh
         .find_server_by_name(&client, "nest-example")
         .await
         .unwrap()
         .expect("expected a match");
-    assert_eq!(inst.server_id, "ovh-1");
+    assert_eq!(inst.server_id, "proj-1/ovh-1");
     assert_eq!(inst.ipv4, "198.51.100.9");
 }
 
@@ -435,7 +477,7 @@ async fn ovh_find_server_by_name_no_match_is_none() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_with_projects(&mock, &["proj-1"]).await;
     let client = reqwest::Client::new();
     assert!(
         ovh.find_server_by_name(&client, "nest-example")
@@ -472,14 +514,14 @@ async fn ovh_find_server_by_name_falls_through_to_the_next_usable_match() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_with_projects(&mock, &["proj-1"]).await;
     let client = reqwest::Client::new();
     let inst = ovh
         .find_server_by_name(&client, "nest-example")
         .await
         .unwrap()
         .expect("expected the second, usable match");
-    assert_eq!(inst.server_id, "ovh-2");
+    assert_eq!(inst.server_id, "proj-1/ovh-2");
     assert_eq!(inst.ipv4, "198.51.100.30");
 }
 
@@ -504,7 +546,7 @@ async fn ovh_find_server_by_name_skips_an_instance_with_no_public_ipv4_yet() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_with_projects(&mock, &["proj-1"]).await;
     let client = reqwest::Client::new();
     assert!(
         ovh.find_server_by_name(&client, "nest-example")

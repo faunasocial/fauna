@@ -21,34 +21,38 @@
   // § The two modes / § Manual + live verification / § App surface. IDs:
   // tests/e2e-unified/ui.yaml § admin-dns. Prior art: the linux page above + the
   // onboarding DNS-credential form (`routes/onboarding/+page.svelte`).
-  import { identity } from '$lib/store';
-  import { copyAndConfirm } from '$lib/copy-confirm';
+  import { identity } from '#lib/store';
+  import { copyAndConfirm } from '#lib/copy-confirm';
   import {
     dnsManagementMachineWithCredentials,
     localDomainMachine,
     adminUsersListAll,
     linkedNestsMachine,
-  } from '$lib/rpc';
-  import { toBytes, actorHex } from '$lib/hex';
+  } from '#lib/rpc';
+  import { toBytes, actorHex } from '#lib/hex';
   import {
     ensureWasm,
     dnsVerdictLabel,
     certStatusView,
+    certIssuanceErrorLine,
+    type CertIssuanceErrorRow,
     hexFull,
     roleAddressOptions,
     dmarcPolicyOptions,
+    removeConfirmTitle,
+    removeConfirmBody,
     recordRecheckSecs,
     adminPickerOption,
     type RoleAddressOption,
     type DmarcPolicyOption,
-  } from '$lib/wasm';
-  import { graceCountdown } from '$lib/value-format';
+  } from '#lib/wasm';
+  import { graceCountdown } from '#lib/value-format';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { resolveKey, resolveLocalized } from '$lib/i18n/localized';
-  import { PROVIDERS, type ProviderMeta } from '$lib/generated/providers';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { resolveKey, resolveLocalized } from '#lib/i18n/localized';
+  import { PROVIDERS, type ProviderMeta } from '#lib/generated/providers';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Shapes mirror the shared machines' serde JSON (snake_case fields across the
   // serde_wasm_bindgen boundary). Typed locally over the `any` snapshots.
@@ -81,6 +85,9 @@
     status: string;
     error: string | null;
     cert_statuses: CertStatusRow[];
+    // One entry per failing nest-placed ACME order (deployment-level); empty while
+    // none fails. Worded by the shared formatter via `certIssuanceErrorLine`.
+    cert_issuance_errors: CertIssuanceErrorRow[];
     delegations: DelegationView[];
     pending_cert: PendingCertIssue | null;
   }
@@ -148,6 +155,9 @@
     // § MUA reach). A UX hint only, mirroring the nest's own `is_primary`
     // derivation; the nest stays authority on whether an add is actually first.
     adding_first_domain: boolean;
+    // The domain the remove-confirm dialog is open for (null when closed) —
+    // `mail-multidomain.md` § Removing a local domain. Set by `armRemoveDomain`.
+    remove_confirm_domain: string | null;
   }
 
   // The AddDomain wizard pick defaults to the shared `DEFAULT_CERT_MODE`
@@ -184,6 +194,7 @@
   // BeginManualIssueCert surfaces its `_acme-challenge` paste rows here. Per-domain
   // delegate-form open state + the selected target zone (first held-credential zone).
   let certByName = $state<Record<string, CertStatusRow>>({});
+  let certIssuanceErrors = $state<CertIssuanceErrorRow[]>([]);
   let delegByName = $state<Record<string, DelegationView>>({});
   let pendingCert = $state<PendingCertIssue | null>(null);
   // The 32-byte id the connection is bound to — the `target_nest_id` the cert-issuance
@@ -207,6 +218,9 @@
   // relay.md § MUA reach) — true only while a domainless nest's next add would
   // become the primary.
   let addingFirstDomain = $state(false);
+  // The domain the remove-confirm dialog is open for, read off the shared
+  // snapshot's `remove_confirm_domain` (null = closed).
+  let removeConfirmDomain = $state<string | null>(null);
   let renameSheetOpen = $state(false);
   let renameTarget = $state(''); // the picked new-primary domain name
   let renameGraceDays = $state(''); // optional override; '' → nest default (7)
@@ -243,7 +257,7 @@
   const credZones = $derived(Array.from(new Set(credentials.flatMap((c) => c.zones))));
 
   // Resolve a dot-notation i18n key (provider display names + field labels) —
-  // the shared `$lib/i18n/localized` resolver (was duplicated per-page).
+  // the shared `#lib/i18n/localized` resolver (was duplicated per-page).
   const L = resolveKey;
 
   // A missing verdict reads as "checking" (neutral) — never a false red/green.
@@ -273,9 +287,11 @@
     renameActive = ld?.active_rename ?? null;
     renameAvailable = ld?.rename_available ?? false;
     addingFirstDomain = ld?.adding_first_domain ?? false;
+    removeConfirmDomain = ld?.remove_confirm_domain ?? null;
     dnsByName = Object.fromEntries((dns?.domains ?? []).map((d) => [d.domain, d]));
     credentials = dns?.credentials ?? [];
     certByName = Object.fromEntries((dns?.cert_statuses ?? []).map((c) => [c.domain, c]));
+    certIssuanceErrors = dns?.cert_issuance_errors ?? [];
     delegByName = Object.fromEntries((dns?.delegations ?? []).map((g) => [g.domain, g]));
     pendingCert = dns?.pending_cert ?? null;
     error = ld?.error ?? dns?.error ?? '';
@@ -356,8 +372,10 @@
       try {
         const ln = await linkedNestsMachine(id.secretHex);
         targetNestId = (await ln.thisNestId()) as number[];
-      } catch {
-        // Non-fatal: issuance unavailable until the self-nest id resolves.
+      } catch (e) {
+        // Non-fatal to the rest of the page: issuance stays inert, but a refused
+        // bound-id claim is surfaced on `error-message` like every other app.
+        error = e instanceof Error ? e.message : String(e);
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -427,10 +445,20 @@
       if (!error) error = e instanceof Error ? e.message : String(e);
     }
   }
-  async function removeDomain(domain: string): Promise<void> {
+  // The row's Remove only opens the shared confirm (synchronous, no nest); the
+  // dialog's confirm removes the armed domain, its cancel closes it.
+  function armRemoveDomain(domain: string): void {
+    ldMachine?.armRemoveDomain(domain);
+    applySnapshots();
+  }
+  function cancelRemoveDomain(): void {
+    ldMachine?.cancelRemoveDomain();
+    applySnapshots();
+  }
+  async function confirmRemoveDomain(): Promise<void> {
     if (!ldMachine) return;
     try {
-      await ldMachine.dispatch({ RemoveDomain: { domain } });
+      await ldMachine.dispatch('ConfirmRemoveDomain');
       applySnapshots();
     } catch (e) {
       applySnapshots();
@@ -828,6 +856,12 @@
     }
     return s;
   }
+  // The failing-certificate-request lines, one per entry of the snapshot's
+  // `cert_issuance_errors`, worded entirely by the shared formatter; the date is
+  // rendered like the cert badge's expiry. Plain text only (CA text is untrusted).
+  function certIssuanceErrorLines(errors: CertIssuanceErrorRow[]): string[] {
+    return errors.map((e) => certIssuanceErrorLine(e, formatCertExpiry(e.failed_at_unix)));
+  }
   // success (trusted) / warning (expiring / on-floor — non-fatal) / dim (loading).
   function certStatusClass(cert: CertStatusRow | undefined): string {
     switch (cert?.state) {
@@ -1200,6 +1234,28 @@
   {/if}
 </div>
 
+<!-- Remove-confirm dialog: painted only while the shared machine holds a domain
+     armed (`remove_confirm_domain`). Only its confirm removes; cancel closes it
+     with nothing removed (mail-multidomain.md § Removing a local domain). -->
+{#if removeConfirmDomain !== null}
+  <div class="remove-confirm" data-testid={IDS.ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_MODAL}>
+    <p><strong>{resolveLocalized(removeConfirmTitle(removeConfirmDomain))}</strong></p>
+    <p>{resolveLocalized(removeConfirmBody(removeConfirmDomain))}</p>
+    <div class="add-form">
+      <button
+        class="btn"
+        data-testid={IDS.ADMIN_DNS_DOMAIN_REMOVE_CANCEL_BUTTON}
+        onclick={cancelRemoveDomain}
+      >{t.common.cancel}</button>
+      <button
+        class="btn danger"
+        data-testid={IDS.ADMIN_DNS_DOMAIN_REMOVE_CONFIRM_BUTTON}
+        onclick={confirmRemoveDomain}
+      >{t.admin.dns.remove_confirm}</button>
+    </div>
+  </div>
+{/if}
+
 <!-- Add-domain form: the button reveals an inline input + submit/cancel.
      Submit dispatches AddDomain on the shared LocalDomainMachine. -->
 <div class="add-domain">
@@ -1209,7 +1265,7 @@
     </button>
   {:else}
     {#if addingFirstDomain}
-      <p class="warning">{t.admin.dns.add_domain_primary_warning}</p>
+      <p class="warning" data-testid={IDS.ADMIN_DNS_ADD_DOMAIN_PRIMARY_WARNING}>{t.admin.dns.add_domain_primary_warning}</p>
     {/if}
     <div class="add-form">
       <input
@@ -1228,6 +1284,12 @@
     </div>
   {/if}
 </div>
+
+<!-- Why the nest's own certificate requests are failing: deployment-level, once,
+     above the domain rows (tls-certificates.md § Keeping the cert alive). -->
+{#each certIssuanceErrorLines(certIssuanceErrors) as line}
+  <p class="cert-issuance-error" data-testid={IDS.ADMIN_DNS_CERT_ISSUANCE_ERROR}>{line}</p>
+{/each}
 
 {#if loading}
   <p class="muted">{t.admin.dns.empty}</p>
@@ -1283,7 +1345,7 @@
             class="btn danger"
             data-testid={IDS.ADMIN_DNS_DOMAIN_REMOVE_BUTTON}
             disabled={d.is_primary}
-            onclick={() => removeDomain(d.domain)}
+            onclick={() => armRemoveDomain(d.domain)}
           >{t.admin.dns.remove}</button>
           <!-- Primary-domain rename affordances (mail-primary-domain-rename.md
                § UX surface). On the primary row: "Rename primary" (disabled until a
@@ -1526,6 +1588,12 @@
 
   .add-domain { margin-bottom: 1.5rem; }
   .add-form { display: flex; gap: 0.5rem; align-items: center; }
+  .remove-confirm {
+    margin: 0.75rem 0;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
   .add-input {
     flex: 1 1 auto;
     padding: 0.375rem 0.625rem;
@@ -1628,6 +1696,7 @@
     padding: 0.125rem 0.5rem;
     border-radius: 4px;
   }
+  .cert-issuance-error { color: var(--warning, #d29922); margin: 0 0 0.5rem; }
   .cert-badge.ok { background: rgba(63, 185, 80, 0.15); color: var(--success, #3fb950); }
   .cert-badge.warn { background: rgba(210, 153, 34, 0.15); color: var(--warning, #d29922); }
   .cert-badge.checking { background: rgba(139, 148, 158, 0.15); color: var(--text-muted, #8b949e); }

@@ -264,11 +264,12 @@ def test_admin_area_navigation_switches_between_admin_pages(admin_main_app):
         or app.driver.is_web()
         or app.driver.is_linux()
         or app.driver.is_android()
+        or app.driver.is_windows()
     ):
         skip_unbuilt(
             app.driver,
             surface="admin-nav-row[<page id>]",
-            detail="the admin rail rows carry their ids on tui, web, linux and android; the other three "
+            detail="the admin rail rows carry their ids on tui, web, linux, android and windows; the other two "
             "gain them in their trickle-down rows",
             tracked="ui.yaml navigation.sub_page_nav_rows",
         )

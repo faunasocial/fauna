@@ -1,4 +1,4 @@
-//! How `$lib/store`'s identity store applies a registry re-read.
+//! How `#lib/store`'s identity store applies a registry re-read.
 //!
 //! `identity.init()` runs on every route's `onMount` and re-reads the identity
 //! from the account registry, which does not persist `registered` (it is the

@@ -9,6 +9,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import uniffi.fauna_client_dns.CertIssuanceErrorRow
 import uniffi.fauna_client_dns.CertStatusRow
 import uniffi.fauna_client_dns.CredentialSummary
 import uniffi.fauna_client_dns.DelegationView
@@ -84,6 +85,10 @@ class AdminDnsVM @Inject constructor(
      *  becomes the primary and can never be removed from any app
      *  (deployment-home-with-public-relay.md § MUA reach). A UX hint only. */
     val addingFirstDomain = MutableStateFlow(false)
+    /** The domain the remove-confirm dialog is open for (null = closed), off the
+     *  shared snapshot's `removeConfirmDomain` (mail-multidomain.md § Removing a
+     *  local domain). */
+    val removeConfirmDomain = MutableStateFlow<String?>(null)
     /** Per-domain DNS records (+ verdict) and effective mode, keyed by domain. */
     val dnsDomains = MutableStateFlow<List<DomainView>>(emptyList())
     val credentials = MutableStateFlow<List<CredentialSummary>>(emptyList())
@@ -93,10 +98,15 @@ class AdminDnsVM @Inject constructor(
      *  and the in-flight manual-paste order — the TLS-cert lifecycle surface
      *  (tls-certificates.md § C.3/C.4 + § B tier 3). */
     val certStatuses = MutableStateFlow<List<CertStatusRow>>(emptyList())
+    /** Each failing nest-placed ACME order's last error (deployment-level). */
+    val certIssuanceErrors = MutableStateFlow<List<CertIssuanceErrorRow>>(emptyList())
     val delegations = MutableStateFlow<List<DelegationView>>(emptyList())
     val pendingCert = MutableStateFlow<PendingCertIssue?>(null)
     val error = MutableStateFlow<String?>(null)
     val working = MutableStateFlow(false)
+
+    /** The last cert-issue bound-id refusal (see [resolveTargetNestId]); folded into [error]. */
+    private var resolveRefusal: String? = null
 
     init {
         hydrate()
@@ -154,7 +164,20 @@ class AdminDnsVM @Inject constructor(
         ),
     )
 
-    fun removeDomain(domain: String) = dispatchLd(LocalDomainAction.RemoveDomain(domain = domain))
+    /** The row's Remove: open the shared confirm. Synchronous — it reaches no nest. */
+    fun armRemoveDomain(domain: String) {
+        ldMachine?.armRemoveDomain(domain)
+        publish()
+    }
+
+    /** The dialog's cancel: close it, removing nothing. */
+    fun cancelRemoveDomain() {
+        ldMachine?.cancelRemoveDomain()
+        publish()
+    }
+
+    /** The dialog's confirm: remove the armed domain. */
+    fun confirmRemoveDomain() = dispatchLd(LocalDomainAction.ConfirmRemoveDomain)
 
     fun restoreDomain(domain: String) = dispatchLd(LocalDomainAction.RestoreDomain(domain = domain))
 
@@ -264,7 +287,7 @@ class AdminDnsVM @Inject constructor(
     fun issueCert(domain: String) {
         viewModelScope.launch {
             withWorking {
-                val targetNestId = api.resolveThisNestId()
+                val targetNestId = resolveTargetNestId(domain)
                 if (targetNestId != null) {
                     dnsMachine?.dispatch(DnsAction.IssueCert(domain = domain, targetNestId = targetNestId))
                     dnsMachine?.dispatch(DnsAction.RefreshCertStatus)
@@ -280,13 +303,28 @@ class AdminDnsVM @Inject constructor(
     fun beginManualIssue(domain: String) {
         viewModelScope.launch {
             withWorking {
-                val targetNestId = api.resolveThisNestId()
+                val targetNestId = resolveTargetNestId(domain)
                 if (targetNestId != null) {
                     dnsMachine?.dispatch(
                         DnsAction.BeginManualIssueCert(domain = domain, targetNestId = targetNestId),
                     )
                 }
             }
+        }
+    }
+
+    /** The bound-id resolver's seal target for [domain]; `null` when not connected or
+     *  when it refused (the nest's identity claim disagrees with the connection-bound
+     *  id). A refusal never reaches the machine, so it carries no snapshot error —
+     *  hold it in [resolveRefusal] for [publish] to show on `error-message`, and the
+     *  caller dispatches nothing. Same wording as tui / linux / windows / apple. */
+    private suspend fun resolveTargetNestId(domain: String): ByteArray? {
+        resolveRefusal = null
+        return try {
+            api.resolveThisNestId()
+        } catch (e: Exception) {
+            resolveRefusal = "resolve target nest for $domain: ${e.message}"
+            null
         }
     }
 
@@ -349,17 +387,20 @@ class AdminDnsVM @Inject constructor(
             activeRename.value = snap.activeRename
             renameAvailable.value = snap.renameAvailable
             addingFirstDomain.value = snap.addingFirstDomain
+            removeConfirmDomain.value = snap.removeConfirmDomain
         }
         dnsMachine?.let {
             val snap = it.snapshot()
             dnsDomains.value = snap.domains
             credentials.value = snap.credentials
             certStatuses.value = snap.certStatuses
+            certIssuanceErrors.value = snap.certIssuanceErrors
             delegations.value = snap.delegations
             pendingCert.value = snap.pendingCert
             manageAll.value = it.allDomainsManaged(snap.domains.map { d -> d.domain })
         }
         error.value = listOfNotNull(
+            resolveRefusal,
             ldMachine?.snapshot()?.error,
             dnsMachine?.snapshot()?.error,
         ).firstOrNull()

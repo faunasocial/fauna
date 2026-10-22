@@ -114,7 +114,8 @@ pub use sole_instance::{
 mod sign_out_residue;
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign_out_residue::{
-    ResiduePath, ResidueRetry, SIGN_OUT_RESIDUE_FILE, SignOutResidue, retry_sign_out_residue,
+    FINGERPRINT_MAX_ENTRIES, ResiduePath, ResidueRetry, SIGN_OUT_RESIDUE_FILE, SignOutResidue,
+    TreeFingerprint, retry_sign_out_residue,
 };
 
 /// Web's sign-out record: the durable decision a browser sign-out (and a
@@ -124,10 +125,20 @@ pub use sign_out_residue::{
 mod sign_out_record;
 pub use sign_out_record::{SIGN_OUT_RECORD_KEY, SignOutPlan, SignOutRecord};
 
+/// The sealing [`SecretStore`] wrapper the web identity store sits behind
+/// (`apps/web.md` § Identity store at rest) — platform-neutral, so it is
+/// unit-tested natively.
+mod sealed_store;
+pub use sealed_store::{
+    PASSKEY_PRF_LEN, PasskeyWrapInfo, SEAL_HEADER_KEY, SEAL_STAGING_PREFIX, SEALED_VALUE_PREFIX,
+    SealError, SealedSecretStore, SealingReport, fresh_passkey_prf_salt, is_identity_store_key,
+    is_sealed_value,
+};
+
 #[cfg(feature = "web-localstorage")]
 mod web_store;
 #[cfg(all(feature = "web-localstorage", target_arch = "wasm32"))]
-pub use web_store::{LocalStorageSecretStore, TAB_PIN_KEY, tab_pin};
+pub use web_store::{LocalStorageSecretStore, TAB_PIN_KEY, WebIdentityStore, tab_pin};
 
 /// Web's cross-tab registry mutation lock — the Web Locks leg of
 /// [`MutationLock`], taken by every wasm-facing mutator entry from OUTSIDE
@@ -160,7 +171,8 @@ pub const INDEX_KEY: &str = "fauna/index";
 /// (`long-term-store.md` § Multi-account evolution → *The index is bounded*).
 pub const MAX_INDEX_VALUE_BYTES: usize = 2560;
 
-fn secret_key(actor_id: &str) -> String {
+/// Logical key of an account's secret row.
+pub fn secret_key(actor_id: &str) -> String {
     format!("fauna/{actor_id}/secret")
 }
 fn nest_url_key(actor_id: &str) -> String {
@@ -1481,6 +1493,49 @@ impl AccountRegistry {
         self.store.delete(&pending_aftermath_ceremony_key(actor_id));
     }
 
+    /// Clear the parked aftermath ceremony only if it still holds exactly
+    /// `expected` — the compare and the delete are ONE critical section (a
+    /// single lock acquisition), so a re-park of a wider roster cannot land
+    /// between them and be deleted unraised. `true` when it cleared.
+    ///
+    /// On web the registry's lock is a no-op and the cross-tab exclusion lives
+    /// one layer out, so a web caller reaches this through
+    /// [`Self::clear_aftermath_ceremony_if_serialized`].
+    pub fn clear_aftermath_ceremony_if(&self, actor_id: &str, expected: &str) -> bool {
+        let _mutation = self.lock.acquire();
+        let key = pending_aftermath_ceremony_key(actor_id);
+        if self.store.get(&key).as_deref() != Some(expected) {
+            return false;
+        }
+        self.store.delete(&key);
+        true
+    }
+
+    /// [`Self::clear_aftermath_ceremony_if`] under the host's cross-instance
+    /// serialization: web holds the origin-wide Web Lock around the section
+    /// (`with_web_mutation_lock`); native already holds its file lock inside
+    /// the call. The one entry a host-agnostic caller (the recovery drain)
+    /// awaits, so the `cfg` stays beside the lock it names.
+    pub async fn clear_aftermath_ceremony_if_serialized(
+        &self,
+        actor_id: &str,
+        expected: &str,
+    ) -> bool {
+        #[cfg(all(target_arch = "wasm32", feature = "web-localstorage"))]
+        {
+            let registry = self.clone();
+            let (actor, expected) = (actor_id.to_owned(), expected.to_owned());
+            crate::with_web_mutation_lock(move || {
+                registry.clear_aftermath_ceremony_if(&actor, &expected)
+            })
+            .await
+        }
+        #[cfg(not(all(target_arch = "wasm32", feature = "web-localstorage")))]
+        {
+            self.clear_aftermath_ceremony_if(actor_id, expected)
+        }
+    }
+
     /// The per-actor **last-known supervision snapshot**, as opaque JSON. The
     /// shape is `fauna_client_family::SupervisionSnapshot`; the registry stores
     /// it verbatim and never parses it, exactly as for the three slots above.
@@ -2073,6 +2128,33 @@ impl AccountRegistry {
             self.write_index(&idx)?;
         }
         Ok(())
+    }
+
+    /// [`Self::record_predecessors`] under the host's cross-instance
+    /// serialization: web holds the origin-wide Web Lock around the section
+    /// (`with_web_mutation_lock`) — the `NoopMutationLock` registry web builds
+    /// takes nothing inside the call; native already holds its file lock
+    /// inside it. The one entry the host-agnostic read-prove-record
+    /// (`read_own_profile_learning_link`) awaits, so the `cfg` stays beside the
+    /// lock it names.
+    pub async fn record_predecessors_serialized(
+        &self,
+        new_actor: &str,
+        predecessors: &[String],
+    ) -> Result<(), AccountError> {
+        #[cfg(all(target_arch = "wasm32", feature = "web-localstorage"))]
+        {
+            let registry = self.clone();
+            let (actor, predecessors) = (new_actor.to_owned(), predecessors.to_vec());
+            crate::with_web_mutation_lock(move || {
+                registry.record_predecessors(&actor, &predecessors)
+            })
+            .await
+        }
+        #[cfg(not(all(target_arch = "wasm32", feature = "web-localstorage")))]
+        {
+            self.record_predecessors(new_actor, predecessors)
+        }
     }
 
     /// Record `old_actor`'s fleet as this device — the one running its
@@ -3228,6 +3310,33 @@ mod tests {
         assert_eq!(reg.active().as_deref(), Some(c.as_str()));
     }
 
+    /// The provisional purge's defensive re-seat is the second
+    /// door: a first-run wizard confirms an already-flagged identity, its
+    /// `let _ = set_active` is refused, and the abandoned provisional row
+    /// still holding `active` is retired — the re-seat must not land on the
+    /// flagged account it just refused.
+    #[test]
+    fn purge_reseat_never_promotes_a_flagged_account() {
+        let (reg, _s) = registry();
+        let flagged = reg.add_account(SECRET_B, None, None).unwrap();
+        reg.set_require_confirm(&flagged, true).unwrap();
+        let abandoned = reg.add_account(SECRET_A, None, None).unwrap();
+        reg.set_active(&abandoned).unwrap();
+
+        let confirmed =
+            crate::launch_persistence::persist_confirmed_identity(&reg, SECRET_B, false).unwrap();
+        assert_eq!(confirmed, flagged);
+        assert!(
+            reg.list().iter().all(|a| a.actor_id != abandoned),
+            "the provisional row is retired"
+        );
+        assert_eq!(
+            reg.active(),
+            None,
+            "the only survivor is flagged: the purge's re-seat must not bypass the gate"
+        );
+    }
+
     /// The concurrent-instances bind gate mirrors every activation guard 1:1
     /// (`account-scoping.md` § Concurrent instances) — "open as new instance"
     /// must not be a side door around them — and moves nothing: the active
@@ -3746,6 +3855,28 @@ mod tests {
             assert_one("park_aftermath_ceremony");
             reg.clear_aftermath_ceremony(&a);
             assert_one("clear_aftermath_ceremony");
+            reg.park_aftermath_ceremony(&a, "{}");
+            assert_one("park_aftermath_ceremony (for the compare)");
+            assert!(!reg.clear_aftermath_ceremony_if(&a, "{\"wider\":1}"));
+            assert_one("clear_aftermath_ceremony_if (differing park)");
+            assert_eq!(
+                reg.pending_aftermath_ceremony(&a).as_deref(),
+                Some("{}"),
+                "a differing park survives the compare-and-clear"
+            );
+            assert!(reg.clear_aftermath_ceremony_if(&a, "{}"));
+            assert_one("clear_aftermath_ceremony_if (matching park)");
+            // Native's serialized entry is a plain call: still one acquisition.
+            // (No await point on native, so one poll completes it.)
+            let predecessors = [actor_of(SECRET_B)];
+            let mut recorded =
+                std::pin::pin!(reg.record_predecessors_serialized(&a, &predecessors));
+            let ready = recorded
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            assert!(matches!(ready, std::task::Poll::Ready(Ok(()))));
+            assert_one("record_predecessors_serialized");
+            assert_eq!(reg.pending_aftermath_ceremony(&a), None);
             let install = InMemorySecretStore::new();
             reg.ensure_install_device_secret(&install).unwrap();
             assert_one("ensure_install_device_secret");

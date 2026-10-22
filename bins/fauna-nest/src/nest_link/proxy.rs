@@ -174,6 +174,43 @@ impl WorkerHandle {
         });
         (handle, deleted)
     }
+
+    /// A handle wired to an in-process fake worker whose replica holds
+    /// `payload` under `key`: it answers every `Fetch` for that key with the
+    /// bytes (any other key: not found) — the seam the read-fallback tests
+    /// observe the proxy's re-cache through. Any other command is dropped
+    /// unanswered.
+    pub(crate) fn fake_serving_fetch(key: String, payload: Vec<u8>) -> Arc<Self> {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(64);
+        // spawn-ok(test)
+        tokio::spawn(async move {
+            while let Some(req) = cmd_rx.recv().await {
+                if let ProxyCommand::Fetch {
+                    request_id,
+                    key: asked,
+                    ..
+                } = req.command
+                {
+                    let held = asked == key;
+                    let _ = req.response_tx.send(WorkerMessage::FetchResult {
+                        request_id,
+                        found: held,
+                        payload: held.then(|| hex::encode(&payload)),
+                    });
+                }
+            }
+        });
+        Arc::new(Self {
+            cmd_tx,
+            info: WorkerInfo {
+                max_storage_bytes: 0,
+                current_usage_bytes: 0,
+                payload_count: 0,
+            },
+            connected_at: 0,
+            next_request_id: AtomicU64::new(1),
+        })
+    }
 }
 
 /// Proxy-side state for tracking the connected worker.
@@ -223,7 +260,7 @@ pub async fn worker_ws_handler(
     // — see [`crate::sidecar_channel::internal_ws_allowlist_gate`]'s own doc comment.
     // The prior `if let Some(...)` with no `else` skipped the check outright on a
     // missing ConnectInfo, on the retired belief that TLS connections lack it.
-    if let Err(resp) = crate::sidecar_channel::internal_ws_allowlist_gate(&req, "worker") {
+    if let Err(resp) = crate::sidecar_channel::internal_ws_allowlist_gate(&req, "worker WS") {
         return resp;
     }
     // Extract WebSocketUpgrade from the request

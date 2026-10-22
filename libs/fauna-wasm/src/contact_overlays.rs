@@ -37,7 +37,7 @@ use std::sync::Arc;
 use fauna_account_seams::contact_overlays::{StagedSave, save_staged};
 use fauna_conversations::ConversationsManager;
 use fauna_conversations::contacts::ContactsCache;
-use fauna_core::contact_overlay::{OverlayEditor, OverlayForm};
+use fauna_core::contact_overlay::{OverlayEditor, OverlayForm, label_suggestions};
 use fauna_core::localized::LocalizedText;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -179,6 +179,15 @@ impl WasmContactOverlays {
     /// The derived label vocabulary — every live label across every person.
     pub fn vocabulary(&self) -> Result<JsValue, JsValue> {
         crate::rpc::to_js(&self.cache.vocabulary())
+    }
+
+    /// The completion under the private section's label add field
+    /// (`profile-label-suggestion`): the vocabulary labels `typed` starts,
+    /// minus the `staged` ones. The SPA paints none until the field holds
+    /// text; a pick stages through the editor's `addLabel` as if typed.
+    #[wasm_bindgen(js_name = labelSuggestions)]
+    pub fn label_suggestions(&self, typed: &str, staged: Vec<String>) -> Vec<String> {
+        label_suggestions(&self.cache.vocabulary(), typed, &staged)
     }
 
     /// The private section's staging for `actor_id`.

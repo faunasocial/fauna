@@ -56,7 +56,6 @@ use fauna_protocol::{
         WelcomeDeliverReply, WelcomeDeliverRequest, WelcomeKind,
     },
     decode_strict as decode,
-    posts::LegalTakedownMarker,
 };
 
 use fauna_core::data::{ArrivalOrigin, InboxMode, ReachVerdict, dm_initiation_mode_verdict};
@@ -332,7 +331,7 @@ fn claim_permits(claim: FolderChannelClaim, caller: &[u8; 32]) -> bool {
 /// grant — a strictly narrower question than [`claim_permits`]' "may write
 /// one".
 ///
-/// `federation.md` § Cross-nest shared folders + channel append accepts
+/// `federation-shared-folders.md` § Cross-nest shared folders + channel append accepts
 /// re-binding as a residual *"within the inviter's existing power (they chose
 /// to add the member)"*. `claim_permits` alone does not hold that bound: on a
 /// conversation channel there is no claimant, so its `Unclaimed` arm charges
@@ -522,7 +521,7 @@ fn channel_send_remote_handler() -> RpcHandler {
 
 // ── fauna.conversations.channel.actors_remote ──────────────────
 
-/// The foreign-member roster-read relay (`federation.md` § Cross-nest): the
+/// The foreign-member roster-read relay (`federation-shared-folders.md` § Cross-nest): the
 /// caller's channel is foreign-homed (they hold a recorded Welcome `nest_url`),
 /// so this nest originates `fauna.federation.channel.actors` there and answers
 /// the home nest's authoritative roster union. The home nest applies the
@@ -705,7 +704,7 @@ pub(crate) async fn channel_send_core(
         )));
     }
 
-    // Folder channel Commit admission (`federation.md` § Cross-nest shared
+    // Folder channel Commit admission (`federation-shared-folders.md` § Cross-nest shared
     // folders + channel append — re-ratified 2026-08-24; supersedes the
     // 2026-07-18/S2 claimant-only refusal). A claimed folder channel's MLS
     // group is owner-managed, but MLS commits are PrivateMessage ciphertext:
@@ -1110,7 +1109,7 @@ pub(crate) async fn page_authors(
     state: &Arc<AppState>,
     channel_id: &[u8; 32],
     after_seq: i64,
-    rows: &[(i64, Vec<u8>, Option<String>)],
+    rows: &[(i64, Vec<u8>, crate::segments::records_db::ConvWithhold)],
 ) -> std::collections::HashMap<i64, String> {
     let Some(up_to) = rows.iter().map(|(seq, _, _)| *seq).max() else {
         return Default::default();
@@ -1275,7 +1274,7 @@ fn channel_fetch_handler() -> RpcHandler {
             // Cross-Nest, step 3). The channel log lives on the peer, so the local
             // serving gate / roster / segments below are the same-nest path only.
             if let Some(peer_url) = req.nest_url.as_deref().filter(|u| !u.is_empty()) {
-                // The id→handle ruling (`federation.md` § Cross-nest shared
+                // The id→handle ruling (`federation-shared-folders.md` § Cross-nest shared
                 // folders + channel append, the id→handle bullet): this nest
                 // is the caller's home and the authority for handles at its
                 // domain, so it volunteers the caller's `handle@domain` on
@@ -1321,6 +1320,7 @@ fn channel_fetch_handler() -> RpcHandler {
                         seq: m.seq,
                         envelope: m.envelope,
                         legal_takedown: m.legal_takedown,
+                        admin_block: m.admin_block,
                         labels: m.labels,
                         scores: m.scores,
                         // The HOME nest's attestation, forwarded unchanged —
@@ -1357,6 +1357,9 @@ fn channel_fetch_handler() -> RpcHandler {
                 &channel_id,
                 req.after,
                 limit,
+                // The caller is authenticated: its own blocked records serve
+                // with the notice beside them (`moderation.md` decision 4).
+                Some(&actor_id),
             )
             .await
             .map_err(|e| {
@@ -1392,10 +1395,11 @@ fn channel_fetch_handler() -> RpcHandler {
             let messages: Vec<ChannelFetchEntry> = rows
                 .into_iter()
                 .zip(verdicts)
-                .map(|((seq, envelope, legal_ref), derived)| ChannelFetchEntry {
+                .map(|((seq, envelope, withhold), derived)| ChannelFetchEntry {
                     seq,
                     envelope,
-                    legal_takedown: LegalTakedownMarker::from_ref(legal_ref),
+                    legal_takedown: withhold.legal_takedown_marker(),
+                    admin_block: withhold.admin_block_marker(),
                     labels: derived.labels,
                     scores: derived.scores,
                     author: authors.remove(&seq),
@@ -1429,13 +1433,15 @@ pub(crate) async fn page_verdicts(
     state: &Arc<AppState>,
     channel_id: &[u8; 32],
     reader: &[u8; 32],
-    rows: &[(i64, Vec<u8>, Option<String>)],
+    rows: &[(i64, Vec<u8>, crate::segments::records_db::ConvWithhold)],
 ) -> Vec<crate::db::room_labels::RoomBus> {
     let seqs: Vec<i64> = rows.iter().map(|(seq, _, _)| *seq).collect();
     let mut bus = room_bus_for_member(state, channel_id, reader, &seqs).await;
     rows.iter()
-        .map(|(seq, _, legal_ref)| {
-            if legal_ref.is_some() {
+        .map(|(seq, _, withhold)| {
+            // A withheld record — either ground — carries no verdicts: they
+            // were derived from the plaintext the withhold keeps off the wire.
+            if withhold.is_withheld() {
                 crate::db::room_labels::RoomBus::default()
             } else {
                 bus.remove(seq).unwrap_or_default()
@@ -2076,7 +2082,7 @@ pub(crate) async fn welcome_deliver_core(
     // the client delivers the Welcome, so this nest holds the row. Load-bearing
     // for a CROSS-NEST recipient, whose own nest holds no role row for the set
     // and therefore cannot discover its own grant any other way
-    // (`federation.md` § Cross-nest → Recipient-side access discovery).
+    // (`federation-shared-folders.md` § Cross-nest → Recipient-side access discovery).
     //
     // Advisory-for-UI on the receiving side: it decides whether that client
     // OFFERS a folder binding. Enforcement stays here, on the write kinds'
@@ -2144,7 +2150,7 @@ pub(crate) async fn welcome_deliver_core(
             // a provisioned box boots domainless and would hand the peer no
             // origin nest URL at all until a restart.
             let origin_nest_url = state.handle_domain_if_set().map(|d| format!("https://{d}"));
-            // The cross-nest owner label (`federation.md` § Cross-nest shared
+            // The cross-nest owner label (`federation-shared-folders.md` § Cross-nest shared
             // folders + channel append → *The cross-nest owner label*,
             // *Carrier*): this nest is the set's home and the caller is its
             // owner (`share_core` owner-gates the share), so it volunteers the
@@ -2173,7 +2179,7 @@ pub(crate) async fn welcome_deliver_core(
                     home_nest_actor_id: home_nest_actor_id.clone(),
                     // The folder's residency, off the claimed row beside
                     // `access` — what seeds the recipient's foreign record
-                    // (`federation.md` § … *Relay serving across nests*).
+                    // (`federation-shared-folders.md` § … *Relay serving across nests*).
                     residency: claimed_fs
                         .as_ref()
                         .and_then(crate::federation_handlers::residency_stamp),
@@ -2198,7 +2204,7 @@ pub(crate) async fn welcome_deliver_core(
             //
             // Claimant-gated, the relay-side twin of the same-nest register at
             // the tail of this function: `channel_foreign_members`
-            // is the OTHER half of the one channel roster (`federation.md`
+            // is the OTHER half of the one channel roster (`federation-shared-folders.md`
             // § Cross-nest shared folders + channel append), and the row it
             // writes IS an authorization grant — `require_foreign_member` serves
             // the peer `channel.fetch` (the ciphertext stream) and
@@ -2293,7 +2299,7 @@ pub(crate) async fn welcome_deliver_core(
                 shared_by_handle: shared_by_handle.clone(),
                 // Same-nest: a bare handle means a local `users` row — the
                 // pair's domain half is stamped only on a verified cross-nest
-                // relay (`federation.md` § … *The cross-nest owner label*).
+                // relay (`federation-shared-folders.md` § … *The cross-nest owner label*).
                 shared_by_domain: None,
                 set_name: set_name.clone(),
                 // Uniform stamp, same reasoning as `set_name` — a same-nest
@@ -6232,80 +6238,93 @@ fn room_search_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.conversations.room.search").await?;
             let req: RoomSearchRequest = decode(&payload).map_err(malformed)?;
-            let room_id = parse_room_id(&req.room_id)?;
-            // A community room only: the floor is the membership authority
-            // here, and it is the only class whose log the nest can read at
-            // all. An end-to-end room's search is its members' own work.
-            floor_authoritative_room(&state, &room_id).await?;
-
-            // A live floor member of ANY rank. The roles table gates minting
-            // and membership, never reading — and the refusal is explicit
-            // rather than an empty list, for `room_generations_for_principal`'s
-            // reason: silence would read as "this room holds nothing".
-            let Some(seat) = state
-                .db
-                .list_floor_roster(&room_id)
-                .await
-                .map_err(|e| internal(format!("floor roster: {e}")))?
-                .into_iter()
-                .find(|m| m.principal_id == actor_id)
-            else {
-                return Err(permission_denied("not a member of this room"));
-            };
-
-            if req.query.trim().is_empty() {
-                return Err(crate::rpc_errors::invalid_params_ns(
-                    "conversations",
-                    "query is required",
-                ));
-            }
-            let limit = req
-                .limit
-                .unwrap_or(fauna_protocol::conversations::ROOM_SEARCH_DEFAULT_LIMIT)
-                .clamp(1, fauna_protocol::conversations::ROOM_SEARCH_MAX_LIMIT)
-                as usize;
-
-            // ⚠ **The reader's roster ENTRY is what bounds the page**, and it
-            // is derived here from the principal the door authenticated —
-            // never named by the caller — for `room_generations_for_principal`'s
-            // reason. A member holding no wrap target yet (the admission/mint
-            // race, before the top-up heals it) holds no wrap for anything,
-            // so its page is empty rather than refused: it IS a member, and
-            // there is nothing in the corpus it could open.
-            let Some(entry_id) = seat
-                .entry_id
-                .and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
-            else {
-                return encode_reply(&fauna_protocol::conversations::RoomSearchReply {
-                    hits: Vec::new(),
-                    extra: std::collections::BTreeMap::new(),
-                });
-            };
-
-            // (BM25, hit): FTS5's BM25 is lower-is-better, and it is computed
-            // over the whole corpus whichever class a query filters to, so a
-            // message and a post match rank on one scale and merge by it.
-            let mut ranked =
-                wrap_bounded_page(&state, &room_id, &entry_id, &req.query, limit, false).await?;
-
-            // Posts only for a caller that asked: a post hit carries no
-            // `seq`, which a caller built before post hits requires
-            // (`RoomSearchRequest::include_posts`). Their own class, so the
-            // message page above is exactly what it always was.
-            if req.include_posts {
-                ranked.extend(
-                    wrap_bounded_page(&state, &room_id, &entry_id, &req.query, limit, true).await?,
-                );
-                ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
-                ranked.truncate(limit);
-            }
-            let hits = ranked.into_iter().map(|(_, hit)| hit).collect();
-
-            encode_reply(&fauna_protocol::conversations::RoomSearchReply {
-                hits,
-                extra: std::collections::BTreeMap::new(),
-            })
+            encode_reply(&room_search_for(&state, &actor_id, &req).await?)
         })
+    })
+}
+
+/// The body of `fauna.conversations.room.search`, shared with its federated
+/// twin `fauna.federation.conversation.room.search.fetch` so the two doors
+/// cannot drift on who a hit reaches or what it names (the
+/// `posts_handlers::room_labels_for` precedent). `actor_id` is the searcher:
+/// the session's own actor on the same-nest door, the requester the room home
+/// bound to the verified origin on the relay. Its floor seat — the gate below
+/// — is the floor check the federation row stacks on the foreign-member gate.
+pub(crate) async fn room_search_for(
+    state: &Arc<AppState>,
+    actor_id: &[u8; 32],
+    req: &RoomSearchRequest,
+) -> Result<fauna_protocol::conversations::RoomSearchReply, RpcError> {
+    let room_id = parse_room_id(&req.room_id)?;
+    // A community room only: the floor is the membership authority
+    // here, and it is the only class whose log the nest can read at
+    // all. An end-to-end room's search is its members' own work.
+    floor_authoritative_room(state, &room_id).await?;
+
+    // A live floor member of ANY rank. The roles table gates minting
+    // and membership, never reading — and the refusal is explicit
+    // rather than an empty list, for `room_generations_for_principal`'s
+    // reason: silence would read as "this room holds nothing".
+    let Some(seat) = state
+        .db
+        .list_floor_roster(&room_id)
+        .await
+        .map_err(|e| internal(format!("floor roster: {e}")))?
+        .into_iter()
+        .find(|m| m.principal_id == *actor_id)
+    else {
+        return Err(permission_denied("not a member of this room"));
+    };
+
+    if req.query.trim().is_empty() {
+        return Err(crate::rpc_errors::invalid_params_ns(
+            "conversations",
+            "query is required",
+        ));
+    }
+    let limit = req
+        .limit
+        .unwrap_or(fauna_protocol::conversations::ROOM_SEARCH_DEFAULT_LIMIT)
+        .clamp(1, fauna_protocol::conversations::ROOM_SEARCH_MAX_LIMIT) as usize;
+
+    // ⚠ **The reader's roster ENTRY is what bounds the page**, and it
+    // is derived here from the principal the door authenticated —
+    // never named by the caller — for `room_generations_for_principal`'s
+    // reason. A member holding no wrap target yet (the admission/mint
+    // race, before the top-up heals it) holds no wrap for anything,
+    // so its page is empty rather than refused: it IS a member, and
+    // there is nothing in the corpus it could open.
+    let Some(entry_id) = seat
+        .entry_id
+        .and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+    else {
+        return Ok(fauna_protocol::conversations::RoomSearchReply {
+            hits: Vec::new(),
+            extra: std::collections::BTreeMap::new(),
+        });
+    };
+
+    // (BM25, hit): FTS5's BM25 is lower-is-better, and it is computed
+    // over the whole corpus whichever class a query filters to, so a
+    // message and a post match rank on one scale and merge by it.
+    let mut ranked =
+        wrap_bounded_page(state, &room_id, &entry_id, &req.query, limit, false).await?;
+
+    // Posts only for a caller that asked: a post hit carries no
+    // `seq`, which a caller built before post hits requires
+    // (`RoomSearchRequest::include_posts`). Their own class, so the
+    // message page above is exactly what it always was.
+    if req.include_posts {
+        ranked
+            .extend(wrap_bounded_page(state, &room_id, &entry_id, &req.query, limit, true).await?);
+        ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
+        ranked.truncate(limit);
+    }
+    let hits = ranked.into_iter().map(|(_, hit)| hit).collect();
+
+    Ok(fauna_protocol::conversations::RoomSearchReply {
+        hits,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -6539,7 +6558,7 @@ fn room_list_roster_handler() -> RpcHandler {
 /// [`crate::federation_handlers`]' `require_foreign_member`. That identity is
 /// the point — a foreign member sees the same names a home member sees — and
 /// it is what carries the id→handle announce to the one seat it could not
-/// reach before, the foreign member's own device (`federation.md` § Cross-nest
+/// reach before, the foreign member's own device (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append, the id→handle bullet).
 pub(crate) async fn room_roster_reply(
     state: &Arc<AppState>,
@@ -6607,7 +6626,7 @@ pub(crate) async fn room_roster_reply(
     // join, `RoomMemberRow.foreign_handle`/`foreign_domain`: the
     // `handle@domain` its own home nest announced on the member's
     // relayed drain, verified by this nest to resolve to that nest's
-    // key, and stored on the binding row (`federation.md` § Cross-nest
+    // key, and stored on the binding row (`federation-shared-folders.md` § Cross-nest
     // shared folders + channel append, the id→handle bullet). `None`
     // until its home nest has announced one — then the member renders
     // as its elided actor id, the honest fallback.
@@ -6771,6 +6790,73 @@ fn room_list_roster_remote_handler() -> RpcHandler {
                 Err(pool_err) => {
                     tracing::error!("federation room roster (list_roster_remote): {pool_err}");
                     Err(internal("federation room roster read failed"))
+                }
+            }
+        })
+    })
+}
+
+// ── fauna.conversations.room.search_remote ─────────────────────
+
+/// A **foreign member's** room search, relayed by its own home nest — the
+/// search twin of [`room_list_roster_remote_handler`]
+/// (`../architecture/federation.md` § Federation residue surface, the *room
+/// search* row).
+///
+/// A community room's derived corpus lives on its home nest alone, so this
+/// nest — which is not that home — holds no room record and its same-nest
+/// door would refuse a member who is perfectly well seated. "A member on a
+/// foreign nest reaches the room only through their own home nest"
+/// (`conversation-rooms.md` § The home nest); this is that leg's
+/// client-facing half.
+///
+/// **This nest keeps nothing.** It forwards the room home's hits — positions,
+/// post ids and ranks, never text — and stores no part of them. The room home
+/// resolves the searcher's standing itself, from the actor id this nest is
+/// authenticated for (`require_foreign_member`, then the floor seat), and runs
+/// the body its own `room.search` door runs ([`room_search_for`]).
+fn room_search_remote_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.conversations.room.search_remote").await?;
+            let req: fauna_protocol::conversations::RoomSearchRemoteRequest =
+                decode(&payload).map_err(malformed)?;
+            // Validate the shapes locally; the room's home nest is
+            // authoritative for membership and for the corpus itself.
+            parse_room_id(&req.room_id)?;
+            if req.query.trim().is_empty() {
+                return Err(crate::rpc_errors::invalid_params_ns(
+                    "conversations",
+                    "query is required",
+                ));
+            }
+            let peer_url = req.nest_url.trim();
+            if peer_url.is_empty() {
+                return Err(invalid_params(
+                    "nest_url must name the room's home nest (same-nest searches use room.search)",
+                ));
+            }
+
+            match crate::federation_pool::originate_room_search(
+                &state.federation_pool,
+                &state,
+                peer_url,
+                &hex::encode(actor_id),
+                &req.room_id,
+                &req.query,
+                req.limit,
+                req.include_posts,
+            )
+            .await
+            {
+                Ok(Ok(reply)) => encode_reply(&reply),
+                Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                    peer_err,
+                    "the cross-nest room search relay",
+                )),
+                Err(pool_err) => {
+                    tracing::error!("federation room search (search_remote): {pool_err}");
+                    Err(internal("federation room search failed"))
                 }
             }
         })
@@ -7579,6 +7665,17 @@ pub fn register_conversations_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: room_search_handler(),
+        },
+    );
+    b.add(
+        "fauna.conversations.room.search_remote",
+        RpcKindMeta {
+            // The same read, relayed to the room's home — a pure read on both
+            // hops, with the peer round-trip's deadline (the
+            // `list_roster_remote` posture).
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: room_search_remote_handler(),
         },
     );
     b.add(
@@ -8576,7 +8673,7 @@ mod tests {
         );
     }
 
-    /// Folder-channel Commit admission (`federation.md` § Cross-nest shared
+    /// Folder-channel Commit admission (`federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append, re-ratified 2026-08-24 — supersedes the
     /// 2026-07-18 claimant-only refusal): on a **claimed** folder channel a
     /// `ChannelEnvelope::Commit` is admitted from any actor on the channel

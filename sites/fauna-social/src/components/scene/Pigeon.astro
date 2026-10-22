@@ -1,0 +1,35 @@
+---
+// A pigeon in flight carrying a letter — plain email, still delivered.
+// Profile facing right, wings up, the envelope on a string under it; a
+// group inside the meadow's SVG with the origin at the middle of the body.
+// (The old `glide` animation went with the multi-slide deck, round 9 —
+// git history has it.)
+interface Props {
+  x: number;
+  y: number;
+  scale?: number;
+  /** Scales just the letter, about the top of its string — so the bird can
+      shrink while its cargo grows (the clearing, round 8). */
+  envelope?: number;
+}
+const { x, y, scale = 1, envelope = 1 } = Astro.props;
+---
+<g>
+  <g transform={`translate(${x} ${y}) scale(${scale})`}>
+    <!-- far wing, tail, body, near wing, neck sheen, head, beak, eye -->
+    <ellipse cx="-2" cy="-9" rx="4.5" ry="11" transform="rotate(-42 -2 -9)" fill="#a8b2b8" />
+    <path d="M-11 -1 L-21 -6 L-20 4 Z" fill="#7d8890" />
+    <ellipse cx="0" cy="0" rx="12" ry="7" fill="#8e9aa0" />
+    <ellipse cx="1" cy="-8" rx="5" ry="12" transform="rotate(-25 1 -8)" fill="#7d8890" />
+    <ellipse cx="7" cy="-1.5" rx="3.5" ry="3" fill="#6b9a6a" />
+    <circle cx="11.5" cy="-3.5" r="5.5" fill="#8e9aa0" />
+    <path d="M16.5 -3.5 L21 -2.5 L16.5 -1.5 Z" fill="#6d675a" />
+    <circle cx="13" cy="-4.8" r="1.1" fill="#2b2a24" />
+    <!-- the letter -->
+    <g transform={`translate(${1 - envelope} ${13 - 13 * envelope}) scale(${envelope})`}>
+      <path d="M1 6 L1 13" stroke="#6d675a" stroke-width="1" />
+      <rect x="-6" y="13" width="14" height="10" rx="1" fill="#fffdf5" stroke="#6d675a" stroke-width="0.9" />
+      <path d="M-6 13 L1 19 L8 13" fill="none" stroke="#6d675a" stroke-width="0.9" />
+    </g>
+  </g>
+</g>

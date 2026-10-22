@@ -1138,7 +1138,7 @@ fn an_entry_larger_than_a_chunk_survives_the_header_patch() {
     let mut found = false;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("entry");
-        if file.name().ends_with(".eml") {
+        if file.name().expect("entry name").ends_with(".eml") {
             let mut out = Vec::new();
             std::io::Read::read_to_end(&mut file, &mut out).expect("read the entry");
             assert_eq!(out, big.body, "the large entry did not survive the stream");
@@ -1204,7 +1204,7 @@ fn read_back_through_the_stream(entries: &[ExportEntry]) -> ReadBack {
     (0..archive.len())
         .map(|i| {
             let file = archive.by_index(i).expect("entry");
-            (file.name().to_string(), file.is_dir())
+            (file.name().expect("entry name").into_owned(), file.is_dir())
         })
         .collect()
 }

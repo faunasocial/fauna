@@ -792,7 +792,7 @@ mod tests {
     /// owner did, when it added them), so the first advertisement pass stages a
     /// self-`Update` and posts it. That takeover is exactly what the
     /// 2026-08-24 roster-membership commit admission exists to let through
-    /// (`federation.md` § Cross-nest shared folders + channel append); without it a nest
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append); without it a nest
     /// refuses the Commit outright, killing the member leg — the
     /// linux red.
     ///
@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// **The takeover of a FOREIGN-HOMED channel lands on the channel's home
-    /// nest, not the member's own** (`federation.md` § Cross-nest shared
+    /// nest, not the member's own** (`federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append — *"a foreign member's device-owned-epoch
     /// takeover must land"*).
     ///

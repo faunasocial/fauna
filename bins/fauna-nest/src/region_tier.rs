@@ -445,6 +445,23 @@ pub async fn active_document(state: &AppState) -> Result<Option<RegionDocumentRe
 pub const KIND_REGION_GET: &str = "fauna.admin.region.get";
 pub const KIND_REGION_SET: &str = "fauna.admin.region.set";
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's declared region — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        ("fauna.admin.region.get", region_get_handler()),
+        ("fauna.admin.region.set", region_set_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_region_handlers(b: &mut crate::rpc_router::RpcRouterBuilder) {
     // Mirror any change in `KindRegistry::register_admin_kinds`.
     b.add(
@@ -939,19 +956,13 @@ async fn demand_situs_content_policies(state: &std::sync::Arc<AppState>, situs: 
 }
 
 /// Re-render every publishing site because what the situs chain has in force
-/// moved (see [`crate::web_content::service::WebContentService::rerender_after_region_policy_change`]).
+/// moved (see [`crate::web_content::service::WebContentService::rerender_after_publisher_policy_change`]).
 async fn rerender_public_sites(state: &AppState) {
-    let Some(wcs) = &state.web_content_service else {
-        return;
-    };
-    match wcs.rerender_after_region_policy_change().await {
-        Ok(0) => {}
-        Ok(failed) => tracing::warn!(
-            failed,
-            "region policy change: some sites failed to re-render and were cleared"
-        ),
-        Err(e) => tracing::error!("region policy change: cannot list the publishing sites: {e:#}"),
-    }
+    crate::web_content::service::rerender_after_publisher_policy_change(
+        state,
+        "a region policy change",
+    )
+    .await;
 }
 
 /// Refill ONE (region, kind) the relay caches — the worker's per-pair step, and

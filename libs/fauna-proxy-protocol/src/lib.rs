@@ -380,3 +380,6 @@ mod tests {
         assert_eq!(parse_router_auth_tlv(0x00, &[1, 2, 3]), None);
     }
 }
+
+#[cfg(test)]
+mod proptests;

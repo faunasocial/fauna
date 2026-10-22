@@ -26,12 +26,12 @@
 //   (h) supervision is not re-tested at render — the inputs are
 //       supervised-only by construction.
 //
-// Plain TS with NO `$lib`/wasm import so it stays plain-Deno-testable
+// Plain TS with NO `#lib`/wasm import so it stays plain-Deno-testable
 // (`ward-asks.test.ts`); the wire shapes are restated structurally here
-// (they are the `fauna_protocol::family` serde forms `$lib/rpc` also types).
+// (they are the `fauna_protocol::family` serde forms `#lib/rpc` also types).
 // The two ask-matching rules are NOT restated: they are the shared
 // `fauna_client_family::ward_asks::{contact_ask_pending, feed_request_state}`,
-// injected as an `AskRules` — `$lib/wasm`'s `wardAskRules` in the app (their
+// injected as an `AskRules` — `#lib/wasm`'s `wardAskRules` in the app (their
 // wasm faces), a stub in the tests.
 
 import { isGuardianApprovalRequired } from './guardian-refusal.ts';
@@ -65,13 +65,19 @@ export interface BlockedPeer {
   peer_id: string;
 }
 
-/** The ward's own asks, off one `fauna.family.status` read. */
+/** The caller's own policy document (`status.policy`), passed back to the
+ *  shared rules whole — only the knock rule reads it (`contact_approval`). */
+export type OwnPolicy = { contact_approval?: boolean };
+
+/** The ward's own asks, off one `fauna.family.status` read — plus the ward's
+ *  own policy, which decides whether every knock waits on the guardian. */
 export interface WardAsks {
   contact: ContactAsk[];
   feed: FeedAsk[];
+  policy: OwnPolicy | null;
 }
 
-export const NO_WARD_ASKS: WardAsks = { contact: [], feed: [] };
+export const NO_WARD_ASKS: WardAsks = { contact: [], feed: [], policy: null };
 
 /** Rule (c)/(h): the asks a status reply carries, gated on `supervised_by`. A
  *  graduated account has no guardian to be waiting on, so a stale row from the
@@ -80,13 +86,15 @@ export const NO_WARD_ASKS: WardAsks = { contact: [], feed: [] };
  *  graduation too; this is the client half of the same rule. */
 export function wardAsksFromStatus(status: {
   supervised_by?: unknown;
+  policy?: OwnPolicy | null;
   contact_requests?: ContactAsk[] | null;
   feed_requests?: FeedAsk[] | null;
 }): WardAsks {
-  if (status.supervised_by == null) return { contact: [], feed: [] };
+  if (status.supervised_by == null) return { contact: [], feed: [], policy: null };
   return {
     contact: status.contact_requests ?? [],
     feed: status.feed_requests ?? [],
+    policy: status.policy ?? null,
   };
 }
 
@@ -114,6 +122,19 @@ export interface AskRules {
     operation: string,
     target: string,
   ): FeedRequestState | null;
+  /** Whether every knock waiting on the caller waits on their guardian
+   *  (`knock-guardian-pending`), over the caller's own policy. */
+  knocksAwaitGuardian(policy: OwnPolicy | null): boolean;
+}
+
+// ── Knock rows (contacts page) ──────────────────────────────────────────────
+
+/** Whether each knock row carries `knock-guardian-pending` (family-safety.md
+ *  § App surface — "pending approval states render on the blocked surfaces
+ *  themselves (the knock row …)"). Rule (h): the policy is supervised-only by
+ *  construction, so the shared rule reads the data alone. */
+export function knocksAwaitGuardian(rules: AskRules, asks: WardAsks): boolean {
+  return rules.knocksAwaitGuardian(asks.policy);
 }
 
 // ── Contact ask (contacts page + profile page) ─────────────────────────────

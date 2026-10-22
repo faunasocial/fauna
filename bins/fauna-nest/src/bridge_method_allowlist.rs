@@ -267,20 +267,20 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // DKIM read/manage surface for the admin DNS page — public metadata
         // only. No kind hands a DKIM private key to any caller: the nest holds
         // it and signs at the outbound hand-out.
-        "fauna.bridges.list_dkim_selectors" => matches!(class, Admin),
+        "fauna.bridges.list_dkim_selectors" => matches!(class, Admin | ThirdParty),
         "fauna.bridges.revoke_dkim_blob" => matches!(class, Admin),
         // Unified DNS management (`fauna.dns.*`) —
         // the post-onboarding DNS surface (record matrix, live verify,
         // provider credentials, managed publish). Admin-only: DNS records +
         // provider API tokens are deployment-operational config, never a user
         // or bridge concern. See `docs/goal/behavior/dns-management.md`.
-        "fauna.dns.list_records" => matches!(class, Admin),
-        "fauna.dns.verify_records" => matches!(class, Admin),
+        "fauna.dns.list_records" => matches!(class, Admin | ThirdParty),
+        "fauna.dns.verify_records" => matches!(class, Admin | ThirdParty),
         // The DNS-01 propagation gate's readiness probe, run nest-side for the
         // web app (a browser has no raw DNS). Reads public DNS and mutates
         // nothing, but it belongs to the admin cert surface and stays Admin-only
         // like the rest of the namespace. No bridge has a reason to ask.
-        "fauna.dns.probe_txt_visible" => matches!(class, Admin),
+        "fauna.dns.probe_txt_visible" => matches!(class, Admin | ThirdParty),
         // The onboarding hand-off that persists the deployment's own public
         // address (apex + mail-host A/AAAA/PTR source). Admin-only — host config.
         "fauna.dns.set_host_address" => matches!(class, Admin),
@@ -292,42 +292,56 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // can enumerate seal targets without exposing enrollment history or
         // deployment topology, and without a second wire kind. Bridges have
         // no reason to read the roster; they stay denied.
-        "fauna.bridges.list_service_users" => matches!(class, User | Admin),
+        "fauna.bridges.list_service_users" => matches!(class, User | Admin | ThirdParty),
         // Bridge approval lifecycle (Stage 1, `mail-bridge-lifecycle.md`
         // § Pending approval / § Default-off): admin-only. Approval is
         // admin-initiated by the security model — a bridge can ask (by
         // connecting with an unknown pubkey) but only an admin completes it.
-        "fauna.bridges.list_pending_bridges" => matches!(class, Admin),
+        // For an admin-consented principal the roster's reads admit
+        // `ThirdParty` under `fauna:admin:read:bridges-pending`; approving,
+        // rejecting and the service-user revoke (the re-key) are the grant
+        // plane, sovereign, and stay `Admin` only (`apps/cli.md` § The
+        // sovereign-act boundary → *The admin plane's sovereign acts*). The
+        // mail-side toggles and policies below admit `ThirdParty` under their
+        // page's string (`authorization-server.md` § *The admin arms*), the
+        // account's admin authority read per RPC (rule (e)); the mail secrets'
+        // rotations and the Microsoft registration stay `Admin` only.
+        "fauna.bridges.list_pending_bridges" => matches!(class, Admin | ThirdParty),
         "fauna.bridges.approve_pending_bridge" => matches!(class, Admin),
         "fauna.bridges.reject_pending_bridge" => matches!(class, Admin),
-        "fauna.bridges.set_mail_enabled" => matches!(class, Admin),
-        "fauna.bridges.set_caldav_enabled" => matches!(class, Admin),
+        "fauna.bridges.set_mail_enabled" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.set_caldav_enabled" => matches!(class, Admin | ThirdParty),
         // Deployment-wide CardDAV-enable toggle — contacts twin of
         // `set_caldav_enabled` (`2026-07-02-carddav-server-design.md` § 5).
         // Admin-only: enabling a contacts surface is a deployment choice.
-        "fauna.bridges.set_carddav_enabled" => matches!(class, Admin),
+        "fauna.bridges.set_carddav_enabled" => matches!(class, Admin | ThirdParty),
         // Deployment-wide WebDAV-enable toggle — files twin of
         // `set_carddav_enabled` (`webdav-server.md` § Independent enablement).
         // Admin-only: enabling a files surface is a deployment choice.
-        "fauna.bridges.set_webdav_enabled" => matches!(class, Admin),
+        "fauna.bridges.set_webdav_enabled" => matches!(class, Admin | ThirdParty),
         // Admin-set CalDAV listener port (`caldav-server.md` § Network exposure
         // — admin-settable port). Admin-only: the port a bare-IP / desktop box
         // serves CalDAV on is a deployment-wide admin *choice*, persisted in nest
         // state, never a per-user control.
-        "fauna.bridges.set_caldav_port" => matches!(class, Admin),
+        "fauna.bridges.set_caldav_port" => matches!(class, Admin | ThirdParty),
         // Read twin of `set_caldav_port`, `User | Admin`: a regular user's
         // mail-settings page reads the effective port to display the CalDAV
         // connection detail for a third-party calendar app (the non-sensitive
         // `MuaInstructions.caldav_port` read-path; `caldav-server.md`
         // § Implementation status — Client endpoint display). Setting it stays
         // Admin-only above; reading the single port number is user-safe.
-        "fauna.bridges.get_caldav_port" => matches!(class, User | Admin),
+        "fauna.bridges.get_caldav_port" => matches!(class, User | Admin | ThirdParty),
         // Deployment-wide "auto-enable mail for new users" policy default
         // (mail-policy-config.md § Tier-2 new-user mail defaults). Admin-only —
         // a deployment default, NOT a per-user control (mail is user-controlled,
         // admin.md § Don't do these). Drives no bridge state; surfaced to clients
         // on `fauna.setup.status`.
-        "fauna.bridges.set_auto_enable_mail_for_new_users" => matches!(class, Admin),
+        "fauna.bridges.set_auto_enable_mail_for_new_users" => matches!(class, Admin | ThirdParty),
+        // The deployment's own Microsoft app registration for the Outlook
+        // import (mailbox-migration.md § Microsoft sign-in, *An admin-supplied
+        // registration*). Admin-only, a deployment default; read back by every
+        // app from `fauna.setup.status`, never by a bridge.
+        "fauna.bridges.set_microsoft_registration" => matches!(class, Admin),
         // Per-actor IMAP/CalDAV-serving opt-out (deployment-home-with-public-
         // relay.md § MUA reach). `set` is **User-class + caller-scoped** (the
         // user sets their OWN row; the handler keys on the authenticated actor,
@@ -453,6 +467,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.bridges.cancel_import_session" => matches!(class, User),
         "fauna.bridges.finalize_import_session" => matches!(class, User),
         "fauna.bridges.fail_import_session" => matches!(class, User),
+        "fauna.bridges.discard_import_session" => matches!(class, User),
         // Mailbox-export surface (`mail-export.md` § Wire shapes) — User-class
         // and caller-scoped, the read-out twin of the import block above.
         // § Cross-actor isolation is why none of these is reachable by a
@@ -521,9 +536,9 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // Admin-class: forwarders are deployment routing config attributed to
         // the managing admin, NOT a user's personal aliases (excluded from
         // `list_account_aliases`).
-        "fauna.bridges.create_forwarder" => matches!(class, Admin),
-        "fauna.bridges.list_forwarders" => matches!(class, Admin),
-        "fauna.bridges.delete_forwarder" => matches!(class, Admin),
+        "fauna.bridges.create_forwarder" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_forwarders" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.delete_forwarder" => matches!(class, Admin | ThirdParty),
         // Per-account forward-all knob.
         // User-class: the handler derives the owning actor from the caller and
         // reads/writes only that actor's `mail_account_settings` row. See
@@ -585,80 +600,80 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // (mail-deliverability.md § Architectural rules: "Symptom diagnostic is
         // admin-pane-only (no API for users)"; § Wire shapes names the
         // admin-client caller). NOT MTA-class.
-        "fauna.bridges.run_deliverability_diagnostics" => matches!(class, Admin),
-        "fauna.bridges.blocklist_self_check_run" => matches!(class, Admin),
+        "fauna.bridges.run_deliverability_diagnostics" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.blocklist_self_check_run" => matches!(class, Admin | ThirdParty),
         // Fresh-IP warm-up status/reset (mail-deliverability.md § Manual reset:
         // "Warmup reset is an admin action"; the deployment-wide outbound IP
         // reputation is an admin concern, not per-user). Admin-only.
-        "fauna.bridges.outbound_warmup_status" => matches!(class, Admin),
-        "fauna.bridges.outbound_warmup_reset" => matches!(class, Admin),
+        "fauna.bridges.outbound_warmup_status" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.outbound_warmup_reset" => matches!(class, Admin | ThirdParty),
         // The mail health readout (mail-deliverability.md § The mail health
         // readout): a deployment-wide fold over the self-check, diagnostics,
         // queue, warm-up and bridge-connection facts — admin-pane-only, like
         // the kinds it reads.
-        "fauna.bridges.mail_health" => matches!(class, Admin),
+        "fauna.bridges.mail_health" => matches!(class, Admin | ThirdParty),
         // Deliverability history/observability reads (mail-deliverability.md
         // § Admin-visible audit: diagnostic history is admin-only → 403
         // for non-admin). Admin-pane-only, same as the run/check kinds above.
-        "fauna.bridges.list_blocklist_self_check_history" => matches!(class, Admin),
-        "fauna.bridges.list_deliverability_diagnostic_runs" => matches!(class, Admin),
-        "fauna.bridges.put_spam_policy" => matches!(class, Admin),
-        "fauna.bridges.put_auth_policy" => matches!(class, Admin),
-        "fauna.bridges.put_submission_policy" => matches!(class, Admin),
-        "fauna.bridges.put_imap_policy" => matches!(class, Admin),
-        "fauna.bridges.put_outbound_policy" => matches!(class, Admin),
+        "fauna.bridges.list_blocklist_self_check_history" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_deliverability_diagnostic_runs" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.put_spam_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.put_auth_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.put_submission_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.put_imap_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.put_outbound_policy" => matches!(class, Admin | ThirdParty),
         // Nest-side alias-policy knobs (NOT projected to the bridge — read
         // by the alias resolver + alias CRUD): exact_aliases_max,
         // reserved_local_parts, subaddressing_enabled,
         // wildcard_prefix_enabled.
-        "fauna.bridges.put_alias_policy" => matches!(class, Admin),
+        "fauna.bridges.put_alias_policy" => matches!(class, Admin | ThirdParty),
         // Admin read twin of `put_alias_policy` — the `admin-mail` form reads
         // the effective alias policy to hydrate before edit (these knobs are
         // not in `FetchConfigReply`, so they have their own read kind).
-        "fauna.bridges.get_alias_policy" => matches!(class, Admin),
+        "fauna.bridges.get_alias_policy" => matches!(class, Admin | ThirdParty),
         // The deployment-wide `mail.dmarc.*` catalog (NOT projected to the
         // bridge — read by the DNS surface's record assembler + the daily
         // report prunes) and its admin read twin.
-        "fauna.bridges.put_dmarc_policy" => matches!(class, Admin),
-        "fauna.bridges.get_dmarc_policy" => matches!(class, Admin),
+        "fauna.bridges.put_dmarc_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.get_dmarc_policy" => matches!(class, Admin | ThirdParty),
         // Nest-OWN transport/abuse policy (NOT a mail policy, NOT projected to
         // the bridge): the per-source-IP concurrent-connection cap on nest's
         // own client-facing TLS listener, read nest-side by `serve_tls`.
         // Admin-only put/get — a deployment-wide abuse knob (same class as
         // spam thresholds), client-set per the product invariant. See
         // `docs/goal/architecture/transport-connection.md` § Abuse posture item (2).
-        "fauna.transport.put_policy" => matches!(class, Admin),
-        "fauna.transport.get_policy" => matches!(class, Admin),
+        "fauna.transport.put_policy" => matches!(class, Admin | ThirdParty),
+        "fauna.transport.get_policy" => matches!(class, Admin | ThirdParty),
         // Local-domain admin (multidomain): the admin client drives the
         // `mail_domains` table over WS-RPC (no HTTP). Admin-only writes;
         // `list` is Admin-only too (the bridge reads its domain list from
         // `fetch_config`, not these). See
         // `docs/goal/behavior/mail-multidomain.md` § Wire shapes.
-        "fauna.bridges.add_local_domain" => matches!(class, Admin),
-        "fauna.bridges.remove_local_domain" => matches!(class, Admin),
-        "fauna.bridges.restore_local_domain" => matches!(class, Admin),
-        "fauna.bridges.list_local_domains" => matches!(class, Admin),
-        "fauna.bridges.update_local_domain_config" => matches!(class, Admin),
-        "fauna.bridges.list_dmarc_aggregate_reports" => matches!(class, Admin),
-        "fauna.bridges.get_dmarc_aggregate_report" => matches!(class, Admin),
-        "fauna.bridges.list_dmarc_forensic_reports" => matches!(class, Admin),
-        "fauna.bridges.get_dmarc_forensic_report" => matches!(class, Admin),
-        "fauna.bridges.list_tlsrpt_inbound_reports" => matches!(class, Admin),
-        "fauna.bridges.get_tlsrpt_inbound_report" => matches!(class, Admin),
+        "fauna.bridges.add_local_domain" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.remove_local_domain" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.restore_local_domain" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_local_domains" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.update_local_domain_config" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_dmarc_aggregate_reports" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.get_dmarc_aggregate_report" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_dmarc_forensic_reports" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.get_dmarc_forensic_report" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_tlsrpt_inbound_reports" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.get_tlsrpt_inbound_report" => matches!(class, Admin | ThirdParty),
         // Primary-domain rename (mail-primary-domain-rename.md § Wire shapes).
         "fauna.bridges.start_primary_domain_rename" => matches!(class, Admin),
-        "fauna.bridges.get_primary_domain_rename_status" => matches!(class, Admin),
-        "fauna.bridges.list_primary_domain_renames" => matches!(class, Admin),
+        "fauna.bridges.get_primary_domain_rename_status" => matches!(class, Admin | ThirdParty),
+        "fauna.bridges.list_primary_domain_renames" => matches!(class, Admin | ThirdParty),
         "fauna.bridges.abort_primary_domain_rename" => matches!(class, Admin),
         "fauna.bridges.complete_primary_domain_rename" => matches!(class, Admin),
         "fauna.bridges.extend_primary_domain_rename_grace" => matches!(class, Admin),
-        "fauna.bridges.set_catch_all_actor" => matches!(class, Admin),
+        "fauna.bridges.set_catch_all_actor" => matches!(class, Admin | ThirdParty),
         // Per-domain role-address override (postmaster/abuse/noc/security target
         // actor); `mail-multidomain.md` § Per-domain role-address routing.
-        "fauna.bridges.set_role_address" => matches!(class, Admin),
+        "fauna.bridges.set_role_address" => matches!(class, Admin | ThirdParty),
         // Per-domain DKIM rotation interval — the accelerated-rotation operator
         // lever; `mail-multidomain.md` § Selector.
-        "fauna.bridges.set_dkim_rotation_days" => matches!(class, Admin),
+        "fauna.bridges.set_dkim_rotation_days" => matches!(class, Admin | ThirdParty),
         // Emergency DKIM rotation: flip a domain's active selector to its
         // newest-provisioned one; `mail-multidomain.md` § Rotation.
         "fauna.bridges.force_rotate_dkim" => matches!(class, Admin),
@@ -686,7 +701,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // the cert the listener currently serves per domain. Admin-only — same
         // admin-concern scoping as `publish_cert`; read-only (no mutation).
         // `docs/goal/architecture/nest/tls-certificates.md` § C.4.
-        "fauna.tls.cert_status" => matches!(class, Admin),
+        "fauna.tls.cert_status" => matches!(class, Admin | ThirdParty),
         // The nest-held OAuth issuer key set (`fauna.oauth.*`, TP5 slice S1).
         // Admin-only for the `rotate_srs_secret` / `force_rotate_dkim` reason:
         // this is deployment crypto material. Rotation is the deliberate
@@ -695,7 +710,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // half, so an admin can see the outgoing key still being served.
         // Notably NOT bridge-callable: the key is the nest's own, and the
         // surface answers on a nest that compiles no bridge at all.
-        "fauna.oauth.issuer_key_status" => matches!(class, Admin),
+        "fauna.oauth.issuer_key_status" => matches!(class, Admin | ThirdParty),
         "fauna.oauth.rotate_issuer_key" => matches!(class, Admin),
         // The forced arm — drop the outgoing key(s) now, horizon skipped — is
         // the actual compromise response (`authorization-server.md` § The
@@ -713,9 +728,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // lists or ends it. Never bridge-callable, and never callable by a
         // principal itself: a third party cannot enumerate or revoke its
         // siblings.
-        "fauna.principals.list" | "fauna.principals.ops" | "fauna.principals.revoke" => {
-            matches!(class, User)
-        }
+        // The record kind is the device custodian's submission of what it
+        // performed (`conversations-oracle.md` § The per-operation record) —
+        // the account's own app, never the principal it served.
+        "fauna.principals.list"
+        | "fauna.principals.ops"
+        | "fauna.principals.ops.record"
+        | "fauna.principals.revoke" => matches!(class, User),
         // The events doors' poll (`transport.md` § Push events → *Third-party
         // event doors*). ThirdParty ONLY — the account's own apps hear the
         // unfiltered nudges on their own sockets; the principal handler
@@ -790,7 +809,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // _policy` overrides) to hydrate the `admin-mail` policy form before
         // edit. Read-only; Admin-only. See
         // `docs/goal/behavior/mail-policy-config.md` § Implementation status today.
-        "fauna.bridges.get_mail_config" => matches!(class, Admin),
+        "fauna.bridges.get_mail_config" => matches!(class, Admin | ThirdParty),
         "fauna.bridges.report_session_close" => matches!(class, BridgeMta | BridgeMda),
         "fauna.bridges.check_submission_quota" => matches!(class, BridgeMta),
         "fauna.bridges.ingest_inbound_mail" => matches!(class, BridgeMta),
@@ -991,12 +1010,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // reachable only from the flat `admin-mail` admin page
         // (`admin-mail-publish-spam-baseline-button`). Not caller-scoped — it
         // aggregates over all opt-in users (mail-spam.md § Cold start, Path 2).
-        "fauna.bridges.publish_spam_baseline" => matches!(class, Admin),
+        "fauna.bridges.publish_spam_baseline" => matches!(class, Admin | ThirdParty),
         // The baseline's current state (`mail-spam.md` § Cold start Path 2 →
         // *Standing publish*): the admin page's "published over N contributors
         // on <date>" / "waiting for more contributor activity" text. Admin-only
         // and aggregate-only — no contributor id, no withdrawal time or reason.
-        "fauna.bridges.get_spam_baseline_state" => matches!(class, Admin),
+        "fauna.bridges.get_spam_baseline_state" => matches!(class, Admin | ThirdParty),
         // Slice 5 — set_baseline_contribution. The per-user opt-in toggle
         // (`mail-spam-contribute-baseline-toggle`). User/Admin set their OWN
         // contribution flag — caller-scoped by construction (the handler keys
@@ -1126,6 +1145,13 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // request (`post_author_oracle.rs`).
         "fauna.posts.author.create" => matches!(class, ThirdParty),
         "fauna.posts.author.delete" => matches!(class, ThirdParty),
+        // The oracle's profile door (TP11, the `profile.author` row): a
+        // principal edits the display fields of the account's profile, signed
+        // with the same sub-key. ThirdParty ONLY — the account's own apps sign
+        // their own profile and use `fauna.profile.set`; the principal handler
+        // re-resolves the live grant and the delegation per request
+        // (`profile_author_oracle.rs`).
+        "fauna.profile.author.set" => matches!(class, ThirdParty),
         // The oracle's ATProto door (TP11, the `atproto.service_auth` row): a
         // principal asks for a service JWT for one declared `(aud, lxm)`.
         // ThirdParty ONLY — the account's own apps reach `getServiceAuth`
@@ -1326,6 +1352,10 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // in a community room reads through its own membership, and no
         // non-member class has a floor row to be gated on.
         "fauna.conversations.room.search" => matches!(class, User),
+        // Its relayed twin, for a room homed on another nest: the same
+        // User-only class, and the room home re-runs the member gate and the
+        // floor seat itself (the `room.list_roster_remote` posture).
+        "fauna.conversations.room.search_remote" => matches!(class, User),
         // Spam slice — the user's local spam-classifier preferences. User-
         // only: these are per-actor end-user settings; bridge actors and
         // admin have no role. The HTTP twins were bearer-authed; the
@@ -1372,8 +1402,16 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.moderation.abuse_report.submit" => matches!(class, User | Admin),
         "fauna.moderation.abuse_report.mine" => matches!(class, User | Admin),
         "fauna.moderation.abuse_report.withdraw" => matches!(class, User | Admin),
-        "fauna.moderation.abuse_report.queue" => matches!(class, Admin),
-        "fauna.moderation.abuse_report.resolve" => matches!(class, Admin),
+        "fauna.moderation.abuse_report.queue" => matches!(class, Admin | ThirdParty),
+        "fauna.moderation.abuse_report.resolve" => matches!(class, Admin | ThirdParty),
+        // The admin's block of one reported item (moderation.md § Admin block
+        // of a reported item) — the fourth verb on a queue row, beside
+        // `legal_takedown`: Admin-only, and structurally a recorded act on a
+        // report (the report is its citation; the handler refuses an account
+        // subject and writes the notice's obligation + audit rows). `.list`
+        // is the blocked list Unblock acts from — the admin's too.
+        "fauna.moderation.admin_block" => matches!(class, Admin | ThirdParty),
+        "fauna.moderation.admin_block.list" => matches!(class, Admin | ThirdParty),
         // Family-safety slice (family-safety.md § Wire & data shape). All four
         // are User|Admin at the class level — the real authorization is
         // per-target against the guardianships link table, in the handler:
@@ -1443,6 +1481,10 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // rather than trusting the relaying nest (the
         // `room.list_roster_remote` posture).
         "fauna.posts.room_labels_remote" => matches!(class, User),
+        // The deep-link door's relay of `posts.get` to a post's home nest:
+        // User-only like `get`; the home serves it under its own peer gate
+        // (`caller = None`), never on this nest's word.
+        "fauna.posts.get_remote" => matches!(class, User),
         // The self-scoped own-post enumeration: User-only, and self-scoping is
         // structural (no `actor_id` on the wire), so no bridge or admin class
         // could name a target here even if admitted.
@@ -1481,6 +1523,14 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // `fauna:feed:read:account`.
         "fauna.feed.local.posts" => matches!(class, User | ThirdParty),
         "fauna.feed.trending.posts" => matches!(class, User | ThirdParty),
+        // One author's posts (`feed.md` § The read model → *The author read*).
+        // A principal reaches it only through the author arm,
+        // `fauna:feed:read:author` (`principal_reach`; `authorization-server.md`
+        // § Scope grammar → *The author arm*), never through the shipped
+        // `fauna:feed:read`, whose reach may not widen to a new kind: public
+        // posts only, the account's view for a session also holding the
+        // refining `fauna:feed:read:account`.
+        "fauna.feed.author.posts" => matches!(class, User | ThirdParty),
         "fauna.feed.contributors.list" => matches!(class, User),
         "fauna.feed.contributors.grant" => matches!(class, User),
         "fauna.feed.contributors.revoke" => matches!(class, User),
@@ -1500,18 +1550,21 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.personalization.model.put" => matches!(class, User | ThirdParty),
         "fauna.personalization.model.delete" => matches!(class, User),
         // Notifications slice (T1) — the
-        // list / mark-read / count plane. User-only on the same reasoning
-        // as the posts/feed clusters: notifications are an end-user inbox
-        // surface scoped to the calling actor; bridge actors and admin have
-        // no role here. The (concurrently-deprecated) HTTP twins were
-        // bearer-authed (every handler did `bearer.0.0 != actor_id → 403`);
-        // the allowlist arm adds the sharper caller-class gate, and the
-        // actor scoping moves to the connection `actor_id`.
-        "fauna.notifications.list" => matches!(class, User),
-        "fauna.notifications.mark_read" => matches!(class, User),
-        "fauna.notifications.count" => matches!(class, User),
+        // list / mark-read / count plane: an end-user inbox surface scoped to
+        // the calling actor; bridge actors and admin have no role here. The
+        // (concurrently-deprecated) HTTP twins were bearer-authed (every
+        // handler did `bearer.0.0 != actor_id → 403`); the allowlist arm adds
+        // the sharper caller-class gate, and the actor scoping moves to the
+        // connection `actor_id`. `ThirdParty`: the notifications arms
+        // (`authorization-server.md` § Scope grammar → *The notifications
+        // arms*) — `read` the list and the count, `write` the mark-read, each
+        // over the principal's account.
+        "fauna.notifications.list" => matches!(class, User | ThirdParty),
+        "fauna.notifications.mark_read" => matches!(class, User | ThirdParty),
+        "fauna.notifications.count" => matches!(class, User | ThirdParty),
         // The user's own deletes (`behavior/notifications.md` § Retention
-        // rule 2) — the same inbox surface, the same User-only scoping.
+        // rule 2) — the same inbox surface, User-only: dismissal is
+        // destruction, the owner's affordance, never a principal's.
         "fauna.notifications.dismiss" => matches!(class, User),
         "fauna.notifications.clear" => matches!(class, User),
         // Contacts cluster (T2) — the
@@ -1583,8 +1636,15 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.domain.expiry.get" => matches!(class, User | Admin),
         // Per-user profile *detail* fetch (own or anyone else's) — same
         // `User | Admin` read gate as `fauna.account.get`. `docs/goal/ui/
-        // profile.md` § Where logic lives.
-        "fauna.profile.get" => matches!(class, User | Admin),
+        // profile.md` § Where logic lives. `ThirdParty`: the profile arm
+        // (`authorization-server.md` § Scope grammar → *The profile arm*) —
+        // the public signed record of any actor this nest holds.
+        "fauna.profile.get" => matches!(class, User | Admin | ThirdParty),
+        // Its relay to an actor's home nest (`profile.md` § Where logic lives
+        // → *The remote read*): User-only like `fauna.posts.get_remote` — a
+        // kind that makes this nest dial a caller-named peer; the home serves
+        // it under its own consent gate, never on this nest's word.
+        "fauna.profile.get_remote" => matches!(class, User),
         // Own-profile publish/edit (the write half) — same `User | Admin`
         // personal-account gate as its sibling `fauna.profile.handle.change`
         // (the human running the client edits their own profile; an admin actor
@@ -1610,6 +1670,10 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.pending_actions.get" => matches!(class, User | Admin),
         "fauna.pending_actions.cancel" => matches!(class, User | Admin),
         "fauna.pending_actions.approve" => matches!(class, Admin),
+        // Approving and vetoing a pending admin action are sovereign — the
+        // human quorum around the delayed roster changes and deletions — and
+        // enter no admin string (`apps/cli.md` § The sovereign-act boundary →
+        // *The admin plane's sovereign acts*): no `ThirdParty` arm here.
 
         // Stats (`fauna.stats.get`, Track B17) — repository storage stats. The
         // (concurrently-deprecated) HTTP twin used plain `BearerAuth` (any
@@ -1653,8 +1717,8 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // (the web analogue of `fauna.bridges.set_catch_all_actor`), so
         // `Admin`-only, unlike the per-user publish/domain kinds above.
         // `web-content-hosting.md` § Admin apex hosting.
-        "fauna.web.set_apex_actor" => matches!(class, Admin),
-        "fauna.web.get_apex_actor" => matches!(class, Admin),
+        "fauna.web.set_apex_actor" => matches!(class, Admin | ThirdParty),
+        "fauna.web.get_apex_actor" => matches!(class, Admin | ThirdParty),
         // Per-user subdomain-hosting opt-in (`<handle>.<domain>`) — a personal
         // user surface, caller-scoped on the connection actor (no `actor_id`
         // param), exactly like `fauna.web.publish.*`. `User | Admin` (the admin
@@ -1704,16 +1768,26 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // value — `admin.md` § Admin continuity) and that dead tier machinery was
         // removed, so `is_admin` was always the whole check — the `Admin`
         // gate is behavior-preserving.
-        "fauna.admin.users.list" => matches!(class, Admin),
-        "fauna.admin.users.get" => matches!(class, Admin),
-        "fauna.admin.users.create" => matches!(class, Admin),
-        "fauna.admin.users.update" => matches!(class, Admin),
+        //
+        // The users page is the admin plane's first `rw` page for a principal
+        // (`authorization-server.md` § Scope grammar → *The admin arms*;
+        // `apps/cli.md` § The sovereign-act boundary → *The admin plane's
+        // sovereign acts*): its reads admit `ThirdParty` under
+        // `fauna:admin:read:users` (or `rw:users`), its non-sovereign writes
+        // under `fauna:admin:rw:users` alone, the account's admin authority
+        // read per RPC (rule (e)). Deletion, eviction and clearing a handle
+        // are sovereign and stay `Admin` only — as do the roster writes and
+        // approving or vetoing a pending admin action, below.
+        "fauna.admin.users.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.users.get" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.users.create" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.users.update" => matches!(class, Admin | ThirdParty),
         "fauna.admin.users.delete" => matches!(class, Admin),
         "fauna.admin.users.clear_handle" => matches!(class, Admin),
         "fauna.admin.users.evict" => matches!(class, Admin),
-        "fauna.admin.users.cancel_eviction" => matches!(class, Admin),
-        "fauna.admin.users.suspend" => matches!(class, Admin),
-        "fauna.admin.evictions.list" => matches!(class, Admin),
+        "fauna.admin.users.cancel_eviction" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.users.suspend" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.evictions.list" => matches!(class, Admin | ThirdParty),
 
         // Admin-management (`fauna.admin.{tiers,invite_codes,invite_requests,
         // admins}.*`, Track C / C2) — the admin surface migrating
@@ -1721,21 +1795,22 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // **Admin-only**, matching the HTTP twins' `AdminBearerAuth`. Distinct
         // from the pre-identity public `fauna.account.invite_{request,code}.*`
         // (Track A5, anonymous connection).
-        "fauna.admin.tiers.list" => matches!(class, Admin),
-        "fauna.admin.tiers.create" => matches!(class, Admin),
-        "fauna.admin.tiers.update" => matches!(class, Admin),
+        "fauna.admin.tiers.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.tiers.create" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.tiers.update" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.tiers.delete" => matches!(class, Admin | ThirdParty),
         // Membership designation (monetization.md § Pillar 4) — Admin-only like
         // the rest of C2. WS-RPC-native, no HTTP twin.
-        "fauna.admin.membership_tiers.list" => matches!(class, Admin),
-        "fauna.admin.membership_tiers.set" => matches!(class, Admin),
-        "fauna.admin.membership_tiers.clear" => matches!(class, Admin),
-        "fauna.admin.invite_codes.list" => matches!(class, Admin),
-        "fauna.admin.invite_codes.create" => matches!(class, Admin),
-        "fauna.admin.invite_codes.delete" => matches!(class, Admin),
-        "fauna.admin.invite_requests.list" => matches!(class, Admin),
-        "fauna.admin.invite_requests.approve" => matches!(class, Admin),
-        "fauna.admin.invite_requests.deny" => matches!(class, Admin),
-        "fauna.admin.admins.list" => matches!(class, Admin),
+        "fauna.admin.membership_tiers.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.membership_tiers.set" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.membership_tiers.clear" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_codes.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_codes.create" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_codes.delete" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_requests.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_requests.approve" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.invite_requests.deny" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.admins.list" => matches!(class, Admin | ThirdParty),
         "fauna.admin.admins.add" => matches!(class, Admin),
         "fauna.admin.admins.remove" => matches!(class, Admin),
         // The co-admin seed hand-off (`nest/box-recovery.md` § Mechanism, the
@@ -1760,14 +1835,23 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // the HTTP twins' `AdminBearerAuth`. The cross-actor
         // `fauna.admin.pending_actions.list` is distinct from B20's user-scoped
         // `fauna.pending_actions.list` (gated `User | Admin`).
-        "fauna.admin.stats" => matches!(class, Admin),
-        "fauna.admin.status" => matches!(class, Admin),
-        "fauna.admin.audit.list" => matches!(class, Admin),
-        "fauna.admin.audit.integrity" => matches!(class, Admin),
-        "fauna.admin.cluster.status" => matches!(class, Admin),
-        "fauna.admin.gc" => matches!(class, Admin),
-        "fauna.admin.worker.status" => matches!(class, Admin),
-        "fauna.admin.pending_actions.list" => matches!(class, Admin),
+        //
+        // The dashboard's two reads are the admin plane's first door for a
+        // principal (`apps/bridges.md` § Capability-allowlist enforcement →
+        // rule (e); `authorization-server.md` § Scope grammar → *The admin
+        // arms*): `ThirdParty` under `fauna:admin:read:dashboard`, and the
+        // dispatch gate reads the ACCOUNT's admin authority per RPC beside
+        // the ceiling and the scopes — the class stays `ThirdParty`, never
+        // `Admin` (rule (a)), so a member's principal holding the string is
+        // served nothing.
+        "fauna.admin.stats" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.status" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.audit.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.audit.integrity" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.cluster.status" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.gc" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.worker.status" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.pending_actions.list" => matches!(class, Admin | ThirdParty),
 
         // The deployment's declared region (`region-blocking.md` § Region
         // determination). Admin-only in both directions, including the **read**:
@@ -1779,20 +1863,25 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // Unreachable by every bridge class, like the rest of this plane. A
         // bridge is a service actor, never a rule-setter, and never the party
         // that decides where a deployment legally sits.
-        "fauna.admin.region.get" => matches!(class, Admin),
-        "fauna.admin.region.set" => matches!(class, Admin),
+        "fauna.admin.region.get" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.region.set" => matches!(class, Admin | ThirdParty),
+        // The nest's published rules (`nest-rules.md` § The nest content
+        // policy). Admin-only both ways; what a member is owed — the rules in
+        // force — rides the signed self-description every class reads.
+        "fauna.admin.content_policy.get" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.content_policy.set" => matches!(class, Admin | ThirdParty),
         // The admin's web-app origin choice (`web-content-hosting.md` § The
         // nest-served `/app/` and the central origin). Admin-only both ways; what
         // a user is owed — the address `/app/` sends them to — rides the
         // anonymous `fauna.setup.status` projection, and is public anyway (any
         // browser that opens `/app/` sees the redirect).
-        "fauna.admin.web_app_origin.get" => matches!(class, Admin),
-        "fauna.admin.web_app_origin.set" => matches!(class, Admin),
+        "fauna.admin.web_app_origin.get" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.web_app_origin.set" => matches!(class, Admin | ThirdParty),
         // The update channel (`nest/update-channel.md`). Admin-only both ways:
         // what the box follows is the admin's choice, and what an updater needs
         // rides the anonymous `/api/v1/health`. Never a bridge.
-        "fauna.admin.update_channel.get" => matches!(class, Admin),
-        "fauna.admin.update_channel.set" => matches!(class, Admin),
+        "fauna.admin.update_channel.get" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.update_channel.set" => matches!(class, Admin | ThirdParty),
         // The app-facing relay: any user may fetch its own region's
         // published artifact (region-blocking.md § The content plane). User —
         // and so an admin's app too (Admin ⊇ User, above) — never a bridge or
@@ -1810,15 +1899,15 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.admin.folders.create" => matches!(class, Admin),
         "fauna.admin.folders.get" => matches!(class, Admin),
         "fauna.admin.folders.add_member" => matches!(class, Admin),
-        "fauna.admin.services.list" => matches!(class, Admin),
-        "fauna.admin.services.update" => matches!(class, Admin),
+        "fauna.admin.services.list" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.services.update" => matches!(class, Admin | ThirdParty),
 
         // Observability (`fauna.admin.logs`, Track C / C6 — observability.md
         // § Surfaces) — the admin Logs view's read of the nest's in-memory
         // `fauna-log` ring. **Admin-only**: the ring can carry deployment-
         // operational targets/metadata (never message plaintext — the redaction
         // rule binds the call sites), an admin concern, not a user/bridge one.
-        "fauna.admin.logs" => matches!(class, Admin),
+        "fauna.admin.logs" => matches!(class, Admin | ThirdParty),
 
         // Factory reset — destructive return-to-fresh/unclaimed. `Admin`-gated
         // like every other `fauna.admin.*`; the single-admin dogfood box's admin
@@ -1833,20 +1922,20 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // authed Admin-class twin of `fauna.bridges.set_mail_enabled`; the nest
         // upserts a DB singleton + swaps the live `AppState` RwLock. See
         // `node_policy_handlers`.
-        "fauna.admin.set_registration_mode" => matches!(class, Admin),
-        "fauna.admin.set_subhandles" => matches!(class, Admin),
-        "fauna.admin.set_age_verification_required" => matches!(class, Admin),
-        "fauna.admin.set_max_storage_bytes" => matches!(class, Admin),
-        "fauna.admin.set_cors_origins" => matches!(class, Admin),
+        "fauna.admin.set_registration_mode" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.set_subhandles" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.set_age_verification_required" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.set_max_storage_bytes" => matches!(class, Admin | ThirdParty),
+        "fauna.admin.set_cors_origins" => matches!(class, Admin | ThirdParty),
         // The admin's chosen client-facing API serving port (the nest's own HTTPS
         // listener) — apply-on-restart, surfaced on `fauna.setup.status`. Unlike
         // its siblings it writes a `/data/serving-port` value flag + no live swap.
         // See `node_policy_handlers` + `nest/common.md` § Serving ports.
-        "fauna.admin.set_serving_port" => matches!(class, Admin),
+        "fauna.admin.set_serving_port" => matches!(class, Admin | ThirdParty),
         // Host-OS "restart now": writes a flag the host reboot-coordinator picks
         // up (onboarded VPS only; rejected on a nest with no maintenance mount).
         // See `host_maintenance.rs` + `installers/vps.md` § Host OS Maintenance.
-        "fauna.admin.request_host_restart" => matches!(class, Admin),
+        "fauna.admin.request_host_restart" => matches!(class, Admin | ThirdParty),
 
         // Pairings: admin `fauna.admin.pairings.*` RETIRED (per-user-pairing
         // design) — pairing is the user's own action (`fauna.pair.{add,revoke}`,
@@ -1964,7 +2053,7 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         "fauna.folders.lease.release" => matches!(class, User | Admin),
         // The publicly-synced follow (phase 4 slice 4f-i): any account may read
         // a public folder — the plane's gate is the folder's own audience, not
-        // the caller (`federation.md` § The public folder read plane).
+        // the caller (`federation-shared-folders.md` § The public folder read plane).
         "fauna.folders.public.fetch" => matches!(class, User | Admin),
         "fauna.sync.conflicts.list" => matches!(class, User | Admin),
         "fauna.sync.conflicts.report" => matches!(class, User | Admin),
@@ -2475,12 +2564,12 @@ pub fn is_permitted(class: CallerClass, kind: &str) -> bool {
         // never a rule-setter — § The rule-setter model admits exactly
         // governments, app stores, guardians, admins and the user themselves,
         // and every one of those speaks through an app.
-        "fauna.features.policy.update" => matches!(class, Admin),
+        "fauna.features.policy.update" => matches!(class, Admin | ThirdParty),
         "fauna.features.self_limits.update" => matches!(class, User),
         // The authored-document reads split the same way and for the same
         // reason: `policy.get` reads the nest-wide admin document the admin
         // editor owns, `self_limits.get` the bearer's own tier.
-        "fauna.features.policy.get" => matches!(class, Admin),
+        "fauna.features.policy.get" => matches!(class, Admin | ThirdParty),
         "fauna.features.self_limits.get" => matches!(class, User),
         "fauna.labelers.publish" => matches!(class, User),
         "fauna.labelers.list" => matches!(class, User),
@@ -2511,11 +2600,35 @@ pub enum PrincipalReach {
     ScopeDispatched(&'static [fauna_bridge_atproto::fauna_scope::FaunaScopeArm]),
     /// Covered by an `identity.op` scope (the
     /// [`fauna_bridge_atproto::fauna_scope::FaunaScopeArm::IdentityOp`] arm)
-    /// whose class is performed by this custodian — class-aware, not
-    /// arm-wide (`authorization-server.md` § The Fauna family → *The second
-    /// arm*): a future class held by another custodian must not open this
-    /// custodian's door.
-    IdentityOp(fauna_core::identity_op::Custodian),
+    /// naming one of these classes — class-aware, not arm-wide and not
+    /// custodian-wide (`authorization-server.md` § The Fauna family → *The
+    /// second arm*): a class held by another custodian must not open this
+    /// door, and neither may another class of the same custodian with a door
+    /// of its own (`post.author` never opens the profile door, nor
+    /// `profile.author` the posting one). Every class listed is performed by
+    /// one custodian (pinned below).
+    IdentityOp(&'static [fauna_core::identity_op::IdentityOpClass]),
+    /// Covered by `fauna:admin:read:<page>` for exactly this page — AND by
+    /// the account's live admin authority, the fourth predicate the dispatch
+    /// gate reads per RPC for every kind of this reach (`apps/bridges.md`
+    /// § Capability-allowlist enforcement → rule (e)): the string is the
+    /// admin's consent, the roster row is whether the account may still.
+    AdminRead(fauna_bridge_atproto::fauna_scope::AdminPage),
+    /// Covered by `fauna:admin:rw:<page>` for exactly this page, never by its
+    /// `read` string — a write of the page's. The account's admin authority
+    /// is the same fourth predicate as [`PrincipalReach::AdminRead`]'s.
+    AdminRw(fauna_bridge_atproto::fauna_scope::AdminPage),
+}
+
+impl PrincipalReach {
+    /// Whether the reach is the admin plane's — a kind the dispatch gate
+    /// serves only while the account holds admin authority (rule (e)).
+    pub fn is_admin_plane(self) -> bool {
+        matches!(
+            self,
+            PrincipalReach::AdminRead(_) | PrincipalReach::AdminRw(_)
+        )
+    }
 }
 
 /// The compiled kind → reach mapping beside the matrix: `Some` for exactly
@@ -2528,6 +2641,7 @@ pub enum PrincipalReach {
 /// event. New reach is a new arm.
 pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
     use fauna_bridge_atproto::fauna_scope::FaunaScopeArm;
+    use fauna_core::identity_op::IdentityOpClass;
     match kind {
         "fauna.capabilities.fetch" => Some(PrincipalReach::Session),
         // The bare arm stays the two timelines' one arm; the refining
@@ -2542,21 +2656,29 @@ pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
         "fauna.feed.list" | "fauna.feed.get" | "fauna.feed.posts" => {
             Some(PrincipalReach::Scope(FaunaScopeArm::FeedReadAccount))
         }
-        "fauna.nostr.bunker.bind" => Some(PrincipalReach::IdentityOp(
-            fauna_core::identity_op::Custodian::NostrDepositedKey,
-        )),
-        "fauna.activitypub.oracle.http_sig" => Some(PrincipalReach::IdentityOp(
-            fauna_core::identity_op::Custodian::ActivityPubActorKey,
-        )),
-        "fauna.posts.author.create" => Some(PrincipalReach::IdentityOp(
-            fauna_core::identity_op::Custodian::AccountAuthoringKey,
-        )),
-        "fauna.posts.author.delete" => Some(PrincipalReach::IdentityOp(
-            fauna_core::identity_op::Custodian::AccountAuthoringKey,
-        )),
-        "fauna.atproto.oracle.service_auth" => Some(PrincipalReach::IdentityOp(
-            fauna_core::identity_op::Custodian::AtprotoRepoKey,
-        )),
+        // The author arm (`authorization-server.md` § Scope grammar → *The
+        // author arm*): one author's public posts. The account arm refines
+        // it off the session's scopes, as it refines the two timelines.
+        "fauna.feed.author.posts" => Some(PrincipalReach::Scope(FaunaScopeArm::FeedReadAuthor)),
+        "fauna.nostr.bunker.bind" => Some(PrincipalReach::IdentityOp(&[
+            IdentityOpClass::NostrSignEvent,
+            IdentityOpClass::NostrNip44,
+        ])),
+        "fauna.activitypub.oracle.http_sig" => Some(PrincipalReach::IdentityOp(&[
+            IdentityOpClass::ActivityPubHttpSig,
+        ])),
+        "fauna.posts.author.create" => {
+            Some(PrincipalReach::IdentityOp(&[IdentityOpClass::PostAuthor]))
+        }
+        "fauna.posts.author.delete" => {
+            Some(PrincipalReach::IdentityOp(&[IdentityOpClass::PostAuthor]))
+        }
+        "fauna.profile.author.set" => Some(PrincipalReach::IdentityOp(&[
+            IdentityOpClass::ProfileAuthor,
+        ])),
+        "fauna.atproto.oracle.service_auth" => Some(PrincipalReach::IdentityOp(&[
+            IdentityOpClass::AtprotoServiceAuth,
+        ])),
         // The `records` arm (`third-party-kinds.md` § The record doors). The
         // arm-wide check here is the gate's half; the per-kind half — the
         // request's `ext:<kind>` covered by one of the session's `records`
@@ -2607,6 +2729,188 @@ pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
         | "fauna.subscriptions.status.get" => {
             Some(PrincipalReach::Scope(FaunaScopeArm::FollowWrite))
         }
+        // The admin plane (`authorization-server.md` § Scope grammar → *The
+        // admin arms*): one page per qualifier, the dashboard's two reads
+        // first. The account's admin authority is the gate's fourth
+        // predicate on every kind of this reach, and the handler's twin
+        // re-reads it (`principal_handlers::require_admin`).
+        "fauna.admin.stats" | "fauna.admin.status" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Dashboard,
+        )),
+        // The users page (`authorization-server.md` § *The admin arms* names
+        // the set): its reads under `read:users` or `rw:users`, its
+        // non-sovereign writes under `rw:users`. Deletion, eviction, clearing
+        // a handle, the roster writes and approving or vetoing a pending admin
+        // action are sovereign and map to nothing.
+        "fauna.admin.users.list"
+        | "fauna.admin.users.get"
+        | "fauna.admin.evictions.list"
+        | "fauna.admin.tiers.list"
+        | "fauna.admin.invite_codes.list"
+        | "fauna.admin.invite_requests.list"
+        | "fauna.admin.admins.list"
+        | "fauna.admin.pending_actions.list" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Users,
+        )),
+        "fauna.admin.users.create"
+        | "fauna.admin.users.update"
+        | "fauna.admin.users.suspend"
+        | "fauna.admin.users.cancel_eviction"
+        | "fauna.admin.invite_codes.create"
+        | "fauna.admin.invite_codes.delete"
+        | "fauna.admin.invite_requests.approve"
+        | "fauna.admin.invite_requests.deny"
+        | "fauna.admin.set_registration_mode"
+        | "fauna.admin.set_age_verification_required" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Users,
+        )),
+        // The nest-side pages (`authorization-server.md` § *The admin arms*
+        // names each set): reads under the page's `read` or `rw` string,
+        // non-sovereign writes under its `rw` string. The sovereign kinds of
+        // these pages — the factory reset, the deployment seed, the issuer-key
+        // and session-secret rotations, the legal takedown, custody hosting,
+        // the host address and every TLS key-material write — map to nothing.
+        "fauna.admin.membership_tiers.list" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Settings,
+        )),
+        "fauna.admin.tiers.create"
+        | "fauna.admin.tiers.update"
+        | "fauna.admin.tiers.delete"
+        | "fauna.admin.membership_tiers.set"
+        | "fauna.admin.membership_tiers.clear" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Settings,
+        )),
+        "fauna.admin.region.get"
+        | "fauna.admin.web_app_origin.get"
+        | "fauna.admin.update_channel.get"
+        | "fauna.admin.services.list"
+        | "fauna.admin.worker.status"
+        | "fauna.admin.cluster.status"
+        | "fauna.transport.get_policy"
+        | "fauna.admin.content_policy.get"
+        | "fauna.features.policy.get"
+        | "fauna.oauth.issuer_key_status"
+        | "fauna.moderation.abuse_report.queue"
+        | "fauna.moderation.admin_block.list" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Nest,
+        )),
+        "fauna.admin.region.set"
+        | "fauna.admin.web_app_origin.set"
+        | "fauna.admin.update_channel.set"
+        | "fauna.admin.services.update"
+        | "fauna.admin.set_serving_port"
+        | "fauna.admin.request_host_restart"
+        | "fauna.admin.gc"
+        | "fauna.transport.put_policy"
+        | "fauna.admin.content_policy.set"
+        | "fauna.features.policy.update"
+        | "fauna.admin.set_subhandles"
+        | "fauna.admin.set_max_storage_bytes"
+        | "fauna.admin.set_cors_origins"
+        | "fauna.moderation.abuse_report.resolve"
+        | "fauna.moderation.admin_block" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Nest,
+        )),
+        "fauna.admin.logs" | "fauna.admin.audit.list" | "fauna.admin.audit.integrity" => Some(
+            PrincipalReach::AdminRead(fauna_bridge_atproto::fauna_scope::AdminPage::Logs),
+        ),
+        "fauna.web.get_apex_actor" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Web,
+        )),
+        "fauna.web.set_apex_actor" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Web,
+        )),
+        "fauna.dns.list_records"
+        | "fauna.dns.verify_records"
+        | "fauna.dns.probe_txt_visible"
+        | "fauna.tls.cert_status"
+        | "fauna.bridges.list_local_domains"
+        | "fauna.bridges.list_dkim_selectors"
+        | "fauna.bridges.get_primary_domain_rename_status"
+        | "fauna.bridges.list_primary_domain_renames" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Dns,
+        )),
+        "fauna.bridges.add_local_domain"
+        | "fauna.bridges.remove_local_domain"
+        | "fauna.bridges.restore_local_domain"
+        | "fauna.bridges.update_local_domain_config"
+        | "fauna.bridges.set_catch_all_actor"
+        | "fauna.bridges.set_role_address"
+        | "fauna.bridges.set_dkim_rotation_days" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Dns,
+        )),
+        // The mail-side pages (`authorization-server.md` § *The admin arms*
+        // names the sets). Sovereign, mapping to nothing: the DKIM force-rotate
+        // and blob revoke, the SRS and list-unsubscribe secret rotations, the
+        // Microsoft registration (it carries a client secret), and the pending
+        // bridge approve, reject and the service-user revoke that is its
+        // re-key — the grant plane.
+        "fauna.bridges.get_mail_config"
+        | "fauna.bridges.get_alias_policy"
+        | "fauna.bridges.get_dmarc_policy"
+        | "fauna.bridges.get_spam_baseline_state"
+        | "fauna.bridges.mail_health"
+        | "fauna.bridges.outbound_warmup_status" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Mail,
+        )),
+        "fauna.bridges.set_mail_enabled"
+        | "fauna.bridges.set_auto_enable_mail_for_new_users"
+        | "fauna.bridges.put_spam_policy"
+        | "fauna.bridges.put_auth_policy"
+        | "fauna.bridges.put_submission_policy"
+        | "fauna.bridges.put_imap_policy"
+        | "fauna.bridges.put_outbound_policy"
+        | "fauna.bridges.put_alias_policy"
+        | "fauna.bridges.put_dmarc_policy"
+        | "fauna.bridges.run_deliverability_diagnostics"
+        | "fauna.bridges.blocklist_self_check_run"
+        | "fauna.bridges.outbound_warmup_reset"
+        | "fauna.bridges.publish_spam_baseline" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Mail,
+        )),
+        "fauna.bridges.list_dmarc_aggregate_reports"
+        | "fauna.bridges.get_dmarc_aggregate_report"
+        | "fauna.bridges.list_dmarc_forensic_reports"
+        | "fauna.bridges.get_dmarc_forensic_report"
+        | "fauna.bridges.list_tlsrpt_inbound_reports"
+        | "fauna.bridges.get_tlsrpt_inbound_report"
+        | "fauna.bridges.list_blocklist_self_check_history"
+        | "fauna.bridges.list_deliverability_diagnostic_runs" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::MailReports,
+        )),
+        "fauna.bridges.list_forwarders" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Aliases,
+        )),
+        "fauna.bridges.create_forwarder" | "fauna.bridges.delete_forwarder" => Some(
+            PrincipalReach::AdminRw(fauna_bridge_atproto::fauna_scope::AdminPage::Aliases),
+        ),
+        "fauna.bridges.get_caldav_port" => Some(PrincipalReach::AdminRead(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Calendar,
+        )),
+        "fauna.bridges.set_caldav_enabled" | "fauna.bridges.set_caldav_port" => Some(
+            PrincipalReach::AdminRw(fauna_bridge_atproto::fauna_scope::AdminPage::Calendar),
+        ),
+        "fauna.bridges.set_carddav_enabled" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Contacts,
+        )),
+        "fauna.bridges.set_webdav_enabled" => Some(PrincipalReach::AdminRw(
+            fauna_bridge_atproto::fauna_scope::AdminPage::Files,
+        )),
+        "fauna.bridges.list_pending_bridges" | "fauna.bridges.list_service_users" => Some(
+            PrincipalReach::AdminRead(fauna_bridge_atproto::fauna_scope::AdminPage::BridgesPending),
+        ),
+        // The profile arm (`authorization-server.md` § Scope grammar → *The
+        // profile arm*): any actor's public profile this nest holds.
+        "fauna.profile.get" => Some(PrincipalReach::Scope(FaunaScopeArm::ProfileRead)),
+        // The notifications arms (`authorization-server.md` § Scope grammar →
+        // *The notifications arms*): two strings, so a principal may see the
+        // inbox and not touch it. `dismiss` and `clear` stay the owner's.
+        "fauna.notifications.list" | "fauna.notifications.count" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::NotificationsRead))
+        }
+        "fauna.notifications.mark_read" => {
+            Some(PrincipalReach::Scope(FaunaScopeArm::NotificationsWrite))
+        }
         _ => None,
     }
 }
@@ -2614,7 +2918,10 @@ pub fn principal_reach(kind: &str) -> Option<PrincipalReach> {
 /// Does `scope` name an `identity.op` class that `custodian` performs? The
 /// arm match first ([`fauna_bridge_atproto::fauna_scope::arm_of`] refuses
 /// every sovereign and unknown name), then the class's custodian.
-fn identity_op_scope_reaches(scope: &str, custodian: fauna_core::identity_op::Custodian) -> bool {
+fn identity_op_scope_reaches(
+    scope: &str,
+    classes: &[fauna_core::identity_op::IdentityOpClass],
+) -> bool {
     use fauna_bridge_atproto::fauna_scope::{FaunaScopeArm, arm_of, parse};
     if arm_of(scope) != Some(FaunaScopeArm::IdentityOp) {
         return false;
@@ -2622,7 +2929,7 @@ fn identity_op_scope_reaches(scope: &str, custodian: fauna_core::identity_op::Cu
     parse(scope)
         .and_then(|p| p.qualifier)
         .and_then(|q| fauna_core::identity_op::IdentityOpClass::parse(q).ok())
-        .is_some_and(|class| class.custodian() == custodian)
+        .is_some_and(|class| classes.contains(&class))
 }
 
 /// Does `scopes` — a principal's row scopes intersected with its session
@@ -2639,9 +2946,18 @@ pub fn scope_covers(scopes: &[String], kind: &str) -> bool {
         Some(PrincipalReach::ScopeDispatched(arms)) => scopes.iter().any(|s| {
             fauna_bridge_atproto::fauna_scope::arm_of(s).is_some_and(|a| arms.contains(&a))
         }),
-        Some(PrincipalReach::IdentityOp(custodian)) => scopes
+        Some(PrincipalReach::IdentityOp(classes)) => {
+            scopes.iter().any(|s| identity_op_scope_reaches(s, classes))
+        }
+        // A page's `rw` string is a superset of its `read` string: a read is
+        // covered by either, a write by `rw` alone.
+        Some(PrincipalReach::AdminRead(page)) => scopes.iter().any(|s| {
+            fauna_bridge_atproto::fauna_scope::admin_read_qualifier(s) == Some(page)
+                || fauna_bridge_atproto::fauna_scope::admin_rw_qualifier(s) == Some(page)
+        }),
+        Some(PrincipalReach::AdminRw(page)) => scopes
             .iter()
-            .any(|s| identity_op_scope_reaches(s, custodian)),
+            .any(|s| fauna_bridge_atproto::fauna_scope::admin_rw_qualifier(s) == Some(page)),
     }
 }
 
@@ -2981,19 +3297,120 @@ mod tests {
     /// sentences that name the set.
     #[test]
     fn the_third_party_class_reaches_exactly_its_ceiling() {
-        const CEILING: [&str; 30] = [
+        const CEILING: [&str; 146] = [
             "fauna.account.state.put",
             "fauna.activitypub.oracle.http_sig",
+            "fauna.admin.admins.list",
+            "fauna.admin.audit.integrity",
+            "fauna.admin.audit.list",
+            "fauna.admin.cluster.status",
+            "fauna.admin.content_policy.get",
+            "fauna.admin.content_policy.set",
+            "fauna.admin.evictions.list",
+            "fauna.admin.gc",
+            "fauna.admin.invite_codes.create",
+            "fauna.admin.invite_codes.delete",
+            "fauna.admin.invite_codes.list",
+            "fauna.admin.invite_requests.approve",
+            "fauna.admin.invite_requests.deny",
+            "fauna.admin.invite_requests.list",
+            "fauna.admin.logs",
+            "fauna.admin.membership_tiers.clear",
+            "fauna.admin.membership_tiers.list",
+            "fauna.admin.membership_tiers.set",
+            "fauna.admin.pending_actions.list",
+            "fauna.admin.region.get",
+            "fauna.admin.region.set",
+            "fauna.admin.request_host_restart",
+            "fauna.admin.services.list",
+            "fauna.admin.services.update",
+            "fauna.admin.set_age_verification_required",
+            "fauna.admin.set_cors_origins",
+            "fauna.admin.set_max_storage_bytes",
+            "fauna.admin.set_registration_mode",
+            "fauna.admin.set_serving_port",
+            "fauna.admin.set_subhandles",
+            "fauna.admin.stats",
+            "fauna.admin.status",
+            "fauna.admin.tiers.create",
+            "fauna.admin.tiers.delete",
+            "fauna.admin.tiers.list",
+            "fauna.admin.tiers.update",
+            "fauna.admin.update_channel.get",
+            "fauna.admin.update_channel.set",
+            "fauna.admin.users.cancel_eviction",
+            "fauna.admin.users.create",
+            "fauna.admin.users.get",
+            "fauna.admin.users.list",
+            "fauna.admin.users.suspend",
+            "fauna.admin.users.update",
+            "fauna.admin.web_app_origin.get",
+            "fauna.admin.web_app_origin.set",
+            "fauna.admin.worker.status",
             "fauna.atproto.oracle.service_auth",
+            "fauna.bridges.add_local_domain",
+            "fauna.bridges.blocklist_self_check_run",
             "fauna.bridges.conversation.deposit",
             "fauna.bridges.conversation.outbox.ack",
             "fauna.bridges.conversation.outbox.fetch",
             "fauna.bridges.conversation.receipt",
             "fauna.bridges.conversation.room.members",
             "fauna.bridges.conversation.room.upsert",
+            "fauna.bridges.create_forwarder",
+            "fauna.bridges.delete_forwarder",
             "fauna.bridges.fetch_recipient_mls_pubkey",
+            "fauna.bridges.get_alias_policy",
+            "fauna.bridges.get_caldav_port",
+            "fauna.bridges.get_dmarc_aggregate_report",
+            "fauna.bridges.get_dmarc_forensic_report",
+            "fauna.bridges.get_dmarc_policy",
+            "fauna.bridges.get_mail_config",
+            "fauna.bridges.get_primary_domain_rename_status",
+            "fauna.bridges.get_spam_baseline_state",
+            "fauna.bridges.get_tlsrpt_inbound_report",
+            "fauna.bridges.list_blocklist_self_check_history",
+            "fauna.bridges.list_deliverability_diagnostic_runs",
+            "fauna.bridges.list_dkim_selectors",
+            "fauna.bridges.list_dmarc_aggregate_reports",
+            "fauna.bridges.list_dmarc_forensic_reports",
+            "fauna.bridges.list_forwarders",
+            "fauna.bridges.list_local_domains",
+            "fauna.bridges.list_pending_bridges",
+            "fauna.bridges.list_primary_domain_renames",
+            "fauna.bridges.list_service_users",
+            "fauna.bridges.list_tlsrpt_inbound_reports",
+            "fauna.bridges.mail_health",
+            "fauna.bridges.outbound_warmup_reset",
+            "fauna.bridges.outbound_warmup_status",
+            "fauna.bridges.publish_spam_baseline",
+            "fauna.bridges.put_alias_policy",
+            "fauna.bridges.put_auth_policy",
+            "fauna.bridges.put_dmarc_policy",
+            "fauna.bridges.put_imap_policy",
+            "fauna.bridges.put_outbound_policy",
+            "fauna.bridges.put_spam_policy",
+            "fauna.bridges.put_submission_policy",
+            "fauna.bridges.remove_local_domain",
+            "fauna.bridges.restore_local_domain",
+            "fauna.bridges.run_deliverability_diagnostics",
+            "fauna.bridges.set_auto_enable_mail_for_new_users",
+            "fauna.bridges.set_caldav_enabled",
+            "fauna.bridges.set_caldav_port",
+            "fauna.bridges.set_carddav_enabled",
+            "fauna.bridges.set_catch_all_actor",
+            "fauna.bridges.set_dkim_rotation_days",
+            "fauna.bridges.set_mail_enabled",
+            "fauna.bridges.set_role_address",
+            "fauna.bridges.set_webdav_enabled",
+            "fauna.bridges.update_local_domain_config",
             "fauna.capabilities.fetch",
+            "fauna.dns.list_records",
+            "fauna.dns.probe_txt_visible",
+            "fauna.dns.verify_records",
             "fauna.events.poll",
+            "fauna.features.policy.get",
+            "fauna.features.policy.update",
+            "fauna.feed.author.posts",
             "fauna.feed.get",
             "fauna.feed.list",
             "fauna.feed.local.posts",
@@ -3003,15 +3420,30 @@ mod tests {
             "fauna.folders.deposit.begin",
             "fauna.folders.deposit.commit",
             "fauna.folders.deposit.part",
+            "fauna.moderation.abuse_report.queue",
+            "fauna.moderation.abuse_report.resolve",
+            "fauna.moderation.admin_block",
+            "fauna.moderation.admin_block.list",
             "fauna.nostr.bunker.bind",
+            "fauna.notifications.count",
+            "fauna.notifications.list",
+            "fauna.notifications.mark_read",
+            "fauna.oauth.issuer_key_status",
             "fauna.personalization.model.fetch",
             "fauna.personalization.model.put",
             "fauna.posts.author.create",
             "fauna.posts.author.delete",
+            "fauna.profile.author.set",
+            "fauna.profile.get",
             "fauna.subscriptions.status.get",
             "fauna.subscriptions.subscribe",
             "fauna.subscriptions.unsubscribe",
             "fauna.sync.changes.list",
+            "fauna.tls.cert_status",
+            "fauna.transport.get_policy",
+            "fauna.transport.put_policy",
+            "fauna.web.get_apex_actor",
+            "fauna.web.set_apex_actor",
         ];
         let kinds = every_kind_arm_in_this_file();
         // Two `|`-joined arms sit on lines of their own, so the extractor
@@ -3037,6 +3469,16 @@ mod tests {
             CallerClass::ThirdParty,
             "fauna.capabilities.mint"
         ));
+        // The notifications write arm marks read and never destroys: dismiss
+        // and clear stay the owner's (*The notifications arms*), and the
+        // profile write is the oracle's class, never this kind's class.
+        for kind in [
+            "fauna.notifications.dismiss",
+            "fauna.notifications.clear",
+            "fauna.profile.set",
+        ] {
+            assert!(!is_permitted(CallerClass::ThirdParty, kind), "{kind}");
+        }
     }
 
     /// The compiled kind → reach mapping is exactly the ceiling: every
@@ -3079,6 +3521,8 @@ mod tests {
                 // A scope-dispatched kind names every arm of its set.
                 PrincipalReach::ScopeDispatched(arms) => arms.to_vec(),
                 PrincipalReach::IdentityOp(_) => vec![FaunaScopeArm::IdentityOp],
+                PrincipalReach::AdminRead(_) => vec![FaunaScopeArm::AdminRead],
+                PrincipalReach::AdminRw(_) => vec![FaunaScopeArm::AdminRw],
                 PrincipalReach::Session => Vec::new(),
             })
             .collect();
@@ -3091,17 +3535,221 @@ mod tests {
         live.sort_by_key(|a| a.advertised());
         named.dedup();
         assert_eq!(named, live);
-        // Every custodian a built class names has a door in the ceiling, so
-        // no grantable class is a scope string that reaches nothing.
+        // Every built class has a door in the ceiling, so no grantable class
+        // is a scope string that reaches nothing; and every door's classes
+        // are one custodian's, so no door spans two keys. A device
+        // custodian's door is the local `fauna-ipc` endpoint its app serves
+        // (`conversations-oracle.md` § The custodian and the door), so its
+        // classes reach no nest kind — and none may reach one.
         for class in fauna_core::identity_op::IdentityOpClass::ALL {
+            if class.custodian().is_device() {
+                assert!(
+                    every_kind_arm_in_this_file().into_iter().all(|k| {
+                        !matches!(principal_reach(k),
+                            Some(PrincipalReach::IdentityOp(classes)) if classes.contains(class))
+                    }),
+                    "{} is a device class and reaches a nest kind",
+                    class.name()
+                );
+                continue;
+            }
             assert!(
                 every_kind_arm_in_this_file().into_iter().any(|k| {
-                    principal_reach(k) == Some(PrincipalReach::IdentityOp(class.custodian()))
+                    matches!(principal_reach(k),
+                        Some(PrincipalReach::IdentityOp(classes)) if classes.contains(class))
                 }),
-                "{} names a custodian with no ceiling kind",
+                "{} has no ceiling kind",
                 class.name()
             );
         }
+        for kind in every_kind_arm_in_this_file() {
+            if let Some(PrincipalReach::IdentityOp(classes)) = principal_reach(kind) {
+                assert!(
+                    classes
+                        .iter()
+                        .all(|c| c.custodian() == classes[0].custodian()),
+                    "{kind}'s classes span two custodians"
+                );
+            }
+        }
+        // Every built admin page is reached by at least one ceiling kind, and
+        // every admin ceiling kind names a built page — the closed-table
+        // predicate per qualifier, as for the oracle's classes.
+        for page in fauna_bridge_atproto::fauna_scope::AdminPage::ALL {
+            // A page has a `read` string iff a read kind of its names it.
+            assert_eq!(
+                every_kind_arm_in_this_file()
+                    .into_iter()
+                    .any(|k| principal_reach(k) == Some(PrincipalReach::AdminRead(*page))),
+                page.has_reads(),
+                "{page:?}: a read string exists iff a ceiling read kind names the page"
+            );
+            // A page has an `rw` string iff a write kind of its names it.
+            assert_eq!(
+                every_kind_arm_in_this_file()
+                    .into_iter()
+                    .any(|k| principal_reach(k) == Some(PrincipalReach::AdminRw(*page))),
+                page.has_writes(),
+                "{page:?}: an rw string exists iff a ceiling write kind names the page"
+            );
+        }
+    }
+
+    /// The users page's sovereign acts (`apps/cli.md` § The sovereign-act
+    /// boundary → *The admin plane's sovereign acts*; the kinds are named in
+    /// `authorization-server.md` § *The admin arms*): never a kind of any
+    /// admin string — deleting or evicting a user, clearing a handle, the
+    /// admin roster's writes, and approving or vetoing a pending admin action
+    /// — and the account's own pending-action reads are not the page's.
+    #[test]
+    fn the_users_pages_sovereign_acts_reach_no_principal() {
+        for kind in [
+            "fauna.admin.users.delete",
+            "fauna.admin.users.evict",
+            "fauna.admin.users.clear_handle",
+            "fauna.admin.admins.add",
+            "fauna.admin.admins.remove",
+            "fauna.pending_actions.approve",
+            "fauna.pending_actions.cancel",
+            "fauna.pending_actions.get",
+            "fauna.pending_actions.list",
+        ] {
+            assert!(
+                every_kind_arm_in_this_file().contains(&kind),
+                "{kind} is a listed kind"
+            );
+            assert!(!is_permitted(CallerClass::ThirdParty, kind), "{kind}");
+            assert_eq!(principal_reach(kind), None, "{kind}");
+        }
+    }
+
+    /// The admin plane's kinds stay `Admin`-class for the account's own
+    /// sockets and gain `ThirdParty` ONLY for the kinds an admin arm names
+    /// (`apps/bridges.md` rule (e)); the class gate never resolves `Admin`
+    /// for a principal, so the matrix alone is not the admin door — the
+    /// per-RPC authority read in `principal_handlers` is (its tests prove
+    /// the member's refusal).
+    #[test]
+    fn the_admin_plane_reaches_a_principal_only_through_an_admin_arm() {
+        for kind in every_kind_arm_in_this_file() {
+            let admin_only = is_permitted(CallerClass::Admin, kind)
+                && !is_permitted(CallerClass::User, kind)
+                && !is_permitted(CallerClass::BridgeMda, kind)
+                && !is_permitted(CallerClass::BridgeMta, kind);
+            if !admin_only {
+                continue;
+            }
+            let admin_arm = principal_reach(kind).is_some_and(PrincipalReach::is_admin_plane);
+            assert_eq!(
+                is_permitted(CallerClass::ThirdParty, kind),
+                admin_arm,
+                "{kind}: an admin-only kind reaches a principal iff an admin arm names it"
+            );
+        }
+    }
+
+    /// The nest-side pages' sovereign acts (`apps/cli.md` § The sovereign-act
+    /// boundary → *The admin plane's sovereign acts*; the kinds are named in
+    /// `authorization-server.md` § *The admin arms*): the factory reset, the
+    /// deployment seed, the issuer-key and session-secret rotations, a legal
+    /// takedown, custody hosting, the host address and every TLS key-material
+    /// write never reach a principal — while the issuer key set's and the
+    /// served certificates' status reads do.
+    /// The mail-side pages' sovereign acts (`apps/cli.md` § The sovereign-act
+    /// boundary → *The admin plane's sovereign acts*; named in
+    /// `authorization-server.md` § *The admin arms*): the mail secrets'
+    /// rotations, the Microsoft registration (it carries a client secret),
+    /// and the pending-bridge roster's writes — approve, reject and the
+    /// service-user revoke that is its re-key (there is no separate rotate
+    /// kind: a revoked bridge re-enrolls with a fresh key) — never a kind of
+    /// any admin string.
+    #[test]
+    fn the_mail_side_pages_sovereign_acts_reach_no_principal() {
+        for kind in [
+            "fauna.bridges.rotate_srs_secret",
+            "fauna.bridges.rotate_list_unsubscribe_secret",
+            "fauna.bridges.set_microsoft_registration",
+            "fauna.bridges.approve_pending_bridge",
+            "fauna.bridges.reject_pending_bridge",
+            "fauna.bridges.revoke_service_user",
+        ] {
+            assert!(
+                every_kind_arm_in_this_file().contains(&kind),
+                "{kind} is a listed kind"
+            );
+            assert!(!is_permitted(CallerClass::ThirdParty, kind), "{kind}");
+            assert_eq!(principal_reach(kind), None, "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_nest_side_pages_sovereign_acts_reach_no_principal() {
+        for kind in [
+            "fauna.admin.factory_reset",
+            "fauna.admin.deployment_seed.get",
+            "fauna.admin.deployment_seed.rotate",
+            "fauna.admin.custody_hosting.list",
+            "fauna.admin.custody_hosting.remove",
+            "fauna.oauth.rotate_issuer_key",
+            "fauna.oauth.force_rotate_issuer_key",
+            "fauna.oauth.force_rotate_session_secret",
+            "fauna.moderation.legal_takedown",
+            "fauna.dns.set_host_address",
+            "fauna.tls.publish_cert",
+            "fauna.bridges.provision_tls_cert_blob",
+            "fauna.bridges.provision_self_signed_cert",
+            "fauna.bridges.restore_real_tls_cert",
+            "fauna.bridges.force_rotate_dkim",
+            "fauna.bridges.revoke_dkim_blob",
+            "fauna.bridges.start_primary_domain_rename",
+            "fauna.bridges.abort_primary_domain_rename",
+            "fauna.bridges.complete_primary_domain_rename",
+            "fauna.bridges.extend_primary_domain_rename_grace",
+        ] {
+            assert!(
+                every_kind_arm_in_this_file().contains(&kind),
+                "{kind} is a listed kind"
+            );
+            assert!(!is_permitted(CallerClass::ThirdParty, kind), "{kind}");
+            assert_eq!(principal_reach(kind), None, "{kind}");
+        }
+        use fauna_bridge_atproto::fauna_scope::AdminPage;
+        assert_eq!(
+            principal_reach("fauna.oauth.issuer_key_status"),
+            Some(PrincipalReach::AdminRead(AdminPage::Nest))
+        );
+        assert_eq!(
+            principal_reach("fauna.tls.cert_status"),
+            Some(PrincipalReach::AdminRead(AdminPage::Dns))
+        );
+    }
+
+    /// The admin arms' two verbs: a page's read is covered by its `read` or
+    /// its `rw` string, its write by `rw` alone, and neither page's string
+    /// covers the other page.
+    #[test]
+    fn an_admin_read_takes_either_verb_and_a_write_takes_rw() {
+        let read = vec!["fauna:admin:read:users".to_string()];
+        let rw = vec!["fauna:admin:rw:users".to_string()];
+        let dash = vec!["fauna:admin:read:dashboard".to_string()];
+        assert!(scope_covers(&read, "fauna.admin.users.list"));
+        assert!(scope_covers(&rw, "fauna.admin.users.list"));
+        assert!(!scope_covers(&dash, "fauna.admin.users.list"));
+        assert!(scope_covers(&rw, "fauna.admin.users.create"));
+        assert!(!scope_covers(&read, "fauna.admin.users.create"));
+        assert!(!scope_covers(&rw, "fauna.admin.stats"));
+        assert!(scope_covers(&dash, "fauna.admin.stats"));
+        assert!(!scope_covers(&rw, "fauna.admin.users.delete"));
+        // A page of reads only has no `rw` string to cover its reads, and a
+        // page's string covers no other page's kinds.
+        let logs = vec!["fauna:admin:read:logs".to_string()];
+        let nest = vec!["fauna:admin:rw:nest".to_string()];
+        assert!(scope_covers(&logs, "fauna.admin.audit.list"));
+        assert!(!scope_covers(&nest, "fauna.admin.audit.list"));
+        assert!(scope_covers(&nest, "fauna.admin.gc"));
+        assert!(scope_covers(&nest, "fauna.oauth.issuer_key_status"));
+        assert!(!scope_covers(&nest, "fauna.admin.factory_reset"));
+        assert!(!scope_covers(&nest, "fauna.admin.tiers.update"));
     }
 
     #[test]
@@ -3135,6 +3783,27 @@ mod tests {
         assert!(!scope_covers(&account, "fauna.feed.local.posts"));
         assert!(!scope_covers(&account, "fauna.feed.trending.posts"));
         assert!(!scope_covers(&account, "fauna.feed.create"));
+
+        // The author arm covers exactly the author read; neither the bare
+        // arm nor the account arm covers it — the account arm refines it for
+        // a session that also holds the author arm, without entering its
+        // mapping.
+        let author = vec!["fauna:feed:read:author".to_string()];
+        assert!(scope_covers(&author, "fauna.feed.author.posts"));
+        assert!(!scope_covers(&feed, "fauna.feed.author.posts"));
+        assert!(!scope_covers(&account, "fauna.feed.author.posts"));
+        for k in [
+            "fauna.feed.local.posts",
+            "fauna.feed.trending.posts",
+            "fauna.feed.list",
+            "fauna.feed.get",
+            "fauna.feed.posts",
+        ] {
+            assert!(
+                !scope_covers(&author, k),
+                "{k}: the author arm never covers it"
+            );
+        }
 
         // The oracle's door is class-aware: either Nostr class covers bind,
         // `fauna:feed:read` does not, and a sovereign-named or unknown
@@ -3173,6 +3842,16 @@ mod tests {
         }
         assert!(!scope_covers(&post, "fauna.activitypub.oracle.http_sig"));
         assert!(!scope_covers(&post, "fauna.nostr.bunker.bind"));
+        // The profile class opens the profile door alone — the same custodian
+        // as posting, and still neither class opens the other's door.
+        let profile = ["fauna:identity:op:profile.author".to_string()];
+        assert!(scope_covers(&profile, "fauna.profile.author.set"));
+        assert!(!scope_covers(&post, "fauna.profile.author.set"));
+        assert!(!scope_covers(&ap, "fauna.profile.author.set"));
+        for kind in ["fauna.posts.author.create", "fauna.posts.author.delete"] {
+            assert!(!scope_covers(&profile, kind), "{kind}");
+        }
+        assert!(!scope_covers(&profile, "fauna.profile.get"));
         // The ATProto class opens its own custodian's door and no other.
         let at = ["fauna:identity:op:atproto.service_auth".to_string()];
         assert!(scope_covers(&at, "fauna.atproto.oracle.service_auth"));
@@ -3230,6 +3909,26 @@ mod tests {
             &["fauna:personalization:read".to_string()],
             "fauna.sync.changes.list"
         ));
+
+        // The profile arm covers exactly the profile read; the two
+        // notifications arms split read from mark-read, and neither reaches
+        // the owner's deletes (*The profile arm*, *The notifications arms*).
+        let profile = vec!["fauna:profile:read".to_string()];
+        let notif_read = vec!["fauna:notifications:read".to_string()];
+        let notif_write = vec!["fauna:notifications:write".to_string()];
+        assert!(scope_covers(&profile, "fauna.profile.get"));
+        assert!(!scope_covers(&profile, "fauna.profile.set"));
+        assert!(!scope_covers(&feed, "fauna.profile.get"));
+        for kind in ["fauna.notifications.list", "fauna.notifications.count"] {
+            assert!(scope_covers(&notif_read, kind), "{kind}");
+            assert!(!scope_covers(&notif_write, kind), "{kind}");
+        }
+        assert!(scope_covers(&notif_write, "fauna.notifications.mark_read"));
+        assert!(!scope_covers(&notif_read, "fauna.notifications.mark_read"));
+        let both = [notif_read.clone(), notif_write.clone(), profile.clone()].concat();
+        for kind in ["fauna.notifications.dismiss", "fauna.notifications.clear"] {
+            assert!(!scope_covers(&both, kind), "{kind}");
+        }
     }
 
     /// `caller_class_for_actor` never answers `ThirdParty`, so a principal's
@@ -3486,10 +4185,14 @@ mod tests {
                 !is_permitted(class, "fauna.activitypub.oracle.http_sig"),
                 "{class:?} must not reach the ActivityPub oracle"
             );
-            for kind in ["fauna.posts.author.create", "fauna.posts.author.delete"] {
+            for kind in [
+                "fauna.posts.author.create",
+                "fauna.posts.author.delete",
+                "fauna.profile.author.set",
+            ] {
                 assert!(
                     !is_permitted(class, kind),
-                    "{class:?} must not reach the posting oracle"
+                    "{class:?} must not reach the authoring-key oracle"
                 );
             }
             assert!(
@@ -3520,6 +4223,10 @@ mod tests {
         assert!(is_permitted(
             CallerClass::ThirdParty,
             "fauna.posts.author.delete"
+        ));
+        assert!(is_permitted(
+            CallerClass::ThirdParty,
+            "fauna.profile.author.set"
         ));
     }
 
@@ -3654,6 +4361,7 @@ mod tests {
             "fauna.admin.tiers.list",
             "fauna.admin.tiers.create",
             "fauna.admin.tiers.update",
+            "fauna.admin.tiers.delete",
             "fauna.admin.membership_tiers.list",
             "fauna.admin.membership_tiers.set",
             "fauna.admin.membership_tiers.clear",
@@ -3727,6 +4435,8 @@ mod tests {
     fn admin_stats_audit_ops_cluster_is_admin_only() {
         // C3: stats / status / audit / cluster / gc / worker / cross-actor
         // pending-actions — Admin-only, matching the HTTP twins' `AdminBearerAuth`.
+        // (The two dashboard reads also admit `ThirdParty` under the admin
+        // arm — `the_admin_plane_reaches_a_principal_only_through_an_admin_arm`.)
         for kind in [
             "fauna.admin.stats",
             "fauna.admin.status",
@@ -5074,6 +5784,7 @@ mod tests {
         for kind in [
             "fauna.principals.list",
             "fauna.principals.ops",
+            "fauna.principals.ops.record",
             "fauna.principals.revoke",
         ] {
             assert!(is_permitted(CallerClass::User, kind), "{kind}: User");
@@ -6039,6 +6750,7 @@ mod tests {
             "fauna.posts.interact",
             "fauna.posts.room_labels",
             "fauna.posts.room_labels_remote",
+            "fauna.posts.get_remote",
         ] {
             assert!(
                 is_permitted(CallerClass::User, kind),
@@ -6057,6 +6769,7 @@ mod tests {
             "fauna.posts.interact",
             "fauna.posts.room_labels",
             "fauna.posts.room_labels_remote",
+            "fauna.posts.get_remote",
         ] {
             for class in [CallerClass::BridgeMta, CallerClass::BridgeMda] {
                 assert!(
@@ -6069,7 +6782,7 @@ mod tests {
 
     // ── Feed slice (T2) ──────────────
 
-    const FEED_KINDS: [&str; 11] = [
+    const FEED_KINDS: [&str; 12] = [
         "fauna.feed.list",
         "fauna.feed.create",
         "fauna.feed.get",
@@ -6077,6 +6790,7 @@ mod tests {
         "fauna.feed.delete",
         "fauna.feed.posts",
         "fauna.feed.local.posts",
+        "fauna.feed.author.posts",
         "fauna.feed.trending.posts",
         "fauna.feed.contributors.list",
         "fauna.feed.contributors.grant",
@@ -6233,6 +6947,24 @@ mod tests {
                     "{kind} should be denied for {class:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn profile_get_remote_user_only() {
+        // Admin inherits every User arm (`is_permitted`'s first rule).
+        for class in [CallerClass::User, CallerClass::Admin] {
+            assert!(is_permitted(class, "fauna.profile.get_remote"));
+        }
+        for class in [
+            CallerClass::ThirdParty,
+            CallerClass::BridgeMta,
+            CallerClass::BridgeMda,
+        ] {
+            assert!(
+                !is_permitted(class, "fauna.profile.get_remote"),
+                "fauna.profile.get_remote should be denied for {class:?}"
+            );
         }
     }
 
@@ -6486,7 +7218,7 @@ mod tests {
     // flow) — User-class: the importer is the user's own Fauna app, caller-
     // scoped. Distinct from the BridgeMda-only `fauna.bridges.append` the
     // handlers share a write path with.
-    const IMPORT_KINDS: [&str; 10] = [
+    const IMPORT_KINDS: [&str; 11] = [
         "fauna.bridges.start_import_session",
         "fauna.bridges.import_message",
         "fauna.bridges.import_message_batch",
@@ -6497,6 +7229,7 @@ mod tests {
         "fauna.bridges.cancel_import_session",
         "fauna.bridges.finalize_import_session",
         "fauna.bridges.fail_import_session",
+        "fauna.bridges.discard_import_session",
     ];
 
     #[test]

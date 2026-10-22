@@ -88,10 +88,10 @@ export interface Affordance {
   reason?: LocalizedText;
 }
 
-/** The `offlineAffordance` wasm face's shape (`$lib/wasm`). */
+/** The `offlineAffordance` wasm face's shape (`#lib/wasm`). */
 export type AffordanceFn = (kind: string, connectionState: string) => Affordance;
 
-/** `connectionStatus.subscribe` (`$lib/store`) — the ONE place web learns the
+/** `connectionStatus.subscribe` (`#lib/store`) — the ONE place web learns the
  *  transport state, so the `connection-status` indicator and this gate cannot
  *  disagree about what "connected" means. */
 export type StateSubscribe = (run: (state: string) => void) => () => void;

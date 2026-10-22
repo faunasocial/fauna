@@ -162,6 +162,12 @@ class NostrActions:
         self.link_generate()
         return self.wait_for_linked()
 
+    def signing_mode_text(self, timeout: float = 10.0) -> str:
+        """The linked account's signing mode as painted (`nostr-signing-mode`,
+        the shared `nostr_key_source_label` map's localized label)."""
+        self.driver.wait_for("nostr-signing-mode", timeout=timeout)
+        return self.driver.get_text("nostr-signing-mode")
+
     def unlink(self) -> None:
         """Unlink the account (`nostr-unlink-button` — a plain destructive
         Button, no confirm overlay; → `fauna.bridges.unlink` → refresh)."""

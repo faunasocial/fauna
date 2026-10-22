@@ -114,7 +114,7 @@ pub fn build(m: Arc<OnboardingMachine>, append: bool) -> (gtk::Box, Rc<dyn Fn()>
                     // Commit the secret immediately so a crash before
                     // complete-login can resume at HandleEntry — moment 1,
                     // owned by `super::commit_confirmed_identity`.
-                    super::commit_confirmed_identity(&secret, append);
+                    super::commit_confirmed_identity(&m, &secret, append);
                 }
                 Err(_) => {
                     // The machine sets error_message on failure; we still set

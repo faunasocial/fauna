@@ -418,13 +418,21 @@ class OAuthClient:
 
     def _token_request(self, form: dict) -> dict:
         htu = f"{self.htu_origin}{TOKEN_PATH}"
-        status, body, headers = self._post_form(TOKEN_PATH, form, htu)
+        # A confidential client authenticates here as at PAR — a fresh
+        # assertion per request (the server keeps a `jti` replay set).
+        status, body, headers = self._post_form(TOKEN_PATH, self._authenticated(form), htu)
         # The same nonce round trip PAR makes: this client's nonce may have
         # aged out between the consent ceremony and here, and the refusal
-        # carries a fresh one.
-        if status != 200 and headers.get(NONCE_HEADER):
+        # carries a fresh one. Only a nonce refusal is retried — the nest
+        # spends a code before validating the request, so a retry after any
+        # other refusal answers "already redeemed" and hides the real one.
+        if (
+            status != 200
+            and _json_or_raw(body).get("error") in ("use_dpop_nonce", "invalid_dpop_proof")
+            and headers.get(NONCE_HEADER)
+        ):
             self.nonce = headers[NONCE_HEADER]
-            status, body, headers = self._post_form(TOKEN_PATH, form, htu)
+            status, body, headers = self._post_form(TOKEN_PATH, self._authenticated(form), htu)
         assert status == 200, f"token exchange refused: {status} {body!r}"
         if headers.get(NONCE_HEADER):
             self.nonce = headers[NONCE_HEADER]

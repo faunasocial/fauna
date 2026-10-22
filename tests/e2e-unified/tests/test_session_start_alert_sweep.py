@@ -43,7 +43,7 @@ true is app-specific — found live on web, apps row 315.** Every web route
 mounts by calling ``identity.init()`` (``apps/fauna-web/src/routes/{feed,
 settings,backups,events,media,conversations,admin,onboarding}/+page.svelte``),
 whose async ``refreshFromServer`` tail hands the root layout's
-``$identity``-object-gated sweep effect (``routes/+layout.svelte``) a FRESH
+``$identity``-object-gated sweep effect (``lib/components/RootShell.svelte``) a FRESH
 object on every mount — not only at login. So navigating into Settings to
 build the kit (unavoidable; the section lives nowhere else) already re-sweeps
 the account once or twice before anything is parked, and navigating to feed to

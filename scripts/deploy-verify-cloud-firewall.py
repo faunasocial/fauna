@@ -30,7 +30,15 @@ gate spends none of that budget; it talks only to api.hetzner.cloud):
            model has no legitimate off-box caller for these, so even an
            allowlisted source is a violation;
        (c) prints the effective inbound (port → sources) allow table so a
-           human reviews drift the invariant can't formalize.
+           human reviews drift the invariant can't formalize;
+       (d) NO applied inbound rule names a sibling organisation box's public
+           address (every other server the token lists, plus the other
+           organisation hostnames that resolve) — the provider's rules are
+           allow-only, so box↔box isolation rests on the allowlist never
+           admitting a sibling (docs/goal/architecture/deployment-threat-model.md
+           § Concern 2, path 6). A catch-all source (/0) names nobody;
+       (e) the server is attached to NO provider private network — those
+           are not filtered by the provider's firewalls.
 
   Deliberately NOT asserted: which ports are open to which sources. The
   box's inbound allowlist is an operational choice that may legitimately
@@ -44,8 +52,9 @@ Usage:
     scripts/deploy-verify-cloud-firewall.py dev.fauna.build --warn-only
 
 Exit codes:
-    0  invariant holds ((a)+(b)), or --warn-only
-    1  violation — no applied cloud firewall, or an internal port is opened
+    0  invariant holds ((a), (b), (d), (e)), or --warn-only
+    1  violation — no applied cloud firewall, an internal port is opened, a
+       rule admits a sibling box, or the server has a private network
     2  cannot verify — API unreachable (after retries), DNS resolution failed,
        or the host is not among the token's servers
     3  no token ($HETZNER_API_TOKEN unset and the host's project token file
@@ -58,6 +67,7 @@ its sibling scripts/_cloud_project.py (the box→project map).
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import socket
@@ -90,6 +100,11 @@ cloud_project = _load_cloud_project()
 # loopback :8444, watchtower API :8080.
 FORBIDDEN_PORTS = (3000, 8443, 8444, 8080)
 
+# The organisation's nests (docs/goal/architecture/deployment-threat-model.md
+# § Concern 2, path 6): no one's allowlist may name another's address. A name
+# that does not resolve (a box not provisioned yet) is skipped.
+SIBLING_HOSTS = ("dev.fauna.build", "test.fauna.build", "fauna.build")
+
 
 class _TransientApiError(Exception):
     """A retryable API failure (5xx or a network-level error)."""
@@ -99,7 +114,7 @@ class _TransientApiError(Exception):
 
 
 def _normalize_host(host: str) -> str:
-    """`root@example.com` / `https://example.com/` / `example.com` → bare hostname."""
+    """`root@example.net` / `https://example.net/` / `example.net` → bare hostname."""
     host = host.strip()
     if host.startswith(("http://", "https://")):
         host = urllib.parse.urlparse(host).netloc
@@ -150,6 +165,83 @@ def _find_server_by_ips(servers: list[dict], ips: set[str]) -> dict | None:
     return None
 
 
+def _server_networks(server: dict) -> list:
+    """The server's public addresses as networks: the IPv4 as a /32, the IPv6
+    as the /64 the provider hands out. Unparseable entries are dropped."""
+    pn = server.get("public_net") or {}
+    out = []
+    v4 = (pn.get("ipv4") or {}).get("ip", "")
+    v6 = (pn.get("ipv6") or {}).get("ip", "")
+    for raw, default_len in ((v4, 32), (v6, 64)):
+        if not raw:
+            continue
+        try:
+            out.append(ipaddress.ip_network(raw if "/" in raw else f"{raw}/{default_len}",
+                                            strict=False))
+        except ValueError:
+            pass
+    return out
+
+
+def _ips_networks(ips: set[str]) -> list:
+    """Resolved addresses as host networks (/32, /128)."""
+    out = []
+    for ip in ips:
+        try:
+            out.append(ipaddress.ip_network(ip.split("%", 1)[0], strict=False))
+        except ValueError:
+            pass
+    return out
+
+
+def _sources_naming(rule: dict, networks: list) -> list[str]:
+    """The inbound rule's source entries that name any of `networks`: a source
+    that overlaps one. A catch-all (/0) names nobody in particular and is the
+    web ports' normal shape, so it is not a hit."""
+    if rule.get("direction") != "in":
+        return []
+    hits = []
+    for raw in rule.get("source_ips") or []:
+        try:
+            src = ipaddress.ip_network(raw, strict=False)
+        except ValueError:
+            continue
+        if src.prefixlen == 0:
+            continue
+        if any(src.version == n.version and src.overlaps(n) for n in networks):
+            hits.append(raw)
+    return hits
+
+
+def _sibling_networks(servers: list[dict], own: dict | None, resolved: set[str]) -> list:
+    """Every address a rule must not name: each OTHER server the token lists,
+    plus the organisation hostnames' resolved addresses, minus the box's own."""
+    own_nets = _server_networks(own) if own else []
+    nets = []
+    for s in servers:
+        if own is not None and s.get("id") == own.get("id"):
+            continue
+        nets.extend(_server_networks(s))
+    for n in _ips_networks(resolved):
+        if not any(n.version == o.version and n.overlaps(o) for o in own_nets):
+            nets.append(n)
+    return nets
+
+
+def _resolve_siblings(own_host: str) -> set[str]:
+    """Addresses of the other organisation hostnames; one that fails to
+    resolve is skipped."""
+    out: set[str] = set()
+    for name in SIBLING_HOSTS:
+        if name == own_host:
+            continue
+        try:
+            out |= _resolve_ips(name)
+        except OSError:
+            continue
+    return out
+
+
 class _Posture:
     """Evaluation result: hard violations, advisories, and the human-review
     allow table."""
@@ -161,10 +253,24 @@ class _Posture:
         self.cannot_verify_reason: str | None = None
 
 
-def _evaluate_posture(applied_firewalls: list[dict], statuses: dict) -> _Posture:
+def _evaluate_posture(
+    applied_firewalls: list[dict],
+    statuses: dict,
+    server: dict | None = None,
+    sibling_networks: list | None = None,
+) -> _Posture:
     """Assert the safety invariant over the firewalls applied to the server.
-    `statuses` maps firewall id → apply status ("applied" / "pending")."""
+    `statuses` maps firewall id → apply status ("applied" / "pending").
+    `server` (its private_net) and `sibling_networks` feed (e) and (d)."""
     result = _Posture()
+
+    # (e) no provider private network — the provider's firewalls do not filter it.
+    if server and server.get("private_net"):
+        result.violations.append(
+            f"the server is attached to {len(server['private_net'])} provider private "
+            "network(s) — private networks are not filtered by the cloud firewalls "
+            "(box↔box isolation gone)"
+        )
 
     # (a) ≥1 cloud firewall applied — a detached box = the layer silently gone.
     if not applied_firewalls:
@@ -200,6 +306,13 @@ def _evaluate_posture(applied_firewalls: list[dict], statuses: dict) -> _Posture
                 result.violations.append(
                     f"{fw_label} rule ({proto} {port} ← {sources}) opens "
                     f"internal-only port(s) {hit}"
+                )
+            # (d) no inbound rule may name a sibling organisation box.
+            named = _sources_naming(rule, sibling_networks or [])
+            if named:
+                result.violations.append(
+                    f"{fw_label} rule ({proto} {port} ← {sources}) admits a sibling "
+                    f"organisation box: {named}"
                 )
 
     # (a), tightened: an all-pending posture has NOT confirmed the
@@ -360,7 +473,8 @@ def main() -> int:
     }
     applied = [fw for fw in firewalls if fw.get("id") in statuses]
 
-    result = _evaluate_posture(applied, statuses)
+    siblings = _sibling_networks(servers, server, _resolve_siblings(host))
+    result = _evaluate_posture(applied, statuses, server, siblings)
 
     for line in result.allow_table:
         print(f"  inbound: {line}")
@@ -384,7 +498,8 @@ def main() -> int:
 
     print(
         f"GATE G1-cloud: PASS — {len(applied)} firewall(s) applied, no rule "
-        f"opens an internal-only port {list(FORBIDDEN_PORTS)}."
+        f"opens an internal-only port {list(FORBIDDEN_PORTS)} or admits a sibling "
+        "box, and no private network is attached."
     )
     return 0
 

@@ -57,7 +57,10 @@ from helpers.box_recovery_launch import (
 )
 from helpers.budgets import PROVIDER_VERIFY_S, RPC_ROUNDTRIP_S
 from helpers.waiting import wait_until
+from helpers.indexed_rows import diagnose_row, row_visible, wait_for_row
 from i18n.strings import S
+
+RECOVER_BOX_ITEM = "recover-box-item"  # indexed; read via helpers.indexed_rows
 
 pytestmark = [pytest.mark.tier_2, pytest.mark.tui, pytest.mark.linux, pytest.mark.web, pytest.mark.android]
 
@@ -261,6 +264,12 @@ def test_retire_failed_dns_stops_before_the_server_and_force_deletes_only_it(
     driver.click("retire-retry-button")
     retire.wait_dns_failed()
     assert fake_cloud.hetzner_cloud.deleted_server_ids == []
+
+    # Outcome 25: the choice to delete anyway repeats the dangling-record
+    # warning, on screen before the button is pressed.
+    assert driver.get_text("retire-force-server-warning") == (
+        S.onboarding.retire.force_server_warning
+    )
 
     # Delete anyway: the armed server, and no other.
     driver.click("retire-force-server-button")
@@ -1092,10 +1101,10 @@ def test_retire_keeps_the_nests_recovery_key(
         def recovery_lists_the_box(app, why: str) -> None:
             app.driver.wait_for("launch-recover-button", timeout=60)
             app.click("launch-recover-button")
-            app.driver.wait_for("recover-box-item-0", timeout=30)
-            assert app.is_visible("recover-box-item-0"), (
+            wait_for_row(app.driver, RECOVER_BOX_ITEM, 0, timeout=30)
+            assert row_visible(app.driver, RECOVER_BOX_ITEM, 0), (
                 f"{why}: nest_recovery no longer lists the box — "
-                + app.driver.diagnose("recover-box-item-0")
+                + diagnose_row(app.driver, RECOVER_BOX_ITEM, 0)
             )
 
         # -- launch 1: claim the box; its seed rests in this device's store ----

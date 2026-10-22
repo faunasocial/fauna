@@ -234,7 +234,9 @@ pub async fn submit_invite_request_core(
         Ok(false) => {}
     }
 
-    // Early rejection on a currently-taken handle (admin re-checks at approval).
+    // Early rejection on a currently-taken handle (admin re-checks at approval)
+    // — taken as a handle, or as a mail address an exact alias, forwarder or
+    // list holds (`mail-aliases.md` § Cross-user uniqueness).
     match state.db.resolve_handle(&handle).await {
         Ok(Some(_)) => return Err(InviteError::HandleTaken),
         Err(e) => {
@@ -242,6 +244,14 @@ pub async fn submit_invite_request_core(
             return Err(InviteError::Internal("internal error".into()));
         }
         Ok(None) => {}
+    }
+    match state.db.alias_holds_handle(&handle, &actor_bytes).await {
+        Ok(true) => return Err(InviteError::HandleTaken),
+        Err(e) => {
+            tracing::error!("handle alias-holder check error: {e}");
+            return Err(InviteError::Internal("internal error".into()));
+        }
+        Ok(false) => {}
     }
 
     // Does this actor already have a row (pending or decided)?

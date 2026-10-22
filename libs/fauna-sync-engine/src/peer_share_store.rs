@@ -980,7 +980,7 @@ impl fauna_core::file_download::BlobFetcher for SpoolFetcher {
             ));
         }
         let path = spool_manifest_path(&self.dir, hash);
-        tokio::fs::read(&path)
+        read_addressed(&path, hash)
             .await
             .map_err(|e| anyhow::anyhow!("spool manifest {}: {e}", hex::encode(hash.digest())))
     }
@@ -993,7 +993,7 @@ impl fauna_core::file_download::BlobFetcher for SpoolFetcher {
         let mut out = Vec::with_capacity(store_keys.len());
         for key in store_keys {
             let path = spool_chunk_path(&self.dir, key);
-            out.push(tokio::fs::read(&path).await.map_err(|e| {
+            out.push(read_addressed(&path, key).await.map_err(|e| {
                 anyhow::anyhow!(
                     "spool chunk {} for {}: {e}",
                     hex::encode(key.digest()),
@@ -1003,6 +1003,25 @@ impl fauna_core::file_download::BlobFetcher for SpoolFetcher {
         }
         Ok(out)
     }
+}
+
+/// Read a spool body and check it against the name it rests under — the
+/// local-store rule of `file-sync.md` § *A failed change must not strand the
+/// device* (the TRANSIENT IS THE DEFAULT paragraph). A body that does not
+/// hash to its name (a torn write, a disk fault) is evicted and answered as
+/// an ordinary miss, carrying no permanent mark, so the ingest holds the
+/// cursor below its row for a retry. Handed to the walk instead, its per-chunk
+/// check would fail inside the record's signer bound and come back final.
+async fn read_addressed(
+    path: &std::path::Path,
+    name: &fauna_core::data::ContentHash,
+) -> anyhow::Result<Vec<u8>> {
+    let body = tokio::fs::read(path).await?;
+    if fauna_core::data::ContentHash::of_raw(&body) != *name {
+        let _ = tokio::fs::remove_file(path).await; // best-effort eviction
+        anyhow::bail!("spooled bytes do not hash to their name (evicted)");
+    }
+    Ok(body)
 }
 
 /// Which peer leg served a page — the ONE ingest's parameter

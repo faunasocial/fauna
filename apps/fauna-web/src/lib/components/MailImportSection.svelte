@@ -35,8 +35,8 @@
   // The fetch-drive loop (`run_import`) is not spawned here for the same
   // reason: it reads the source. tui and linux spawn it after a successful
   // Start; web cannot, and pretending otherwise would fake progress.
-  import { identity } from '$lib/store';
-  import { mailImportMachine } from '$lib/rpc';
+  import { identity, reconnectTick } from '#lib/store';
+  import { mailImportMachine, onPushEvent, staleSurfacesForPushKind } from '#lib/rpc';
   import {
     ensureWasm,
     importSelectedTotals,
@@ -45,14 +45,15 @@
     mailImportConnectActions,
     transferTiming,
     type TransferTiming,
-  } from '$lib/wasm';
-  import { byteSize, durationSecs } from '$lib/value-format';
-  import { confirmSummaryText } from '$lib/mail-import-confirm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  } from '#lib/wasm';
+  import { byteSize, durationSecs } from '#lib/value-format';
+  import { confirmSummaryText } from '#lib/mail-import-confirm';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onDestroy, onMount } from 'svelte';
-  import { t } from '$lib/i18n/strings';
+  import { isFailedImport, restartOffered, nextSourceDrafts } from '#lib/mail-import-controls';
+  import { t } from '#lib/i18n/strings';
   import type { WasmMailImportMachine } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface; import dispatch
   // errors flow into it (the same surface the other mail-settings sections use).
@@ -85,6 +86,10 @@
     started_at: number; // the session's epoch seconds; 0 before a session exists
     last_progress_at: number;
     error_log: string[];
+    // The shared machine's remembered-source / rebuilt-mailbox / opt-out reads.
+    source_remembered: boolean;
+    rebuilt_mailboxes: string[];
+    import_duplicates: boolean;
     status: string; // "Idle" | "Loading" | "Working"
     error: string | null;
   }
@@ -100,7 +105,11 @@
   const CANCEL_ARM_MS = 4000;
   let cancelArmed = $state(false);
   let cancelArmTimer: ReturnType<typeof setTimeout> | null = null;
+  let unsubPush: (() => void) | null = null;
+  let unsubReconnect: (() => void) | null = null;
   onDestroy(() => {
+    unsubPush?.();
+    unsubReconnect?.();
     if (cancelArmTimer) clearTimeout(cancelArmTimer);
   });
 
@@ -147,10 +156,45 @@
   const appPasswordKind = $derived(snap?.source_kind === 'Gmail' || snap?.source_kind === 'ICloud');
   const imapFieldsKind = $derived(snap?.source_kind === 'Outlook' || snap?.source_kind === 'Generic');
 
+  // The source the account remembers (`mailbox-migration.md` § Credential
+  // handling): the machine prefilled the Source step, so this visit's drafts
+  // fill from it once — never over what the user typed — and empty when a
+  // Forget lands (tui: `settings::apply_mail_import_snapshot`).
+  let draftsSeeded = false;
+  let wasRemembered = false;
+
   function applySnapshot(): void {
     if (!machine) return;
-    snap = machine.snapshot() as unknown as ImportSnapshot;
+    const next = machine.snapshot() as unknown as ImportSnapshot;
+    if (next.step === 'Source') {
+      const drafts = nextSourceDrafts(next, usernameInput === '', draftsSeeded, wasRemembered);
+      if (drafts) {
+        hostInput = drafts.host;
+        portInput = drafts.port;
+        usernameInput = drafts.username;
+        if (drafts.clearPassword) passwordInput = '';
+        draftsSeeded = drafts.seeded;
+      }
+    }
+    wasRemembered = next.source_remembered;
+    snap = next;
     if (snap?.error) error = snap.error;
+  }
+
+  // The import open here follows a failure, completion or dismissal on another
+  // device (`StaleSurfaces::mail_import`, `mailbox-migration.md` § A failed
+  // import is a record the wizard shows until the user moves on): the push
+  // re-runs the machine's own hydrate, which ignores the nudge while this
+  // device holds a run. A reconnect re-reads too: a push sent while the socket
+  // was down is never replayed.
+  async function rehydrate(): Promise<void> {
+    if (!machine) return;
+    try {
+      await machine.hydrate();
+      applySnapshot();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
   }
 
   onMount(async () => {
@@ -164,6 +208,15 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    unsubPush = onPushEvent((kind) => {
+      if (staleSurfacesForPushKind(kind).mail_import) void rehydrate();
+    });
+    // `reconnectTick` fires once on subscribe — skip that seed value.
+    let firstTick = true;
+    unsubReconnect = reconnectTick.subscribe(() => {
+      if (firstTick) { firstTick = false; return; }
+      void rehydrate();
+    });
   });
 
   // Dispatch `actions` IN ORDER, awaiting each before the single re-read, so a
@@ -385,6 +438,13 @@
           />
         {/if}
 
+        {#if snap.source_remembered}
+          <!-- Painted for every provider while the account remembers a source. -->
+          <button class="btn" data-testid={IDS.MAIL_IMPORT_SOURCE_FORGET_BUTTON} onclick={() => dispatch('ForgetSource')} disabled={busy}>
+            {t.mail_import.source_forget_button}
+          </button>
+        {/if}
+
         <div class="nav">
           <button class="btn primary" data-testid={IDS.MAIL_IMPORT_CONNECT_BUTTON} onclick={connect} disabled={busy}>
             {t.mail_import.connect_button}
@@ -435,6 +495,19 @@
         <p class="muted small" data-testid={IDS.MAIL_IMPORT_SCOPE_MAILBOX_MAPPING}>
           {t.mail_import.scope_mailbox_mapping_label}
         </p>
+        <!-- The advanced opt-out; its label carries the double-storage warning
+             itself — never painted without it. `data-state` reads the snapshot. -->
+        <label class="mailbox">
+          <input
+            type="checkbox"
+            data-testid={IDS.MAIL_IMPORT_SCOPE_IMPORT_DUPLICATES_TOGGLE}
+            data-state={snap.import_duplicates ? 'on' : 'off'}
+            checked={snap.import_duplicates}
+            disabled={busy}
+            onchange={() => dispatch({ SetImportDuplicates: { value: !snap?.import_duplicates } })}
+          />
+          <span>{t.mail_import.scope_import_duplicates_label}</span>
+        </label>
         <div class="nav">
           <button class="btn" data-testid={IDS.WIZARD_BACK_BUTTON} onclick={() => dispatch('Back')} disabled={busy}>
             {t.mail_import.back}
@@ -490,15 +563,25 @@
           {#each snap.error_log as line}<p class="muted small">{line}</p>{/each}
         </div>
         <div class="nav">
-          <button class="btn" data-testid={IDS.MAIL_IMPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')} disabled={busy}>
-            {t.mail_import.pause_button}
-          </button>
-          <button class="btn" data-testid={IDS.MAIL_IMPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')} disabled={busy}>
-            {t.mail_import.resume_button}
-          </button>
-          <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_IMPORT_CANCEL_BUTTON} onclick={onCancel} disabled={busy}>
-            {cancelArmed ? t.common.confirm_q : t.mail_import.cancel_button}
-          </button>
+          {#if isFailedImport(snap.session_state)}
+            <!-- A failed import is a record: Dismiss is its one control. -->
+            <button class="btn danger" data-testid={IDS.MAIL_IMPORT_DISMISS_BUTTON} onclick={() => dispatch('Dismiss')} disabled={busy}>{t.mail_import.dismiss_failed_button}</button>
+          {:else}
+            <button class="btn" data-testid={IDS.MAIL_IMPORT_PAUSE_BUTTON} onclick={() => dispatch('Pause')} disabled={busy}>
+              {t.mail_import.pause_button}
+            </button>
+            <button class="btn" data-testid={IDS.MAIL_IMPORT_RESUME_BUTTON} onclick={() => dispatch('Resume')} disabled={busy}>
+              {t.mail_import.resume_button}
+            </button>
+            {#if restartOffered(snap.rebuilt_mailboxes)}
+              <button class="btn" data-testid={IDS.MAIL_IMPORT_RESTART_BUTTON} onclick={() => dispatch('RestartRebuiltMailboxes')} disabled={busy}>
+                {t.mail_import.restart_button}
+              </button>
+            {/if}
+            <button class="btn danger" class:armed={cancelArmed} data-testid={IDS.MAIL_IMPORT_CANCEL_BUTTON} onclick={onCancel} disabled={busy}>
+              {cancelArmed ? t.common.confirm_q : t.mail_import.cancel_button}
+            </button>
+          {/if}
         </div>
       </div>
     {/if}

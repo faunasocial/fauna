@@ -809,11 +809,15 @@ impl FileDownloadKeys {
             )?;
             let candidates: Vec<[u8; 32]> = content_keys.keys_for(version).copied().collect();
             if candidates.is_empty() {
-                anyhow::bail!(
+                // KEY-PENDING (`file-sync.md` § *A failed change must not
+                // strand the device*): no reader can tell a generation not
+                // synced yet from one stamped above any that exists, so the
+                // anchor holds for the bounded wait, never for ever.
+                return Err(crate::apply_failure::key_pending(format!(
                     "content_open_roots: this holder lacks content-key generation {version} \
                      (removed member, or generation not yet synced) — failing closed rather than \
                      fall through to a plaintext/owner-key read"
-                );
+                )));
             }
             return Ok(Some(candidates));
         }
@@ -1176,14 +1180,31 @@ fn open_sealed_manifest(
     };
     // Try every same-version candidate root (normally one; two after a
     // concurrent-rotation custody merge — the AEAD tag disambiguates).
-    let mut last_err = None;
+    // A marked error wins: once one root authenticated the blob, another
+    // root's tag failure says nothing about it.
+    let mut last_err: Option<anyhow::Error> = None;
     for root in &roots {
         match manifest.clone().unseal_hashes(root) {
             Ok(m) => return Ok(m),
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                if last_err
+                    .as_ref()
+                    .is_none_or(|prev| crate::apply_failure::permanent_reason(prev).is_none())
+                {
+                    last_err = Some(e);
+                }
+            }
         }
     }
-    Err(last_err.expect("roots is non-empty"))
+    let err = last_err.expect("roots is non-empty");
+    if crate::apply_failure::permanent_reason(&err).is_some() {
+        return Err(err);
+    }
+    // No candidate root opened it: KEY-PENDING, never a verdict on the writer.
+    Err(crate::apply_failure::key_pending(format!(
+        "sealed manifest opens under none of the {} candidate root(s): {err:#}",
+        roots.len()
+    )))
 }
 
 /// Download a manifest's chunks, then decrypt and decompress them, yielding the
@@ -1298,9 +1319,9 @@ fn resolve_chunk_open_policy(
     }
     // PERMANENT for this change (`apply_failure`), and deliberately NOT the
     // same class as `content_open_roots`' "this holder lacks generation v"
-    // above: a generation arrives over the wire, so that one stays transient
-    // and the anchor waits for it (`path-sealing.md` § Apply-path degrade
-    // ruling). A reader holding NO key material of any kind never acquires an
+    // above: a generation arrives over the wire, so that one is KEY-PENDING
+    // and the anchor waits for it, for a bounded time (`file-sync.md` § *A
+    // failed change must not strand the device*). A reader holding NO key material of any kind never acquires an
     // owner key by syncing, so waiting for it is waiting for nothing —
     // freezing here would strand every later change behind this one.
     Err(crate::apply_failure::permanent(
@@ -1344,6 +1365,11 @@ fn open_chunk_window(
             bodies.len()
         );
     }
+    // Only an AEAD-opened body is the writer's own: a plaintext body may be a
+    // local store's bad copy, which a refetch replaces, so its miss stays
+    // transient (`file-sync.md` § *A failed change must not strand the
+    // device*, TRANSIENT IS THE DEFAULT).
+    let authenticated = matches!(policy, ChunkOpenPolicy::Roots(_));
     let opened = match policy {
         ChunkOpenPolicy::Plaintext => bodies,
         ChunkOpenPolicy::Roots(roots) => {
@@ -1360,7 +1386,15 @@ fn open_chunk_window(
             }
             match decoded {
                 Some(d) => d,
-                None => return Err(last_err.expect("roots is non-empty")),
+                // The bodies were fetched whole and no candidate root's tag
+                // passes. KEY-PENDING: a same-version key may still arrive.
+                None => {
+                    return Err(crate::apply_failure::key_pending(format!(
+                        "chunk tag fails under every one of the {} candidate root(s): {:#}",
+                        roots.len(),
+                        last_err.expect("roots is non-empty")
+                    )));
+                }
             }
         }
     };
@@ -1370,11 +1404,19 @@ fn open_chunk_window(
         .enumerate()
         .map(|(i, (body, want))| {
             crate::compress::unframe_verified_chunk(body, want).ok_or_else(|| {
-                anyhow::anyhow!(
+                let message = format!(
                     "chunk {i} does not address its recorded content (expected {}) either \
                      framed or raw — the stored bytes are not this chunk",
                     hex::encode(want.digest())
-                )
+                );
+                if authenticated {
+                    crate::apply_failure::permanent(
+                        crate::apply_failure::PermanentApplyFailure::CONTENT_UNADDRESSED,
+                        message,
+                    )
+                } else {
+                    anyhow::anyhow!(message)
+                }
             })
         })
         .collect()
@@ -1933,16 +1975,7 @@ impl WasmPublicChunkFetcher {
             .map_err(|e| anyhow::anyhow!("GET {path}: {e}"))?;
         let status = resp.status();
         if !(200..300).contains(&status) {
-            let message = if check_declared_body_len(
-                resp.headers().get("content-length").as_deref(),
-                ERROR_BODY_READ_CAP,
-            )
-            .is_ok()
-            {
-                resp.text().await.unwrap_or_default()
-            } else {
-                String::new()
-            };
+            let message = read_error_body(resp).await;
             anyhow::bail!("GET {path} failed ({status}): {message}");
         }
         check_declared_body_len(resp.headers().get("content-length").as_deref(), max_bytes)
@@ -2096,11 +2129,33 @@ pub async fn read_body_capped(resp: gloo_net::http::Response, max_bytes: u64) ->
 /// How much of a non-2xx body a browser reader will read as diagnostic text.
 pub const ERROR_BODY_READ_CAP: u64 = 4096;
 
+/// Read a non-2xx browser `fetch` reply's body as diagnostic text under
+/// [`ERROR_BODY_READ_CAP`]: a declared `Content-Length` past the cap is refused
+/// before any byte is read, and the body is then streamed under the cap by
+/// [`read_body_capped`] so a length-less (chunked) error body from a stranger's
+/// nest is cut off too. A refusal or a failed read yields the empty message;
+/// the bytes are decoded lossily. Shared by every browser reader.
+#[cfg(all(target_arch = "wasm32", feature = "blob-fetch-wasm"))]
+pub async fn read_error_body(resp: gloo_net::http::Response) -> String {
+    if check_declared_body_len(
+        resp.headers().get("content-length").as_deref(),
+        ERROR_BODY_READ_CAP,
+    )
+    .is_err()
+    {
+        return String::new();
+    }
+    match read_body_capped(resp, ERROR_BODY_READ_CAP).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
 /// Refuse a reply whose declared `Content-Length` is past `max_bytes`, before
 /// any body byte is read. An absent or unparsable header passes (the caller
-/// still checks the length it read): this is the browser readers' early bound,
-/// where `fetch` offers no streaming cap. The native readers use
-/// `fauna_nest_http::capped` instead.
+/// still checks the length it read, and [`read_body_capped`] streams the body
+/// under the cap): this is the browser readers' early bound. The native readers
+/// use `fauna_nest_http::capped` instead.
 pub fn check_declared_body_len(declared: Option<&str>, max_bytes: u64) -> Result<()> {
     match declared.and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(len) if len > max_bytes => {
@@ -3995,6 +4050,125 @@ mod tests {
             FileDownloadKeys::owner(owner_key())
                 .label_open_roots(Some(4))
                 .is_err()
+        );
+    }
+
+    /// What the bytes PROVE decides the mark (`file-sync.md` § *A failed
+    /// change must not strand the device*, TRANSIENT IS THE DEFAULT): a chunk
+    /// whose AEAD tag verifies under a held root is the writer's own, so a
+    /// plaintext that misses its manifest chunk hash recurs on every pull and
+    /// is marked; a tag failing under every root, and a plaintext body that
+    /// misses (a local cache may hold it), stay unmarked.
+    #[test]
+    fn an_authenticated_chunk_that_misses_its_hash_is_marked_and_the_controls_are_not() {
+        let root = [0x5Au8; 32];
+        let claimed = ContentHash::of_raw(b"the chunk the manifest records");
+        // A writer holding the root seals other bytes under the claimed hash.
+        let body = crate::chunk_crypto::encrypt_chunk(
+            &root,
+            &claimed,
+            &crate::compress::compress_chunk(b"not it"),
+        )
+        .unwrap();
+        let unaddressed =
+            Some(crate::apply_failure::PermanentApplyFailure::CONTENT_UNADDRESSED.reason);
+
+        let err = open_chunk_window(
+            &ChunkOpenPolicy::Roots(vec![[0x01u8; 32], root]),
+            &[claimed],
+            vec![body.clone()],
+        )
+        .expect_err("an unaddressed chunk must not open");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            unaddressed,
+            "{err:#}"
+        );
+
+        // Control: the tag fails under every root this reader holds — transient.
+        let err = open_chunk_window(
+            &ChunkOpenPolicy::Roots(vec![[0x01u8; 32]]),
+            &[claimed],
+            vec![body],
+        )
+        .expect_err("a foreign tag must not open");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            None,
+            "{err:#}"
+        );
+
+        // Control: an unauthenticated plaintext body that misses — transient.
+        let err = open_chunk_window(
+            &ChunkOpenPolicy::Plaintext,
+            &[claimed],
+            vec![crate::compress::compress_chunk(b"not it")],
+        )
+        .expect_err("a plaintext miss must not open");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            None,
+            "{err:#}"
+        );
+    }
+
+    /// A sealed manifest that AUTHENTICATES under a held root and opens to a
+    /// chunk count other than its store keys is marked — and the mark
+    /// survives a later candidate root's tag failure, which says nothing once
+    /// another root authenticated. A manifest no held root opens stays
+    /// unmarked.
+    #[tokio::test]
+    async fn an_authenticated_manifest_with_the_wrong_chunk_count_is_marked() {
+        let chain = Chain::new();
+        let [s, _, _] = chain.roots();
+        let keys = chain.keys(RecordSigner::Current);
+        // The owner roots are tried current first, so the predecessor's tag
+        // failure comes AFTER the authenticated open.
+        assert_eq!(keys.owner_open_roots().first(), Some(&s));
+        let stored = vec![ContentHash::of_raw(b"store key")];
+        let manifest_for = |root: &[u8; 32]| {
+            let sealed = crate::manifest_crypto::seal_manifest_hashes(
+                root,
+                &ContentHash::of_raw(b"file"),
+                &[ContentHash::of_raw(b"a"), ContentHash::of_raw(b"b")],
+                &stored,
+            )
+            .unwrap();
+            let manifest = ChunkManifest {
+                file_hash: crate::chunk::blank_file_hash(),
+                total_size: 5,
+                chunk_hashes: Vec::new(),
+                chunk_sizes: vec![5],
+                stored_hashes: Some(stored.clone()),
+                sealed_hashes: Some(sealed),
+                min_reader: Some(crate::chunk::MANIFEST_READER_VERSION),
+            };
+            let bytes = crate::encoding::canonical_encode(&manifest).unwrap();
+            let hash = ContentHash::of_raw(&bytes);
+            let mut fetcher = FakeFetcher::default();
+            fetcher.put(&hash, bytes);
+            (fetcher, hash)
+        };
+
+        let (fetcher, hash) = manifest_for(&s);
+        let err = fetch_manifest(&fetcher, &keys, &hash, None)
+            .await
+            .expect_err("a miscounted manifest must not open");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            Some(crate::apply_failure::PermanentApplyFailure::CONTENT_UNADDRESSED.reason),
+            "{err:#}"
+        );
+
+        // Control: sealed under a root this reader does not hold — transient.
+        let (fetcher, hash) = manifest_for(&[0x77u8; 32]);
+        let err = fetch_manifest(&fetcher, &keys, &hash, None)
+            .await
+            .expect_err("a foreign manifest must not open");
+        assert_eq!(
+            crate::apply_failure::permanent_reason(&err),
+            None,
+            "{err:#}"
         );
     }
 }

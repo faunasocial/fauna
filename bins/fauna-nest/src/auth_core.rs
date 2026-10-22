@@ -173,6 +173,11 @@ pub enum AuthError {
     /// device, and its next step — import the successor identity — is only
     /// possible if the error says so.
     Superseded { new_actor_id: [u8; 32] },
+    /// The challenge store holds its per-source or global cap
+    /// (`challenge_auth::CHALLENGE_PER_SOURCE_CAP`) — issue only. WS
+    /// `fauna.protocol.rate_limited`, the dispatcher throttle's own refusal, so
+    /// a client handles both alike: retry later.
+    RateLimited,
     /// Server-side failure. HTTP 500; WS `fauna.protocol.internal`.
     Internal(String),
 }
@@ -418,6 +423,7 @@ pub async fn direct_auth_core(
         .insert_with_metadata(actor_id, TOKEN_TTL_SECS, None, None)
         .await;
     let expires_at = now_ms / 1000 + TOKEN_TTL_SECS;
+    mark_first_session(state, &actor_bytes).await;
 
     // 7. Detect new-location sign-in and notify.
     note_sign_in_address(state, &actor_bytes, client_ip).await;
@@ -428,6 +434,22 @@ pub async fn direct_auth_core(
         expires_at,
         expires_in: TOKEN_TTL_SECS,
     })
+}
+
+/// The first-session mark — the side effect the actor's OWN session mints share
+/// (the handshake, the verify and the device-key arm; never a custodian's mint,
+/// which is not the user signing in): set the account's durable mark if unset
+/// and answer whether this was its first (`login.md` § Direct Auth → the verify
+/// reply, `first_sign_in`). A database fault reads as not-first — the safe
+/// side, the trust offer suppressed — and never refuses the sign-in.
+async fn mark_first_session(state: &Arc<AppState>, actor_bytes: &[u8; 32]) -> bool {
+    match state.db.mark_first_session(actor_bytes).await {
+        Ok(first) => first,
+        Err(e) => {
+            tracing::warn!("first-session mark failed: {e:#}");
+            false
+        }
+    }
 }
 
 /// New-IP detection — the side effect every bearer mint shares
@@ -470,17 +492,23 @@ pub struct ChallengeIssued {
     pub expires_at: u64,
 }
 
-/// Issue a challenge nonce — the body of `POST /api/v1/auth/challenge`. No
-/// security side effects.
+/// Issue a challenge nonce — the body of `fauna.auth.challenge`, charged to
+/// `source` against the store's caps. No security side effects.
 pub async fn issue_challenge_core(
     state: &AppState,
     actor_id_hex: &str,
+    source: crate::challenge_auth::IssueSource,
 ) -> Result<ChallengeIssued, AuthError> {
     let actor_bytes = parse_actor_id(actor_id_hex).ok_or(AuthError::InvalidRequest("actor_id"))?;
     if VerifyingKey::from_bytes(&actor_bytes).is_err() {
         return Err(AuthError::InvalidRequest("public key"));
     }
-    let (nonce, expires_at) = state.auth.challenge_store.issue(actor_bytes).await;
+    let (nonce, expires_at) = state
+        .auth
+        .challenge_store
+        .issue(actor_bytes, source)
+        .await
+        .map_err(|_| AuthError::RateLimited)?;
     let now = fauna_core::data::Timestamp::now_secs() as u64;
     Ok(ChallengeIssued {
         nonce_hex: hex::encode(nonce),
@@ -503,6 +531,8 @@ pub struct VerifyMint {
     pub expires_at: u64,
     /// Seconds from now — see [`TokenMint::expires_in`].
     pub expires_in: u64,
+    /// This mint was the actor's first own session — `VerifyReply::first_sign_in`.
+    pub first_sign_in: bool,
 }
 
 /// Verify a signed challenge nonce and mint a bearer — the body of
@@ -624,6 +654,7 @@ pub async fn verify_core(
         .await;
     let now = fauna_core::data::Timestamp::now_secs() as u64;
     let expires_at = now + TOKEN_TTL_SECS;
+    let first_sign_in = mark_first_session(state, &actor_bytes).await;
 
     tracing::info!(handle = %handle, tier = %user.tier, "challenge-response sign-in");
 
@@ -637,6 +668,7 @@ pub async fn verify_core(
         tier: user.tier,
         expires_at,
         expires_in: TOKEN_TTL_SECS,
+        first_sign_in,
     })
 }
 
@@ -865,6 +897,7 @@ pub async fn device_auth_core(
             return Err(AuthError::Internal(e.to_string()));
         }
     }
+    mark_first_session(state, &actor_bytes).await;
 
     Ok(TokenMint {
         token,

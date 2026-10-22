@@ -7,7 +7,7 @@
 // through the core wasm chunk.
 //
 // This module exists ONLY in builds made for testing (convention 15): its sole
-// importer is `$lib/e2e-automation`, itself reached only through
+// importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away — and the wasm halves are `test-helpers` only.
 //

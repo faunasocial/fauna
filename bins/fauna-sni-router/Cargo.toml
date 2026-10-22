@@ -13,6 +13,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 fauna-proxy-protocol.workspace = true
 fauna-conn-limit.workspace = true
+# The router's one link to nest: the sidecar log-plane channel (dial +
+# `fauna.sidecar.hello` + the shared queue/flush). A workspace crate — no
+# third-party addition.
+fauna-sidecar-client.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+fauna-protocol.workspace = true
+# Property tests over the pre-auth ClientHello parser (`sni.rs`).
+proptest = { workspace = true }

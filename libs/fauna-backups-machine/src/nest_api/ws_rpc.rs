@@ -143,6 +143,43 @@ where
             .map_err(map_err)
     }
 
+    async fn do_list_kind_snapshots(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<SnapshotSummaryRow>, BackupsApiError> {
+        // `(message_kind, folder, limit)`: message-kind mode, server default page.
+        let reply = self
+            .snapshots
+            .list(Some(kind.to_string()), None, 0)
+            .await
+            .map_err(map_err)?;
+        Ok(reply.rows)
+    }
+
+    async fn do_create_kind_snapshot(&self, kind: &str) -> Result<(), BackupsApiError> {
+        // `actor_id: None` — the owner's scope; conv's batched every-channel form.
+        self.snapshots
+            .create_message_kind(kind, None)
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn do_prune_kind_policy(
+        &self,
+        kind: &str,
+        dry_run: bool,
+    ) -> Result<SnapshotPruneSetPolicyReply, BackupsApiError> {
+        self.snapshots
+            .prune_set_policy_kind(kind, dry_run)
+            .await
+            .map_err(map_err)
+    }
+
+    async fn do_check_kind(&self, kind: &str) -> Result<SnapshotCheckReply, BackupsApiError> {
+        self.snapshots.check_kind(kind).await.map_err(map_err)
+    }
+
     /// The sealed-plane detail read. `self.snapshots` was constructed with the
     /// reader's [`LabelCustody`], so a sealed set's rows come back **opened**
     /// here — the consumer-wiring rule is satisfied once, on the seam, for every
@@ -230,6 +267,25 @@ mod native {
         ) -> Result<SnapshotGetReply, BackupsApiError> {
             self.do_get_snapshot(snapshot_id).await
         }
+        async fn list_kind_snapshots(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<SnapshotSummaryRow>, BackupsApiError> {
+            self.do_list_kind_snapshots(kind).await
+        }
+        async fn create_kind_snapshot(&self, kind: &str) -> Result<(), BackupsApiError> {
+            self.do_create_kind_snapshot(kind).await
+        }
+        async fn prune_kind_policy(
+            &self,
+            kind: &str,
+            dry_run: bool,
+        ) -> Result<SnapshotPruneSetPolicyReply, BackupsApiError> {
+            self.do_prune_kind_policy(kind, dry_run).await
+        }
+        async fn check_kind(&self, kind: &str) -> Result<SnapshotCheckReply, BackupsApiError> {
+            self.do_check_kind(kind).await
+        }
     }
 
     /// Build the page machine over the session's connected native requester.
@@ -309,6 +365,25 @@ mod wasm {
             snapshot_id: i64,
         ) -> Result<SnapshotGetReply, BackupsApiError> {
             self.do_get_snapshot(snapshot_id).await
+        }
+        async fn list_kind_snapshots(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<SnapshotSummaryRow>, BackupsApiError> {
+            self.do_list_kind_snapshots(kind).await
+        }
+        async fn create_kind_snapshot(&self, kind: &str) -> Result<(), BackupsApiError> {
+            self.do_create_kind_snapshot(kind).await
+        }
+        async fn prune_kind_policy(
+            &self,
+            kind: &str,
+            dry_run: bool,
+        ) -> Result<SnapshotPruneSetPolicyReply, BackupsApiError> {
+            self.do_prune_kind_policy(kind, dry_run).await
+        }
+        async fn check_kind(&self, kind: &str) -> Result<SnapshotCheckReply, BackupsApiError> {
+            self.do_check_kind(kind).await
         }
     }
 

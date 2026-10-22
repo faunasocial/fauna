@@ -875,7 +875,10 @@ pub struct CustodyItem {
 // **Nothing here deletes.** A target that already holds live records is refused,
 // typed (`fauna.backup.target_not_empty`), with no force arm anywhere in the
 // wire shape: merging a backed-up corpus into a lived-in account is a named
-// non-goal, and *No user-data loss* holds structurally rather than by care.
+// non-goal, and *No user-data loss* holds structurally rather than by care. The
+// one thing a whole landing reclaims is its own landing set -- scaffolding the
+// ceremony wrote, derived twice over once the corpus is live
+// ([`CustodyMaterializeReply::landing_reclaimed`]).
 
 /// `fauna.backup.custody.materialize` request.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -948,12 +951,14 @@ pub struct CustodyMaterializeReply {
     pub segments: Vec<u32>,
     /// Mirror rows re-asserted from the reconstituted sidecars' own footers.
     pub records: u64,
-    /// Always `true` on success, and the reply's whole editorial content: the
-    /// custody set is now **redundant** -- its bytes are live in the scope, so
-    /// keeping it is paying twice. Reclaiming it is the owner's existing
-    /// set-delete authority, a separate deliberate gesture, and never something
-    /// this verb does on their behalf.
-    pub custody_redundant: bool,
+    /// The verb reclaimed the landing set (`__landing/<kind>`) in this call:
+    /// the landing is whole, so the set is scaffolding derived twice over
+    /// (`reserved-folders.md` § __mail Sync -> *The landing set* ->
+    /// *Lifecycle*). Its custody is dropped and its chunks reclaim through the
+    /// ordinary GC walk and grace. `false` on the covered-folder axis, whose
+    /// set is no landing set and is kept, and when the reclaim could not run.
+    #[serde(default)]
+    pub landing_reclaimed: bool,
     /// How many of those records the same call **filed**: placement rows
     /// replayed from the kind's placement journal, which rides the set beside
     /// the content (`behavior/backup-destinations.md` § Third destination kind
@@ -993,7 +998,9 @@ pub struct CustodyMaterializeReply {
 // The lost records come back as records -- appended under the target's own
 // counter, filed where the newest delivered journal put them under fresh UIDs
 // -- and every record the target holds, live or tombstoned, is its history and
-// is left alone. So there is no force arm, and a repeat recovers nothing.
+// is left alone. So there is no force arm, and a repeat recovers nothing. The
+// one thing a whole run reclaims is its own landing set
+// ([`CustodyRecoverReply::landing_reclaimed`]).
 
 /// `fauna.backup.custody.recover` request.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1027,6 +1034,10 @@ pub struct CustodyRecoverReply {
     /// mirror named anything.
     #[serde(default)]
     pub floor: Option<u32>,
+    /// Every candidate landed, so the verb reclaimed the landing set in this
+    /// call -- [`CustodyMaterializeReply::landing_reclaimed`]'s meaning.
+    #[serde(default)]
+    pub landing_reclaimed: bool,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -1507,6 +1518,7 @@ mod tests {
             inboxed: 1,
             unplaceable: 0,
             floor: Some(9),
+            landing_reclaimed: true,
             extra: Default::default(),
         };
         let bytes = encode_canonical(&reply).unwrap();
@@ -1528,7 +1540,7 @@ mod tests {
         let reply = CustodyMaterializeReply {
             segments: vec![1, 2, 7],
             records: 42,
-            custody_redundant: true,
+            landing_reclaimed: true,
             placements: Some(40),
             remaining: Some(3),
             extra: Default::default(),
@@ -1550,7 +1562,6 @@ mod tests {
         struct Before {
             segments: Vec<u32>,
             records: u64,
-            custody_redundant: bool,
             #[serde(flatten, default)]
             extra: BTreeMap<String, Value>,
         }
@@ -1558,7 +1569,6 @@ mod tests {
         let old_nest = encode_canonical(&Before {
             segments: vec![1],
             records: 3,
-            custody_redundant: true,
             extra: Default::default(),
         })
         .unwrap();
@@ -1569,7 +1579,6 @@ mod tests {
         let new_nest = encode_canonical(&CustodyMaterializeReply {
             segments: vec![1],
             records: 3,
-            custody_redundant: true,
             placements: Some(3),
             ..Default::default()
         })

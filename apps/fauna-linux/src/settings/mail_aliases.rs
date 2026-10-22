@@ -858,7 +858,11 @@ fn render(ctx: &Rc<AliasesCtx>, snap: &MailAliasesSnapshot) {
             w.list_group.remove(&row);
         }
         for view in &snap.aliases {
-            let row = build_alias_row(ctx, view);
+            let audit = snap
+                .audit
+                .as_ref()
+                .filter(|audit| audit.alias_id_hex == view.alias_id_hex);
+            let row = build_alias_row(ctx, view, audit);
             w.list_group.add(&row);
             rows.push(row);
         }
@@ -879,7 +883,11 @@ fn render(ctx: &Rc<AliasesCtx>, snap: &MailAliasesSnapshot) {
 /// itself carries the id, mirroring `labeler-catalog-item`'s row-is-the-
 /// container shape). Read-only fields carry 1px marker labels; the revoke +
 /// overflow-delete are two-click inline confirms (no modal).
-fn build_alias_row(ctx: &Rc<AliasesCtx>, view: &AliasView) -> adw::ActionRow {
+fn build_alias_row(
+    ctx: &Rc<AliasesCtx>,
+    view: &AliasView,
+    audit: Option<&fauna_client_mail_settings::AliasAuditView>,
+) -> adw::ActionRow {
     let kind_label = fauna_client_mail_settings::alias_kind_badge(view.kind)
         .resolve(crate::i18n::strings::lookup);
     let row = adw::ActionRow::builder()
@@ -913,21 +921,64 @@ fn build_alias_row(ctx: &Rc<AliasesCtx>, view: &AliasView) -> adw::ActionRow {
         &format_hits(view),
     ));
 
+    // A disposable's expiry and its extend (`mail-aliases.md` § Don't do these
+    // — never auto-expire without telling the user, who can extend before it
+    // lapses). Both decided by the shared helpers at paint time; the row is
+    // rebuilt on every list refresh, so the clock read here is fresh.
+    let now_ms = fauna_core::data::Timestamp::now_millis_or_zero() as i64;
+    if let Some(expiry) = format_expiry(view, now_ms) {
+        row.add_suffix(&super::value_marker(
+            ids::MAIL_ALIASES_LIST_ITEM_EXPIRES_AT,
+            &expiry,
+        ));
+    }
+    if fauna_client_mail_settings::alias_is_extendable(
+        view.kind,
+        view.expires_at_ms,
+        view.uses_remaining,
+        now_ms,
+    ) {
+        let extend_button = gtk::Button::builder()
+            .label(S::EXTEND)
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        set_test_id(&extend_button, ids::MAIL_ALIASES_LIST_ITEM_EXTEND_BUTTON);
+        crate::offline_gate::declare_wire_kind(
+            &extend_button,
+            "fauna.bridges.update_account_alias",
+        );
+        let ctx = Rc::clone(ctx);
+        let alias_id_hex = view.alias_id_hex.clone();
+        extend_button.connect_clicked(move |_| {
+            dispatch_action(
+                &ctx,
+                MailAliasesAction::Extend {
+                    alias_id_hex: alias_id_hex.clone(),
+                    // The one moment the gesture fires; the shared machine
+                    // refuses a row no longer extendable before any round trip.
+                    now_ms: fauna_core::data::Timestamp::now_millis_or_zero() as i64,
+                },
+            );
+        });
+        row.add_suffix(&extend_button);
+    }
+
     // The canonical `<handle>@<domain>` row is the user's primary mailbox +
     // AUTH-login identity; the nest rejects disabling, renaming, or deleting it
     // (`canonical_alias_protected`). Render it **read-only** — no
     // toggle/edit/revoke/delete, marked as the primary address — so the
     // protection is visible rather than surfacing only as an error on attempt
     // (`mail-aliases.md` § Aliases UX). This closes the live-found disable-trap
-    // at the UI layer; the nest guard backs it for every app. The inert
-    // audit disclosure is kept for parity (mail history of the primary address).
+    // at the UI layer; the nest guard backs it for every app. The history
+    // disclosure stays (mail history of the primary address).
     if view.is_canonical {
         let primary_badge = gtk::Label::new(Some(S::PRIMARY_ADDRESS_BADGE));
         primary_badge.add_css_class("dim-label");
         primary_badge.set_valign(gtk::Align::Center);
         primary_badge.set_tooltip_text(Some(S::PRIMARY_ADDRESS_TOOLTIP));
         row.add_suffix(&primary_badge);
-        row.add_suffix(&build_show_audit_button());
+        add_audit_disclosure(ctx, &row, view, audit);
         return row;
     }
 
@@ -1077,23 +1128,94 @@ fn build_alias_row(ctx: &Rc<AliasesCtx>, view: &AliasView) -> adw::ActionRow {
     }
     row.add_suffix(&overflow_menu);
 
-    row.add_suffix(&build_show_audit_button());
+    add_audit_disclosure(ctx, &row, view, audit);
 
     row
 }
 
-/// `mail-aliases-list-item-show-audit` — inert disclosure (audit listing is a
-/// follow-on slice; the machine doesn't expose `list_account_alias_hits` yet).
-/// Shared by the ordinary and canonical (read-only) row layouts.
-fn build_show_audit_button() -> gtk::Button {
+/// The history disclosure (`mail-aliases.md` § Per-alias-hit audit list):
+/// `mail-aliases-list-item-show-audit`, and — when `audit` (the machine's one
+/// open history) is this row's own — one `mail-aliases-audit-item` per hit or
+/// the `mail-aliases-audit-empty` line. Which way the click goes is read off
+/// the snapshot at paint time (tui's `audit_elements` shape). Shared by the
+/// ordinary and canonical (read-only) row layouts.
+fn add_audit_disclosure(
+    ctx: &Rc<AliasesCtx>,
+    row: &adw::ActionRow,
+    view: &AliasView,
+    audit: Option<&fauna_client_mail_settings::AliasAuditView>,
+) {
     let show_audit = gtk::Button::builder()
-        .label(S::SHOW_AUDIT)
+        .label(if audit.is_some() {
+            S::HIDE_AUDIT
+        } else {
+            S::SHOW_AUDIT
+        })
         .valign(gtk::Align::Center)
         .css_classes(["flat"])
-        .sensitive(false)
         .build();
     set_test_id(&show_audit, ids::MAIL_ALIASES_LIST_ITEM_SHOW_AUDIT);
-    show_audit
+    {
+        let ctx = Rc::clone(ctx);
+        let action = if audit.is_some() {
+            MailAliasesAction::HideAudit
+        } else {
+            MailAliasesAction::ShowAudit {
+                alias_id_hex: view.alias_id_hex.clone(),
+            }
+        };
+        show_audit.connect_clicked(move |_| dispatch_action(&ctx, action.clone()));
+    }
+    row.add_suffix(&show_audit);
+
+    let Some(audit) = audit else {
+        return;
+    };
+    let history = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    history.set_valign(gtk::Align::Center);
+    if audit.hits.is_empty() {
+        let empty = gtk::Label::new(Some(S::AUDIT_EMPTY));
+        empty.add_css_class("dim-label");
+        set_test_id(&empty, ids::MAIL_ALIASES_AUDIT_EMPTY);
+        history.append(&empty);
+    }
+    for hit in &audit.hits {
+        let item = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        set_test_id(&item, ids::MAIL_ALIASES_AUDIT_ITEM);
+        for (id, text) in [
+            (
+                ids::MAIL_ALIASES_AUDIT_ITEM_MATCHED_ADDRESS,
+                hit.matched_address.clone(),
+            ),
+            (
+                ids::MAIL_ALIASES_AUDIT_ITEM_SENDER_DOMAIN,
+                hit.sender_domain.clone(),
+            ),
+            (
+                ids::MAIL_ALIASES_AUDIT_ITEM_RECEIVED_AT,
+                crate::i18n::local_date(hit.received_at_ms),
+            ),
+        ] {
+            let label = gtk::Label::new(Some(&text));
+            label.add_css_class("dim-label");
+            set_test_id(&label, id);
+            item.append(&label);
+        }
+        history.append(&item);
+    }
+    row.add_suffix(&history);
+}
+
+/// `mail-aliases-list-item-expires-at` text — the shared `alias_expiry_label`
+/// with the expiry date formatted natively (the [`format_hits`] split); `None`
+/// for an alias with no expiry.
+fn format_expiry(view: &AliasView, now_ms: i64) -> Option<String> {
+    let date = view
+        .expires_at_ms
+        .map(crate::i18n::local_date)
+        .unwrap_or_default();
+    fauna_client_mail_settings::alias_expiry_label(view.expires_at_ms, now_ms, date)
+        .map(|text| text.resolve(crate::i18n::strings::lookup))
 }
 
 /// `mail-aliases-list-item-hits` text: hit count + last-hit date if any. The

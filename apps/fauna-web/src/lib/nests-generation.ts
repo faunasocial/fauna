@@ -5,7 +5,7 @@
 // `generation_path_text`/`generation_shows_restore`/`generation_notice_text`
 // extraction (`apps/fauna-linux/src/settings/linked_nests.rs`), the same
 // idiom this file's own component uses for `backupScopeText`.
-// Relative, not `$lib/...` — this module's own `.test.ts` runs under plain
+// Relative, not `#lib/...` — this module's own `.test.ts` runs under plain
 // `deno test` (no Vite/SvelteKit alias resolution; see `justfile`'s
 // `web-unit-test`), and a relative import resolves under both.
 import { t } from './i18n/strings.ts';
@@ -57,4 +57,22 @@ export function generationNoticeText(outcome: TrustRestoreOutcome | null): strin
   if (outcome === 'Restored') return t.nests.generation_restored;
   if (outcome === 'PastRecoveryWindow') return t.nests.generation_past_window;
   return '';
+}
+
+/** The `nest-trust-holders-status` text (nests.md:125, home row): the
+ *  unreachable copy when the nest's holder roster could not be read, EMPTY
+ *  otherwise. */
+export function holdersStatusText(unreachable: boolean | undefined): string {
+  return unreachable ? t.nests.holders_status_unreachable : '';
+}
+
+/** Whether `nest-trust-empty` renders (nests.md:99,125): nothing to list AND
+ *  the roster was readable — an unreadable roster is "could not ask", never
+ *  "trusts nothing". */
+export function showsTrustEmpty(
+  grantCount: number,
+  backupCount: number,
+  holdersUnreachable: boolean | undefined,
+): boolean {
+  return grantCount === 0 && backupCount === 0 && !holdersUnreachable;
 }

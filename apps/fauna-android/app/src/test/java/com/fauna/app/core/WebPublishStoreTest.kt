@@ -22,7 +22,7 @@ import uniffi.fauna_client_web.WebDomainRow
  * `WebSettingsVM` (the `web-settings` Published-posts section) and `FeedVM`
  * (the feed ⋯-menu) read and write, so the two surfaces can never disagree
  * about a creator's address (mirrors linux's thread-local cache / web's
- * `$lib/web-publish` store). Same shape as [ContentPolicyStoreTest]: mock
+ * `#lib/web-publish` store). Same shape as [ContentPolicyStoreTest]: mock
  * [ApiClient] + its [FfiWebClient], drive the store's public surface, assert
  * on its [kotlinx.coroutines.flow.StateFlow]s.
  */

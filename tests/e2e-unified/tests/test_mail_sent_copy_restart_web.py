@@ -20,7 +20,7 @@ only). Fix: `conversations_accept_recipient` now uses the REAL manager
 Why a SEPARATE web test (not a skip-branch in the linux file): web drives a DIFFERENT
 send+receive path than the four native apps. The natives ride the shared
 `ConversationsSession::start_receive_loop`; web has no such loop — it drives its own
-JS poll (`$lib/conversations.ts::startReceivePoll` → `pollOnce` → `emailSentFetch`)
+JS poll (`#lib/conversations.ts::startReceivePoll` → `pollOnce` → `emailSentFetch`)
 over a wasm `ConversationsManager`. A web restart regression guard is therefore NOT
 redundant with the linux one.
 

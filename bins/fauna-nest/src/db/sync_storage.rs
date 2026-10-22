@@ -1179,8 +1179,8 @@ fn row_to_snapshot_row(row: &rusqlite::Row) -> rusqlite::Result<SnapshotRow> {
 }
 
 /// One device place's roster row, written through **one** statement no matter
-/// which door the caller came in by (the admin `add_folder_member` or
-/// `fauna.folders.places.set`). The three flag columns are the whole place —
+/// which door the caller came in by (the admin `fauna.admin.folders.add_member`
+/// or `fauna.folders.places.set`, both through `set_folder_place_flags`). The three flag columns are the whole place —
 /// the legacy `role` column and the single-source bookkeeping it fed retired
 /// with the role contraction (`folders.md` § Implementation status today).
 fn upsert_folder_place(
@@ -2412,7 +2412,7 @@ impl CacheDb {
             .context("query head sync_change for path")?;
         let new_signature: Option<&[u8]> = signature.map(|s| s.signature);
 
-        // ── Exactly-once by CONTENT (`federation.md` § Cross-nest…, contract
+        // ── Exactly-once by CONTENT (`federation-shared-folders.md` § Cross-nest…, contract
         // point (i)). A record whose (acting actor, path_hash,
         // manifest_hash, change_type, content_key_version) equals the path's
         // latest entry is already-applied — a reconnect / >L3-TTL redelivery /
@@ -3202,6 +3202,9 @@ impl CacheDb {
         }
     }
 
+    /// Seat a device WITHOUT the owner-registration check — a fixture for
+    /// tests only. Both seat doors go through `set_folder_place_flags`, which
+    /// admits only a device the folder's owner registered.
     pub async fn add_folder_member(
         &self,
         folder_id: i64,
@@ -4700,6 +4703,29 @@ impl CacheDb {
             tag_hashes: tag_hashes_json,
             tags_sealed: tags_sealed.map(<[u8]>::to_vec),
         })
+    }
+
+    /// List every snapshot row a set holds, newest first — folder rows and
+    /// message-kind rows alike, so it reads a reserved `__<kind>` row's own
+    /// snapshots, which [`Self::list_snapshots`] filters out. The population
+    /// every retention consumer and the kind `check` evaluate over
+    /// (`backup-restore.md` § 8 → *Message-kind rows*: the prune of a kind row
+    /// routes through the same § 7 layers as a folder's). On an ordinary
+    /// folder it returns exactly what `list_snapshots` does, since message-kind
+    /// rows live only on reserved rows.
+    pub async fn list_set_snapshots(&self, folder_id: i64) -> Result<Vec<SnapshotRow>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SNAPSHOT_COLS} FROM snapshots \
+             WHERE folder_id = ?1 \
+             ORDER BY created_at DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![folder_id], row_to_snapshot_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// List all snapshots for a folder, newest first.
@@ -7759,29 +7785,15 @@ impl CacheDb {
             .optional()
             .context("query is_pure_backup_destination")?
             .unwrap_or(false);
-        if !crate::db::snapshots::is_reserved_custody_copy(custody_copy, &folder_name) {
-            return Ok(false);
-        }
-        // Channel-scoped conv is out of this rule: a channel's scope holds live
-        // records on every member's nest, so records there say nothing about a
-        // materialize, and a conv set cannot be materialized yet anyway.
-        if kind == "conv" {
-            return Ok(true);
-        }
-        // "Pure" is the corpus shape, not the custody flag alone: a destination
-        // holds opaque chunks and no local plaintext-framed segments, which is
-        // what every caller of this predicate refuses or skips on. A re-seeded
-        // nest keeps the custody set marked a custody copy after
-        // `fauna.backup.custody.materialize` (the custody rows stay, and a
-        // retried delivery still records into them), but its scope now holds
-        // LIVE records. For an actor-scoped kind nothing else can produce that
-        // pair, since no enroll points an owner's destination at their own home
-        // nest. So it is the owner's live account, and serving,
-        // snapshotting and compacting it is exactly what "seeded means a live
-        // account" asks for (`behavior/backup-destinations.md` § Re-seed).
-        let live = crate::segments::records_db::count_live_records(&conn, scope_id, kind)
-            .context("count live records for is_pure_backup_destination")?;
-        Ok(live == 0)
+        // The flag and the `__<kind>` name alone, conv included. A re-seeded
+        // nest's delivered corpus rests under `__landing/<kind>`, never this
+        // name (`reserved-folders.md` § __mail Sync → *The landing set*), so a
+        // `__<kind>` custody copy is a pure-backup destination without
+        // qualification — the 2026-09-26 live-record carve-out retired with it.
+        Ok(crate::db::snapshots::is_reserved_custody_copy(
+            custody_copy,
+            &folder_name,
+        ))
     }
 
     /// `include_resolved = true` also returns resolved rows (the auto-resolve
@@ -10165,7 +10177,7 @@ mod tests {
         );
     }
 
-    /// **Exactly-once by CONTENT, not by key** (`federation.md` § Cross-nest…,
+    /// **Exactly-once by CONTENT, not by key** (`federation-shared-folders.md` § Cross-nest…,
     /// contract point (i)). The L3 idempotency cache is
     /// per-connection, 1000-entry and 5-min-TTL'd, so it cannot span a
     /// reconnect, a >TTL redelivery, or a crashed-ack retry — and the federated
@@ -11906,6 +11918,119 @@ mod tests {
             "negative refusals credit nothing"
         );
         assert_eq!(rows(&db, fs_id).await, (2, 1));
+    }
+
+    /// The report's retained loser is bytes the path does not list, so it is
+    /// charged in full and never takes the charge the path's head holds: only a
+    /// row minted over the head's OWN manifest transfers (`file-versions.md`
+    /// § Retention (4)). A loser that took the head's charge would leave the
+    /// head's still-listed bytes uncharged for good.
+    #[tokio::test]
+    async fn a_resolved_report_over_a_head_charges_its_retained_loser_in_full() {
+        use crate::db::{ConflictCandidateRow, ResolvedReport};
+
+        let db = CacheDb::open_in_memory().unwrap();
+        let owner = [0xb4u8; 32];
+        db.create_user(&owner, "free", "owner").await.unwrap();
+        let fs_id = db.create_folder("docs", &owner).await.unwrap();
+        let (me, other) = ([0xd5u8; 32], [0xd6u8; 32]);
+        let (mine, theirs, merged) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32]);
+        let path_hash = fauna_core::sync::path_hash("h.txt");
+
+        // The path's head: the remote side's version, charged at 50.
+        db.record_sync_change_metered(
+            &owner,
+            &owner,
+            None,
+            &path_hash,
+            Some(&theirs),
+            50,
+            "create",
+            fs_id,
+            &other,
+            Some("h.txt"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            i64::MAX,
+        )
+        .await
+        .unwrap();
+
+        db.report_conflict(
+            &owner,
+            fs_id,
+            &me,
+            "h.txt",
+            "modify-modify",
+            None,
+            &[
+                ConflictCandidateRow {
+                    manifest_hash: mine.to_vec(),
+                    device_id: me.to_vec(),
+                    size_bytes: 100,
+                    created_at: 0,
+                    content_key_version: None,
+                },
+                ConflictCandidateRow {
+                    manifest_hash: theirs.to_vec(),
+                    device_id: other.to_vec(),
+                    size_bytes: 50,
+                    created_at: 0,
+                    content_key_version: None,
+                },
+            ],
+            Some(ResolvedReport {
+                resolution: "merged".into(),
+                winning_manifest_hash: merged.to_vec(),
+                winning_size_bytes: 200,
+                winning_content_key_version: None,
+                winner_device_id: me.to_vec(),
+                winning_derived_through: None,
+                losing_derived_through: None,
+                winning_carries_novelty: None,
+            }),
+            Default::default(),
+            false,
+        )
+        .await
+        .expect("an in-quota resolved report lands");
+
+        let used = db
+            .get_user(&owner)
+            .await
+            .unwrap()
+            .unwrap()
+            .storage_bytes_used;
+        assert_eq!(
+            used,
+            50 + 100 + 200,
+            "head, retained loser and winner each pay"
+        );
+        let charged: Vec<(Vec<u8>, i64)> = {
+            let conn = db.conn.lock().await;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT manifest_hash, charged FROM sync_changes
+                     WHERE folder_id = ?1 ORDER BY seq",
+                )
+                .unwrap();
+            stmt.query_map([fs_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            charged,
+            vec![
+                (theirs.to_vec(), 1),
+                (mine.to_vec(), 1),
+                (merged.to_vec(), 1)
+            ],
+            "the head keeps its own charge; the loser took none of it"
+        );
     }
 
     /// The same, member half: a `writer`-granted member's resolved report bumps

@@ -223,6 +223,7 @@ impl ConversationsRpc for ScriptedNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
         _b: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -232,6 +233,7 @@ impl ConversationsRpc for ScriptedNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         Err(unused("blob_get"))
@@ -291,9 +293,15 @@ fn restored_slice() -> ChannelHistorySlice {
         deleted: false,
         is_own: own,
         legal_takedown_ref: None,
+        admin_block_reason: None,
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        undelivered: false,
+        warmup_hold: None,
+        scan_result_lines: Vec::new(),
+        delivered_to: None,
+        withheld: None,
     };
     ChannelHistorySlice {
         channel_id_hex: CHANNEL_HEX.to_string(),

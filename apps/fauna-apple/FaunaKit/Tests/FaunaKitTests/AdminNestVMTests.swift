@@ -30,21 +30,24 @@ import Testing
 // the `nest-os-maintenance-status` headline is the shared `os_maintenance_status_label`
 // decision resolved through the same `renderLocalizedText` → `L.lookup` pipeline
 // production uses (the real UniFFI export, like `ValueFormatTests`). Pins apple to
-// the shared state→key map + its priority (reboot > updates > up-to-date) so a
+// the shared state→key map + its priority (no host data > reboot > updates > up-to-date) so a
 // per-app drift / inverted priority fails fast (the count badge + button gating
 // is the harness e2e `test_host_maintenance.py`).
 @Test @MainActor func osMaintenanceLabelResolvesPerState() {
-    // No updates, no reboot → "OS up to date".
-    #expect(AdminNestVM.osMaintenanceLabel(securityUpdates: 0, rebootPending: false)
+    // No host-status file (a hand-built box) → not reported, never "OS up to date".
+    #expect(AdminNestVM.osMaintenanceLabel(hostStatusPresent: false, securityUpdates: 0, rebootPending: false)
+        == L.admin.nestPage.osNoHostData)
+    // Host data, no updates, no reboot → "OS up to date".
+    #expect(AdminNestVM.osMaintenanceLabel(hostStatusPresent: true, securityUpdates: 0, rebootPending: false)
         == L.admin.nestPage.osUpToDate)
     // Updates pending, no reboot → "Security updates pending".
-    #expect(AdminNestVM.osMaintenanceLabel(securityUpdates: 3, rebootPending: false)
+    #expect(AdminNestVM.osMaintenanceLabel(hostStatusPresent: true, securityUpdates: 3, rebootPending: false)
         == L.admin.nestPage.osUpdatesPending)
     // Reboot pending (no updates) → "Restart pending …".
-    #expect(AdminNestVM.osMaintenanceLabel(securityUpdates: 0, rebootPending: true)
+    #expect(AdminNestVM.osMaintenanceLabel(hostStatusPresent: true, securityUpdates: 0, rebootPending: true)
         == L.admin.nestPage.osRestartPending)
     // Reboot pending takes priority over a non-zero pending-update count.
-    #expect(AdminNestVM.osMaintenanceLabel(securityUpdates: 5, rebootPending: true)
+    #expect(AdminNestVM.osMaintenanceLabel(hostStatusPresent: true, securityUpdates: 5, rebootPending: true)
         == L.admin.nestPage.osRestartPending)
 }
 

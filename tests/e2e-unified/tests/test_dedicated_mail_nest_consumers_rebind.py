@@ -86,6 +86,11 @@ def _general_path_fixtures() -> set[str]:
                 continue
             if getattr(call.func, "id", None) not in (_IMPL, _VENUE_START):
                 continue
+            # The DAV toggle venue sets its toggles BEFORE the MDA boots, so
+            # nothing idles; a later flip is answered by the venue's own
+            # `rebind()` (`conftest.py::dav_toggle_venue`).
+            if any(kw.arg == "dav_toggles" for kw in call.keywords):
+                continue
             caldav_only = None
             for kw in call.keywords:
                 if kw.arg == "caldav_only":

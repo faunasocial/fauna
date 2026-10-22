@@ -65,8 +65,10 @@ pub(crate) async fn start_rotation(
 
     // Step (c): persist the sentinel BEFORE any nest write. The staged
     // `new_msek` is irrecoverable once the rotation provisions it, so it
-    // reaches the mail custody first; the recreatable-half write restates no
-    // key material, so it cannot disturb the MSEK a concurrent device holds.
+    // reaches the mail custody first; the write names only the sentinel and
+    // leaves the MSEK absent, which the door reads as no change
+    // (`MailStateRow::written_over`), so it cannot disturb the MSEK a
+    // concurrent device holds.
     machine
         .mail_store()
         .write_state(MailStateRow {
@@ -175,6 +177,7 @@ pub(crate) async fn first_enable(
             created_at: Timestamp::now_secs() as u64,
             updated_at: Timestamp::default(),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         })
@@ -220,7 +223,7 @@ async fn drive_rotation_loop(
     let mut retired_at_unix = Vec::new();
     if let Some(old) = mail.msek.as_ref().filter(|old| **old != new_msek) {
         mseks.push(old.to_array());
-        retired_at_unix.push(Timestamp::now_secs().max(0) as u64);
+        retired_at_unix.push(machine.retirement_now_unix());
     }
     mseks.extend(mail.prior_mseks.iter().map(SecretArray32::to_array));
     retired_at_unix.extend(mail.prior_retired_at_unix());
@@ -354,15 +357,12 @@ async fn drive_rotation_loop(
 
         if mail.msek.as_ref() == Some(&new_msek) {
             if mail.pending_rotation.is_some() {
-                // The clear restates no key material (the recreatable half
-                // alone), so it cannot itself revert the swap; a peer's stale
-                // row still can, which is why the read back decides.
+                // The clear names the MSEK′ it clears and touches nothing
+                // else, so it cannot itself revert the swap; a peer's own
+                // concurrent swap still can, which is why the read back decides.
                 machine
                     .mail_store()
-                    .write_state(MailStateRow {
-                        pending_rotation: None,
-                        ..MailStateRow::recreatable_of(&mail)
-                    })
+                    .clear_rotation(new_msek.clone())
                     .await?;
                 let stored = machine.mail_store().load().await?;
                 if stored.msek.as_ref() == Some(&new_msek) {
@@ -403,7 +403,7 @@ async fn drive_rotation_loop(
                 .generations
                 .get(&MsekFingerprint::of(&old))
                 .map(|g| g.retired_at_unix);
-            let retired_at_unix = recorded.unwrap_or_else(|| Timestamp::now_secs().max(0) as u64);
+            let retired_at_unix = recorded.unwrap_or_else(|| machine.retirement_now_unix());
             machine
                 .mail_store()
                 .retire_generation(PriorMsekRetirement {

@@ -72,7 +72,7 @@ export interface DecoRange {
 /** Styled-content kind → CSS class. Marker kinds are handled separately (the
  *  reveal-near-caret rule), so they are absent here. `image` shares `link`'s look
  *  (mirrors the linux applier's `Image → md-link`). Exported so the Notes applier
- *  (`$lib/notes-editor`) reuses the same inline-content class map (priority #4). */
+ *  (`#lib/notes-editor`) reuses the same inline-content class map (priority #4). */
 export const CONTENT_CLASS: Partial<Record<MdDecorationKind, string>> = {
   bold: 'cm-md-bold',
   italic: 'cm-md-italic',
@@ -89,7 +89,7 @@ export const CONTENT_CLASS: Partial<Record<MdDecorationKind, string>> = {
 export const MARKER_CLASS = 'cm-md-marker';
 
 /** UTF-8 byte length of a single Unicode code point. Exported so the Notes applier
- *  (`$lib/notes-editor`) shares the one UTF-16↔UTF-8 conversion (priority #4). */
+ *  (`#lib/notes-editor`) shares the one UTF-16↔UTF-8 conversion (priority #4). */
 export function utf8Len(codePoint: number): number {
   if (codePoint < 0x80) return 1;
   if (codePoint < 0x800) return 2;

@@ -21,6 +21,7 @@ use js_sys::Promise;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 
+use crate::nest_rules::WasmNestRulesBook;
 use crate::rpc::{WsRpcClient, from_js, to_js};
 
 fn now_secs() -> u64 {
@@ -30,6 +31,9 @@ fn now_secs() -> u64 {
 struct Inner {
     plane: RegionPlane,
     last_refresh: Option<u64>,
+    /// The ward's guardian document, its keyword and labeler rules joined in
+    /// the one composed call (`nest-rules.md` § The shared rule editor (b)).
+    guardian: fauna_client_policy::GuardianRules,
 }
 
 /// The device's region plane — one per browser profile, opened at app start
@@ -54,6 +58,7 @@ impl WasmRegionPlane {
             inner: Rc::new(RefCell::new(Inner {
                 plane,
                 last_refresh: None,
+                guardian: Default::default(),
             })),
         }
     }
@@ -126,6 +131,81 @@ impl WasmRegionPlane {
         has_media: bool,
         lang: String,
     ) -> Result<JsValue, JsValue> {
+        self.compose(
+            None,
+            labels,
+            content_policy,
+            own_spam_permille,
+            own_phishing_permille,
+            content_id_hex,
+            author_hex,
+            text,
+            hashtags,
+            has_media,
+            lang,
+        )
+    }
+
+    /// [`Self::render`] with the nest source composed in — the ONE call a
+    /// surface makes for an item read through the nest `nest_id` names
+    /// (`nest-rules.md` § The nest source in the engine): the region, the
+    /// nest's published rules (their keyword and labeler factors joined over
+    /// the item's text), the guardian floor and the viewer's own thresholds,
+    /// strictest-wins. Adds `nestPlaceholder: { verb, domain, reason } | null`
+    /// to [`Self::render`]'s answer, set exactly when a nest rule drove a
+    /// `block` or `collapse`; the reason is the admin's, verbatim, in `lang`
+    /// where written. `guardianPlaceholder: { verb, reason } | null` is set
+    /// exactly when the guardian's policy drove it — `reason` the guardian
+    /// rule's, verbatim, or `null` when a floor drove it (`nest-rules.md` § The
+    /// shared rule editor → *The reason is the member's to read*); `render`
+    /// carries it too.
+    #[wasm_bindgen(js_name = renderWithNest)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_nest(
+        &self,
+        book: &WasmNestRulesBook,
+        nest_id: String,
+        labels: JsValue,
+        content_policy: JsValue,
+        own_spam_permille: Option<u16>,
+        own_phishing_permille: Option<u16>,
+        content_id_hex: Option<String>,
+        author_hex: Option<String>,
+        text: String,
+        hashtags: Vec<String>,
+        has_media: bool,
+        lang: String,
+    ) -> Result<JsValue, JsValue> {
+        self.compose(
+            Some((book, nest_id.as_str())),
+            labels,
+            content_policy,
+            own_spam_permille,
+            own_phishing_permille,
+            content_id_hex,
+            author_hex,
+            text,
+            hashtags,
+            has_media,
+            lang,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compose(
+        &self,
+        nest: Option<(&WasmNestRulesBook, &str)>,
+        labels: JsValue,
+        content_policy: JsValue,
+        own_spam_permille: Option<u16>,
+        own_phishing_permille: Option<u16>,
+        content_id_hex: Option<String>,
+        author_hex: Option<String>,
+        text: String,
+        hashtags: Vec<String>,
+        has_media: bool,
+        lang: String,
+    ) -> Result<JsValue, JsValue> {
         let labels: Vec<fauna_core::content_category::ContentLabelEntry> = from_js(labels)?;
         let policy: Option<ContentPolicy> =
             if content_policy.is_null() || content_policy.is_undefined() {
@@ -139,20 +219,71 @@ impl WasmRegionPlane {
                 spam_permille: s,
                 phishing_permille: p,
             });
+        // The guardian document in force: the same value on each render keeps
+        // what is compiled; a different one, or none, drops it.
+        self.inner.borrow_mut().guardian.set_policy(policy.as_ref());
         let inner = self.inner.borrow();
         let id = content_id_hex
             .as_deref()
             .and_then(|h| fauna_core::hex32::decode(h).ok());
-        let joined = inner.plane.join_labels(id.as_ref(), &labels, || {
+        let input = || {
             let author = author_hex
                 .as_deref()
                 .and_then(|h| fauna_core::hex32::decode(h).ok())
                 .map(fauna_core::identity::ActorId)
                 .unwrap_or(fauna_core::identity::ActorId([0; 32]));
             fauna_client_region::scorer_input(author, &text, &hashtags, has_media)
+        };
+        let joined = inner.plane.join_labels(id.as_ref(), &labels, input);
+        let (joined, nest_sets) = match nest {
+            Some((book, nest_id)) => {
+                let book = book.book();
+                let book = book.borrow();
+                let joined = book
+                    .join_labels(nest_id, id.as_ref(), &joined, input)
+                    .into_owned();
+                (joined, book.rule_sets_for(nest_id))
+            }
+            None => (joined.into_owned(), Vec::new()),
+        };
+        // After the nest's join: the guardian's own scorers over the same input.
+        let joined = inner
+            .guardian
+            .join_labels(id.as_ref(), &joined, input)
+            .into_owned();
+        let composed = render_verdict_composed(
+            &joined,
+            policy.as_ref(),
+            own,
+            &inner.plane.rule_sets(),
+            &nest_sets,
+        );
+        let nest_placeholder = composed.nest().and_then(|source| {
+            let verb = match composed.verdict {
+                fauna_core::obligation::RenderVerdict::Block => "block",
+                fauna_core::obligation::RenderVerdict::Collapse => "collapse",
+                _ => return None,
+            };
+            Some(serde_json::json!({
+                "verb": verb,
+                "domain": source.domain,
+                "reason": fauna_core::content_policy::reason_text(&source.reason, &lang),
+            }))
         });
-        let composed =
-            render_verdict_composed(&joined, policy.as_ref(), own, &inner.plane.rule_sets());
+        let guardian_placeholder = composed.guardian().and_then(|source| {
+            let verb = match composed.verdict {
+                fauna_core::obligation::RenderVerdict::Block => "block",
+                fauna_core::obligation::RenderVerdict::Collapse => "collapse",
+                _ => return None,
+            };
+            Some(serde_json::json!({
+                "verb": verb,
+                "reason": source
+                    .rule
+                    .as_ref()
+                    .map(|r| fauna_core::content_policy::reason_text(&r.reason, &lang)),
+            }))
+        });
         let placeholder = fauna_client_region::placeholder_for(&composed, &lang).map(|p| {
             serde_json::json!({
                 "verb": p.verb.as_str(),
@@ -164,6 +295,8 @@ impl WasmRegionPlane {
         to_js(&serde_json::json!({
             "verdict": composed.verdict.as_str(),
             "placeholder": placeholder,
+            "nestPlaceholder": nest_placeholder,
+            "guardianPlaceholder": guardian_placeholder,
         }))
     }
 

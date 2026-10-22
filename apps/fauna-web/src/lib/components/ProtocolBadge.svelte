@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { classifySources, type BridgeIdentity } from '$lib/wasm';
-  import { sourceGlyphEmoji } from '$lib/source-glyph';
-  import { IDS } from '$lib/generated/uiIds';
+  import { classifySources, type BridgeIdentity } from '#lib/wasm';
+  import { sourceGlyphEmoji } from '#lib/source-glyph';
+  import { IDS } from '#lib/generated/uiIds';
 
   let { source, bridgeRoster }: { source: string; bridgeRoster: BridgeIdentity[] } = $props();
 

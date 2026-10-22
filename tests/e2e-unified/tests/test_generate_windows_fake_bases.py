@@ -6,7 +6,7 @@ dotnet, no nest, no driver. The real generated bindings
 (apps/fauna-windows/FaunaApp/FaunaApp.Core/Generated/uniffi/) are gitignored and not
 guaranteed present in a clean checkout, so this suite never depends on them.
 
-See docs/goal/architecture/merge-gate-check.md § Merge-gate check (win). Guards the
+See docs/goal/architecture/merge-gate-check-win.md § Merge-gate check (win). Guards the
 class of break fixed 2026-07-23: a UniFFI interface grows a member and a hand-written
 C# test fake (FakeAccountRegistry et al.) stops compiling (CS0535) — four real
 instances. Generated fake bases make the growth compile clean by

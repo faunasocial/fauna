@@ -947,6 +947,55 @@ async fn an_arrival_for_a_deleted_successor_is_refused_not_stranded_on_the_prede
     }
 }
 
+#[tokio::test]
+async fn an_arrival_past_the_succession_walk_bound_is_refused_not_landed_on_a_retired_hop() {
+    // `succession_path` stops at `MAX_SUCCESSION_PATH` links, so on a longer
+    // chain its last element is NOT the terminal hop: it names an identity that
+    // is itself superseded, whose `users` row the ceremony keeps — so the
+    // existence check passes and the arrival would land on a retired id, the
+    // very misdelivery the re-point exists to end. The consult fails closed
+    // instead, like every other leg of it.
+    let (router, state) = nest().await;
+    let (third_seed, third) = identity(0x77);
+    state
+        .db
+        .create_user_with_handle(&third, "free", "carol", None)
+        .await
+        .expect("the sender's account");
+    let bound = fauna_nest::db::successions::MAX_SUCCESSION_PATH;
+    let actors: Vec<[u8; 32]> = (0..(bound as u8 + 3))
+        .map(|i| [i.wrapping_add(0xa0); 32])
+        .collect();
+    state
+        .db
+        .create_user_with_handle(&actors[0], "free", "alice", None)
+        .await
+        .expect("the first identity's account");
+    for pair in actors.windows(2) {
+        state
+            .db
+            .record_succession(&pair[0], &pair[1], b"s", 1)
+            .await
+            .expect("storage")
+            .expect("each link lands");
+    }
+    assert!(
+        state.db.is_actor_registered(&actors[bound]).await.unwrap(),
+        "precondition: the hop the bounded walk stops at is a registered (retired) id"
+    );
+
+    let err = send_inbox_post(&router, &state, &third_seed, third, actors[0], "after")
+        .await
+        .expect_err("a walk that did not reach the terminal hop must not land anywhere");
+    assert_eq!(err.code, "fauna.protocol.internal", "{err:?}");
+    for id in &actors {
+        assert!(
+            state.db.poll_knocks(id).await.unwrap().is_empty(),
+            "no knock lands on any hop of the chain"
+        );
+    }
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // An identity registered on two nests (`identity-succession.md` § Enforcement
 // on the home nest → *Every nest the identity is linked to*)

@@ -420,3 +420,97 @@ fn base_equals_form_is_accepted() {
     );
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+// ── The ratified list's own invariants, at their two edges ──────────────────
+
+const RATIFIED_PATH: &str = "libs/fauna-protocol/schemas/ratified-breaks.txt";
+const GONE_RATIFIED: &str = "rust foo::Foo.gone removed 2026-09-24 ratified in the test\n";
+
+/// `base_repo()` with a product version and a ratified list already on
+/// `origin/main`.
+fn ratified_repo(version: &str, list: &str) -> PathBuf {
+    let repo = base_repo();
+    write(
+        &repo,
+        "Cargo.toml",
+        &format!("[workspace.package]\nversion = \"{version}\"\n"),
+    );
+    write(&repo, RATIFIED_PATH, list);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "version and list"]);
+    git(&repo, &["branch", "-f", "origin/main", "HEAD"]);
+    repo
+}
+
+fn revive_gone(repo: &Path) -> std::process::Output {
+    write(
+        repo,
+        &format!("{SRC_DIR}/foo.rs"),
+        &BASE_FOO.replace("pub note:", "pub gone: Option<String>,\n    pub note:"),
+    );
+    git(repo, &["commit", "-aqm", "revive gone, entry kept"]);
+    run_gate(repo)
+}
+
+#[test]
+fn a_revival_is_refused_inside_the_0_1_x_window() {
+    let repo = ratified_repo("0.1.4", GONE_RATIFIED);
+    let out = revive_gone(&repo);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr={stderr}");
+    assert!(stderr.contains("revives wire field `gone`"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_revival_is_refused_at_0_2_0() {
+    let repo = ratified_repo("0.2.0", GONE_RATIFIED);
+    let out = revive_gone(&repo);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr={stderr}");
+    assert!(stderr.contains("revives wire field `gone`"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn a_malformed_base_line_does_not_wedge_the_fixing_commit() {
+    let repo = ratified_repo(
+        "0.1.4",
+        &format!("rsut foo::Foo.x removed 2026-09-24 malformed at the base\n{GONE_RATIFIED}"),
+    );
+    // The fix drops the malformed line and keeps the well-formed one.
+    write(&repo, RATIFIED_PATH, GONE_RATIFIED);
+    git(&repo, &["commit", "-aqm", "drop the malformed line"]);
+    let out = run_gate(&repo);
+    assert!(
+        out.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The only-grows check still reds on a well-formed base entry missing
+    // from HEAD...
+    write(&repo, RATIFIED_PATH, "");
+    git(&repo, &["commit", "-aqm", "drop everything"]);
+    let out = run_gate(&repo);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr={stderr}");
+    assert!(stderr.contains("missing from HEAD"), "{stderr}");
+
+    // ...and a malformed HEAD line is still a config error.
+    write(
+        &repo,
+        RATIFIED_PATH,
+        "rsut foo::Foo.x removed 2026-09-24 still malformed\n",
+    );
+    git(&repo, &["commit", "-aqm", "malformed head"]);
+    let out = run_gate(&repo);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&repo);
+}

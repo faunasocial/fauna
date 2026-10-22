@@ -126,6 +126,7 @@ impl ConversationsRpc for SilentNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
         _b: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -135,6 +136,7 @@ impl ConversationsRpc for SilentNest {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         if self.permissive {

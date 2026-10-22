@@ -35,11 +35,11 @@ use fauna_nest::{
 use fauna_protocol::{
     Value, decode_strict as decode,
     feed::{
-        FeedContributorGrantReply, FeedContributorGrantRequest, FeedContributorRevokeRequest,
-        FeedContributorsListReply, FeedContributorsListRequest, FeedCreateReply, FeedCreateRequest,
-        FeedDeleteRequest, FeedGetReply, FeedGetRequest, FeedListReply, FeedListRequest,
-        FeedLocalPostsReply, FeedLocalPostsRequest, FeedPostsReply, FeedPostsRequest,
-        FeedUpdateRequest,
+        FeedAuthorPostsReply, FeedAuthorPostsRequest, FeedContributorGrantReply,
+        FeedContributorGrantRequest, FeedContributorRevokeRequest, FeedContributorsListReply,
+        FeedContributorsListRequest, FeedCreateReply, FeedCreateRequest, FeedDeleteRequest,
+        FeedGetReply, FeedGetRequest, FeedListReply, FeedListRequest, FeedLocalPostsReply,
+        FeedLocalPostsRequest, FeedPostsReply, FeedPostsRequest, FeedUpdateRequest,
     },
 };
 
@@ -1716,7 +1716,7 @@ async fn feed_posts_project_a_repost_targets_gate() {
 
 // ── allowlist ──────────────────────────────────────────────────
 
-const FEED_KINDS: [&str; 10] = [
+const FEED_KINDS: [&str; 11] = [
     "fauna.feed.list",
     "fauna.feed.create",
     "fauna.feed.get",
@@ -1724,6 +1724,7 @@ const FEED_KINDS: [&str; 10] = [
     "fauna.feed.delete",
     "fauna.feed.posts",
     "fauna.feed.local.posts",
+    "fauna.feed.author.posts",
     "fauna.feed.contributors.list",
     "fauna.feed.contributors.grant",
     "fauna.feed.contributors.revoke",
@@ -1917,4 +1918,276 @@ async fn blocking_an_author_hides_their_posts_from_the_blockers_feeds_only() {
             "unblocked: the post returns: {ids:?}"
         );
     }
+}
+
+// ── the author read (feed.md § The read model → *The author read*) ──────
+
+/// Sign and ingest one post by `kp` through the real `put_post` path (index
+/// row + `content_meta`, the gate projected), returning its digest.
+async fn ingest_by(
+    db: &CacheDb,
+    kp: &fauna_core::identity::ActorKeypair,
+    body: &str,
+    created_at: u64,
+    gated: Option<fauna_core::subscription::types::GatedInfo>,
+) -> [u8; 32] {
+    let post = fauna_core::data::Post {
+        author: kp.actor_id(),
+        created_at: fauna_core::data::Timestamp(created_at),
+        body: fauna_core::data::PostBody::Text {
+            content: body.into(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated,
+        content_warning: None,
+        origin: None,
+    };
+    let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+    let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+    let bytes = fauna_core::encoding::sign_and_pack(kp, &post).unwrap();
+    db.put_post(&digest, &bytes, None).await.unwrap();
+    digest
+}
+
+fn gold_gate() -> fauna_core::subscription::types::GatedInfo {
+    use fauna_core::data::ContentHash;
+    use fauna_core::subscription::types::{GatedInfo, KeyAccess};
+    GatedInfo {
+        encrypted_ref: ContentHash::from_digest_raw([9u8; 32]),
+        key_access: KeyAccess::Broadcast {
+            key_blob_ref: ContentHash::from_digest_raw([8u8; 32]),
+        },
+        tier: "gold".into(),
+        tier_rank: 2,
+        seal_id: ContentHash::from_digest_raw([7u8; 32]),
+        attachment_refs: vec![],
+    }
+}
+
+fn author_bytes(kp: &fauna_core::identity::ActorKeypair) -> [u8; 32] {
+    kp.actor_id().0
+}
+
+async fn author_read(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    viewer: [u8; 32],
+    author: &[u8; 32],
+    cursor: Option<i64>,
+    limit: Option<i64>,
+) -> FeedAuthorPostsReply {
+    decode(
+        &dispatch(
+            router,
+            state.clone(),
+            viewer,
+            "fauna.feed.author.posts",
+            encode(&FeedAuthorPostsRequest {
+                author: hex::encode(author),
+                cursor,
+                limit,
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect("author.posts ok"),
+    )
+    .unwrap()
+}
+
+fn ids(reply: &FeedAuthorPostsReply) -> Vec<String> {
+    reply.posts.iter().map(|p| p.post_id.clone()).collect()
+}
+
+/// The read lists that author's posts and no one else's, newest first.
+#[tokio::test]
+async fn the_author_read_lists_only_that_authors_posts() {
+    let (router, state) = router_with_db_only().await;
+    let viewer = [0x61u8; 32];
+    let (alice, bob) = (
+        fauna_core::identity::ActorKeypair::generate(),
+        fauna_core::identity::ActorKeypair::generate(),
+    );
+    let a1 = ingest_by(&state.db, &alice, "alice one", 1_700_001, None).await;
+    let b1 = ingest_by(&state.db, &bob, "bob one", 1_700_002, None).await;
+    let a2 = ingest_by(&state.db, &alice, "alice two", 1_700_003, None).await;
+
+    let reply = author_read(&router, &state, viewer, &author_bytes(&alice), None, None).await;
+    assert_eq!(ids(&reply), vec![hex::encode(a2), hex::encode(a1)]);
+    assert!(!ids(&reply).contains(&hex::encode(b1)));
+    assert!(
+        reply
+            .posts
+            .iter()
+            .all(|p| p.author == hex::encode(author_bytes(&alice)))
+    );
+    assert!(
+        reply.posts.iter().all(|p| p.score.is_none()),
+        "chronological"
+    );
+}
+
+/// For the account on its own box the read is a FEED read: a gated envelope
+/// lists exactly as the local feed lists it, its tier projected.
+#[tokio::test]
+async fn the_author_read_lists_a_gated_envelope_for_the_account() {
+    let (router, state) = router_with_db_only().await;
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let gated = ingest_by(&state.db, &author, "a teaser", 1_700_001, Some(gold_gate())).await;
+    let public = ingest_by(&state.db, &author, "public", 1_700_002, None).await;
+
+    let reply = author_read(
+        &router,
+        &state,
+        [0x62u8; 32],
+        &author_bytes(&author),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(ids(&reply), vec![hex::encode(public), hex::encode(gated)]);
+    let envelope = reply
+        .posts
+        .iter()
+        .find(|p| p.post_id == hex::encode(gated))
+        .unwrap();
+    assert_eq!(envelope.gated_tier.as_deref(), Some("gold"));
+}
+
+/// An off-box reader is held to the public predicate: the same author's gated
+/// post is withheld, the public one served. Pinned at the query the core runs
+/// with `FeedAudience::OffBox` — the audience every off-box `FeedReader` maps
+/// to; no principal door reaches the kind yet (its arm is a ruling of its own,
+/// `bridge_method_allowlist.rs`), so the predicate is pinned where it binds.
+#[tokio::test]
+async fn the_author_read_serves_an_off_box_reader_public_posts_only() {
+    use fauna_core::scoring::FilterCombination;
+    use fauna_nest::db::feeds::FeedAudience;
+    let (_router, state) = router_with_db_only().await;
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let gated = ingest_by(&state.db, &author, "a teaser", 1_700_001, Some(gold_gate())).await;
+    let public = ingest_by(&state.db, &author, "public", 1_700_002, None).await;
+    let authors = vec![author_bytes(&author).to_vec()];
+    let mut reads = Vec::new();
+    for audience in [FeedAudience::OnBox, FeedAudience::OffBox] {
+        let rows = state
+            .db
+            .query_feed_for_authors(
+                &[],
+                FilterCombination::All,
+                &[],
+                &authors,
+                None,
+                50,
+                audience,
+                fauna_nest::db::feeds::FeedLocality::NestWide,
+            )
+            .await
+            .unwrap();
+        reads.push(rows.into_iter().map(|p| p.post_id).collect::<Vec<_>>());
+    }
+    assert!(
+        reads[0].contains(&public.to_vec()) && reads[0].contains(&gated.to_vec()),
+        "on the box both list: {:?}",
+        reads[0]
+    );
+    assert_eq!(
+        reads[1],
+        vec![public.to_vec()],
+        "the gated post never leaves the box"
+    );
+}
+
+/// The viewer's block list binds: blocking the author empties the viewer's
+/// read of them, and only theirs.
+#[tokio::test]
+async fn the_viewers_block_list_empties_the_author_read() {
+    let (router, state) = router_with_db_only().await;
+    let (viewer, bystander) = ([0x63u8; 32], [0x64u8; 32]);
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let post = ingest_by(&state.db, &author, "hello", 1_700_001, None).await;
+    let author_id = author_bytes(&author);
+    assert_eq!(
+        ids(&author_read(&router, &state, viewer, &author_id, None, None).await),
+        vec![hex::encode(post)],
+        "precondition"
+    );
+
+    state.db.block_contact(&viewer, &author_id).await.unwrap();
+    assert!(
+        author_read(&router, &state, viewer, &author_id, None, None)
+            .await
+            .posts
+            .is_empty(),
+        "a blocked author's read is empty for the blocker"
+    );
+    assert_eq!(
+        ids(&author_read(&router, &state, bystander, &author_id, None, None).await),
+        vec![hex::encode(post)],
+        "a block hides nothing for anyone else"
+    );
+}
+
+/// Every moderation flag binds: a quarantined post leaves the read.
+#[tokio::test]
+async fn the_author_read_excludes_a_quarantined_post() {
+    let (router, state) = router_with_db_only().await;
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let kept = ingest_by(&state.db, &author, "kept", 1_700_001, None).await;
+    let held = ingest_by(&state.db, &author, "held", 1_700_002, None).await;
+    state.db.set_post_quarantined(&held, true).await.unwrap();
+
+    let reply = author_read(
+        &router,
+        &state,
+        [0x65u8; 32],
+        &author_bytes(&author),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(ids(&reply), vec![hex::encode(kept)]);
+}
+
+/// The `created_at` keyset cursor pages the read to its end, no row repeated
+/// or skipped; a malformed author is the caller's invalid request.
+#[tokio::test]
+async fn the_author_read_cursor_pages() {
+    let (router, state) = router_with_db_only().await;
+    let viewer = [0x66u8; 32];
+    let author = fauna_core::identity::ActorKeypair::generate();
+    let mut posts = Vec::new();
+    for (i, at) in [1_700_001u64, 1_700_002, 1_700_003].into_iter().enumerate() {
+        posts.push(ingest_by(&state.db, &author, &format!("post {i}"), at, None).await);
+    }
+    let author_id = author_bytes(&author);
+
+    let first = author_read(&router, &state, viewer, &author_id, None, Some(2)).await;
+    assert_eq!(
+        ids(&first),
+        vec![hex::encode(posts[2]), hex::encode(posts[1])]
+    );
+    let cursor = first.cursor.expect("a full page carries a cursor");
+    let second = author_read(&router, &state, viewer, &author_id, Some(cursor), Some(2)).await;
+    assert_eq!(ids(&second), vec![hex::encode(posts[0])]);
+    let third = author_read(&router, &state, viewer, &author_id, second.cursor, Some(2)).await;
+    assert!(third.posts.is_empty() && third.cursor.is_none(), "the end");
+
+    let err = dispatch(
+        &router,
+        state.clone(),
+        viewer,
+        "fauna.feed.author.posts",
+        encode(&FeedAuthorPostsRequest {
+            author: "not-hex".into(),
+            cursor: None,
+            limit: None,
+            extra: Default::default(),
+        }),
+    )
+    .await
+    .expect_err("a malformed author is refused");
+    assert_eq!(err.code, "fauna.feed.invalid_params");
 }

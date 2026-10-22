@@ -1,0 +1,250 @@
+/* Design tokens — a meadow in daylight, and the same meadow at dusk. */
+:root {
+  --bg: #faf7ef;
+  --bg-surface: #ffffff;
+  --bg-alt: #f2edde;
+  --bg-hover: #ece5d2;
+  --text: #2b2a24;
+  --text-muted: #6d675a;
+  --accent: #2f6b46;
+  --accent-strong: #245337;
+  --accent-soft: #dcead9;
+  --sky: #cfe6f2;
+  --sky-deep: #7fb5d5;
+  --bark: #6b4f3a;
+  --sun: #f4c95d;
+  --border: #e0d8c3;
+  --error: #b3372f;
+  --meadow-hill-1: #7fb069;
+  --meadow-hill-2: #5d9152;
+  --meadow-hill-3: #3e7c4f;
+  /* The walled garden behind the talk-slide meadow (scene/Wall.astro). */
+  --wall: #a3a6a8;
+  --wall-mortar: #969a9d;
+  --wall-edge: #75787b;
+  --wall-inside: #62666a;
+  /* The clearing scene (scene/OutsideTheWalls.astro): pond water and clouds. */
+  --pond: #6fa8cc;
+  --pond-sheen: #b6d8ec;
+  --cloud: #ffffff;
+  --font: 'Nunito Variable', 'Nunito', ui-rounded, 'Hiragino Maru Gothic ProN',
+    Quicksand, Comfortaa, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Fira Code', monospace;
+  --max-width: 1040px;
+  --radius: 14px;
+  /* Both palettes exist; the UA picks scrollbars/controls to match. */
+  color-scheme: light dark;
+}
+
+/* `daylight` on <html> (Base.astro's prop) pins the page to the light
+   palette — the talk slides are presented on a projector in a lit room, so
+   they must look the same whatever the presenting laptop prefers. */
+:root.daylight { color-scheme: light; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.daylight) {
+    --bg: #20251e;
+    --bg-surface: #2a3027;
+    --bg-alt: #262c23;
+    --bg-hover: #333a2f;
+    --text: #ece7d9;
+    --text-muted: #a8a191;
+    --accent: #8ec49a;
+    --accent-strong: #a8d6b2;
+    --accent-soft: #33402f;
+    --sky: #2e3a44;
+    --sky-deep: #4a6a82;
+    --bark: #a07d5e;
+    --sun: #d9b356;
+    --border: #3d443a;
+    --error: #e07a72;
+    --meadow-hill-1: #4a6b41;
+    --meadow-hill-2: #3c5936;
+    --meadow-hill-3: #2e4a2f;
+    --wall: #6e7275;
+    --wall-mortar: #636769;
+    --wall-edge: #4f5356;
+    --wall-inside: #3c4043;
+    --pond: #3f5d70;
+    --pond-sheen: #6d8fa3;
+    --cloud: #93a9b8;
+  }
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--font);
+  color: var(--text);
+  background: var(--bg);
+  line-height: 1.65;
+  font-size: 1.0625rem;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Keyboard focus must stay obvious on the pill buttons and the meadow-tinted
+   backgrounds, where the UA default ring washes out. */
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.25;
+  margin: 1.6em 0 0.5em;
+  font-weight: 800;
+}
+h1 { font-size: 2.4rem; margin-top: 0; }
+h2 { font-size: 1.6rem; }
+h3 { font-size: 1.2rem; }
+p { margin-bottom: 1em; }
+ul, ol { margin-bottom: 1em; padding-left: 1.4em; }
+li { margin-bottom: 0.35em; }
+img { max-width: 100%; height: auto; }
+/* Only the outermost svg: a stylesheet `height: auto` outranks the width /
+   height attributes, and on an svg NESTED in another (a small critter
+   placed inside the meadow scene) `auto` means 100% of the outer viewport
+   — a 40-unit critter became 350 tall. */
+svg:not(svg svg) { max-width: 100%; height: auto; }
+
+code {
+  font-family: var(--font-mono);
+  background: var(--bg-alt);
+  padding: 0.1rem 0.35rem;
+  border-radius: 5px;
+  font-size: 0.9em;
+}
+
+blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.25rem 0 0.25rem 1rem;
+  color: var(--text-muted);
+  margin-bottom: 1em;
+}
+
+/* On the story pages (docs/sites/fauna-social/*.md) a blockquote is the
+   boxed aside — the closing call-to-action, "the honest part". The bylaws
+   pages keep the rule above for the passages they actually quote. */
+.copy blockquote {
+  border-left: none;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin: 2.5rem 0 1rem;
+}
+.copy blockquote p:last-child { margin-bottom: 0; }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+
+table { width: 100%; border-collapse: collapse; margin-bottom: 1.25em; }
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+th { font-weight: 700; }
+/* Markdown tables may be header-less — written with an empty header row
+   (`|  |  |`), the idiom the who facts and what costs tables use. Hide the
+   empty thead the markdown compiler still emits. */
+thead:not(:has(th:not(:empty))) { display: none; }
+
+/* Layout helpers */
+.wrap { max-width: var(--max-width); margin: 0 auto; padding: 0 1.25rem; }
+.section { padding: 3.5rem 0; }
+.section-alt { background: var(--bg-alt); }
+.section h2 { margin-top: 0; }
+.lead { font-size: 1.2rem; color: var(--text-muted); }
+.center { text-align: center; }
+
+/* Every page that opens straight into content (i.e. everything except the
+   home page, which opens on the hero) needs the same breathing room under the
+   header. One rule here instead of an identical scoped copy per page. */
+.wrap.page { padding-top: 3rem; }
+
+/* A critter beside the page title — the shared opening of the prose pages. */
+.page-head {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+}
+.page-head .critter { flex-shrink: 0; }
+@media (max-width: 560px) {
+  .page-head { flex-direction: column; align-items: flex-start; }
+}
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  padding: 0.7rem 1.6rem;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 1.05rem;
+  text-decoration: none;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.btn:hover { text-decoration: none; transform: translateY(-1px); }
+.btn-primary { background: var(--accent); color: var(--bg-surface); }
+.btn-primary:hover { background: var(--accent-strong); }
+.btn-secondary {
+  background: transparent;
+  color: var(--accent);
+  border: 2px solid var(--accent);
+}
+
+/* Cards */
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+}
+.card h3 { margin-top: 0; }
+
+/* Long-form markdown (bylaws, news posts) */
+/* Prose is narrower than the wrap it sits in, and centred within it — every
+   page the same. (Until 2026-08-05 only the home page centred its prose, via
+   a private rule, so /what and /who hugged the left of a 1040px container.) */
+.prose { max-width: 46rem; margin-inline: auto; }
+.prose h1 { font-size: 1.9rem; }
+.prose h2 { font-size: 1.35rem; margin-top: 2em; }
+
+/* Critters — the waving fauna. transform-box makes the inline
+   transform-origin (in viewBox px) work for the raised paw. */
+.critter { display: block; }
+.critter-shadow { fill: var(--text); opacity: 0.1; }
+.wave {
+  transform-box: view-box;
+  animation: critter-wave 2s ease-in-out infinite;
+  animation-delay: var(--wave-delay, 0s);
+}
+@keyframes critter-wave {
+  0%, 100% { transform: rotate(-8deg); }
+  50% { transform: rotate(24deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wave { animation: none; }
+  html { scroll-behavior: auto; }
+}
+
+/* FAQ disclosure styling */
+details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  padding: 0.9rem 1.2rem;
+  margin-bottom: 0.75rem;
+}
+details summary {
+  font-weight: 800;
+  cursor: pointer;
+  list-style-position: inside;
+}
+details[open] summary { margin-bottom: 0.5rem; }

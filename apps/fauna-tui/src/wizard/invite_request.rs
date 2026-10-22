@@ -5,7 +5,10 @@
 //! `invite-code-status`, `invite-request-continue-button`,
 //! `invite-request-back-button`; optional `invite-request-recheck-button`
 //! (visible only during `PendingReview`) and `invite-code-supervised-notice`
-//! (only when the checked code carries a guardian designation).
+//! (only when the checked code carries a guardian designation). Above the
+//! bottom row, always: the terms notice `onboarding-terms-notice` +
+//! `onboarding-terms-link` (`terms-and-content-guidelines.md` § The decisions,
+//! item 3).
 //!
 //! Two independent rows: the admin-flow request on top, the out-of-band code
 //! below. Both status labels render the snapshot's `LocalizedText` — the OOB
@@ -90,6 +93,7 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         ));
     }
 
+    out.extend(super::terms_notice());
     out.push(Element::button(
         ids::INVITE_REQUEST_CONTINUE_BUTTON,
         common::CONTINUE,

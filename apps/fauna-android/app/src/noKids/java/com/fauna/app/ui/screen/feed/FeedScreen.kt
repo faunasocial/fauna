@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.text
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -46,6 +47,9 @@ import com.fauna.app.core.ContentPolicyInputs
 import com.fauna.app.core.RegionPlaneHost
 import com.fauna.app.core.RegionSubject
 import com.fauna.app.core.post
+import com.fauna.app.ui.components.GuardianReason
+import com.fauna.app.ui.components.NestBlockWitness
+import com.fauna.app.ui.components.NestPlaceholder
 import com.fauna.app.ui.components.RegionBlockWitness
 import com.fauna.app.ui.components.RegionPlaceholder
 import com.fauna.app.ui.components.ContentLabelBadge
@@ -63,11 +67,15 @@ import com.fauna.app.ui.components.documentQuotedPost
 import com.fauna.app.ui.components.documentResolvedLinkPreviews
 import com.fauna.app.ui.components.documentResolvingLinkPreviewUrls
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.navigation.navigateToDrawerRoute
+import com.fauna.app.ui.navigation.profileRoute
 import com.fauna.app.ui.util.ValueFormat
 import com.fauna.app.ui.util.localized
+import com.fauna.app.ui.util.localizedNested
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.FeedVM
+import com.fauna.ffi.adminBlockNotice
 import com.fauna.ffi.legalTakedownTombstone
 import com.fauna.ffi.shortId
 import com.fauna.ffi.urlHost
@@ -153,48 +161,10 @@ fun FeedScreen(navController: NavController, vm: FeedVM = hiltViewModel()) {
     val cueError by vm.cueError.collectAsState()
     LaunchedEffect(cueError) { cueError?.let { appMessages.showError(it) } }
 
-    // Own-post delete failures reach the same `error-message` banner (feed.md
-    // § State & data shape → Post deletion). The raw manager message is wrapped
-    // in the localized `feed_error_delete` template here — the VM is Context-free
-    // (the same split as the page/cue errors). A success needs no handler: the
-    // shared manager drops the post from the loaded window and the snapshot
-    // re-emits, so the card just vanishes.
-    val deleteError by vm.deleteError.collectAsState()
-    val deleteErrorText = deleteError?.let { stringResourceFmt(R.string.feed_error_delete, it) }
-    LaunchedEffect(deleteErrorText) { deleteErrorText?.let { appMessages.showError(it) } }
-
-    // Training-gesture failures (feed-post-more-like-this / -less-like-this)
-    // reach the same `error-message` banner, wrapped in the localized
-    // feed_error_train template — mirrors the delete-error handling above.
-    val trainError by vm.trainError.collectAsState()
-    val trainErrorText = trainError?.let { stringResourceFmt(R.string.feed_error_train, it) }
-    LaunchedEffect(trainErrorText) { trainErrorText?.let { appMessages.showError(it) } }
-
-    // Self-serve teaser-buy failures (`gated-post-buy-button`, monetization.md
-    // § Per-post pay-to-unlock) reach the same `error-message` banner, wrapped
-    // in the localized feed_error_buy_unlock template — mirrors the delete/
-    // train error handling above. A success needs no handler: the shared
-    // manager clears `unlock_offer` and the snapshot re-emits, so the teaser
-    // just vanishes.
-    val buyUnlockError by vm.buyUnlockError.collectAsState()
-    val buyUnlockErrorText = buyUnlockError?.let { stringResourceFmt(R.string.feed_error_buy_unlock, it) }
-    LaunchedEffect(buyUnlockErrorText) { buyUnlockErrorText?.let { appMessages.showError(it) } }
-
-    // Own-post web-publishing verb failures (web-content-hosting.md
-    // § Published-post management) reach the same `error-message` banner,
-    // wrapped in the `kind`-matched `web_publish_error_*` template.
-    val webPublishError by vm.webPublishError.collectAsState()
-    val webPublishErrorText = webPublishError?.let { (kind, message) ->
-        when (kind) {
-            "unpublish" -> stringResourceFmt(R.string.web_publish_error_unpublish, message)
-            "paywall" -> stringResourceFmt(R.string.web_publish_error_paywall_link, message)
-            else -> stringResourceFmt(R.string.web_publish_error_publish, message)
-        }
-    }
-    LaunchedEffect(webPublishErrorText) { webPublishErrorText?.let { appMessages.showError(it) } }
-
-    // Reply / quote / repost failures — a restricted post's refusal among them.
-    VerbErrorEffect(vm)
+    // Every per-post verb failure the card can raise (delete, train, the buy,
+    // web publishing, reply / quote / repost) — one effect set, shared with the
+    // profile's Posts tab, whose cards are this page's own.
+    FeedVerbFailureEffects(vm)
 
     // This device's own actor id (hex), resolved once — the `is_own` gate for
     // the per-card delete affordance (feed.md § Post deletion). Stable for the
@@ -762,6 +732,10 @@ private fun TrainTargetSheet(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .testTag(Ids.FEED_POST_TRAIN_TARGET_ITEM)
+                            // `factor` test-attr = the key's hex alone (the
+                            // personalization-trained-factor-item convention).
+                            .semantics { stateDescription = key.removePrefix("topic:") }
                             .clickable { onSelectFactor(key) }
                             .padding(vertical = 12.dp),
                     )
@@ -772,7 +746,7 @@ private fun TrainTargetSheet(
                     onDismiss()
                     navController.navigate("settings/personalization")
                 },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().testTag(Ids.FEED_POST_TRAIN_TARGET_NEW_BUTTON),
             ) {
                 Text(stringResource(R.string.personalization_trained_factor_create))
             }
@@ -797,6 +771,62 @@ private fun TrainTargetSheet(
  * early-return shape).
  */
 /**
+ * The `error-message` effects of every per-post verb the feed card fires —
+ * own-post delete, a training gesture, the teaser buy, the web-publishing
+ * verbs, and reply / quote / repost ([VerbErrorEffect]). The VM is
+ * Context-free; each raw manager message is wrapped in its localized template
+ * here. Called by the Feed page and by the profile's Posts tab
+ * (`ProfilePostsSection`), whose cards are the feed's own [PostCard] over an
+ * author window.
+ */
+@Composable
+internal fun FeedVerbFailureEffects(vm: FeedVM) {
+    val appMessages = LocalAppMessages.current
+    // Own-post delete failures reach the same `error-message` banner (feed.md
+    // § State & data shape → Post deletion). The raw manager message is wrapped
+    // in the localized `feed_error_delete` template here — the VM is Context-free
+    // (the same split as the page/cue errors). A success needs no handler: the
+    // shared manager drops the post from the loaded window and the snapshot
+    // re-emits, so the card just vanishes.
+    val deleteError by vm.deleteError.collectAsState()
+    val deleteErrorText = deleteError?.let { stringResourceFmt(R.string.feed_error_delete, it) }
+    LaunchedEffect(deleteErrorText) { deleteErrorText?.let { appMessages.showError(it) } }
+
+    // Training-gesture failures (feed-post-more-like-this / -less-like-this)
+    // reach the same `error-message` banner, wrapped in the localized
+    // feed_error_train template — mirrors the delete-error handling above.
+    val trainError by vm.trainError.collectAsState()
+    val trainErrorText = trainError?.let { stringResourceFmt(R.string.feed_error_train, it) }
+    LaunchedEffect(trainErrorText) { trainErrorText?.let { appMessages.showError(it) } }
+
+    // Self-serve teaser-buy failures (`gated-post-buy-button`, monetization.md
+    // § Per-post pay-to-unlock) reach the same `error-message` banner, wrapped
+    // in the localized feed_error_buy_unlock template — mirrors the delete/
+    // train error handling above. A success needs no handler: the shared
+    // manager clears `unlock_offer` and the snapshot re-emits, so the teaser
+    // just vanishes.
+    val buyUnlockError by vm.buyUnlockError.collectAsState()
+    val buyUnlockErrorText = buyUnlockError?.let { stringResourceFmt(R.string.feed_error_buy_unlock, it) }
+    LaunchedEffect(buyUnlockErrorText) { buyUnlockErrorText?.let { appMessages.showError(it) } }
+
+    // Own-post web-publishing verb failures (web-content-hosting.md
+    // § Published-post management) reach the same `error-message` banner,
+    // wrapped in the `kind`-matched `web_publish_error_*` template.
+    val webPublishError by vm.webPublishError.collectAsState()
+    val webPublishErrorText = webPublishError?.let { (kind, message) ->
+        when (kind) {
+            "unpublish" -> stringResourceFmt(R.string.web_publish_error_unpublish, message)
+            "paywall" -> stringResourceFmt(R.string.web_publish_error_paywall_link, message)
+            else -> stringResourceFmt(R.string.web_publish_error_publish, message)
+        }
+    }
+    LaunchedEffect(webPublishErrorText) { webPublishErrorText?.let { appMessages.showError(it) } }
+
+    // Reply / quote / repost failures — a restricted post's refusal among them.
+    VerbErrorEffect(vm)
+}
+
+/**
  * What a post names its author — the one shared resolver over the viewer's
  * nickname for them (`contacts.md` § The private overlay). A bridged author's
  * face (`PostSummary.authorDisplay`, the display name and handle the origin
@@ -806,8 +836,43 @@ private fun TrainTargetSheet(
 internal fun postAuthorLabel(overlays: com.fauna.ffi.FfiContactOverlays, post: PostSummary): String =
     overlays.peerLabel(post.authorDisplay?.displayName, post.authorDisplay?.handle, post.author).primary
 
+/**
+ * The author line's gesture (`click post-author → profile`, `click
+ * feed-post-detail-author → profile`; `feed.md` § User actions): open the
+ * post author's Profile carrying the post's own `home_nest_url` — the opener
+ * takes the home (`profile.md` § Layout & flow → *Reaching another actor's
+ * profile with their home carried*). An id naming the viewer normalizes to
+ * SELF through the shared `profileNavTarget`, so the viewer's own post never
+ * opens their own profile in OTHER shape.
+ */
+internal fun openAuthorProfile(navController: NavController, post: PostSummary, ownActorId: String?) {
+    val other = com.fauna.ffi.profileNavTarget(post.author, ownActorId)
+    if (other == null) {
+        navController.navigateToDrawerRoute("profile")
+    } else {
+        navController.navigate(profileRoute(other, post.homeNestUrl))
+    }
+}
+
+/**
+ * The remote author's byline driver (`feed.md` § The read model → *The remote
+ * author's byline*) — the per-post fire-once resolve beside the tips and media
+ * ones: a rendered post whose `home_nest_url` is set and whose `author_display`
+ * is still unset asks the shared manager to resolve the author's face. The
+ * guard closes on every outcome (the manager writes an empty face when the
+ * author did not opt in), so this never retries; the card's label is the
+ * shared resolver's, unchanged here.
+ */
 @Composable
-private fun PostCard(
+internal fun AuthorFaceResolve(post: PostSummary, vm: FeedVM) {
+    val pending = !post.homeNestUrl.isNullOrBlank() && post.authorDisplay == null
+    LaunchedEffect(post.postId, pending) {
+        if (pending) vm.resolveAuthorFace(post.postId)
+    }
+}
+
+@Composable
+internal fun PostCard(
     post: PostSummary,
     authorLabel: String,
     vm: FeedVM,
@@ -818,6 +883,7 @@ private fun PostCard(
     onRevealMuted: () -> Unit,
     contentPolicyInputs: ContentPolicyInputs,
 ) {
+    AuthorFaceResolve(post, vm)
     // Reply composer visibility (`feed-reply-dialog`) — raised by
     // `feed-reply-button` below, dismissed on send/cancel.
     var showReplyDialog by remember { mutableStateOf(false) }
@@ -849,6 +915,7 @@ private fun PostCard(
     val reported = decision.reported
     val contentVerdict = decision.verdict
     RegionBlockWitness("feed:${post.postId}", decision.isRegionBlocked)
+    NestBlockWitness("feed:${post.postId}", decision.isNestBlocked)
     // A `collapse` floor hides the body behind a one-tap reveal, session-local
     // (the floor persists) — mirrors linux `build_content_collapse`. A `block`
     // is never revealable.
@@ -878,6 +945,9 @@ private fun PostCard(
         // placeholder (its authority, the reason verbatim); a revealed region
         // `collapse` falls through to the ordinary arms, sharing the family reveal.
         val regionPlaceholder = decision.placeholder
+        // A NEST verdict (nest-rules.md § The nest source in the engine) the same
+        // way: the nest named, the admin's reason verbatim, a `block` unrevealable.
+        val nestPlaceholder = decision.nestPlaceholder
         if (regionPlaceholder != null && (regionPlaceholder.verb == "block" || !contentRevealed)) {
             RegionPlaceholder(
                 regionPlaceholder,
@@ -885,12 +955,19 @@ private fun PostCard(
                 onReveal = { contentRevealed = true },
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
+        } else if (nestPlaceholder != null && (nestPlaceholder.verb == "block" || !contentRevealed)) {
+            NestPlaceholder(
+                nestPlaceholder,
+                witnessKey = "feed:${post.postId}",
+                onReveal = { contentRevealed = true },
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
         } else if (contentVerdict == "block") {
-            ContentPolicyBlockedBody(reported = reported)
+            ContentPolicyBlockedBody(reported = reported, reason = decision.guardianReason)
         } else if (!muteRevealed && vm.isMuted(post.postId)) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    stringResource(R.string.feed_post_muted_placeholder),
+                    stringResource(R.string.muted_words_collapsed),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.testTag(Ids.FEED_POST_MUTED),
@@ -899,13 +976,16 @@ private fun PostCard(
                     onClick = onRevealMuted,
                     modifier = Modifier.testTag(Ids.FEED_POST_MUTED_REVEAL_BUTTON),
                 ) {
-                    Text(stringResource(R.string.feed_post_muted_reveal))
+                    Text(stringResource(R.string.muted_words_reveal))
                 }
             }
         } else if (contentVerdict == "collapse" && !contentRevealed) {
             // A `collapse` floor (guardian OR the viewer's own spam/phishing
             // threshold) sits AFTER the muted arm — both are revealable collapses.
-            ContentPolicyCollapsedBody(onReveal = { contentRevealed = true })
+            ContentPolicyCollapsedBody(
+                reason = decision.guardianReason,
+                onReveal = { contentRevealed = true },
+            )
         } else {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
@@ -921,7 +1001,11 @@ private fun PostCard(
                             text = authorLabel,
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.testTag(Ids.POST_AUTHOR)
+                            // `click post-author → profile` (`feed.md` § User actions):
+                            // the author's Profile, carrying the post's home.
+                            modifier = Modifier
+                                .clickable { openAuthorProfile(navController, post, ownActorId) }
+                                .testTag(Ids.POST_AUTHOR)
                         )
                         // The `repost-attribution` marker (id user-approved
                         // 2026-08-11) — what lets an e2e tell a repost card
@@ -983,6 +1067,7 @@ private fun PostCard(
                             gatedTier = post.gatedTier,
                             postId = post.postId,
                             vm = vm,
+                            purchasePending = post.unlockPurchasePending && !post.gatedUnlocked,
                         )
                         // post.timestamp is epoch-millis (the manager already divided
                         // the FeedPostItem micros by 1000).
@@ -1092,7 +1177,10 @@ private fun PostCard(
                     // `c2pa-badge` on the list card — the same
                     // `PostImageC2paBadge`/`FeedVM.checkBlobC2pa` pair `feed.post_detail`
                     // already uses (`PostDetailScreen.kt`), lifted onto the list card too.
-                    PostImageC2paBadge(document = post.document, checkC2pa = { vm.checkBlobC2pa(it) })
+                    PostImageC2paBadge(
+                        document = post.document,
+                        checkC2pa = { vm.checkBlobC2pa(post.postId, it) },
+                    )
                 }
 
                 // Link-preview cards (render-model.md § D4): one per Resolved `LinkPreview` block in
@@ -1196,7 +1284,14 @@ private fun PostCard(
             onDismiss = { pendingSheetVerb = null },
             onSelectFactor = { factor ->
                 pendingSheetVerb = null
-                vm.dispatchTrain(post.postId, factor, verb, alreadyMarked = false)
+                // Toggle as train-in-context: the topic already marked with
+                // this verb un-marks.
+                vm.dispatchTrain(
+                    post.postId,
+                    factor,
+                    verb,
+                    alreadyMarked = vm.exampleLabelFor(post.postId, factor) == verb,
+                )
             },
         )
     }
@@ -1207,34 +1302,46 @@ private fun PostCard(
  * WHOLE post-card body, no reveal (family-safety.md § Content policy; the feed
  * twin of linux `build_content_block` / web's `contentBlocked` arm). A `block` is
  * always a guardian floor (a viewer's own threshold only ever collapses).
- * `content-policy-blocked-notice` is the one ui.yaml id this pillar renders
- * (indexed, per post-card).
+ * `content-policy-blocked-notice` is the pillar's notice (indexed, per
+ * post-card); its `state` (`stateDescription`) tells it from the collapse arm's.
  */
 @Composable
-private fun ContentPolicyBlockedBody(reported: Boolean = false) {
+private fun ContentPolicyBlockedBody(reported: Boolean = false, reason: String? = null) {
     // `reported` is the same notice for the viewer's OWN report (moderation.md
     // § Corollary): "You reported this" in place of the family words, no body, no
     // reveal — a personal filter, so it names the viewer's own act, not a policy.
-    Text(
-        stringResource(
-            if (reported) R.string.moderation_report_hidden_placeholder
-            else R.string.family_content_blocked_notice,
-        ),
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(16.dp).testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE),
-    )
+    // `reason` is the guardian rule's, verbatim beside the frame
+    // (`content-policy-blocked-reason`; nest-rules.md § The shared rule editor →
+    // *The reason is the member's to read*).
+    Column(
+        modifier = Modifier.padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            stringResource(
+                if (reported) R.string.moderation_report_hidden_placeholder
+                else R.string.family_content_blocked_notice,
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                .semantics { stateDescription = "blocked" },
+        )
+        GuardianReason(reason)
+    }
 }
 
 /**
  * The content-policy COLLAPSE placeholder + one-tap reveal (family-safety.md
  * § Content policy) — session-local reveal; the floor itself persists (the
  * guardian relaxing it, or the viewer raising their own threshold, is what stops
- * future collapse). Presentation only, no test id: v1 e2e drives the block case
- * (the linux/web precedent — `build_content_collapse`).
+ * future collapse). The block arm's `content-policy-blocked-notice` in
+ * `state="collapsed"` beside `content-policy-collapsed-reveal-button` (ids
+ * user-approved 2026-10-16), both inside the post-card.
  */
 @Composable
-private fun ContentPolicyCollapsedBody(onReveal: () -> Unit) {
+private fun ContentPolicyCollapsedBody(reason: String? = null, onReveal: () -> Unit) {
     Column(
         modifier = Modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -1243,8 +1350,15 @@ private fun ContentPolicyCollapsedBody(onReveal: () -> Unit) {
             stringResource(R.string.family_content_collapsed_notice),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier
+                .testTag(Ids.CONTENT_POLICY_BLOCKED_NOTICE)
+                .semantics { stateDescription = "collapsed" },
         )
-        TextButton(onClick = onReveal) {
+        GuardianReason(reason)
+        TextButton(
+            onClick = onReveal,
+            modifier = Modifier.testTag(Ids.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON),
+        ) {
             Text(stringResource(R.string.family_content_reveal_button))
         }
     }
@@ -1473,6 +1587,15 @@ fun QuotedPostEmbed(document: RenderDocument, quotedPostId: String, vm: FeedVM) 
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                } else if (q.adminBlockReason != null && q.body.isEmpty()) {
+                    // Admin-blocked (moderation.md § Admin block of a reported item):
+                    // the nest withheld the body from every viewer but its author, so
+                    // the shared notice stands in its place — never a blank embed.
+                    Text(
+                        localizedNested(adminBlockNotice(q.adminBlockReason!!)).orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 } else if (q.notFound) {
                     // Its author deleted the quoted post (feed.md § Post
                     // deletion: references dangle by design) — the same one
@@ -1504,6 +1627,15 @@ fun QuotedPostEmbed(document: RenderDocument, quotedPostId: String, vm: FeedVM) 
                     if (q.body.isNotBlank()) {
                         Spacer(Modifier.height(4.dp))
                         Text(q.body, style = MaterialTheme.typography.bodySmall, maxLines = 3)
+                    }
+                    // The author's own read keeps the body; the notice paints beside it.
+                    q.adminBlockReason?.let { reason ->
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            localizedNested(adminBlockNotice(reason)).orEmpty(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -1545,7 +1677,7 @@ fun FeedPostImage(document: RenderDocument, postId: String, mediaHash: String?, 
     val proxiedPath = documentProxiedPostImagePath(document)
     val bitmap by produceState<ImageBitmap?>(null, hash, proxiedPath) {
         val bytes = when {
-            hash != null -> vm.fetchBlobBytes(hash)
+            hash != null -> vm.fetchPostBlobBytes(postId, hash)
             proxiedPath != null -> vm.fetchProxiedBytes(proxiedPath)
             else -> null
         }
@@ -1676,11 +1808,32 @@ fun FeedLinkPreviewCards(document: RenderDocument, vm: FeedVM) {
  * state machine.
  */
 @Composable
-fun PostUnlockOfferTeaser(offer: UnlockOfferView?, gatedTier: String?, postId: String, vm: FeedVM) {
+fun PostUnlockOfferTeaser(
+    offer: UnlockOfferView?,
+    gatedTier: String?,
+    postId: String,
+    vm: FeedVM,
+    purchasePending: Boolean = false,
+) {
     LaunchedEffect(postId) {
         if (gatedTier != null && offer == null) vm.resolvePostUnlockOffer(postId)
     }
-    if (offer == null || !BuildConfig.PAYMENTS) return
+    if (!BuildConfig.PAYMENTS) return
+    // Bought, the author's grant still on its way (monetization.md § Per-post
+    // pay-to-unlock → a completed buy must not be re-offered): the shared
+    // `unlockPurchasePending` marker, never set while the offer is. The caller
+    // passes it already cleared for an opened post.
+    if (offer == null) {
+        if (purchasePending) {
+            Text(
+                text = stringResource(R.string.feed_post_purchase_pending),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(Ids.GATED_POST_PURCHASE_PENDING),
+            )
+        }
+        return
+    }
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val appMessages = LocalAppMessages.current

@@ -1,0 +1,72 @@
+[package]
+name = "fauna-cli"
+description = "The cli app's tool catalog: one transport-agnostic catalog of page-named manager verbs, spoken over MCP by every cli shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+# The device shell's half (`apps/cli.md` § The device shell): the DPoP prover,
+# the typed-code consent start and its token poll, and the issuer discovery
+# read. Native only — the nest-hosted shell reaches the issuer from inside the
+# nest and never runs a consent start of its own.
+device = ["dep:p256", "dep:sha2", "dep:base64", "dep:reqwest", "dep:x25519-dalek", "dep:rand", "dep:url", "dep:tokio", "dep:fauna-ipc", "dep:fauna-client-conversations-oracle"]
+
+[dependencies]
+# `feed`: the catalog's first served group is the feed plane, so it carries
+# the plane's typed wire (the `fauna-client-feed` precedent). default-features
+# off keeps the catalog wasm-safe for the nest-hosted shell.
+fauna-protocol = { path = "../fauna-protocol", default-features = false, features = ["feed"] }
+# The feed page's typed call surface — the catalog's feed tools are its verbs.
+fauna-client-feed = { path = "../fauna-client-feed" }
+# The admin pages' typed call surface — the admin plane's tools are its verbs
+# (`apps/cli.md` § The feature ledger, the admin pages for an admin-consented
+# principal). wasm-safe as declared by the crate itself.
+fauna-client-admin = { path = "../fauna-client-admin" }
+# The nest page's feature-limit document — the shared authoring client the
+# apps' editor saves through. wasm-safe as declared by the crate itself.
+fauna-client-features = { path = "../fauna-client-features" }
+# The nest page's blocked list and the web page's apex designation — the
+# reported-item block and the apex actor are these crates' call surfaces.
+# Both wasm-safe as declared by the crates themselves.
+fauna-client-moderation = { path = "../fauna-client-moderation" }
+fauna-client-web = { path = "../fauna-client-web" }
+# The mail-side admin pages' typed call surface (`MailAdminClient`) — the
+# mail, mail-reports, aliases, calendar, contacts, files and pending-bridge
+# tools are its verbs. wasm-safe as declared by the crate itself.
+fauna-client-bridges = { path = "../fauna-client-bridges" }
+# The mail-reports page's raw view: the bounded gunzip the apps' report view
+# decodes an archived report with (`dmarc-report-view`, declared WASM-safe by
+# the crate; the receive half's MIME parser and zip reader stay out).
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["dmarc-report-view"] }
+# The profile page's call surface and its one shared display decode — the
+# `nest://profile` resources read through it.
+fauna-client-profile = { path = "../fauna-client-profile" }
+# The notifications page's call surface — the poll and mark-read tools.
+fauna-client-notifications = { path = "../fauna-client-notifications" }
+# `PostBody`, the body the `post.author` door takes.
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# ── `device` ──
+# The conversations oracle's door: its vocabulary and client, and the
+# principal's open of the custodian's challenge.
+fauna-ipc = { path = "../fauna-ipc", optional = true }
+fauna-client-conversations-oracle = { path = "../fauna-client-conversations-oracle", optional = true }
+p256 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The test door's seal of its challenge (`tests/conversations_door.rs`).
+fauna-mls = { path = "../fauna-mls" }
+fauna-client-testkit = { path = "../fauna-client-testkit" }
+tokio = { workspace = true }

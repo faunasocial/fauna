@@ -226,7 +226,7 @@ def destructive_live_box() -> tuple[str, str | None]:
     return "", (
         "destructive live test (it factory-resets the box or rewrites its global "
         "admin state): it runs only on a run that declares its box disposable — "
-        "`--nest live:https://dev.example.com --live-box disposable` "
+        "`--nest live:https://dev.fauna.build --live-box disposable` "
         "(testing.md § The shared-box rule → The disposable-box declaration). "
         "The admin seed is resolved per box and is never the opt-in."
     )

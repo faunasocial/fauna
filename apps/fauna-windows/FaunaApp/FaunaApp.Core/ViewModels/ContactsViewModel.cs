@@ -135,6 +135,13 @@ public partial class ContactsViewModel : ViewModelBase
 
     private readonly INestRpcClient _rpc;
 
+    /// <summary>The Find User lookup seam: <c>(homeUrl, handle, domain)</c> →
+    /// <c>[actor_id, handle, domain, nest_url]</c>. Defaults to the shared
+    /// <see cref="FaunaFfiMethods.FindUser"/>; a unit test swaps it because the lookup is a
+    /// live network hop.</summary>
+    internal Func<string, string, string?, Task<string[]>> FindUserAsync { get; set; } =
+        FaunaFfiMethods.FindUser;
+
     internal ContactsViewModel(INestRpcClient rpc)
     {
         _rpc = rpc;
@@ -285,7 +292,12 @@ public partial class ContactsViewModel : ViewModelBase
         // this — its content_ids are opaque FTS keys, not actor ids).
         ErrorMessage = null;
         KnockAsk = KnockAsk with { KnockInFlight = true };
-        var result = await WardAskFolds.ClassifyKnockAsync(() => _rpc.SendKnockAsync(actorId));
+        // The peer-nest route is the one the Find User lookup answered, read off the
+        // stored result for THIS actor — never re-derived; null for a home-nest actor.
+        var route = ActorIdResult is { } found
+            && string.Equals(found.ActorId, actorId, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(found.NestUrl) ? found.NestUrl : null;
+        var result = await WardAskFolds.ClassifyKnockAsync(() => _rpc.SendKnockAsync(actorId, route));
         var (next, effect) = WardAskFolds.FoldKnockReply(KnockAsk, actorId, result);
         KnockAsk = next;
         switch (effect)
@@ -344,8 +356,8 @@ public partial class ContactsViewModel : ViewModelBase
         // add-able result. Windows was the LONE client without the handle branch
         // (contacts.md § Where logic lives → Contact lookup by handle); it now mirrors
         // linux/android: classify → (actor_id) build the row directly, (handle)
-        // resolve_nest → resolve_handle, (invalid) surface the find error. The add step
-        // knocks the RESOLVED actor id (AddFoundContactAsync), never the typed input.
+        // find_user, (invalid) surface the find error. The add step knocks the RESOLVED
+        // actor id (AddFoundContactAsync), never the typed input.
         var c = ClassifyRecipientInput(input);
         ActorIdError = null;
         SetFindResult(null);
@@ -375,24 +387,27 @@ public partial class ContactsViewModel : ViewModelBase
             case RecipientKind.Handle:
                 try
                 {
-                    // Two-hop anonymous federated discovery over the shared FFI seam
-                    // (libs/fauna-ffi/src/resolve.rs): home nest SRV-resolves the handle's
-                    // domain → owning node URL, then that node maps the handle → actor id.
+                    // The shared find-user lookup (fauna_client_core::find_user, FFI
+                    // libs/fauna-ffi/src/resolve.rs): one call answers the handle against
+                    // the home nest first and, on a miss, dials the peer nest directly
+                    // (federation.md § Client-side peer discovery for a cross-nest knock).
                     // The home URL is this client's own nest (the same value linux's
-                    // FaunaClient::node_url / android's ApiClient.nodeUrl feed resolve_nest).
-                    var nodeUrl = await FaunaFfiMethods.ResolveNest(_rpc.HomeUrl, c.Domain);
-                    // Pass the typed @domain qualifier so a multi-domain handle echoes it:
+                    // FaunaClient::node_url / android's ApiClient.nodeUrl feed it).
+                    // The typed @domain qualifier is passed so a multi-domain handle echoes it:
                     // on a deployment serving domain1 (primary) + domain2, `bob@domain2`
-                    // resolves with domain2 echoed in slot 3 → we display `bob@domain2`
+                    // resolves with domain2 echoed in slot 2 → we display `bob@domain2`
                     // (parity with web/linux/android; mail-multidomain.md § Multi-domain
-                    // handles § Resolution). A bare/primary-domain handle still reports the
-                    // identity domain. A domain this nest does not serve is rejected
-                    // (fauna.actor.domain_not_local) → the catch below surfaces not-found.
-                    // resolved = [actor_id, handle, domain]
-                    var resolved = await FaunaFfiMethods.ResolveHandle(nodeUrl, c.User, c.Domain);
+                    // handles § Resolution). A not-found handle throws → the catch below
+                    // surfaces not-found.
+                    // found = [actor_id, handle, domain, nest_url]; nest_url is "" for a
+                    // home-nest actor and is the peer's URL for a cross-nest one.
+                    var found = await FindUserAsync(_rpc.HomeUrl, c.User, c.Domain);
                     SetFindResult(new ContactInfo(
-                        resolved[0], $"{resolved[1]}@{resolved[2]}", ContactStatus.Pending, null)
-                    { Domain = resolved[2] });
+                        found[0], $"{found[1]}@{found[2]}", ContactStatus.Pending, null)
+                    {
+                        Domain = found[2],
+                        NestUrl = string.IsNullOrEmpty(found[3]) ? null : found[3],
+                    });
                 }
                 catch
                 {

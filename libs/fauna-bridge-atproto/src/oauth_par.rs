@@ -612,6 +612,12 @@ pub fn finish_par_request(pending: PendingPar, records: Vec<Vec<u8>>) -> ParVerd
         includes,
     } = pending;
     let mut scopes = accepted.scopes;
+    // A hash set beside the ordered list, as `permission_set::push_scope`
+    // does: this merge runs BEFORE the grant caps below, so a `Vec` scan per
+    // member is quadratic over one member naming tens of thousands of lxms.
+    // Not an incremental cap check in the loop — `check_grant_expansion` stays
+    // the cap's single owner (its wording and both limits).
+    let mut seen: std::collections::HashSet<String> = scopes.iter().cloned().collect();
     let mut sets = Vec::with_capacity(records.len());
     for (include, record) in includes.into_iter().zip(records) {
         let mut set = match expand_permission_set(include, record) {
@@ -660,7 +666,7 @@ pub fn finish_par_request(pending: PendingPar, records: Vec<Vec<u8>>) -> ParVerd
             );
         }
         for member in &granting {
-            if !scopes.iter().any(|s| s == member) {
+            if seen.insert(member.clone()) {
                 scopes.push(member.clone());
             }
         }
@@ -855,6 +861,34 @@ mod tests {
             accept(with("fauna:feed:read"), &remote).scopes,
             vec!["fauna:feed:read".to_string()]
         );
+    }
+
+    /// The conversations oracle's classes are form-gated per class
+    /// (`conversations-oracle.md` § The two classes): a device client may ask
+    /// for them, a confidential (remote) one is `invalid_scope` — while the
+    /// same arm's nest-performed classes stay open to it.
+    #[test]
+    fn the_conversation_classes_are_refused_to_a_confidential_client() {
+        use crate::fauna_scope::{
+            SCOPE_IDENTITY_OP_CONVERSATION_READ as READ,
+            SCOPE_IDENTITY_OP_CONVERSATION_SEND as SEND, SCOPE_IDENTITY_OP_POST_AUTHOR as POST,
+        };
+        let device = web_client(&format!("{READ} {SEND} {POST}"));
+        let with = |scope: &str| ParRequest {
+            scope: scope.to_string(),
+            ..good_request()
+        };
+        for class in [READ, SEND] {
+            assert_eq!(accept(with(class), &device).scopes, vec![class.to_string()]);
+        }
+        let mut remote = device.clone();
+        remote.confidential = true;
+        for class in [READ, SEND] {
+            let (error, description) = deny(with(class), &remote);
+            assert_eq!(error, OAUTH_ERR_INVALID_SCOPE, "{class}");
+            assert!(description.contains("user's own device"), "{description}");
+        }
+        assert_eq!(accept(with(POST), &remote).scopes, vec![POST.to_string()]);
     }
 
     /// A `records` wildcard is the client's own publisher's or nothing
@@ -1674,5 +1708,42 @@ mod tests {
             }
             other => panic!("an over-cap expansion must refuse, got {other:?}"),
         }
+    }
+
+    /// The merge into the effective scope list runs BEFORE the grant
+    /// caps, so one hostile member naming tens of thousands of lxms must cost
+    /// linear work there even though the request is refused at the end: a
+    /// `Vec` scan per name was 6 s at 40,000 names in a debug build (0.14 s at
+    /// 5,000), a hash set is milliseconds. The bound is generous so a loaded
+    /// box cannot flake it, and still far under the quadratic cost.
+    #[test]
+    fn a_hostile_large_member_merges_in_linear_time_and_still_refuses() {
+        let scope = format!("atproto {}", include_scope(SET_NSID));
+        let lxms: Vec<String> = (0..40_000)
+            .map(|i| format!("com.example.calendar.m{i}"))
+            .collect();
+        // ONE permission naming every lxm: the per-set member cap counts
+        // permissions, not the names one of them expands to.
+        let record = document(
+            SET_NSID,
+            serde_json::json!([{"resource": "rpc", "aud": AUD, "lxms": lxms}]),
+        );
+        let pending = pending(&scope);
+
+        let started = std::time::Instant::now();
+        let verdict = finish_par_request(pending, vec![record]);
+        let elapsed = started.elapsed();
+
+        match verdict {
+            ParVerdict::Deny { error, description } => {
+                assert_eq!(error, OAUTH_ERR_INVALID_SCOPE);
+                assert!(description.contains("limit"), "{description}");
+            }
+            other => panic!("an over-cap expansion must refuse, got {other:?}"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_000),
+            "the PAR merge of 40,000 names took {elapsed:?} — a quadratic dedup"
+        );
     }
 }

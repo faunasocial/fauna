@@ -81,6 +81,10 @@ test-helpers = [
   # The Nests trust facet's render clock (`trustSetClockOffsetForTest`, the
   # `trust_facet_advance_clock` command's mechanism) — forwarded, rule (b).
   "fauna-client-capabilities/e2e-agent",
+  # The submission-token refresh's clock (`mailTokenRefreshSetClockOffsetForTest`,
+  # the `mail_token_refresh_advance_clock` command's mechanism) — forwarded,
+  # rule (b).
+  "fauna-client-mail-settings/e2e-agent",
   # The region plane's registry-seed entry point (`seeded_registry`), which
   # src/region.rs feeds from browser storage — convention 15, forwarded.
   "fauna-client-region/e2e-agent",
@@ -128,7 +132,7 @@ fauna-mls ={ path = "../fauna-mls", default-features = false, features = ["js"] 
 # only, no auth/tokio) so the SPA runs the SAME on-device INBOX scoring the Go
 # MDA does (`src/spam.rs`; content-scoring.md § The shared-scorer shape — "one
 # shared-Rust scorer compiles to nest/MDA/clients"; priority #2).
-fauna-mail = { path = "../fauna-mail", default-features = false, features = ["segments-receive", "spam-classifier", "body-ref-resolve"] }
+fauna-mail = { path = "../fauna-mail", default-features = false, features = ["segments-receive", "spam-classifier", "body-ref-resolve", "aliases"] }
 # The e2e snapshot test-surface (mock rail backends + `inject_inbound_for_test` /
 # `create_mls_group` / `clear_for_test`) is forwarded from THIS crate's own
 # `test-helpers` feature above — deliberately NOT named here. Naming it on this
@@ -217,9 +221,15 @@ fauna-client-admin = { path = "../fauna-client-admin" }
 # instead of the UniFFI scaffolding `libs/fauna-ffi` turns on.
 fauna-client-capabilities = { path = "../fauna-client-capabilities" }
 fauna-client-family = { path = "../fauna-client-family" }
+# The labeler picker's reads (`ruleLabelers` / `ruleModule`, rpc.rs).
+fauna-client-labelers = { path = "../fauna-client-labelers" }
 # The gated-feature plane's transparency read + the shared row shape the SPA
 # renders (`featuresStatus`), so web says what the native apps say.
 fauna-client-features = { path = "../fauna-client-features" }
+# The shared rule editor model (`rule_editor.rs`) and the nest-rules book;
+# `scorers` runs a nest document's `wasm` labelers on the device, as the region
+# plane (`fauna-client-region`, below) already does here.
+fauna-client-policy = { path = "../fauna-client-policy", features = ["scorers"] }
 # The Status page's node leg and clock-free text projection (`ui/status.md` §
 # State & data shape) — `statusNode` / `statusText`; no `agent`/`local-clock`
 # (web has no local sync agent and no OS clock behind the relative time).
@@ -403,7 +413,7 @@ fauna-client-moderation = { path = "../fauna-client-moderation" }
 # Push subscription management (`PushClient<R>`) — the Settings push-toggle's
 # WS-RPC seam over `fauna.push.{vapid_key,subscribe,unsubscribe}`, the twin of
 # the three `/api/v1/push/*` routes. Wasm-clean (fauna-protocol only); the
-# browser `serviceWorker`/`PushManager` work stays in `$lib/push.ts`.
+# browser `serviceWorker`/`PushManager` work stays in `#lib/push.ts`.
 #
 fauna-client-push = { path = "../fauna-client-push" }
 # Full-text search (`SearchClient<R>`) — the search page's WS-RPC seam over

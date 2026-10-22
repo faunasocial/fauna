@@ -444,7 +444,7 @@ class FeedActions:
     # do.
     # `[singleton]` is the third class again: not what the boot did, not what
     # died unexpectedly, but a build the SPA itself DECLARED dead. It is what
-    # `$lib/singleton-build.ts`'s settle deadline writes when a memoized build
+    # `#lib/singleton-build.ts`'s settle deadline writes when a memoized build
     # neither resolves nor rejects inside its budget, and it names WHICH builder
     # (feed manager / conversations manager / search manager / event drafts /
     # WS-RPC client) — the one line that turns "the composer is disabled and
@@ -769,6 +769,40 @@ class FeedActions:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.driver.count("gated-post-buy-button", scope=scope) == 0:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def require_purchase_pending_supported(self) -> None:
+        """Skip unless this app renders `gated-post-purchase-pending` — the
+        bought-and-pending line off `PostSummary::unlock_purchase_pending`
+        (monetization.md § Per-post pay-to-unlock → *a completed buy must not
+        be re-offered*). tui leads (2026-10-18); linux, web and android follow;
+        the rest of the six are tracked in the batched trickle-down."""
+        d = self.driver
+        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="gated-post-purchase-pending (a bought post's pending line)",
+                detail="tui, linux, web and android today",
+                tracked="",
+            )
+
+    def wait_for_purchase_pending(
+        self, timeout: float = 30.0, *, card: int
+    ) -> bool:
+        """Deadline-poll for `gated-post-purchase-pending` on ``post-card[card]``
+        (convention 14: a named budget polled to a deadline, never a fixed
+        sleep). The buy sets the marker in the same write that clears the
+        offer, and every later resolve the purchase guard declines re-sets it —
+        a reload rebuilds the post without it — so seeing it again after a
+        reload committed is the positive trace that a later pass ran and did
+        not re-offer."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.driver.count("gated-post-purchase-pending", scope=f"post-card[{card}]") >= 1:
                 return True
             time.sleep(0.2)
         return False
@@ -1313,18 +1347,35 @@ class FeedActions:
         Rather than guess a settle delay, re-inject until the count sticks: the reload
         is **one-shot per navigation**, so once it has completed the injection holds.
         Cross-app (no per-platform branch in the test); returns the final count.
+
+        **The count alone is not the witness.** On a session nest whose feed is
+        NOT empty — another module published real posts to it — the reload
+        replaces the seeded list with the nest's own posts, and when there are
+        as many of those the count still matches while every positional
+        ``post-card[i]`` read lands on a stranger's post. So where the app
+        publishes its feed in state, the rendered post ids must be the seeded
+        ids, in order, too.
         """
         expected = len(posts)
         self.driver.navigate_to("feed")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.inject_posts(posts)
-            if self.wait_post_count(expected, timeout=1.5) == expected:
+            if self.wait_post_count(expected, timeout=1.5) == expected and self._seeded_in_place(posts):
                 # Confirm it holds — a late one-shot reload would drop it back to 0.
                 time.sleep(0.5)
-                if self.post_card_count() == expected:
+                if self.post_card_count() == expected and self._seeded_in_place(posts):
                     return expected
         return self.post_card_count()
+
+    def _seeded_in_place(self, posts: list[dict]) -> bool:
+        """Whether the rendered feed is exactly ``posts``, by id and in order —
+        ``True`` on an app that publishes no feed in state, where the card count
+        is the only witness there is."""
+        rendered = [p.get("post_id") for p in self._feed_posts_from_state()]
+        if not rendered:
+            return True
+        return rendered == [p["post_id"] for p in posts]
 
     def post_count(self) -> int:
         if self._use_state_for_feed_reads():
@@ -1705,14 +1756,19 @@ class FeedActions:
     def close_post_detail(self) -> None:
         """Leave the open post detail back to the list, the way the user does.
 
-        ui.yaml gives `post_detail` no dismiss element. On tui the way back is
-        the Esc key, which the agent presses over the painted dialog
-        (`press_key(id, "Escape")` runs the keymap's own Esc arm). The other
-        apps' dismiss gestures have no journey that needs them yet."""
-        if not self.driver.is_tui():
+        ui.yaml gives `post_detail` no dismiss element. On tui and linux the way
+        back is the Esc key, which the agent presses over the painted dialog
+        (`press_key(id, "Escape")` runs the keymap's own Esc arm on tui, the
+        Escape shortcut the linux detail binds, and the dismiss door macos's
+        sheet and ios's pushed detail register on the dialog). The other apps'
+        dismiss gestures have no journey that needs them yet."""
+        if not (
+            self.driver.is_tui() or self.driver.is_linux()
+            or self.driver.is_macos() or self.driver.is_ios() or self.driver.is_web()
+        ):
             raise NotImplementedError(
-                "close_post_detail is driven on tui only; the other apps' "
-                "dialog dismiss has no journey that needs it yet"
+                "close_post_detail is driven on tui, linux, macos, ios and web only; the "
+                "other apps' dialog dismiss has no journey that needs it yet"
             )
         self.driver.press_key("feed-post-detail-dialog", "Escape")
         deadline = time.monotonic() + 10.0
@@ -2385,6 +2441,29 @@ class FeedActions:
     # ── Trained-topic training verbs (post-card ⋯ overflow;
     # topic-factors.md § Training signals) ─────────────────────────────────
 
+    def require_author_line_opens_profile(self) -> None:
+        """Skip unless activating a card's ``post-author`` opens the author's
+        Profile (ui.yaml ``click post-author → profile``; convention 7). tui
+        leads (`feed.md` § User actions); android and linux have lifted it and the other
+        four lift it in the batched trickle-down — parity debt, so
+        ``skip_unbuilt``."""
+        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="post-author / feed-post-detail-author activation",
+                detail="the author line opens the author's Profile with the post's home carried",
+                tracked="feed.md § User actions; the batched per-app trickle-down",
+            )
+
+    def open_post_author(self, index: int = 0) -> None:
+        """Activate post ``index``'s author line (scoped to
+        ``post-card[index]``, as :meth:`open_post_actions` is) and wait for the
+        author's Profile."""
+        self.driver.click("post-author", scope=f"post-card[{index}]")
+        self.driver.wait_for("profile-view", timeout=10.0)
+
     def open_post_actions(self, index: int = 0, timeout_s: float = 10.0) -> None:
         """Open post ``index``'s ⋯ overflow (``feed-post-actions-button`` →
         ``feed-post-actions-menu``). Mirrors
@@ -2508,14 +2587,12 @@ class FeedActions:
     # ── The factor-target sheet (no in-context factor; topic-factors.md
     # § Authoring surface & picker) ──────────────────────────────────────
     #
-    # tui paints ``feed-post-train-target-sheet`` as ONE picker — the user's
-    # topics by stable ``topic:<hex>`` key, then "New trained topic…" — with no
-    # row ids of its own in ui.yaml. A terminal picker cycles on Enter, so
-    # choosing a topic only re-aims the verbs, and the verb's next tap trains.
-
-    #: The sheet's "New trained topic…" option value (tui's
-    #: ``feed::NEW_TRAINED_TOPIC_OPTION``) — it leaves for the Trained-topics facet.
-    NEW_TRAINED_TOPIC_OPTION = "new-trained-topic"
+    # The sheet (a ``view``) is a list of tappable rows, ratified 2026-10-16:
+    # one ``feed-post-train-target-item`` per trained topic in registry order
+    # (text = the user's name; ``factor`` test-attr = the stable key's hex,
+    # the ``personalization-trained-factor-item`` convention), then
+    # ``feed-post-train-target-new-button`` last. One tap on a row trains,
+    # with the verb that opened the sheet.
 
     def open_train_target_sheet(self, verb: str, post_index: int = 0) -> None:
         """On a feed with no in-context trained factor, open post
@@ -2525,28 +2602,46 @@ class FeedActions:
         el = f"feed-post-{verb}-like-this"
         self.driver.wait_for(el)
         self.driver.click(el)
-        if not self.driver.is_visible("feed-post-train-target-sheet"):
+        # The sheet is presented once the registry read resolves (latency-
+        # independent wait, convention 14), not on the tap itself.
+        try:
+            self.driver.wait_for("feed-post-train-target-sheet")
+        except TimeoutError:
             raise AssertionError(
                 f"tapping {el!r} opened no `feed-post-train-target-sheet`: "
                 f"{self.driver.diagnose('feed-post-train-target-sheet')}"
             )
 
     def train_target_options(self) -> list:
-        """The open sheet's options as painted: each topic's NAME, then the
-        new-topic entry's label."""
-        return self.driver.option_texts("feed-post-train-target-sheet") or []
+        """The open sheet's entries as painted: each topic row's NAME in order,
+        then the new-topic entry's label."""
+        rows = self.driver.get_texts("feed-post-train-target-item")
+        return [*rows, self.driver.get_text("feed-post-train-target-new-button")]
 
-    def train_into_target(self, verb: str, factor_key: str) -> None:
-        """With the sheet open, choose ``factor_key`` and tap ``verb`` again —
-        the tap that trains."""
-        self.driver.select("feed-post-train-target-sheet", factor_key)
-        self.driver.click(f"feed-post-{verb}-like-this")
+    def train_into_target(self, factor_key: str) -> None:
+        """With the sheet open, tap the row whose ``factor`` attr is
+        ``factor_key``'s hex — the tap that trains, with the verb that opened
+        the sheet."""
+        hexpart = factor_key.removeprefix("topic:")
+        n = self.driver.count("feed-post-train-target-item")
+        for i in range(n):
+            if self.driver.get_attr("feed-post-train-target-item", "factor", index=i) == hexpart:
+                self.driver.click("feed-post-train-target-item", index=i)
+                return
+        painted = [
+            self.driver.get_attr("feed-post-train-target-item", "factor", index=i)
+            for i in range(n)
+        ]
+        raise AssertionError(
+            f"no `feed-post-train-target-item` carries factor {hexpart!r}; "
+            f"painted {painted!r}"
+        )
 
     def choose_new_trained_topic(self) -> None:
-        """With the sheet open, pick "New trained topic…" — the app leaves for
+        """With the sheet open, tap "New trained topic…" — the app leaves for
         the Personalization home's Trained-topics facet, where topics are
         created."""
-        self.driver.select("feed-post-train-target-sheet", self.NEW_TRAINED_TOPIC_OPTION)
+        self.driver.click("feed-post-train-target-new-button")
 
     # ── Own-post delete (post-card ⋯ overflow; feed.md § State & data shape
     # → Post deletion) ───────────────────────────────────────────────────

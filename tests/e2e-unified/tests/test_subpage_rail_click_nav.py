@@ -13,7 +13,7 @@ human does, through the real ``am-i-admin`` gate that reveals ``admin-tab``.
 
 tier_3: a real nest and a real app, nothing stubbed. tui is the lead app; the
 other apps gain the ids in trickle-down rows and join this file's markers then
-(android, web and linux have).
+(android, web, linux and windows have).
 """
 
 import pytest
@@ -24,6 +24,7 @@ pytestmark = [
     pytest.mark.android,
     pytest.mark.web,
     pytest.mark.linux,
+    pytest.mark.windows,
 ]
 
 

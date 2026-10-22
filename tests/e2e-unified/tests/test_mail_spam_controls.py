@@ -80,6 +80,7 @@ def _seed_history(app, nest_instance, test_user, seal_helper_binary, rows):
 
 
 @pytest.mark.feature("spam")
+@pytest.mark.android
 def test_history_rows_show_the_message_the_lesson_and_where_it_was_given(
     logged_in_app, nest_instance, test_user, seal_helper_binary
 ):
@@ -145,6 +146,7 @@ def test_history_rows_show_the_message_the_lesson_and_where_it_was_given(
 
 
 @pytest.mark.feature("spam")
+@pytest.mark.android
 def test_reset_confirm_says_it_cannot_be_undone(
     logged_in_app, nest_instance, test_user, seal_helper_binary
 ):
@@ -266,6 +268,7 @@ def test_contributing_is_off_until_turned_on_and_is_a_revocable_grant(app, contr
 
 
 @pytest.mark.feature("spam")
+@pytest.mark.android
 def test_mark_as_spam_is_offered_on_received_messages_only(logged_in_app):
     """Outcome 14: Mark as spam is offered on a message you received and never
     on your own. Each bubble's ⋯ menu is opened; the own one's Delete (an
@@ -442,13 +445,15 @@ def test_your_own_spam_threshold_sorts_your_mail(
 # The apps whose second seat of one identity the harness can launch
 # (`conftest.py::_alice_extra_seat`, and web's twin page
 # `conftest.py::_alice_web_twin_seat`) — and so the apps this journey can run on.
-_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "windows", "web"})
+_SECOND_SEAT_APPS = frozenset({"tui", "linux", "macos", "ios", "windows", "web"})
 # The apps whose open spam page re-reads on `StaleSurfaces::mail_spam`.
-_PUSH_REREAD_APPS = frozenset({"tui", "linux", "web", "android", "windows"})
+_PUSH_REREAD_APPS = frozenset({"tui", "linux", "macos", "ios", "web", "android", "windows"})
 
 
 @pytest.mark.feature("spam")
 @pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.web
 @pytest.mark.windows
 @pytest.mark.real_conversations
@@ -472,7 +477,7 @@ def test_an_undo_or_reset_on_one_device_updates_the_history_open_on_another(
         skip_unbuilt(
             app.driver,
             surface="a second seat of one identity in the e2e harness",
-            detail="conftest.py::_alice_extra_seat launches tui, linux, macos and windows seats, and web opens a twin page; android has no second-seat harness",
+            detail="conftest.py::_alice_extra_seat launches tui, linux, macos, ios and windows seats, and web opens a twin page; android has no second-seat harness",
             tracked="",
         )
     if name not in _PUSH_REREAD_APPS:

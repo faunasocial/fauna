@@ -97,6 +97,24 @@ class RecoveryEntryScreenTest {
         assertEquals(SECRET, registry.sessionMaterial(registry.active()!!)?.secretHex)
     }
 
+    /** A failed write is loud and the outcome's own line never covers it. */
+    @Test
+    fun aFailedCommitSaysTheSaveErrorNotTheOutcome() {
+        val machine = mock(OnboardingMachine::class.java)
+        val host = mock(OnboardingHost::class.java)
+        val throwing = mock(FfiAccountRegistry::class.java)
+        whenever(host.machine).thenReturn(machine)
+        whenever(host.appendMode).thenReturn(false)
+        whenever(machine.effectiveSecret()).thenReturn(SECRET)
+        whenever(throwing.confirmIdentity(SECRET, false))
+            .thenThrow(com.fauna.ffi.FfiException.General("keystore unavailable"))
+        RecoveryEntryVM(host, throwing).settle(RecoveryEntryOutcome.Restored, context)
+        verify(machine).identityCommitFailed(
+            org.mockito.ArgumentMatchers.contains("keystore unavailable"),
+        )
+        verify(machine, never()).setErrorMessage(anyString())
+    }
+
     /** …and in append mode, through the same shared moment, which writes nothing. */
     @Test
     fun anAppendRestoreWritesNothingYet() {

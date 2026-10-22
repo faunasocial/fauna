@@ -15,13 +15,11 @@ private func resolveLocalizedTemplate(_ lt: LocalizedText) -> String? {
 
 /// Renders a `LocalizedText` (key + args dictionary) emitted by the
 /// `OnboardingMachine` snapshots. Substitutes `{name}` placeholders with the
-/// args verbatim.
+/// args verbatim, in the one shared single pass (`fillPlaceholders`): an arg
+/// holding `{other}` is data and is never expanded.
 public func renderLocalizedText(_ lt: LocalizedText) -> String {
-    guard var rendered = resolveLocalizedTemplate(lt) else { return "" }
-    for (k, v) in lt.args {
-        rendered = rendered.replacingOccurrences(of: "{\(k)}", with: v)
-    }
-    return rendered
+    guard let template = resolveLocalizedTemplate(lt) else { return "" }
+    return fillPlaceholders(template: template, args: lt.args)
 }
 
 /// `renderLocalizedText`, but each **argument** is first put through `L.lookup`
@@ -35,11 +33,8 @@ public func renderLocalizedText(_ lt: LocalizedText) -> String {
 /// not a key simply misses the lookup (falls back to the raw value via
 /// `L.lookup`'s own miss behavior) and substitutes verbatim.
 public func renderLocalizedTextNested(_ lt: LocalizedText) -> String {
-    guard var rendered = resolveLocalizedTemplate(lt) else { return "" }
-    for (k, v) in lt.args {
-        rendered = rendered.replacingOccurrences(of: "{\(k)}", with: L.lookup(v))
-    }
-    return rendered
+    guard let template = resolveLocalizedTemplate(lt) else { return "" }
+    return fillPlaceholders(template: template, args: lt.args.mapValues { L.lookup($0) })
 }
 
 /// The first non-nil source, in priority order — the shared `errorMessage`

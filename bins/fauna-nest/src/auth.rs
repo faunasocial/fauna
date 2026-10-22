@@ -213,7 +213,7 @@ pub enum RelayReader {
 /// read. Every other purpose (WebDAV, mail, index, nest backup, conversation
 /// attachments) is refused exactly as an unknown bearer is.
 ///
-/// **Here the purpose is read after the mint, and that is right** (`federation.md`
+/// **Here the purpose is read after the mint, and that is right** (`federation-shared-folders.md`
 /// § Cross-nest shared folders + channel append → *Where a federated byte-plane
 /// token is taken for a read*): it confers nothing narrower or wider at the
 /// byte layer — it says which roster names the token's actor. The caller

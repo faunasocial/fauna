@@ -12,20 +12,20 @@
   // WASM twin `libs/fauna-wasm-labeler-catalog`), filtered client-side to
   // `subscribed === true` — no second RPC. Mirrors
   // `apps/fauna-linux/src/views/personalization/mod.rs`'s `HomeShell`.
-  import { identity } from '$lib/store';
-  import { sharedRpcPort } from '$lib/rpc';
+  import { identity } from '#lib/store';
+  import { sharedRpcPort } from '#lib/rpc';
   import {
     ensureWasm,
     publishKindOptions,
     ngramDirectionLabel,
     ngramDocCountLabel,
     textModelNeedsNewerApp,
-  } from '$lib/wasm';
-  import { createLabelerCatalogMachine } from '$lib/wasm-labeler-catalog';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  } from '#lib/wasm';
+  import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
+  import { resolveLocalized } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
-  import { t } from '$lib/i18n/strings';
-  import type { LabelerCatalogSnapshot } from '$lib/labeler-catalog-machine';
+  import { t } from '#lib/i18n/strings';
+  import type { LabelerCatalogSnapshot } from '#lib/labeler-catalog-machine';
   import type { LabelerCatalogMachine } from '../../../static/fauna_wasm_labeler_catalog.js';
   import {
     trainedTopicsList,
@@ -40,10 +40,10 @@
     type PublishListError,
     type PublishModelError,
     type PublishNgram,
-  } from '$lib/rpc';
-  import { getFeedManager } from '$lib/feed';
-  import { onStoreChange } from '$lib/store-change';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/rpc';
+  import { getFeedManager } from '#lib/feed';
+  import { onStoreChange } from '#lib/store-change';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The page-level error surface is the Settings shell's shared MessageBanner
   // (`error-message`); mirrors DevicesSection's bound `error` prop.
@@ -61,7 +61,7 @@
   // at the row (prefilled, the button relabels "Save name") and the next commit
   // renames instead of creating. Any successful commit resets to create mode.
   //
-  // All four gestures are `$lib/rpc` wrappers over the SHARED
+  // All four gestures are `#lib/rpc` wrappers over the SHARED
   // `fauna_client_personalization::TrainedTopics` lifecycle — the registry↔model
   // pairing is not re-coded here (priority #2). Each returns the fresh rows.
   let topics = $state<TrainedTopicRow[]>([]);
@@ -110,7 +110,7 @@
     }
   }
 
-  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // The open page's re-read on a store-change notice (`#lib/store-change`):
   // the topic registry rests in the account store, so another device's
   // create, rename or delete walking in repaints it. Level-shaped, tui's
   // `TrainedTopicsListed` rule: skipped while a gesture is in flight, and a

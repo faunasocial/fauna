@@ -11,10 +11,12 @@ import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.ffi.FfiKnock
 import com.fauna.ffi.FfiNotificationText
+import com.fauna.ffi.knockPushMutedFor
 import com.fauna.ffi.knockTextFor
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import uniffi.fauna_core.MutedKeyword
 
 @Singleton
 class NotificationHelper @Inject constructor(
@@ -123,8 +125,14 @@ class NotificationHelper @Inject constructor(
      * sender — never the knocker's raw message on its own. The message arg arrives
      * already sanitized to plain capped text. Coalesced under one id
      * ([KNOCK_NOTIFICATION_ID]). Opens Contacts, where the pending knock is.
+     *
+     * **None for a knock a muted word collapses** (`behavior/notifications.md`
+     * § Muted words rule 6): the toast paints the same relayed text as the
+     * knock's row and cannot be revealed, so it asks the shared
+     * [knockPushMutedFor] over [mutedKeywords] first. Returns whether it fired.
      */
-    fun postKnockNotification(knock: FfiKnock) {
+    fun postKnockNotification(knock: FfiKnock, mutedKeywords: List<MutedKeyword>): Boolean {
+        if (knockPushMutedFor(knock, mutedKeywords)) return false
         val body = when (val text = knockTextFor(knock)) {
             is FfiNotificationText.Localized -> resolveLocalized(context, text.text).orEmpty()
             is FfiNotificationText.Verbatim -> text.text
@@ -146,13 +154,48 @@ class NotificationHelper @Inject constructor(
             .setContentIntent(pendingIntent)
             .build()
 
-        try {
+        return try {
             NotificationManagerCompat.from(context)
                 .notify(KNOCK_NOTIFICATION_ID, notification)
-        } catch (_: SecurityException) {}
+            true
+        } catch (_: SecurityException) {
+            false
+        }
+    }
+
+    /**
+     * Raise the banner for one push message the nest sent while the app was
+     * closed (`common.md` § Push Notifications) — the generic strings a
+     * `web-push` delivery carries, on the messages channel. Coalesced under one
+     * id ([PUSH_NOTIFICATION_ID]): the strings say only that something
+     * arrived, so a stack of them says nothing more. A tap opens the app.
+     */
+    fun postPushNotification(title: String, body: String): Boolean {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, PUSH_NOTIFICATION_ID, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+            .setSmallIcon(android.R.drawable.ic_dialog_email)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+        return try {
+            NotificationManagerCompat.from(context).notify(PUSH_NOTIFICATION_ID, notification)
+            true
+        } catch (_: SecurityException) {
+            false
+        }
     }
 
     companion object {
+        /** One id for every push banner ([postPushNotification]). */
+        const val PUSH_NOTIFICATION_ID = 0x5055
         const val CHANNEL_MESSAGES = "fauna_messages"
         const val CHANNEL_GROUPS = "fauna_groups"
         const val CHANNEL_CONTACTS = "fauna_contacts"

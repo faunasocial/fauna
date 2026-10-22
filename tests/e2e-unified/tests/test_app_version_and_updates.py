@@ -217,10 +217,8 @@ def test_asking_for_a_newer_version_says_so_and_where_to_get_it(
     )
 
 
-# Outcome 3's witness, unmarked until the catalog lists that outcome: listing it
-# declares web, iOS and Android absent from it, which waits on the user's
-# approval. The answer lands the
-# outcome and adds `@pytest.mark.feature("app-version-and-updates")` here.
+# Outcome 3's witness; web, iOS and Android are declared absent from it.
+@pytest.mark.feature("app-version-and-updates")
 def test_signing_in_looks_once_and_only_tells_you(
     signed_in_with_a_newer_release_out, release_feed_stub
 ):

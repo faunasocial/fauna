@@ -79,8 +79,8 @@ Stamped 2026-10-09 at a0eef3f66d.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows |  no run recorded | |
 | macos |  no run recorded | |
 | ios |  no run recorded | |
@@ -89,22 +89,22 @@ Stamped 2026-10-09 at a0eef3f66d.
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_own_renewals_fold_into_one_row_and_survive_sign_out_everywhere_else` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_own_renewals_fold_into_one_row_and_survive_sign_out_everywhere_else` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_ending_a_sign_in_closes_its_connections_at_once_and_leaves_the_others_working` | nest (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_ending_a_sign_in_closes_its_connections_at_once_and_leaves_the_others_working` | nest (linux): passed |
 | 12 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_naming_someone_elses_sign_in_ends_nothing` | nest (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
-| 16 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
+| 16 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_a_lock_lasts_exactly_24_hours_whatever_the_request_asks` | nest (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_locking_ends_every_sign_in_and_closes_every_connection_the_pressers_included` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_while_locked_nobody_signs_in_and_the_refusal_says_when_the_lock_ends` | nest (linux): passed |
@@ -116,5 +116,5 @@ Stamped 2026-10-09 at a0eef3f66d.
 | 25 | app | `tests/e2e-unified/tests/test_emergency_lockout_door.py::test_the_door_locks_an_account_from_a_device_that_holds_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_emergency_lockout_door.py::test_the_door_locks_an_account_from_a_device_that_holds_nothing` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_sign_in_ending_and_lockout.py::test_a_lock_request_more_than_five_minutes_old_is_refused` | nest (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): passed, linux (linux): failed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_sessions_page.py::test_list_revoke_one_then_sign_out_everywhere_else` | web (linux): failed, linux (linux): failed, tui (linux): passed |
 <!-- features-render:end -->

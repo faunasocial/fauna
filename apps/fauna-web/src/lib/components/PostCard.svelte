@@ -12,14 +12,14 @@
   import TipSurface from './payments/TipSurface.svelte';
   import SoldPostTeaser from './payments/SoldPostTeaser.svelte';
   import RegionPlaceholder from './RegionPlaceholder.svelte';
-  import { markdownToHtml } from '$lib/markdown';
-  import { liveStatusClass } from '$lib/feed-utils';
-  import { contactOverlays, contactsRevision } from '$lib/conversations';
-  import { structuredView, markdownToDocument, postCardGate, type BridgeIdentity, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
-  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, documentMediaBlocks, mediaBlockKey, resolvedLinkPreviews } from '$lib/document';
-  import { t } from '$lib/i18n/strings';
-  import { relativeTime } from '$lib/value-format';
-  import { IDS } from '$lib/generated/uiIds';
+  import { markdownToHtml } from '#lib/markdown';
+  import { liveStatusClass } from '#lib/feed-utils';
+  import { contactOverlays, contactsRevision } from '#lib/conversations';
+  import { structuredView, markdownToDocument, postCardGate, type BridgeIdentity, type ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
+  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, documentMediaBlocks, mediaBlockKey, resolvedLinkPreviews } from '#lib/document';
+  import { t } from '#lib/i18n/strings';
+  import { relativeTime } from '#lib/value-format';
+  import { IDS } from '#lib/generated/uiIds';
 
   /** A snapshot `fauna_feed::PostSummary` — the shared post-list row
    *  (`feed.md` § State & data shape). `body` is the nest's preview; `tags` /
@@ -42,7 +42,7 @@
      *  still in flight, or if it did not open — paint nothing, as for any undecodable
      *  image. The card cannot reach the feed manager, so the page decides which of the
      *  two it is and hands down the result — the same shape as `onrevealremote`. */
-    mediaUrl: (hash: string) => string | null;
+    mediaUrl: (hash: string, post?: unknown) => string | null;
     /** A bridged post's `ProxiedImage` path → the object URL of its bytes, fetched by the page
      *  with the session bearer (render-model.md § D6c); `null` while in flight or after a
      *  failure — the card then paints the path placeholder. Absent → placeholder only. */
@@ -52,7 +52,7 @@
      *  (a nest URL, or a sealed item's object URL). `null` = nothing playable. On the page for
      *  `mediaUrl`'s reason: the card cannot reach the feed manager. */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    playbackUrl?: (block: any) => Promise<string | null>;
+    playbackUrl?: (block: any, post?: unknown) => Promise<string | null>;
     oninteract: (post_id: string, action: string) => void;
     contentLabel?: string;
     /** Open the post-detail view (ui.yaml feed transition `click post-card → post_detail`). */
@@ -120,6 +120,11 @@
      *  that act — "You reported this", `source="reported"` — and no body paints
      *  (`moderation.md` § Corollary). Only meaningful with `contentBlocked`. */
     contentReported?: boolean;
+    /** The guardian rule's reason, verbatim, painted beside the family-policy
+     *  frame in `content-policy-blocked-reason` — block and collapse arms alike
+     *  (`nest-rules.md` § The shared rule editor → *The reason is the member's
+     *  to read*). `null` for a floor, the viewer's own threshold or a report. */
+    contentReason?: string | null;
     /** `feed-post-report-button` in the ⋯ menu — gated `!isOwn`; the parent
      *  opens the shared report sheet on this post. */
     onreport?: (post_id: string) => void;
@@ -176,6 +181,7 @@
     onrevealcontent,
     regionPlaceholder = null,
     contentReported = false,
+    contentReason = null,
     onreport,
   }: Props = $props();
 
@@ -195,7 +201,7 @@
   // menu before reading a verb's state.
   let actionsOpen = $state(false);
 
-  // The engagement-cue capture shell's probe key (`$lib/feed-cues`): only a card
+  // The engagement-cue capture shell's probe key (`#lib/feed-cues`): only a card
   // that shows its post is an exposure. A region, block, mute or collapse
   // placeholder carries no subject, so lingering on one trains nothing.
   let cueSubject = $derived(!regionPlaceholder && !contentBlocked && !muted && !contentCollapsed);
@@ -357,13 +363,18 @@
        of the body, NO reveal (family-safety.md § Content policy; mirrors the
        legal-takedown tombstone). Checked AHEAD of `muted`, so a blocked post can
        never be revealed past the floor. `content-policy-blocked-notice` is the
-       one ui.yaml ID this pillar renders (indexed, per post-card). -->
+       pillar's notice (indexed, per post-card); `state` tells it from the
+       collapse arm's. -->
   <div class="content-policy-collapse">
     <span
       class="muted"
       data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+      data-state="blocked"
       data-source={contentReported ? 'reported' : undefined}
     >{contentReported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</span>
+    {#if contentReason}
+      <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON}>{contentReason}</span>
+    {/if}
   </div>
 {:else if muted}
   <!-- Muted-keyword collapse. The body, media and author are NOT rendered — the
@@ -372,23 +383,31 @@
        stays muted, this just un-collapses this instance. The linux twin is
        `build_muted_collapse`; the conversation twin is `dm-message-muted`. -->
   <div class="muted-collapse">
-    <span class="muted" data-testid={IDS.FEED_POST_MUTED}>{t.feed.post_muted_placeholder}</span>
+    <span class="muted" data-testid={IDS.FEED_POST_MUTED}>{t.muted_words.collapsed}</span>
     <button
       class="btn-secondary small"
       data-testid={IDS.FEED_POST_MUTED_REVEAL_BUTTON}
       onclick={(e) => { e.stopPropagation(); onrevealmuted?.(post.post_id); }}
-    >{t.feed.post_muted_reveal}</button>
+    >{t.muted_words.reveal}</button>
   </div>
 {:else if contentCollapsed}
   <!-- Content-policy COLLAPSE (a viewer's own threshold, or a guardian
        `collapse` floor) — a one-tap reveal, session-local; the floor itself
        persists (the guardian relaxing it is what stops future collapse).
-       Presentation only, no test id: v1 e2e drives the block case (linux
-       precedent — `build_content_collapse`). -->
+       The block arm's notice in `state="collapsed"` beside
+       `content-policy-collapsed-reveal-button` (ids user-approved 2026-10-16). -->
   <div class="content-policy-collapse">
-    <span class="muted">{t.family.content_collapsed_notice}</span>
+    <span
+      class="muted"
+      data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+      data-state="collapsed"
+    >{t.family.content_collapsed_notice}</span>
+    {#if contentReason}
+      <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON}>{contentReason}</span>
+    {/if}
     <button
       class="btn-secondary small"
+      data-testid={IDS.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON}
       onclick={(e) => { e.stopPropagation(); onrevealcontent?.(post.post_id); }}
     >{t.family.content_reveal_button}</button>
   </div>
@@ -452,6 +471,13 @@
         {onopenpaymentlink}
         onbuy={() => onbuyunlockoffer?.(post.post_id)}
       />
+    {/if}
+    <!-- Bought, the author's grant still on its way (monetization.md § Per-post
+         pay-to-unlock → a completed buy must not be re-offered): the shared
+         `unlock_purchase_pending` marker, never set while the offer is and
+         kept off an opened post. Same payments gate as the buy button. -->
+    {#if __FAUNA_PAYMENTS__ && !post.unlock_offer && post.unlock_purchase_pending && !post.gated_unlocked}
+      <span class="muted" data-testid={IDS.GATED_POST_PURCHASE_PENDING}>{t.feed.post.purchase_pending}</span>
     {/if}
     {#if ontrain || showDelete || showWebPublish || showReport}
       <!-- Per-card ⋯ overflow (the dm-message-actions-button precedent applied to
@@ -681,7 +707,7 @@
                  blob URL for everything else. No is-this-post-gated branch here —
                  the card paints whatever string it is given (media.md
                  § Encryption at rest). `null` = in flight or would not open. -->
-            {@const mediaSrc = mediaUrl(block.Image.hash)}
+            {@const mediaSrc = mediaUrl(block.Image.hash, post)}
             {#if mediaSrc}
               <C2paImage data-testid={IDS.POST_IMAGE} data-blob-hash={block.Image.hash} src={mediaSrc} alt={block.Image.alt || 'post media'} class="post-media-img" thumb />
             {/if}
@@ -689,7 +715,7 @@
             <VideoThumbnail
               src={blobUrl(block.Video.hash)}
               alt={block.Video.alt || 'post video'}
-              resolveSource={playbackUrl ? () => playbackUrl(block) : undefined}
+              resolveSource={playbackUrl ? () => playbackUrl(block, post) : undefined}
               postId={post.post_id}
             />
           {:else if 'ProxiedImage' in block}
@@ -708,7 +734,7 @@
             <VideoThumbnail
               caption={block.ProxiedVideo.path}
               alt={block.ProxiedVideo.alt || 'post video'}
-              resolveSource={playbackUrl ? () => playbackUrl(block) : undefined}
+              resolveSource={playbackUrl ? () => playbackUrl(block, post) : undefined}
               postId={post.post_id}
             />
           {/if}

@@ -751,3 +751,218 @@ def test_family_ward_feed_source_ask_redeems_once(app, bridges_nest, request):
         "a second link after the grant was spent was not refused by the guardian "
         f"gate: {refused.value.code!r}"
     )
+
+
+# --- The linked card: settings, follows, identity (catalog `bridges` 5–8) ---
+#
+# tui first, the lead app: the ids these journeys read (`bridge-setting[<key>]`,
+# `bridge-follow-id-input`, `bridge-follow-petname-input`, `bridge-identity`)
+# were approved 2026-10-16, and the other six apps gain the marker in the
+# cross-app lift. Every mutation is the user's gesture on the card (convention
+# 8); `fauna.bridges.list` / `list_follows` is the oracle for what the nest kept.
+
+
+def _ensure_ap_linked(app, bridges_nest) -> None:
+    """Link ActivityPub through the page when it is not linked yet."""
+    app.bridges.navigate()
+    assert app.bridges.is_page_visible(), (
+        f"Bridges page should be reachable. error: {app.bridges.page_error_text()!r}"
+    )
+    status = _find_bridge(_bridges_api_actor(bridges_nest).bridges_list(), AP_BRIDGE_ID)
+    if status and status["linked"]:
+        return
+    app.bridges.link(AP_BRIDGE_ID)
+    linked, error, waited = _await_linked(app, bridges_nest, True)
+    assert linked and linked["linked"], (
+        f"activitypub should link (waited {waited:.1f}s); error {error!r}; "
+        f"status {linked!r}"
+    )
+
+
+def _unlink_ap(app, bridges_nest) -> None:
+    app.bridges.unlink(AP_BRIDGE_ID)
+    _await_linked(app, bridges_nest, False)
+
+
+def _ap_setting(bridges_nest, key: str):
+    status = _find_bridge(_bridges_api_actor(bridges_nest).bridges_list(), AP_BRIDGE_ID)
+    return next(
+        (s["value"] for s in (status or {}).get("settings") or [] if s["key"] == key),
+        None,
+    )
+
+
+def _poll(read, want, budget: float = 15.0):
+    """Deadline poll until `read()` equals `want`; returns the last read
+    (convention 14 — never a settle-sleep)."""
+    deadline = time.monotonic() + budget
+    got = read()
+    while got != want and time.monotonic() < deadline:
+        time.sleep(0.3)
+        got = read()
+    return got
+
+
+def _leave_and_return(app) -> None:
+    """Navigate off the Bridges page and back, so the card repaints from a
+    fresh `fauna.bridges.list` rather than from anything held since the tap."""
+    app.driver.navigate_to("feed")
+    app.bridges.navigate()
+    assert app.bridges.is_page_visible(), (
+        f"Bridges page should be reachable again. "
+        f"error: {app.bridges.page_error_text()!r}"
+    )
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.feature("bridges")
+def test_a_card_setting_saves_on_change(bridges_logged_in_app, bridges_nest):
+    """Flip `auto_accept_follows` on the linked card: the nest has it at once,
+    with no other gesture — no save step exists to take — and the row still
+    reads it after leaving the page and coming back (bridges.md § Bridge
+    settings)."""
+    app = bridges_logged_in_app
+    key = "auto_accept_follows"
+    _ensure_ap_linked(app, bridges_nest)
+    try:
+        before = _ap_setting(bridges_nest, key)
+        assert before is True, f"{key} defaults on: {before!r}"
+        assert _poll(lambda: app.bridges.setting_checked(AP_BRIDGE_ID, key), "true") == "true", (
+            app.driver.diagnose(f"bridge-setting[{key}]", attrs=("checked",))
+        )
+
+        app.bridges.toggle_setting(AP_BRIDGE_ID, key)
+        # The tap is the whole commit: the nest must hold the new value with no
+        # further gesture — the absence of any save control, observed.
+        assert _poll(lambda: _ap_setting(bridges_nest, key), False) is False, (
+            f"the change should save on the spot; the nest still has "
+            f"{_ap_setting(bridges_nest, key)!r}. "
+            f"error {app.bridges.page_error_text(timeout=0)!r}"
+        )
+
+        _leave_and_return(app)
+        assert _poll(lambda: app.bridges.setting_checked(AP_BRIDGE_ID, key), "false") == "false", (
+            f"the row should still read the saved value: "
+            f"{app.driver.diagnose(f'bridge-setting[{key}]', attrs=('checked',))}"
+        )
+
+        app.bridges.toggle_setting(AP_BRIDGE_ID, key)
+        assert _poll(lambda: _ap_setting(bridges_nest, key), True) is True
+    finally:
+        _unlink_ap(app, bridges_nest)
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.feature("bridges")
+def test_the_search_toggle_and_cap_persist(bridges_logged_in_app, bridges_nest):
+    """Turn `show_in_search` off and set `limit_posts_in_search` on the card:
+    both are the nest's at once and both still read so after leaving the page
+    (bridges.md § Bridge settings; content-index.md § Bridge content in the
+    Search corpus)."""
+    app = bridges_logged_in_app
+    show, cap = "show_in_search", "limit_posts_in_search"
+    _ensure_ap_linked(app, bridges_nest)
+    try:
+        for key in (show, cap):
+            assert app.bridges.has_setting(AP_BRIDGE_ID, key), (
+                f"every content bridge's card carries {key}: "
+                f"{app.driver.diagnose(f'bridge-setting[{key}]')}"
+            )
+        assert _ap_setting(bridges_nest, show) is True
+
+        app.bridges.toggle_setting(AP_BRIDGE_ID, show)
+        assert _poll(lambda: _ap_setting(bridges_nest, show), False) is False, (
+            f"show_in_search should save off; nest has {_ap_setting(bridges_nest, show)!r}. "
+            f"error {app.bridges.page_error_text(timeout=0)!r}"
+        )
+        app.bridges.commit_setting(AP_BRIDGE_ID, cap, "250")
+        assert _poll(lambda: _ap_setting(bridges_nest, cap), 250) == 250, (
+            f"the cap should save as 250; nest has {_ap_setting(bridges_nest, cap)!r}. "
+            f"error {app.bridges.page_error_text(timeout=0)!r}"
+        )
+
+        _leave_and_return(app)
+        assert _poll(lambda: app.bridges.setting_checked(AP_BRIDGE_ID, show), "false") == "false", (
+            app.driver.diagnose(f"bridge-setting[{show}]", attrs=("checked",))
+        )
+        assert _poll(lambda: app.bridges.setting_text(AP_BRIDGE_ID, cap), "250") == "250", (
+            app.driver.diagnose(f"bridge-setting[{cap}]")
+        )
+
+        app.bridges.toggle_setting(AP_BRIDGE_ID, show)
+        assert _poll(lambda: _ap_setting(bridges_nest, show), True) is True
+        app.bridges.commit_setting(AP_BRIDGE_ID, cap, "1000")
+        assert _poll(lambda: _ap_setting(bridges_nest, cap), 1000) == 1000
+    finally:
+        _unlink_ap(app, bridges_nest)
+
+
+# ActivityPub's add_follow takes the remote actor URI (bridge_provider.rs). A
+# reserved `.invalid` host: the nest keeps the follow and its Follow delivery
+# finds no actor, which is best-effort and never fails the add.
+FOLLOW_ACTOR_URI = "https://alice.invalid/users/alice"
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.feature("bridges")
+def test_a_follow_keeps_its_nickname(bridges_logged_in_app, bridges_nest):
+    """Follow by the actor URI with the nickname "Alice": the row reads
+    "Alice", the nest's `list_follows` carries it, and remove empties the list
+    (bridges.md § Follows)."""
+    app = bridges_logged_in_app
+    api = _bridges_api_actor(bridges_nest)
+    _ensure_ap_linked(app, bridges_nest)
+    try:
+        assert api.bridges_list_follows(AP_BRIDGE_ID) == []
+
+        app.bridges.add_follow(AP_BRIDGE_ID, FOLLOW_ACTOR_URI, "Alice")
+        follows = _poll(
+            lambda: [(f["id"], f.get("petname")) for f in api.bridges_list_follows(AP_BRIDGE_ID)],
+            [(FOLLOW_ACTOR_URI, "Alice")],
+        )
+        assert follows == [(FOLLOW_ACTOR_URI, "Alice")], (
+            f"the nest should keep the follow with its nickname, got {follows!r}. "
+            f"error {app.bridges.page_error_text(timeout=0)!r}"
+        )
+        rows = _poll(lambda: app.bridges.follow_rows(AP_BRIDGE_ID), ["Alice"])
+        assert rows == ["Alice"], (
+            f"the follow should be listed by its nickname, got {rows!r}: "
+            f"{app.driver.diagnose('bridge-follow-item')}"
+        )
+
+        app.bridges.remove_follow(AP_BRIDGE_ID, 0)
+        assert _poll(lambda: api.bridges_list_follows(AP_BRIDGE_ID), []) == [], (
+            f"remove should leave no follow: {api.bridges_list_follows(AP_BRIDGE_ID)!r}"
+        )
+        assert _poll(lambda: app.bridges.follow_rows(AP_BRIDGE_ID), []) == []
+    finally:
+        _unlink_ap(app, bridges_nest)
+
+
+@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.web
+@pytest.mark.feature("bridges")
+def test_the_card_shows_the_linked_identity(bridges_logged_in_app, bridges_nest):
+    """`bridge-identity` reads the identity the nest reports for the linked
+    account — "<label>: <display>" (bridges.md § Link modes)."""
+    app = bridges_logged_in_app
+    _ensure_ap_linked(app, bridges_nest)
+    try:
+        status = _find_bridge(_bridges_api_actor(bridges_nest).bridges_list(), AP_BRIDGE_ID)
+        identity = (status or {}).get("identity")
+        assert identity, f"a linked activitypub bridge carries an identity: {status!r}"
+        want = f"{identity['label']}: {identity['display']}"
+        shown = _poll(lambda: app.bridges.identity_text(AP_BRIDGE_ID), want)
+        assert shown == want, (
+            f"bridge-identity should read {want!r}, got {shown!r}: "
+            f"{app.driver.diagnose('bridge-identity')}"
+        )
+    finally:
+        _unlink_ap(app, bridges_nest)

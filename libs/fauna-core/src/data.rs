@@ -1179,10 +1179,44 @@ pub struct Profile {
     /// — never `null` — is the only encoding of "no binding").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_head: Option<crate::recovery::ChainHead>,
+    /// Who beyond this actor's own nest may read this profile — the actor's
+    /// signed opt-in to the cross-nest read (`docs/goal/ui/profile.md`
+    /// § Where logic lives → *The remote read*). Absent decodes as
+    /// [`ProfileAudience::ThisNest`], so an editor that predates the field
+    /// re-signs it away and fails closed.
+    #[serde(default)]
+    pub audience: ProfileAudience,
     pub updated_at: Timestamp,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Whether a profile may be read from other nests
+/// (`docs/goal/ui/profile.md` § Where logic lives → *The remote read*). A
+/// field of the public record, not a privacy mode: every same-nest actor
+/// reads a profile whatever its audience.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileAudience {
+    /// Readable on the actor's own nest only (default).
+    #[default]
+    ThisNest,
+    /// The home serves it to other nests over `fauna.federation.profile.get`.
+    Everyone,
+    /// An audience a newer build writes into the signed profile and this one
+    /// does not name, carried whole so the owner's re-sign keeps it
+    /// (`transport.md` § Schema and forward-compat discipline → *Rule 3 in
+    /// full*). It acts as [`Self::ThisNest`] ([`Self::is_everyone`] is false).
+    #[serde(untagged)]
+    Unknown(CarriedValue),
+}
+
+impl ProfileAudience {
+    /// True only for [`Self::Everyone`] — the one audience the home serves
+    /// across nests; [`Self::Unknown`] fails closed.
+    pub fn is_everyone(&self) -> bool {
+        matches!(self, Self::Everyone)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileLink {
     pub label: String,
     pub uri: String,
@@ -3073,7 +3107,7 @@ pub const MAX_REFUSED_CHANGE_ADDRESS_BYTES: usize = 254;
 /// `fauna.state.refused-scheduling-changes` row): what
 /// [`MAX_REFUSED_SCHEDULING_CHANGES`] rows, each at every field's ceiling, may
 /// add to the encoded row — 32 KiB, well inside the plane's per-entry byte cap
-/// (`caldav-server.md` § *Where the record rests* →
+/// (`inbound-scheduling-authority.md` § *Where the record rests* →
 /// **Retention**).
 ///
 /// Not enforced by measuring: it follows from the per-field ceilings, and the
@@ -3102,7 +3136,7 @@ const _: () = assert!(
 /// One **refused inbound scheduling change** — someone whose message may not
 /// make the change it asked for tried to cancel, rewrite, or answer for an
 /// event on this user's calendar, and the client refused it
-/// (`docs/goal/behavior/caldav-server.md` § Who may mutate an existing event
+/// (`docs/goal/behavior/inbound-scheduling-authority.md` § Who may mutate an existing event
 /// over the inbound rail → *Surfacing*).
 ///
 /// **Informational, never actionable.** The ruling forbids an "apply anyway"
@@ -3155,7 +3189,7 @@ pub struct RefusedSchedulingChange {
     pub author_home_nest_url: String,
     /// The email address the **delivery door authenticated** as the sender of
     /// a refused mailed `REPLY` — the value of the sealed copy's
-    /// `X-Fauna-Authenticated-Sender` stamp (`caldav-server.md` § Who may
+    /// `X-Fauna-Authenticated-Sender` stamp (`inbound-scheduling-authority.md` § Who may
     /// mutate an existing event over the inbound rail → *The mail rail*).
     /// Empty for the sealed scheduling rail (which names an actor in
     /// [`Self::author`] instead) and for a mailed copy that carried no stamp
@@ -5096,7 +5130,7 @@ pub(crate) fn merge_succession_burns(
 /// happens in `libs/fauna-client-mail-settings/`.
 ///
 /// The type stays tolerant (no `deny_unknown_fields`); the plane row decodes
-/// it strict by round-trip instead (`crate::mail_rows`). The three stamp/marker fields are
+/// it strict by round-trip instead (`crate::mail_rows`). The four stamp/marker fields are
 /// `#[serde(default)]` and always emitted, so a decoded row re-encodes to its
 /// own bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5132,6 +5166,16 @@ pub struct MailCredential {
     /// row; a marked row naming a generation is owed a delete.
     #[serde(default)]
     pub wrapped_under: Option<MsekFingerprint>,
+    /// **The token-mint stamp** — the `issued_at` (unix seconds, the
+    /// submission-token clock) of the newest outbound `SubmissionToken` the
+    /// fleet minted and provisioned for this credential
+    /// (`mail-credentials.md` § Architectural rules, rule 10). Joins on the
+    /// LATER mint whatever the row's own stamp ([`Self::merge`]), so a write
+    /// that read the row before a re-mint cannot set the refresh back. `None`
+    /// reads as unknown, which an email-enabled live row is owed a re-mint for
+    /// (`fauna_client_mail_settings::token_refresh`).
+    #[serde(default)]
+    pub token_minted_at: Option<u64>,
     /// **The soft-revoke marker** — the unix-seconds instant the user revoked
     /// the credential. Monotone: present-wins, the earliest instant, never
     /// undone by a later stamp ([`Self::merge`]). The plane's fold hides a revoked row, and its id stays spent.
@@ -5168,6 +5212,9 @@ impl MailCredential {
     ///   are **present-wins with the earliest instant**: monotone, so no later
     ///   stamp undoes a burn (a racing re-wrap must never put a thief-known
     ///   secret back into the survivor set) or a revoke.
+    /// - The token-mint stamp ([`Self::token_minted_at`]) is **the later
+    ///   mint**, independent of the remainder: a newer mint is what the nest
+    ///   holds, and a stale writer must not make the refresh re-mint early.
     /// - The remainder — `display_name`, `kind`, `wrapped_under`,
     ///   `created_at`, `updated_at` and the secret — is **latest-wins on the
     ///   row's own `updated_at`**, a tie settling on the remainder itself (the
@@ -5219,6 +5266,7 @@ impl MailCredential {
             created_at: win.created_at,
             updated_at: win.updated_at,
             wrapped_under: win.wrapped_under,
+            token_minted_at: self.token_minted_at.max(other.token_minted_at),
             revoked_at_unix,
             burned,
         }
@@ -7228,7 +7276,7 @@ pub struct ForeignFolder {
     /// The member's access grant on this set (`"reader"` / `"writer"`), as the
     /// **home** nest resolved it from its own `folder_member_access` row —
     /// seeded on the Welcome relay and refreshed by the `caller_access` stamp
-    /// every federated read reply carries (`../architecture/federation.md`
+    /// every federated read reply carries (`../architecture/federation-shared-folders.md`
     /// § Cross-nest → *Recipient-side access discovery*).
     ///
     /// **Advisory-for-UI ONLY — never an authorization input** (the cross-nest
@@ -7276,7 +7324,7 @@ pub struct ForeignFolder {
     #[serde(default)]
     pub residency: Option<ForeignResidency>,
     /// The set's owner's **handle**, as the home nest stamped it and this
-    /// member's own nest verified it (`../architecture/federation.md`
+    /// member's own nest verified it (`../architecture/federation-shared-folders.md`
     /// § Cross-nest shared folders + channel append → *The cross-nest owner
     /// label*): written at accept from the Welcome's
     /// `shared_by_handle`/`shared_by_domain` pair and refreshed from every
@@ -8012,6 +8060,7 @@ mod account_record_tests {
                 recovery_pubkey: [5u8; 32],
                 seq: 4,
             }),
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         };
         let bytes =
@@ -8091,6 +8140,7 @@ mod account_record_tests {
                 recovery_pubkey: [6u8; 32],
                 seq: 5,
             }),
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         };
         let bytes =
@@ -8176,6 +8226,7 @@ mod account_record_tests {
                 recovery_pubkey: [5u8; 32],
                 seq: 9,
             }),
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         };
         let cert = DeviceAuthorization {
@@ -8249,6 +8300,7 @@ mod account_record_tests {
                 load_hint: None,
                 inbox_mode: InboxMode::Open,
                 recovery_head: Some(head),
+                audience: crate::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp::now(),
             };
             crate::encoding::sign_and_pack(&peer_kp, &profile).expect("the identity key signs")
@@ -10073,7 +10125,7 @@ mod account_record_tests {
     }
 
     /// The owner label is the fifth latest-wins advisory pair
-    /// (`federation.md` § … *The cross-nest owner label*, join rule): a later
+    /// (`federation-shared-folders.md` § … *The cross-nest owner label*, join rule): a later
     /// stamp's pair lands whole — a rename and a clear alike — and a tie folds
     /// the pair as one unit, so a handle never pairs with another replica's
     /// domain. Commutative and idempotent.
@@ -10418,6 +10470,7 @@ mod nest_entry_tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         assert_eq!(profile.nests.len(), 1);
@@ -10464,6 +10517,7 @@ mod nest_entry_tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         assert_eq!(profile.admin_nests.len(), 1);

@@ -6,10 +6,12 @@ ledger writer is a pure function of "what the run observed", and the marker half
 exercised against the live conftest's own selection helpers rather than a copy of
 them, so a change to the real hook that broke the rule would red these.
 """
+import copy
 import json
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -1079,12 +1081,15 @@ def test_collection_reads_the_trees_dirt_once_and_stamps_the_run_with_it(monkeyp
     monkeypatch.setattr(real, "_selected_repo_ids", set())
     monkeypatch.setattr(fl, "tree_dirt", lambda repo=None: [" M tests/e2e-unified/conftest.py"])
 
-    real._apply_feature_axis(_Config(), [_Item(["feed-read"])])
+    with _isolated_last_green():
+        real._apply_feature_axis(_Config(), [_Item(["feed-read"])])
 
-    assert real._feature_run["dirty"] is True
-    assert real._feature_run["dirt"] == [" M tests/e2e-unified/conftest.py"]
-    assert real._feature_run["stamp"].partition(" ")[0].endswith(".dirty"), \
-        real._feature_run["stamp"]
+        assert real._feature_run["dirty"] is True
+        assert real._feature_run["dirt"] == [" M tests/e2e-unified/conftest.py"]
+        assert real._feature_run["stamp"].partition(" ")[0].endswith(".dirty"), \
+            real._feature_run["stamp"]
+        # ...and the directory's run shares the one reading, never a second one.
+        assert lg._run["dirty"] is True and lg._run["commit"] == real._feature_run["commit"]
 
 
 def test_the_session_summary_says_the_tree_was_dirty(monkeypatch, capsys):
@@ -1616,7 +1621,7 @@ def test_the_preflight_is_wired_where_a_live_run_first_signs_in():
 
 def test_the_admin_probe_skip_names_the_seed_source_it_was_refused_with(_live_run):
     """A `not_registered` to the admin seed is only diagnosable when the skip says
-    WHICH seed was refused — the former live nest's ~/.fauna-id offered to dev.example.com read
+    WHICH seed was refused — the former live nest's ~/.fauna-id offered to the dev nest read
     as a reset box for a whole session."""
     what = live_box_door.admin_probe_what("https://box", "~/.fauna-id")
     with pytest.raises(pytest.skip.Exception, match=r"admin seed from ~/\.fauna-id.*not_registered"):
@@ -1631,3 +1636,287 @@ def test_the_live_provider_probes_with_the_seed_resolved_for_its_url():
 
     assert "resolve_secret(url)" in inspect.getsource(conftest._LiveProvider._admin)
     assert "admin_probe_what(" in inspect.getsource(conftest._LiveProvider._admin)
+
+
+# ── the last-green directory (delayed-testing.md § The last-green directory) ──
+from helpers import last_green as lg  # noqa: E402
+
+
+@contextmanager
+def _isolated_last_green():
+    """Empty the hook's session containers IN PLACE and restore them before the test
+    body returns. A monkeypatch would restore them only at teardown, and the live
+    run's own call report for THIS test fires after the body but before teardown, so
+    that report would land in the patched copy and be lost from the live record."""
+    import conftest as real
+
+    held = [(c, copy.copy(c)) for c in (lg._run, lg._observed, real._feature_run,
+                                        real._selected_repo_ids, real._baseline_results,
+                                        real._skip_reasons)]
+    for container, _ in held:
+        container.clear()
+    try:
+        yield real
+    finally:
+        for container, saved in held:
+            container.clear()
+            container.update(saved)
+
+
+class _LgConfig:
+    rootpath = Path(__file__).resolve().parent.parent
+
+    def __init__(self, collectonly=False, **opts):
+        self.option = type("_Option", (), {"collectonly": collectonly})()
+        self.opts = {"feature": [], "no_feature_ledger": False, "release_candidate": False,
+                     **opts}
+
+    def getoption(self, name, default=None):
+        return self.opts.get(name, default)
+
+
+class _LogReport:
+    """The attributes `pytest_runtest_logreport` reads off a report."""
+
+    def __init__(self, nodeid, when, outcome, duration):
+        self.nodeid, self.when, self.outcome, self.duration = nodeid, when, outcome, duration
+        self.longrepr = ("t.py", 1, "declared") if outcome == "skipped" else None
+
+
+def _phases(nodeid, outcome):
+    """One test's three reports, as pytest sends them for each shape of outcome."""
+    if outcome in ("passed", "failed"):
+        return [_LogReport(nodeid, "setup", "passed", 0.5),
+                _LogReport(nodeid, "call", outcome, 2.0),
+                _LogReport(nodeid, "teardown", "passed", 0.25)]
+    if outcome == "error":
+        return [_LogReport(nodeid, "setup", "failed", 0.5),
+                _LogReport(nodeid, "teardown", "passed", 0.25)]
+    # "skip:unbuilt" / "skip:environment": a declared skip at setup
+    return [_LogReport(nodeid, "setup", "skipped", 0.1),
+            _LogReport(nodeid, "teardown", "passed", 0.0)]
+
+
+LG_A = "tests/test_lg.py::test_lists[tui]"
+LG_B = "tests/test_lg.py::test_orders[tui-docker]"
+LG_KEY_A = "tests/e2e-unified/" + LG_A
+LG_KEY_B = "tests/e2e-unified/" + LG_B
+COMMIT_A, COMMIT_B = "a" * 40, "c" * 40
+
+
+def _lg_session(monkeypatch, directory, outcomes, *, commit=COMMIT_A, dirty=False,
+                tagged=(), config=None):
+    """One pytest session of the directory's event, driven through the live conftest's
+    own hooks: collection (`_apply_feature_axis`), a report per phase per test
+    (`pytest_runtest_logreport`) and the session-end merge. `outcomes` maps a pytest
+    node id to `passed` / `failed` / `error` / `skip:<class>`. Returns the file's
+    records, or `None` when nothing was written."""
+    monkeypatch.setattr(fl, "head_commit", lambda repo=None: commit)
+    monkeypatch.setattr(fl, "main_base", lambda c, repo=None: RUN_BASE)
+    monkeypatch.setattr(fl, "tree_dirt", lambda repo=None: [" M x.py"] if dirty else [])
+    with _isolated_last_green() as real:
+        items = [_Item(["feed-read"] if nodeid in tagged else [], nodeid) for nodeid in outcomes]
+        real._apply_feature_axis(config or _LgConfig(), items)
+        for nodeid, outcome in outcomes.items():
+            fl.reset_test_state()
+            if outcome.startswith("skip:"):
+                fl.note_skip_class(outcome.partition(":")[2])
+            for report in _phases(nodeid, outcome):
+                real.pytest_runtest_logreport(report)
+        path = lg.write(directory, platform="linux")
+        baseline = copy.deepcopy(real._baseline_results)
+        ledger = copy.deepcopy(fl._records)
+    fl.reset_test_state()
+    _lg_session.baseline, _lg_session.ledger = baseline, ledger
+    return lg.load(path) if path else None
+
+
+@pytest.fixture
+def _origin(monkeypatch):
+    monkeypatch.delenv(lg.ORIGIN_ENV, raising=False)
+    return monkeypatch
+
+
+def test_every_collected_test_is_recorded_tagged_or_not(tmp_path, _origin):
+    """The directory covers what the ledger cannot: an untagged test is a test that
+    can go red, and its key keeps the app and the non-default nest mode."""
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed", LG_B: "passed"}, tagged={LG_A})
+    assert set(tests) == {LG_KEY_A, LG_KEY_B}
+    green = tests[LG_KEY_B]["last_green"]
+    assert green == {"base": RUN_BASE, "commit": COMMIT_A, "dirty": False, "duration": 2.75,
+                     "origin": "session", "time": green["time"]}
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00", green["time"]), green["time"]
+    assert tests[LG_KEY_B]["last"]["outcome"] == "green"
+    assert tests[LG_KEY_B]["red_since"] is None and tests[LG_KEY_B]["flaky"]["count"] == 0
+
+
+def test_a_dirty_green_is_a_green_marked_dirty(tmp_path, _origin):
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, dirty=True)
+    assert tests[LG_KEY_A]["last_green"]["dirty"] is True
+
+
+def test_a_red_then_a_green_at_the_same_commit_is_flaky(tmp_path, _origin):
+    """Nothing in the tree changed between the two runs, so the outcome did not come
+    from the code: the § Blame re-run's shape."""
+    _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_B)
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B)
+    rec = tests[LG_KEY_A]
+    assert rec["flaky"]["count"] == 1 and rec["flaky"]["last"] == rec["last"]["time"]
+    assert rec["red_since"] is None and rec["last_green"]["commit"] == COMMIT_B
+
+
+def test_a_red_twice_is_broken_and_its_last_green_stays(tmp_path, _origin):
+    _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_A)
+    _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_B)
+    tests = _lg_session(_origin, tmp_path, {LG_A: "error"}, commit=COMMIT_B)
+    rec = tests[LG_KEY_A]
+    assert rec["red_since"] == {"count": 2, "tip": COMMIT_B}
+    assert rec["last_green"]["commit"] == COMMIT_A, "a red never moves the last green"
+    assert rec["last"]["outcome"] == "error" and rec["flaky"]["count"] == 0
+
+
+def test_a_green_at_a_later_commit_after_a_red_is_a_fix_not_a_flake(tmp_path, _origin):
+    _lg_session(_origin, tmp_path, {LG_A: "failed"}, commit=COMMIT_A)
+    tests = _lg_session(_origin, tmp_path, {LG_A: "passed"}, commit=COMMIT_B)
+    assert tests[LG_KEY_A]["flaky"]["count"] == 0 and tests[LG_KEY_A]["red_since"] is None
+
+
+def test_an_environment_skip_observes_nothing_and_a_declared_skip_is_recorded(tmp_path, _origin):
+    _lg_session(_origin, tmp_path, {LG_A: "passed", LG_B: "passed"})
+    tests = _lg_session(_origin, tmp_path, {LG_A: f"skip:{fl.ENVIRONMENT}",
+                                            LG_B: f"skip:{fl.UNBUILT}"}, commit=COMMIT_B)
+    assert tests[LG_KEY_A]["last"]["outcome"] == "green", "a missing credential says nothing"
+    assert tests[LG_KEY_B]["last"]["outcome"] == "skip:unbuilt"
+    assert tests[LG_KEY_B]["last_green"]["commit"] == COMMIT_A
+
+
+def test_the_check_and_the_tester_name_themselves(tmp_path, _origin):
+    _origin.setenv(lg.ORIGIN_ENV, "check")
+    assert _lg_session(_origin, tmp_path, {LG_A: "passed"})[LG_KEY_A]["last_green"]["origin"] == "check"
+    _origin.setenv(lg.ORIGIN_ENV, "somebody")
+    assert _lg_session(_origin, tmp_path, {LG_A: "passed"})[LG_KEY_A]["last_green"]["origin"] == "session"
+
+
+def test_no_feature_ledger_disables_both_projections(tmp_path, _origin):
+    assert _lg_session(_origin, tmp_path, {LG_A: "passed"}, tagged={LG_A},
+                       config=_LgConfig(no_feature_ledger=True)) is None
+    assert _lg_session.ledger == {}
+    assert not (tmp_path / "linux.json").exists()
+
+
+def test_an_interrupted_session_writes_nothing(tmp_path, _origin, monkeypatch):
+    """The tester's yield leaves a stopped shard's tests unrecorded (§ The background
+    tester): the session-end writer declines an `INTERRUPTED` exit."""
+    monkeypatch.setenv(lg.HOME_ENV, str(tmp_path))
+    with _isolated_last_green() as real:
+        real._apply_feature_axis(_LgConfig(), [_Item([], LG_A)])
+        for report in _phases(LG_A, "passed"):
+            real.pytest_runtest_logreport(report)
+        real._write_last_green(None, pytest.ExitCode.INTERRUPTED)
+        assert not (tmp_path / f"{fl.host_platform()}.json").exists()
+        real._write_last_green(None, pytest.ExitCode.OK)
+        assert (tmp_path / f"{fl.host_platform()}.json").exists(), "the control"
+
+
+def test_a_collect_only_run_writes_nothing(tmp_path, _origin):
+    assert _lg_session(_origin, tmp_path, {LG_A: "passed"}, config=_LgConfig(collectonly=True)) is None
+
+
+def test_the_baseline_json_shape_is_unchanged(tmp_path, _origin):
+    _lg_session(_origin, tmp_path, {LG_A: "passed", LG_B: "error"})
+    assert _lg_session.baseline == {LG_A: {"outcome": "passed", "duration": 2.0},
+                                    LG_B: {"outcome": "error", "duration": 0.5}}
+
+
+def test_a_tagged_tests_ledger_record_is_the_one_it_always_was(tmp_path, _origin):
+    """One event, two projections — and the ledger's projection keeps its keying (the
+    parametrization dropped), its fields and its provenance."""
+    _lg_session(_origin, tmp_path, {LG_A: "passed"}, tagged={LG_A})
+    ((key, record),) = _lg_session.ledger.items()
+    assert key == ("nest", "feed-read", "tests/e2e-unified/tests/test_lg.py::test_lists")
+    assert set(record) == {"outcome", "skip_class", "stamp", "version", "commit", "base",
+                           "image_digest", "nest_mode", "dirty", "date", "platform"}
+    assert (record["outcome"], record["commit"], record["base"], record["dirty"]) == \
+        ("passed", COMMIT_A, RUN_BASE, False)
+
+
+def test_an_older_observation_never_overwrites_a_newer_one():
+    run = {"base": RUN_BASE, "commit": COMMIT_A, "dirty": False, "origin": "session",
+           "today": "2026-10-20"}
+    newer = lg.observe(None, outcome="red", time="2026-10-20T12:00:00+00:00", duration=1.0, run=run)
+    older = lg.observe(newer, outcome="green", time="2026-10-20T11:00:00+00:00", duration=1.0, run=run)
+    assert older["last"]["outcome"] == "red" and older["red_since"]["count"] == 1
+    assert older["last_green"]["time"] == "2026-10-20T11:00:00+00:00", \
+        "a green newer than the record's last green still lands"
+    assert lg.newest(newer, older) is older and lg.newest(older, newer) is newer
+
+
+def test_prune_drops_what_no_collection_has_named_for_45_days():
+    from datetime import date
+    tests = {"kept": {"collected": "2026-09-05"}, "gone": {"collected": "2026-09-04"},
+             "never": {"collected": None}}
+    kept, dropped = lg.prune(tests, date(2026, 10, 20))
+    assert set(kept) == {"kept"} and dropped == ["gone", "never"]
+
+
+def test_the_file_is_json_with_one_record_per_line(tmp_path):
+    tests = {"b": lg.empty_record(), "a": lg.empty_record()}
+    text = lg.dumps("linux", tests)
+    assert json.loads(text) == {"platform": "linux", "schema": lg.SCHEMA, "tests": tests}
+    assert [line.split(":")[0] for line in text.splitlines()[1:-1]] == ['"a"', '"b"']
+    assert lg.dumps("linux", {}) == '{"platform": "linux", "schema": 1, "tests": {\n}}\n'
+    assert json.loads(lg.dumps("linux", {})) == {"platform": "linux", "schema": 1, "tests": {}}
+
+
+def test_the_home_is_the_main_checkout_every_worktree_shares(monkeypatch, tmp_path):
+    monkeypatch.delenv(lg.HOME_ENV, raising=False)
+    main = lg.main_checkout(fl.REPO)
+    assert (main / ".git").is_dir(), "a linked checkout's `.git` is a file; the main checkout's is the dir"
+    assert lg.home(fl.REPO) == main / ".claude" / "last-green"
+    monkeypatch.setenv(lg.HOME_ENV, str(tmp_path))
+    assert lg.home(fl.REPO) == tmp_path
+
+
+def _begun(live, key="tests/e2e-unified/tests/test_x.py::test_y"):
+    lg.begin_run(commit=COMMIT_A, base=None, dirty=False, node_ids={"n": key}, live=live)
+
+
+def test_a_fixture_run_never_writes_the_real_home(monkeypatch, tmp_path):
+    """The box's real directory held fixture keys (`tests/test_x.py::test_y`): a tier_1
+    test driving the collection hook over stub items began a run, and a session-end
+    write with no explicit directory merged it into the machine-local file. A run not
+    begun by a genuine pytest session is declined — the sentinel home stays empty."""
+    monkeypatch.delenv(lg.HOME_ENV, raising=False)
+    sentinel = tmp_path / "real-home"
+    monkeypatch.setattr(lg, "home", lambda repo=lg.REPO: sentinel)
+    with _isolated_last_green():
+        _begun(live=False)
+        assert lg.write(platform="linux") is None
+        assert not sentinel.exists(), "a fixture run reached the real home"
+        lg.reset_session_state()
+        _begun(live=True)
+        assert lg.write(platform="linux") == sentinel / "linux.json", "the control"
+
+
+def test_a_fixture_run_may_still_write_an_explicit_directory(tmp_path):
+    with _isolated_last_green():
+        _begun(live=False)
+        assert lg.write(tmp_path, platform="linux") == tmp_path / "linux.json"
+
+
+def test_a_file_outside_the_rootdir_keys_by_its_real_path():
+    """pytest stamps a file outside the rootdir with an EMPTY path (`::test_x`); the key
+    must be repo-relative to the real file, or be skipped — never `tests/e2e-unified/::`."""
+    import conftest as real
+
+    class _Cfg:
+        rootpath = real._REPO_ROOT / "tests" / "e2e-unified"
+
+    scripts = real._REPO_ROOT / "tests" / "scripts" / "test_features_catalog.py"
+    assert real._repo_node_id(_Cfg(), "::test_a[tui]", keep_params=True, path=scripts) \
+        == "tests/scripts/test_features_catalog.py::test_a[tui]"
+    assert real._repo_node_id(_Cfg(), "::test_a[tui]", path=scripts) \
+        == "tests/scripts/test_features_catalog.py::test_a"
+    unnamed = real._repo_node_id(_Cfg(), "::test_a")
+    assert unnamed == "::test_a" and not real._has_repo_file(unnamed)
+    assert real._has_repo_file(real._repo_node_id(_Cfg(), "tests/test_y.py::test_a"))

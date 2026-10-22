@@ -360,6 +360,12 @@ fn admit_section(state: &UsersState, snapshot: &UsersSnapshot) -> Vec<Element> {
             SelectTarget::AdmitGuardian,
             snapshot,
         ),
+        age_band_picker(
+            ids::ADMIN_USERS_ADMIT_AGE_BAND_SELECT,
+            &state.admit_age_band_draft,
+            SelectTarget::AdmitAgeBand,
+            guardian_draft_names_someone(&state.admit_guardian_draft),
+        ),
         Element::gesture_button(
             ids::ADMIN_USERS_ADMIT_BUTTON,
             t::users_page::ADMIT_BUTTON,
@@ -831,6 +837,7 @@ mod tests {
                 "admin-users-admit-handle-input",
                 "admin-users-admit-tier-select",
                 "admin-users-admit-guardian-select",
+                "admin-users-admit-age-band-select",
                 "admin-users-admit-button",
                 // Section — invite (form closed → the reveal button).
                 "admin-users-invite-section",
@@ -1536,7 +1543,7 @@ mod tests {
     /// The Admit section's picker (`admin-users-admit-guardian-select`) offers the
     /// same handle-keyed options as the two admission pickers and resolves the
     /// committed label to the guardian's actor id on the admit call — a ward is
-    /// admitted supervised, never silently ordinary. No band travels from it yet.
+    /// admitted supervised, never silently ordinary.
     #[test]
     fn admit_guardian_picker_round_trips_into_the_admit_call() {
         let users = vec![user(0x11, "free", "alice"), user(0x22, "free", "bob")];
@@ -1578,6 +1585,50 @@ mod tests {
             None,
             "an unlisted label is no guardian"
         );
+    }
+
+    /// The Admit section's band select (`admin-users-admit-age-band-select`) is
+    /// disabled until a guardian is picked, its band rides the admit call only
+    /// beside a guardian, and clearing the guardian resets it.
+    #[test]
+    fn admit_age_band_follows_the_guardian_into_the_admit_call() {
+        let users = vec![user(0x11, "free", "alice"), user(0x22, "free", "bob")];
+        let mut app = app_on_users(snapshot(users, 2));
+        let id = "admin-users-admit-age-band-select";
+        app.admin.users.admit_actor_input = "55".repeat(32);
+        let admit_band = |app: &crate::app::App| {
+            let super::super::UsersMutation::AdmitUser { age_band, .. } =
+                super::super::admit_mutation(&app.admin.users).expect("valid actor id")
+            else {
+                panic!("expected AdmitUser");
+            };
+            age_band
+        };
+        let picker = |app: &crate::app::App| {
+            users_elements(&app.admin)
+                .into_iter()
+                .find(|e| e.id == id)
+                .expect("the Admit section paints the band select")
+        };
+
+        let p = picker(&app);
+        assert_eq!(p.text, "not-set");
+        assert!(!p.enabled, "no guardian yet → the band select is disabled");
+
+        // A band drafted without a guardian never rides the call.
+        apply_local(&mut app, Action::SetAdmitAgeBand("u13".to_string()));
+        assert_eq!(admit_band(&app), None);
+
+        apply_local(&mut app, Action::SetAdmitGuardian("bob".to_string()));
+        assert!(picker(&app).enabled);
+        assert_eq!(admit_band(&app), Some(fauna_protocol::age::AgeBand::U13));
+
+        apply_local(
+            &mut app,
+            Action::SetAdmitGuardian(GUARDIAN_NONE_VALUE.to_string()),
+        );
+        assert_eq!(app.admin.users.admit_age_band_draft, "not-set");
+        assert_eq!(admit_band(&app), None);
     }
 
     #[test]

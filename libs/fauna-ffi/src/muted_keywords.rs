@@ -149,6 +149,29 @@ pub fn muted_keyword_level(weight: i64) -> MutedKeywordLevel {
     MutedKeywordLevel::of(weight)
 }
 
+/// Both levels in the picker's order — `MutedKeywordLevel::ALL`, so a native
+/// app builds the `muted-word-level-select` options from the shared catalog
+/// rather than listing the two itself.
+#[uniffi::export]
+pub fn muted_keyword_levels() -> Vec<MutedKeywordLevel> {
+    MutedKeywordLevel::ALL.to_vec()
+}
+
+/// A level's own spelling (`hide` | `show-less`) — the picker's option value,
+/// which a driver selects and reads back. The native twin of
+/// `MutedKeywordLevel::value`; no app spells it.
+#[uniffi::export]
+pub fn muted_keyword_level_value(level: MutedKeywordLevel) -> String {
+    level.value().to_string()
+}
+
+/// The level a picker value names — the inverse of [`muted_keyword_level_value`];
+/// `None` for a value no level carries.
+#[uniffi::export]
+pub fn muted_keyword_level_from_value(value: String) -> Option<MutedKeywordLevel> {
+    MutedKeywordLevel::from_value(&value)
+}
+
 /// Does `body` collapse behind the `muted_keywords` list? A thin sync wrapper
 /// over the canonical shared decision `fauna_core::scoring::muted_keywords_collapse`:
 /// a case-insensitive substring match of a term muted at the full penalty (a
@@ -159,6 +182,47 @@ pub fn muted_keyword_level(weight: i64) -> MutedKeywordLevel {
 #[uniffi::export]
 pub fn matches_muted_keywords(body: String, muted_keywords: Vec<MutedKeyword>) -> bool {
     fauna_core::scoring::muted_keywords_collapse(&muted_keywords, &body)
+}
+
+// ── The notification collapse and the toast gate (`behavior/notifications.md`
+// § Muted words) ──
+//
+// Pure functions over one row or push and the list the app already holds for
+// its conversation collapse (`load_muted_words`' `.keywords`) — never a second
+// read. The decision is `fauna_client_notifications`'; the app paints the
+// collapse and withholds the toast.
+
+/// Does a muted word collapse this notification row behind
+/// `notification-muted` and its reveal? The UniFFI face of
+/// `fauna_client_notifications::notification_muted`: the match runs over the
+/// row's relayed text (its `body` args, or its `summary` when it has no body),
+/// only a word muted at Hide collapses, and a `security.notice` never does.
+#[uniffi::export]
+pub fn notification_muted_for(
+    item: crate::FfiNotifItem,
+    muted_keywords: Vec<MutedKeyword>,
+) -> bool {
+    fauna_client_notifications::notification_muted(&muted_keywords, &item.into())
+}
+
+/// Should the in-app toast for this `fauna.notification` push be withheld?
+/// The same decision as [`notification_muted_for`] over the push (rule 6: a
+/// toast cannot be revealed, so a row that would collapse raises none).
+#[cfg(feature = "push-subscription")]
+#[uniffi::export]
+pub fn notification_push_muted_for(
+    notification: crate::FfiNotification,
+    muted_keywords: Vec<MutedKeyword>,
+) -> bool {
+    fauna_client_notifications::notification_push_muted(&muted_keywords, &notification.into())
+}
+
+/// Should the knock toast for this `fauna.knock` push be withheld? The knock's
+/// message is an arg of its row, so the toast follows the row (rule 6).
+#[cfg(feature = "conversations-session")]
+#[uniffi::export]
+pub fn knock_push_muted_for(knock: crate::FfiKnock, muted_keywords: Vec<MutedKeyword>) -> bool {
+    fauna_client_notifications::knock_push_muted(&muted_keywords, &knock.into())
 }
 
 // ── The reporter-side hide (`moderation.md` § Corollary — block also hides) ──
@@ -192,4 +256,73 @@ pub async fn unhide_reported(id: String) -> Result<Vec<String>, FfiError> {
         .await
         .map_err(preference_surfaces::plane_failure)
         .map_err(general_err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fauna_protocol::LocalizedText;
+
+    fn knock_body(message: &str) -> LocalizedText {
+        LocalizedText::new("notifications.row_knock")
+            .with_arg("sender", "abcd1234")
+            .with_arg("message", message)
+    }
+
+    /// The façades carry the row and the push whole across the boundary: the
+    /// relayed arg decides, through the mirror types, exactly as the wire
+    /// types decide in `fauna_client_notifications`.
+    #[test]
+    fn the_facades_decide_on_the_relayed_args_through_the_mirrors() {
+        let muted = vec![MutedKeyword::new("spoiler")];
+        let item = |message: &str| fauna_protocol::notifications::NotifItem {
+            notif_type: "knock".into(),
+            source: "fauna".into(),
+            summary: "abcd1234 wants to connect".into(),
+            body: Some(knock_body(message)),
+            ..Default::default()
+        };
+        assert!(notification_muted_for(
+            item("a SPOILER").into(),
+            muted.clone()
+        ));
+        assert!(!notification_muted_for(item("hello").into(), muted.clone()));
+
+        #[cfg(feature = "push-subscription")]
+        for (message, want) in [("a SPOILER", true), ("hello", false)] {
+            let ev = crate::FfiPushEvent::from(fauna_protocol::PushEvent::Notification(
+                fauna_protocol::push_events::NotificationPayload {
+                    notification_id: 1,
+                    notif_type: "knock".into(),
+                    source: "fauna".into(),
+                    sender_id: None,
+                    content_id: None,
+                    summary: "abcd1234 wants to connect".into(),
+                    body: Some(knock_body(message)),
+                    timestamp: 1,
+                    extra: Default::default(),
+                },
+            ));
+            let crate::FfiPushEvent::Notification { notification } = ev else {
+                panic!("expected a notification push");
+            };
+            assert_eq!(
+                notification_push_muted_for(notification, muted.clone()),
+                want
+            );
+        }
+
+        #[cfg(feature = "conversations-session")]
+        for (message, want) in [("a SPOILER", true), ("hello", false)] {
+            let knock = crate::FfiKnock {
+                sender_id: "abcd1234".into(),
+                summary: message.into(),
+                body: Some(fauna_core::localized::LocalizedText::key_args(
+                    "notifications.row_knock",
+                    [("message".to_string(), message.to_string())],
+                )),
+            };
+            assert_eq!(knock_push_muted_for(knock, muted.clone()), want);
+        }
+    }
 }

@@ -328,13 +328,17 @@ pub trait VpsProvider: Send + Sync {
     ) -> Result<(), ProvisionError>;
 
     /// Return the curated server-types this provider offers, intersected
-    /// with what the API currently lists. Curation list is sourced from
+    /// with what the API currently lists, as the chosen `location` (a
+    /// `VpsLocation::id` from [`Self::verify`]) sells them — its price, and
+    /// only the offers it sells (`docs/goal/architecture/provisioning/registry.md`
+    /// § Server offers follow the location). Curation list is sourced from
     /// `ProviderMeta::curated_offers`. Returned vec preserves curation
     /// order so the UI shows radio options in that order.
     async fn list_server_types(
         &self,
         client: &reqwest::Client,
         curated_ids: &[&str],
+        location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError>;
 
     /// Set the IPv4 reverse-DNS (PTR) record for an instance to `fqdn`.

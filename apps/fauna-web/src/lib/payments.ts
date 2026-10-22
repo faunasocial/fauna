@@ -8,26 +8,26 @@
 // pattern so production builds emit neither code nor chunk"*. The define
 // (`__FAUNA_PAYMENTS__`, `vite.config.ts`) folds the branch; the **isolation** is
 // what actually removes the surface, and it only works if every payments symbol
-// lives in a module nothing else imports. `$lib/rpc`, `$lib/wasm` and
-// `$lib/value-format` are all unconditionally in the bundle, so a payments
+// lives in a module nothing else imports. `#lib/rpc`, `#lib/wasm` and
+// `#lib/value-format` are all unconditionally in the bundle, so a payments
 // function left in one of them ships its own name into the store-safe artifact
 // even with every caller folded away — which is criterion 2's failure on web
 // (`just web-store-safe-check` greps exactly these face names; see that recipe
 // for why the web column's second axis is face names rather than kind strings).
 //
-// So: the RPC calls came from `$lib/rpc`, `paymentsKnownKinds` /
-// `paymentsWebhookUrl` / the tip + status label faces from `$lib/wasm`, and the
-// resolved formatters from `$lib/value-format`. Add a new payments surface HERE,
+// So: the RPC calls came from `#lib/rpc`, `paymentsKnownKinds` /
+// `paymentsWebhookUrl` / the tip + status label faces from `#lib/wasm`, and the
+// resolved formatters from `#lib/value-format`. Add a new payments surface HERE,
 // never back in one of those three.
 //
-// The only importers may be `$lib/components/payments/*` — the components that
+// The only importers may be `#lib/components/payments/*` — the components that
 // are themselves loaded from an `if (__FAUNA_PAYMENTS__)` branch. An import from
 // anywhere else silently re-attaches this module to the shared graph and the
 // witness goes red.
 
-import { rpcCall } from '$lib/rpc';
-import { wasmCoreModule } from '$lib/wasm';
-import { resolveLocalized, type LocalizedText } from '$lib/i18n/localized';
+import { rpcCall } from '#lib/rpc';
+import { wasmCoreModule } from '#lib/wasm';
+import { resolveLocalized, type LocalizedText } from '#lib/i18n/localized';
 
 // ── fauna.payments.* (Pillar 3 client legs — monetization.md § Pillars 2+3) ──
 //
@@ -133,7 +133,16 @@ export function paymentsClaimsList(secretHex: string): Promise<PaymentClaim[]> {
   return rpcCall(secretHex, (c) => c.paymentsClaimsList() as Promise<PaymentClaim[]>);
 }
 
-// ── the wasm faces (moved out of `$lib/wasm` — see the header) ───────────────
+/** Void one of the author's own claim codes (`claims.void`) — the code stops
+ *  working and, if it was redeemed, its redeemer loses the tier. Rejects with
+ *  `fauna.payments.claim_not_found` for a code that is gone or not theirs. */
+export function paymentsClaimsVoid(secretHex: string, code: string): Promise<void> {
+  return rpcCall(secretHex, async (c) => {
+    await c.paymentsClaimsVoid(code);
+  });
+}
+
+// ── the wasm faces (moved out of `#lib/wasm` — see the header) ───────────────
 
 /**
  * Every registered payment-provider kind — the §4 provider form's kind select
@@ -161,7 +170,19 @@ export function paymentsWebhookUrl(
   return wasmCoreModule().paymentsWebhookUrl(baseUrl, authorIdHex, kind) as string;
 }
 
-// ── the resolved formatters (moved out of `$lib/value-format` — see the header) ──
+/**
+ * The post-checkout redirect a creator registers at their provider for `kind`
+ * — the §4 provider form shows it beside the webhook URL. Built on the
+ * creator's **web-site origin** (`siteUrl`, from `siteLink`), never the nest
+ * URL: the paywall return door resolves the site owner from the request `Host`
+ * (monetization.md § Pillar 2 → Visitor entitlement doors). Derived from the
+ * same `fauna-payments` constants the nest registers its route from.
+ */
+export function paymentsReturnUrl(siteUrl: string, kind: string): string {
+  return wasmCoreModule().paymentsReturnUrl(siteUrl, kind) as string;
+}
+
+// ── the resolved formatters (moved out of `#lib/value-format` — see the header) ──
 //
 // Same contract as every other formatter there: the shared `fauna_core::format`
 // decision is made in Rust and this only resolves it against web's i18n table.

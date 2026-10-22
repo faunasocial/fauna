@@ -4,7 +4,7 @@
 //!
 //! Owner docs: `docs/goal/behavior/folders.md` § Publicly-synced follow
 //! (address / floor / strip / flip-back semantics) and
-//! `docs/goal/architecture/federation.md` § The public folder read plane
+//! `docs/goal/architecture/federation-shared-folders.md` § The public folder read plane
 //! (kinds, gates, wire rules). Phase 4 slice 4f-i of the folders re-model.
 //!
 //! **Why this is its own module, authorizing independently.** Every other

@@ -109,6 +109,7 @@ from helpers.live_provision import (
     await_provisioning,
     drive_provisioning,
     finish_provisioned_wizard,
+    hetzner_token,
     retry_get,
     skip_unless_fresh_box_reach_app,
 )
@@ -289,7 +290,7 @@ def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
         app.driver, surface="the live 3-party ActivityPub federation observer drive"
     )
 
-    token = os.environ["HETZNER_API_TOKEN"].strip()
+    token, dns_token = hetzner_token(), hetzner_token(purpose="dns")
     secret_hex = box.identity_secret_hex
     handle = box.handle                       # admin@e2e-<runid>.<zone>
     ap_username = handle.split("@", 1)[0]     # "admin" — handle-verbatim
@@ -298,13 +299,13 @@ def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
     # ── Phase 1: create VPS #2 (GoToSocial peer) FIRST so its cert issuance
     #    overlaps VPS #1's provisioning; then drive VPS #1 provisioning. ──────
     print(f"\n[apfed-live] creating GoToSocial peer VPS for run {box.runid} ...")
-    peer = provision_gotosocial_peer(token, box.zone, box.runid,
+    peer = provision_gotosocial_peer(token, box.zone, box.runid, dns_token=dns_token,
                                      scratch_dir=str(tmp_path))
     print(f"[apfed-live] peer VPS created: {peer.domain} ({peer.ipv4})")
 
     _relaunch(app)  # provisioning drive runs on a clean onboarding machine
     print(f"[apfed-live] provisioning public nest {box.subdomain} ...")
-    drive_provisioning(app, box, token)
+    drive_provisioning(app, box, token, dns_token=dns_token)
     snap = await_provisioning(app, PROVISION_TIMEOUT_S)
     assert snap.get("overall") == "Succeeded", (
         f"public-nest provisioning did not succeed: overall={snap.get('overall')!r} "
@@ -402,7 +403,7 @@ def test_activitypub_federation_live_three_party(app, box, ghcr_latest_image,
         private_url = f"https://127.0.0.1:{priv_http}"
         start_container_with_ports(
             priv_name,
-            {3000: priv_http},
+            {443: priv_http},
             env={
                 "FAUNA_MODE": "private",
                 "FAUNA_CLAIM_CODE": PRIVATE_CLAIM_CODE,

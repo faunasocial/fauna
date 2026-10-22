@@ -28,11 +28,13 @@ uniffi::setup_scaffolding!("fauna_client_mail_settings");
 
 pub mod admin_policy;
 pub mod aliases;
+pub mod autorespond;
 mod bool_toggle_policy;
 pub mod bridge_approval;
 pub mod caldav_policy;
 pub mod carddav_policy;
 pub mod credential;
+pub mod dmarc_reports;
 pub mod error;
 pub mod export;
 pub mod forwarders;
@@ -44,6 +46,7 @@ pub mod local_domains;
 pub mod machine;
 pub mod password_gen;
 pub mod primary_domain_rename;
+pub mod quota;
 mod read_order;
 pub mod rotation;
 #[cfg(feature = "rpc-glue")]
@@ -64,17 +67,25 @@ pub mod testing;
 pub use admin_policy::{
     AliasPolicyView, AuthPolicyView, DmarcForensicMode, DmarcPolicyView, FcrdnsMode,
     ImapDeleteNonempty, ImapPolicyView, MailPolicyAction, MailPolicyMachine, MailPolicyNest,
-    MailPolicySnapshot, MailPolicyStatus, OutboundPolicyView, SpamPolicyView, SubmissionPolicyView,
-    dmarc_forensic_mode_options, fcrdns_mode_options, imap_delete_nonempty_options,
+    MailPolicySnapshot, MailPolicyStatus, OutboundPolicyView, SenderDashboardLink, SpamPolicyView,
+    SubmissionPolicyView, dmarc_forensic_mode_options, dmarc_forensic_retention_warns,
+    fcrdns_mode_options, imap_delete_nonempty_options, sender_dashboard_links,
 };
 pub use aliases::{
-    AliasKind, AliasView, AliasesStatus, ImportAliasOutcomeView, ImportAliasStatusView,
-    ImportResultView, MailAliasesAction, MailAliasesMachine, MailAliasesNest, MailAliasesSnapshot,
-    alias_hits_label, alias_kind_badge,
+    ALIAS_AUDIT_LIMIT, ALIAS_EXTEND_MS, AliasAuditView, AliasHitView, AliasKind, AliasView,
+    AliasesStatus, ImportAliasOutcomeView, ImportAliasStatusView, ImportResultView,
+    MailAliasesAction, MailAliasesMachine, MailAliasesNest, MailAliasesSnapshot,
+    alias_expiry_label, alias_hits_label, alias_is_extendable, alias_kind_badge,
+    extended_expiry_ms,
+};
+pub use autorespond::{
+    AutorespondMessageDraftOutcome, autorespond_message_draft_outcome,
+    parse_autorespond_message_draft,
 };
 pub use bridge_approval::{
     ApprovedBridgeView, BridgeApprovalAction, BridgeApprovalMachine, BridgeApprovalNest,
-    BridgeApprovalSnapshot, BridgeApprovalStatus, PendingBridgeView, bridge_display_name,
+    BridgeApprovalSnapshot, BridgeApprovalStatus, BridgeConfirm, PendingBridgeView,
+    bridge_display_name,
 };
 pub use caldav_policy::{
     CaldavPolicyAction, CaldavPolicyMachine, CaldavPolicyNest, CaldavPolicySnapshot,
@@ -85,7 +96,12 @@ pub use carddav_policy::{
     CarddavPolicyStatus,
 };
 pub use credential::{Credential, derive_credential_id};
-pub use error::{DispatchError, NestError, SignerError, StoreError};
+pub use dmarc_reports::{
+    DMARC_REPORT_DEFAULT_WINDOW_DAYS, DMARC_REPORT_WINDOW_DAYS, DmarcCountRow, DmarcOpenedReport,
+    DmarcReportRowView, DmarcReportsAction, DmarcReportsMachine, DmarcReportsNest,
+    DmarcReportsSnapshot, DmarcReportsStatus, DmarcWindowTotals, dmarc_report_window_options,
+};
+pub use error::{DispatchError, NestError, SetMailEnabledError, SignerError, StoreError};
 pub use export::{
     ExportConfirmEstimate, ExportFormat, ExportScope, ExportSessionState, ExportSessionView,
     ExportStatus, ExportStep, MailExportAction, MailExportMachine, MailExportNest,
@@ -102,14 +118,15 @@ pub use forwarding::{
     parse_forward_per_hour_draft,
 };
 pub use import::{
-    DEFAULT_MAX_SIZE_MB, ImportMailboxProgress, ImportSessionState, ImportSessionView,
-    ImportSourceKind, ImportSourceNest, ImportStatus, ImportStep, ImportTlsMode, ImportTotals,
-    MailImportAction, MailImportMachine, MailImportNest, MailImportSnapshot, SOURCE_KINDS,
-    SourceConnectParams, SourceMailboxOption, SourceMailboxView, TLS_MODES, connect_actions,
+    DEFAULT_MAX_SIZE_MB, ImportMailboxProgress, ImportPauseReason, ImportSessionState,
+    ImportSessionView, ImportSourceKind, ImportSourceNest, ImportStatus, ImportStep, ImportTlsMode,
+    ImportTotals, MailImportAction, MailImportMachine, MailImportNest, MailImportSnapshot,
+    MicrosoftSignInState, MicrosoftSignInView, SOURCE_KINDS, SourceConnectParams,
+    SourceMailboxOption, SourceMailboxView, TLS_MODES, connect_actions, import_action_starts_run,
     import_mailbox_progress_text, import_selected_totals, import_source_kind_label,
-    import_tls_mode_label, resume_actions, scope_next_actions,
+    import_tls_mode_label, microsoft_sign_in_actions, resume_actions, scope_next_actions,
 };
-pub use inbox_scorer::InboxSpamScorer;
+pub use inbox_scorer::{InboxCopyVerdict, InboxSpamScorer, judge_inbox_copy};
 pub use lists::{
     ImportResult, ListDraft, ListMembers, ListView, ListsStatus, MailListMembersAction,
     MailListMembersMachine, MailListMembersNest, MailListMembersSnapshot, MailListsAction,
@@ -121,6 +138,11 @@ pub use local_domains::{
     LocalDomainStatus, LocalDomainView, LocalDomainsSnapshot,
 };
 pub use primary_domain_rename::{PrimaryDomainRenameView, rename_available};
+pub use quota::{
+    MailQuotaDisplay, MailQuotas, mail_over_quota_notice, mail_over_quota_notice_of,
+    mail_quota_display, mail_quota_display_of, mail_quota_text, mail_submission_quota_display,
+    mail_submission_quota_display_of, mail_submission_quota_text,
+};
 pub use succession::{MailBurnOutcome, MailBurnProgress, burn_mail_after_succession};
 pub use timing::{
     EXPORT_ESTIMATE_BYTES_PER_SEC, TransferTiming, export_time_estimate_secs, transfer_timing,
@@ -139,8 +161,8 @@ pub use webdav_policy::{
 // the type in this crate's surface (it lives in `fauna-core`).
 pub use fauna_core::secret::SecretBytes;
 pub use machine::{
-    HistoryWrite, IdentitySigner, MailSettingsMachine, NestClient, SealedModelWriter,
-    SpamModelClientWrite, SpamModelWriteOutcome, WebdavServedSets,
+    HistoryWrite, IdentitySigner, MailSettingsMachine, NestClient, RetirementClock,
+    SealedModelWriter, SpamModelClientWrite, SpamModelWriteOutcome, WebdavServedSets,
 };
 // The client model-write op the moderation-queue / mail-spam surfaces build and
 // hand to `MailSettingsMachine::apply_spam_model_write` (re-exported so a consumer

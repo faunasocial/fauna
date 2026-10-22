@@ -8,8 +8,8 @@ is that page's roster; the add form's
 generate-by-default password with the weak-password warning and strength meter
 for a typed one; the serve-here switch) and docs/goal/behavior/mail-credentials.md
 § Soft revoke (retire a credential). UX/IDs: tests/e2e-unified/ui.yaml
-`mail-settings` page, `mail-settings-credentials-list` and the add-credential
-form.
+`mail-settings` page, the Connected apps roster's `connected-apps-item` rows
+and the add-credential form.
 
 The sibling `test_mail_credentials.py` owns the page's lifecycle (enable, add,
 revoke, rotate); `test_mail_multi_credential_auth.py` owns a second password
@@ -627,6 +627,7 @@ def test_serving_off_closes_mail_apps_but_the_app_still_shows_mail(
 
 
 @pytest.mark.feature("turn-on-mail")
+@pytest.mark.android
 def test_new_password_is_generated_by_default_and_a_typed_one_is_warned(logged_in_app):
     """Outcome 20: a new app password is generated strong by default — the form
     shows it, with no warning — and a typed one gets the warning that it limits

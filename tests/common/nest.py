@@ -405,20 +405,21 @@ def wait_for_node(port: int, timeout: float | None = None, proc=None,
     )
 
 
-def _sync_service_win_build_paths(target_dir: Path) -> tuple[Path, Path]:
-    """(built exe, freshness stamp) for the windows e2e build of
-    `fauna-sync-agent.exe` — the cross-platform `fauna-sync-agent` package
-    built by itself. Always the implicit-host debug profile, one feature set,
-    so there is only ever one cargo output path: no variant-clobber risk, just
-    the stamp that lets a warm tree skip cargo (and the build slot) entirely."""
+def _sync_agent_build_paths(target_dir: Path) -> tuple[Path, Path]:
+    """(built exe, freshness stamp) for the e2e build of `fauna-sync-agent` —
+    the cross-platform package built by itself, `.exe` on windows. Always the
+    implicit-host debug profile, one feature set, so there is only ever one
+    cargo output path: no variant-clobber risk, just the stamp that lets a
+    warm tree skip cargo (and the build slot) entirely."""
     debug_dir = target_dir / "debug"
+    suffix = ".exe" if sys.platform == "win32" else ""
     return (
-        debug_dir / "fauna-sync-agent.exe",
+        debug_dir / f"fauna-sync-agent{suffix}",
         debug_dir / ".fauna-sync-agent-e2e.stamp",
     )
 
 
-def _sync_service_win_newest_source_mtime(repo: Path) -> float:
+def _sync_agent_newest_source_mtime(repo: Path) -> float:
     """Newest mtime across fauna-sync-agent's build inputs (its own crate
     dir + libs + Cargo.lock; every path dep points into libs/)."""
     bis = _load_build_if_stale()
@@ -433,10 +434,13 @@ def _sync_service_win_newest_source_mtime(repo: Path) -> float:
     )
 
 
-def build_sync_service_win() -> str:
-    """Build `fauna-sync-agent.exe` (the windows per-user sync agent) and
-    return its path — the builder behind
-    `tests/e2e-unified/conftest.py::sync_agent_binary`.
+def build_sync_agent() -> str:
+    """Build `fauna-sync-agent` (the per-user sync agent; `.exe` on windows)
+    and return its path — the one builder behind both platforms' real-agent
+    fixtures, `tests/e2e-unified/conftest.py::sync_agent_binary` (windows) and
+    `::macos_sync_agent_binary`. The macOS fixture used to run its own
+    slot-first `cargo build` on every session; sharing this gate is what lets
+    macOS run the warm pass.
 
     Load + freshness discipline mirrors `build_node()`:
     the cargo run holds a machine-wide `build` slot — `cargo build -p
@@ -459,14 +463,15 @@ def build_sync_service_win() -> str:
     `fauna-nest` build (measured: 0 of 66 workspace-local units shared,
     61 of 66 after dropping the flag).
 
-    Never trusts cargo's own exit code — it lies on win-arm64 — so success
-    is judged by the known exe path existing after the run, same as the
-    fixture this replaces judged it before.
+    On windows cargo's own exit code is never trusted — it lies on win-arm64 —
+    so success there is judged by the known exe path existing after the run.
+    Everywhere else a non-zero exit is a failure even with an older binary on
+    disk: committing the stamp over it would vouch for a stale agent.
     """
     repo = get_repo_root()
-    binary, stamp = _sync_service_win_build_paths(_cargo_target_dir(repo))
+    binary, stamp = _sync_agent_build_paths(_cargo_target_dir(repo))
     if _variant_build_is_fresh(
-        binary, stamp, lambda: _sync_service_win_newest_source_mtime(repo)
+        binary, stamp, lambda: _sync_agent_newest_source_mtime(repo)
     ):
         return str(binary)
 
@@ -475,10 +480,12 @@ def build_sync_service_win() -> str:
         _build_slot_cmd(repo) + _cargo_cmd(repo) + ["build", "-p", "fauna-sync-agent"],
         run=subprocess.run, cwd=repo, capture_output=True, text=True,
     )
-    if not binary.exists():
+    if not binary.exists() or (sys.platform != "win32" and result.returncode != 0):
         tail = result.stderr[-3000:] if result.stderr else result.stdout[-3000:]
         raise RuntimeError(
-            f"fauna-sync-agent.exe not found at {binary}\nBuild output tail:\n{tail}"
+            f"building fauna-sync-agent failed (exit {result.returncode}; "
+            f"binary {'present' if binary.exists() else 'absent'} at {binary})\n"
+            f"Build output tail:\n{tail}"
         )
     _load_build_if_stale().commit_stamp(
         stamp, instant,
@@ -490,7 +497,7 @@ def build_sync_service_win() -> str:
 def _example_build_paths(target_dir: Path, example: str) -> tuple[Path, Path]:
     """(built exe, freshness stamp) for a test-only workspace `examples/`
     binary — one debug shape, same single-shape reasoning as
-    `_sync_service_win_build_paths`."""
+    `_sync_agent_build_paths`."""
     examples_dir = target_dir / "debug" / "examples"
     suffix = ".exe" if sys.platform == "win32" else ""
     return (
@@ -516,7 +523,7 @@ def _build_workspace_example(package: str, example: str) -> str:
     its path — the shared builder behind `build_recovery_fixture` and
     `build_render_cloud_init`.
 
-    Load + freshness discipline mirrors `build_sync_service_win()`: the cargo
+    Load + freshness discipline mirrors `build_sync_agent()`: the cargo
     run holds a machine-wide `build` slot, goes through `_cargo_cmd` (bare
     `cargo` fails on Windows, where Git Bash's `link.exe` shadows the MSVC linker),
     and a warm tree — stamp newer than every workspace source — runs no cargo
@@ -807,9 +814,10 @@ def start_nest(node_binary, tmp_dir, port, config_name="default.toml",
     with open(claim_code_path, "w") as f:
         f.write(CLAIM_CODE)
 
-    # Start server — --bind, --config, and --blob-dir as CLI args. blob_dir must
-    # be passed via CLI because main.rs reads args.blob_dir directly (doesn't
-    # honor nest_config.nest.blob_dir); without it /api/v1/blob returns 503.
+    # Start server — --bind, --config, and --blob-dir as CLI args. The rewritten
+    # config already names the same `blob_dir` (main.rs falls back to it when the
+    # flag is absent); the flag keeps the dir explicit for configs that lack the
+    # key. With no blob dir at all /api/v1/blob returns 503.
     # The spawn + health-wait live in `_spawn_and_wait`, shared with
     # `factory_reset_and_restart` (which re-spawns the same binary after a wipe).
     log_path = os.path.join(tmp_dir, "nest.log")

@@ -88,18 +88,21 @@ const DEVICE_ID: [u8; 32] = [0x07; 32];
 /// The body is `fauna_nest::test_support::start_test_nest`, reached through
 /// `tier3-nest`'s forward of `fauna-nest/test-helpers`; only the handler set and
 /// the blob dir are this module's. `tempfile` stays here because it is a
-/// dev-only dependency of `fauna-nest`.
-async fn start_test_nest(owner_secret: [u8; 32]) -> (String, Arc<AppState>, String) {
+/// dev-only dependency of `fauna-nest`. The blob dir's guard is the last tuple
+/// element: the caller binds it (`_blob_dir`) for as long as the nest serves,
+/// and the dir is removed when it drops.
+async fn start_test_nest(
+    owner_secret: [u8; 32],
+) -> (String, Arc<AppState>, String, tempfile::TempDir) {
     let blob_dir = tempfile::tempdir().unwrap();
     let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the process; never deleted under test
 
     let nest = fauna_nest::test_support::start_test_nest(owner_secret, Some(blob_path), |b| {
         fauna_nest::sync_handlers::register_sync_handlers(b);
         fauna_nest::folder_handlers::register_folders_handlers(b);
     })
     .await;
-    (nest.base_url, nest.state, nest.http_token)
+    (nest.base_url, nest.state, nest.http_token, blob_dir)
 }
 
 /// Build an owner-only `backup_key` `SyncEngine` pointed at `dest_url` — the
@@ -134,7 +137,7 @@ fn backup_engine(dest_url: &str, http_token: &str, watch_path: std::path::PathBu
 /// a single end-to-end assertion against the real byte plane.
 #[tokio::test]
 async fn restore_repoint_rehydrates_historical_bytes_against_real_nest() {
-    let (url, _state, token) = start_test_nest(OWNER_SECRET).await;
+    let (url, _state, token, _blob_dir) = start_test_nest(OWNER_SECRET).await;
 
     let watch = tempfile::tempdir().unwrap();
     let engine = backup_engine(&url, &token, watch.path().to_path_buf());
@@ -360,7 +363,7 @@ impl HydrationHost for RealNestHost {
 /// (which stops at the engine boundary); here the OS shim runs end to end.
 #[tokio::test]
 async fn restore_byteplane_cfapi_fetch_data_serves_historical_bytes() {
-    let (url, _state, token) = start_test_nest(OWNER_SECRET).await;
+    let (url, _state, token, _blob_dir) = start_test_nest(OWNER_SECRET).await;
 
     // A real cfapi sync root + a per-folder SyncDb path. run_hydration_loop is
     // driven directly (no IPC / SyncServiceState), so only the paths are needed.

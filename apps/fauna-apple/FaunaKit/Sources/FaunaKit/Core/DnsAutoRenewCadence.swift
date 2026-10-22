@@ -70,7 +70,7 @@ public final class DnsAutoRenewCadence {
         guard let machine = try? await api.dnsManagementMachine() else { return }
         let due = await machine.autoRenewScan()
         guard !due.isEmpty else { return }
-        guard let nestId = try? await api.thisNestId() else { return }
+        guard let nestId = try? await api.boundNestId() else { return }
         _ = await machine.autoRenewIssue(domains: due, targetNestId: nestId)
     }
 }

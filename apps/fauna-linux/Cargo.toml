@@ -115,6 +115,10 @@ e2e-agent = [
     # `trust_clock`'s setter gates on `debug_assertions OR e2e-agent`, so a
     # RELEASE-profile e2e build needs this forward (convention 15).
     "fauna-client-capabilities/e2e-agent",
+    # The submission-token refresh's clock (`mail_token_refresh_advance_clock`)
+    # — `token_refresh`'s setter gates on `debug_assertions OR e2e-agent`, so a
+    # RELEASE-profile e2e build needs this forward (convention 15).
+    "fauna-client-mail-settings/e2e-agent",
     # The custody owner's send-again poke (`custody_owner_resend_now`).
     "fauna-client-custody/e2e-agent",
     # The FAUNA_E2E_CREDENTIAL_DIR store redirect — where the identity secret
@@ -383,6 +387,12 @@ fauna-client-status = { path = "../../libs/fauna-client-status", features = ["ag
 # The region content plane's app side (src/region.rs) — the shared plane tui
 # leads with; linux paints it.
 fauna-client-region = { path = "../../libs/fauna-client-region" }
+# Nest rules (`nest-rules.md`): the shared rule editor both mountings paint
+# (src/rule_editor.rs), the member's nest-rules book (src/nest_rules.rs) and
+# the guardian document's ward-side join. `scorers`: a document's `wasm`
+# labelers run on the device, as the region plane's already do here — the
+# same request fauna-tui makes.
+fauna-client-policy = { path = "../../libs/fauna-client-policy", features = ["scorers"] }
 # Multi-account registry (Stage 1): `AccountRegistry` over the logical-keyed
 # `SecretStore` seam + the `RegistryLaunchPersistence` adapter that reconciles
 # `fauna_launch_machine::LaunchPersistence` onto the active account. Linux
@@ -595,7 +605,9 @@ openmls = { workspace = true }
 # the crate's `debug_assertions` arm, and in a release-profile e2e build via this
 # crate's `e2e-agent` feature. Deliberately NOT enabled unconditionally: that put
 # them in every shipped release binary (testing.md convention 15).
-fauna-conversations = { path = "../../libs/fauna-conversations" }
+# `local-clock`: the bubble paints `dm-message-warmup-deferred` from the shared
+# `message::warmup_deferred_text`, which formats the release in local time.
+fauna-conversations = { path = "../../libs/fauna-conversations", features = ["local-clock"] }
 
 # GTK4 + libadwaita
 gtk = { package = "gtk4", version = "0.9", features = ["v4_12"] }
@@ -642,8 +654,11 @@ serde_json = { workspace = true }
 # Post-A3 the app hosts no resident engine — this dep remains for the state-dir
 # helpers (`load_location_map`/`load_device_id`) and the Backups page's ephemeral
 # segment-backup coordinator.
+# `pull-back`: the nest-held pull-back restore
+# (`reseed_pull::pull_back_from_destination`), which the destinations page calls.
 fauna-sync-engine = { path = "../../libs/fauna-sync-engine", features = [
     "engine-lifecycle",
+    "pull-back",
     "web",
 ] }
 

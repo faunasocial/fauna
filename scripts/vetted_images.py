@@ -46,6 +46,24 @@ class VettedImage:
     # consumes on the runner and never ships a reference to: mirroring one would
     # publish an image no box ever pulls.
     mirror: str | None = None
+    # The upstream release inside the digest, for an image whose daemon parses
+    # what a stranger sends (the scanner sidecars): read at vet time off the
+    # running daemon — clamd's `VERSION` reply — never from a tag name, a build
+    # date or memory. None = not read yet, and the currency report says so.
+    upstream_version: str | None = None
+    # The lowest upstream release this table admits for that daemon
+    # (deployment-threat-model.md § Concern 1a, the sidecar-version finding); a re-vet
+    # whose read version is below it is refused by the installer suite.
+    version_floor: str | None = None
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    """`1.5.3` -> (1, 5, 3); the comparison the floor is checked with."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def meets_floor(version: str, floor: str) -> bool:
+    return version_tuple(version) >= version_tuple(floor)
 
 
 _CLAMAV = (
@@ -71,8 +89,8 @@ _RUST_BASE = (
     "@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922"
 )
 _GOLANG_BASE = (
-    "golang:1.26.9-bookworm"
-    "@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c"
+    "golang:1.26.10-bookworm"
+    "@sha256:5b1f78db1f54cc8cb46e652c51d3f854441c4310a449161b6fe9fb553edab505"
 )
 _DENO_BASE = (
     "denoland/deno:latest"
@@ -85,17 +103,31 @@ _DEBIAN_BASE = (
 
 # ref (name:tag@digest) -> its vetting evidence. Measured against the live
 # registry 2026-08-27 (2026-08-29 for the four Dockerfile build inputs below;
-# the golang entry re-vetted 2026-10-11 with the go1.26.9 toolchain pin bump).
+# the golang entry re-vetted 2026-10-21 with the go1.26.10 toolchain pin bump).
 _VETTED_THIRD_PARTY_IMAGES: dict[str, VettedImage] = {
+    # Floor: 1.5.3 fixes the July 2026 parser out-of-bounds writes
+    # (CVE-2026-20213…20217, -20243/-20244) and carries the CVE-2025-20260 PDF
+    # fix. Version unread: the index carries no version label, no version tag
+    # resolves to this digest, and reading clamd's `VERSION` reply means running
+    # the image on a dev machine, which waits on the owner's approval of it.
     _CLAMAV: VettedImage(
         frozenset({"amd64", "arm64", "ppc64le"}),
         "project-official",
         True,
         "2026-08-27",
         mirror="clamav",
+        version_floor="1.5.3",
     ),
+    # Floor: the current stable release on 2026-10-17 (the registry's newest
+    # release tag). No rspamd advisory of 2025–2026 was found, so this is a
+    # currency floor, not a fix floor. Version unread, for the clamd reasons.
     _RSPAMD: VettedImage(
-        frozenset({"amd64", "arm64"}), "project-official", True, "2026-08-27", mirror="rspamd"
+        frozenset({"amd64", "arm64"}),
+        "project-official",
+        True,
+        "2026-08-27",
+        mirror="rspamd",
+        version_floor="3.14.1",
     ),
     # Personal-namespace fork of the unmaintained containrrr/watchtower (whose
     # Docker client is rejected by Docker 24+ daemons). The weakest publisher
@@ -122,7 +154,7 @@ _VETTED_THIRD_PARTY_IMAGES: dict[str, VettedImage] = {
         frozenset({"amd64", "arm/v7", "arm64", "386", "ppc64le"}),
         "project-official",
         True,
-        "2026-10-11",
+        "2026-10-21",
     ),
     # The Deno project's own account (not the Docker Official Images program) —
     # no attestation manifests accompany this index.
@@ -219,6 +251,18 @@ def check_image_currency() -> int:
             )
         else:
             print(f"current    {name_tag} (last vetted {vetted.vetted})")
+        if vetted.version_floor is not None:
+            if vetted.upstream_version is None:
+                print(
+                    f"::warning title=Third-party image version::{name_tag} — the upstream "
+                    f"version inside the pin is unread; floor {vetted.version_floor} "
+                    "(deployment-threat-model.md § Concern 1a, the sidecar-version finding)."
+                )
+            elif not meets_floor(vetted.upstream_version, vetted.version_floor):
+                print(
+                    f"::warning title=Third-party image version::{name_tag} carries "
+                    f"{vetted.upstream_version}, below its floor {vetted.version_floor}."
+                )
     total = len(_VETTED_THIRD_PARTY_IMAGES)
     print(f"— {total} vetted image(s): {drifted} drifted, {unresolved} unresolved, "
           f"{total - drifted - unresolved} current.")

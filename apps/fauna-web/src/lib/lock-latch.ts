@@ -6,8 +6,8 @@
  *  the nest: nothing clears a lock before its time, and the launch machine owns
  *  the one refresh at the unlock time.
  *
- *  Keyed like `$lib/api`'s token cache (nest + identity). Memory only. Reads no
- *  clock: `now` (Unix **seconds**) is the caller's — `$lib/api`'s
+ *  Keyed like `#lib/api`'s token cache (nest + identity). Memory only. Reads no
+ *  clock: `now` (Unix **seconds**) is the caller's — `#lib/api`'s
  *  `clientNowSecs()`. A module of its own for the reason `own-session-ids.ts`
  *  is: `api.ts` loads wasm at import time, so `deno test` cannot reach it. */
 export class LockLatch {

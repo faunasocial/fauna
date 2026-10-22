@@ -31,8 +31,7 @@ import uniffi.fauna_core.LocalizedText
  * `atproto` page (`docs/goal/ui/atproto.md`): the four-rung integration-depth
  * selector, the transition card, the Linked-account panel (the shared
  * [BridgeCard] embedded verbatim, `atproto.md` § Migration step 2), the hosted
- * panel, and the full-PDS panel (app credentials + connected apps +
- * kill-switch). No Hilt, no VM, no FFI native calls — mirrors
+ * panel, and the full-PDS panel (app credentials + connected apps). No Hilt, no VM, no FFI native calls — mirrors
  * [com.fauna.app.ui.screen.personalization.LabelerCatalogContentTest].
  *
  * `composeTestRule.setContent` may only be called ONCE per test, so a
@@ -80,6 +79,7 @@ class AtprotoSettingsContentTest {
         mode = null,
         settings = emptyList(),
         supportsFollows = false,
+        supportsFollowRequests = false,
         linkModes = listOf(
             FfiBridgeLinkMode(
                 mode = "oauth",
@@ -108,7 +108,6 @@ class AtprotoSettingsContentTest {
         onCancelTransition: () -> Unit = {},
         onSetDidMethod: (String) -> Unit = {},
         onSetHistoryBackfill: (Boolean) -> Unit = {},
-        onSetExternalAppsEnabled: (Boolean) -> Unit = {},
         onMint: suspend (String, Boolean) -> Pair<String, String>? = { _, _ -> null },
         onRevealSecret: suspend (String) -> String? = { null },
         onRevoke: (String) -> Unit = {},
@@ -138,7 +137,6 @@ class AtprotoSettingsContentTest {
                 onCancelTransition = onCancelTransition,
                 onSetDidMethod = onSetDidMethod,
                 onSetHistoryBackfill = onSetHistoryBackfill,
-                onSetExternalAppsEnabled = onSetExternalAppsEnabled,
                 onMint = onMint,
                 onRevealSecret = onRevealSecret,
                 onRevoke = onRevoke,
@@ -557,22 +555,9 @@ class AtprotoSettingsContentTest {
     @Test
     fun fullPdsPanelVisibleAtHostedFull() {
         render(snapshot = emptySnapshot.copy(level = "hosted_full"))
-        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertExists()
+        // The external-apps switch moved to the Connected apps page.
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertDoesNotExist()
         composeTestRule.onNodeWithTag("atproto-app-credentials-list").assertExists()
-    }
-
-    @Test
-    fun killSwitchAlwaysRendersAndTogglesFireTargetValue() {
-        // mail-settings-enabled-toggle idiom: rendered unconditionally, bound
-        // to computed state, never wrapped in an `if`.
-        var enabled: Boolean? = null
-        render(
-            snapshot = emptySnapshot.copy(level = "hosted_full", externalAppsEnabled = true),
-            onSetExternalAppsEnabled = { enabled = it },
-        )
-        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsOn()
-        composeTestRule.onNodeWithTag("atproto-external-apps-enable").performScrollTo().performClick()
-        assertEquals(false, enabled)
     }
 
     @Test

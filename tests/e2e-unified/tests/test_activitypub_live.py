@@ -41,7 +41,7 @@ carve-out, ratified 2026-07-22 — required on every non-destructive
     precondition below, which never repairs, only refuses.
 
 Preconditions (env):
-  FAUNA_LIVE_NEST_URL       e.g. https://dev.example.com — or the run's own box on a
+  FAUNA_LIVE_NEST_URL       e.g. https://dev.fauna.build — or the run's own box on a
                             `--nest live:URL` run (``live_box_door.live_box_url``)
 Optional:
   FAUNA_LIVE_SECRET_HEX     admin ed25519 32-byte seed hex — an OVERRIDE; by

@@ -175,40 +175,29 @@ class ContactsActions:
         self.driver.click("contact-actor-id-lookup")
         time.sleep(1)
 
-    def require_cross_nest_knock(self) -> None:
-        """Skip unless this app has built the cross-nest Find User + knock leg —
-        convention 7, the platform check lives in the action layer.
-
-        tui shipped it as the lead app (`testing.md` § Default app and nest
-        mode: rust → nest → tui → batched trickle-down); linux, web and android
-        followed over the shared `fauna_client_core::find_user::find_user_across_nests`. The
-        transport half is shared on all seven — every app's `fauna.inbox.send`
-        binding takes `recipient_nest_url`, and the decision + URL derivation are
-        shared Rust (`fauna_core::resolve::is_foreign_handle_domain`,
-        `fauna_provisioning::probe::peer_nest_url`, exported to the FFI/wasm apps
-        as `find_user` / `findUser`) — so what the rest owe is the page wiring,
-        not a mechanism. Parity debt, hence `skip_unbuilt` rather than
-        `declared_absence`.
-        """
-        if not (
-            self.driver.is_tui()
-            or self.driver.is_linux()
-            or self.driver.is_web()
-            or self.driver.is_android()
-        ):
+    def require_find_result_opens_profile(self) -> None:
+        """Skip unless this app paints the Find User result's
+        ``contact-actor-id-open-profile-button`` (convention 7). tui leads
+        (`contacts.md` § Layout & flow region 3); android and linux have lifted it and the
+        other four lift it in the batched trickle-down — parity debt, so
+        ``skip_unbuilt``."""
+        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
             from helpers.app_surface import skip_unbuilt
 
             skip_unbuilt(
                 self.driver,
-                surface="the cross-nest Find User + knock leg",
+                surface="contact-actor-id-open-profile-button",
                 detail=(
-                    "a typed foreign `user@domain` resolves against the peer "
-                    "nest and the knock carries `recipient_nest_url`; tui "
-                    "shipped it as the lead app over the shared decision + URL "
-                    "helpers, windows and apple still send null"
+                    "the Find User result's door into the found actor's "
+                    "Profile, carrying the lookup's nest URL as its home"
                 ),
                 tracked="contacts.md § Implementation status today; the batched per-app trickle-down",
             )
+
+    def open_found_profile(self) -> None:
+        """Open the Find User result's actor on the Profile page."""
+        self.driver.click("contact-actor-id-open-profile-button")
+        self.driver.wait_for("profile-view", timeout=10.0)
 
     def find_by_handle(self, handle: str) -> None:
         """Look a user up by a ``localpart@domain`` handle, without settling.
@@ -337,6 +326,34 @@ class ContactsActions:
         return [
             self.driver.get_text("knock-sender", index=i)
             for i in range(self.driver.count("knock-sender"))
+        ]
+
+    def require_knock_guardian_pending(self) -> None:
+        """Skip unless this app paints ``knock-guardian-pending`` — convention 7,
+        the platform check lives in the action layer. tui leads (2026-10-17,
+        ids user-approved 2026-10-16); linux, web and android lifted it
+        (2026-10-18); windows and macos/ios lift it with their family batch
+        (parity debt, hence skip_unbuilt)."""
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_android()
+        ):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="knock-guardian-pending",
+                detail="the ward's knock row marked as waiting for the guardian",
+                tracked="family-safety.md § App surface",
+            )
+
+    def knock_guardian_pending_texts(self) -> list[str]:
+        """Every ``knock-guardian-pending`` text on the page, in row order."""
+        return [
+            self.driver.get_text("knock-guardian-pending", index=i)
+            for i in range(self.driver.count("knock-guardian-pending"))
         ]
 
     def knock_index_for(self, sender_hex: str) -> int | None:

@@ -194,7 +194,7 @@ pub fn held_sets(
         // The owner's canonical `handle@domain`, as the home nest stamped it
         // and this member's own nest verified it; the home nest's host until
         // that pair lands (`on-demand-files-shared-sets.md` § Shared sets on a capability
-        // host, decision 3; `federation.md` § … *The cross-nest owner label*).
+        // host, decision 3; `federation-shared-folders.md` § … *The cross-nest owner label*).
         let owner = fauna_core::format::qualified_handle(
             record.owner_handle.as_deref(),
             record.owner_domain.as_deref(),

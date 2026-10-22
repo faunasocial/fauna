@@ -43,7 +43,7 @@
 
 use std::sync::Arc;
 
-use fauna_client_accounts::{AccountRegistry, LocalStorageSecretStore};
+use fauna_client_accounts::{AccountRegistry, WebIdentityStore};
 use fauna_client_conversations::WsMlsReplicaTransport;
 use fauna_client_mls_sync::{MlsStateSync, ReplicaResealProgress};
 use fauna_client_recovery::{
@@ -203,8 +203,8 @@ fn sweep_view(sweep: &SweepStatus) -> (String, Option<String>) {
 ///
 /// This tab's `sessionStorage` — the SPA's established analogue of a Rust
 /// process-global across the account switch's **full document swap**
-/// (`performSwitch`'s `window.location.assign`; `$lib/api.ts`'s nest-dial
-/// override, `$lib/generation-e2e.ts`'s teardown counter): it survives the swap
+/// (`performSwitch`'s `window.location.assign`; `#lib/api.ts`'s nest-dial
+/// override, `#lib/generation-e2e.ts`'s teardown counter): it survives the swap
 /// and dies with the tab. Here it holds the ephemeral review pass's witness
 /// and the owed kit; the ceremony's raise context is NOT here — it is parked
 /// durably in the account registry (`PendingCeremony::park`).
@@ -236,7 +236,7 @@ fn ephemeral_review_pass_witness_key(successor_actor_hex: &str) -> String {
 /// page asks the same question until the user acts — and cleared only by
 /// [`clear_ephemeral_review_pass_witness`], the *Review The Rest Later*
 /// action. The roster itself is never duplicated into this
-/// key: the pass reads the same `$lib/member-reviews` store the permanent
+/// key: the pass reads the same `#lib/member-reviews` store the permanent
 /// page and the member chips already refresh, this key answers only "was a
 /// sweep the reason it's non-empty right now".
 fn mark_ephemeral_review_pass_witness(successor_actor_hex: &str) {
@@ -413,8 +413,16 @@ fn sweep_owed_key(successor_actor_hex: &str) -> String {
 ///
 /// ⚠ `verified_successor` must be `resolveVerifiedSuccessor`'s answer — the
 /// registration chain's, never the nest's claim.
-pub(crate) fn adopt_held_successor(predecessor: &str, verified_successor: &str) -> bool {
-    if !account_registry().adopt_held_successor(predecessor, verified_successor) {
+pub(crate) async fn adopt_held_successor(predecessor: &str, verified_successor: &str) -> bool {
+    // The link write is a `fauna/index` read-modify-write, so it holds the
+    // origin-wide Web Lock like every wasm-facing registry mutator; the
+    // session-storage writes below are not registry writes and stay outside.
+    let (predecessor, successor) = (predecessor.to_owned(), verified_successor.to_owned());
+    let adopted = fauna_client_accounts::with_web_mutation_lock(move || {
+        account_registry().adopt_held_successor(&predecessor, &successor)
+    })
+    .await;
+    if !adopted {
         return false;
     }
     park_kit_owed(verified_successor);
@@ -694,7 +702,7 @@ const E2E_SWEEP_STATE_KEY: &str = "fauna_e2e_succession_sweep";
 /// that held the report is gone. tui keeps it on `App::succession_sweep`,
 /// declared to outlive `clear_session()` at the account switch; `sessionStorage`
 /// is web's twin of exactly that declaration — the same reasoning
-/// `$lib/generation-e2e.ts` records for the teardown counter, where an
+/// `#lib/generation-e2e.ts` records for the teardown counter, where an
 /// in-memory value "would reset to 0 across exactly the relaunch this key
 /// exists to detect — a false PASS, not a missing signal".
 ///
@@ -867,7 +875,7 @@ pub(crate) async fn run_aftermath_web(
             client.clone(),
             &keypair,
             &predecessors,
-            base_body.as_deref(),
+            base_body.as_ref().map(|b| b.body.as_slice()),
             Some(home),
         )
         .await
@@ -1037,6 +1045,12 @@ impl fauna_client_recovery::aftermath::AftermathSink for JsAftermathSink {
     fn grant_remint(&mut self, progress: fauna_client_capabilities::GrantRemintProgress) {
         self.emit("grantRemint", progress.status_line());
     }
+    fn period_rotation(
+        &mut self,
+        progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
+    ) {
+        self.emit("periodRotation", progress.status_line());
+    }
     fn drafts_reseal(&mut self, progress: fauna_client_drafts::DraftsResealProgress) {
         self.emit("draftsReseal", progress.status_line());
     }
@@ -1059,7 +1073,7 @@ impl fauna_client_recovery::aftermath::AftermathSink for JsAftermathSink {
 /// registry over a second store handle could answer about a different store than
 /// the one just written to.
 pub(crate) fn account_registry() -> AccountRegistry {
-    AccountRegistry::new(Arc::new(LocalStorageSecretStore))
+    AccountRegistry::new(Arc::new(WebIdentityStore))
 }
 
 /// Ask the registry for the secret back — the ONLY proof the persist took.

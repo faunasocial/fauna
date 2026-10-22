@@ -603,6 +603,16 @@ public final class ConversationsVM {
     public func selectThreadAndMessage(_ threadId: ThreadId, _ messageId: MessageId) {
         manager.selectThreadAndMessage(threadId: threadId, messageId: messageId)
     }
+    /// The room's search strip (`room-search.md` § The surface): open and close
+    /// are view state on the detail (closing also clears the query and the rows);
+    /// the submit runs the shared manager's `room_search`, which owns the leg, the
+    /// rows and their typed targets — this app picks no kind. A refusal rides the
+    /// snapshot's own error, so the throw is not surfaced twice.
+    public func openRoomSearch(_ id: ThreadId) { manager.openRoomSearch(id: id) }
+    public func closeRoomSearch(_ id: ThreadId) { manager.closeRoomSearch(id: id) }
+    public func roomSearch(_ id: ThreadId, _ query: String) async {
+        await manager.roomSearch(id: id, query: query)
+    }
     public func clearSelection() { manager.clearSelection() }
     public func startNewConversation() { manager.startNewConversation() }
     public func cancelNewConversation() { manager.cancelNewConversation() }
@@ -703,6 +713,13 @@ public final class ConversationsVM {
     /// only this call moves it to a terminal state (`conversations.md` § Errors &
     /// edge cases → *The picker tells the truth*, 2026-08-29).
     public func resolveRecipient() async { await manager.resolveRecipient() }
+    /// Re-derive the compose's list-send texts (`ComposeState.listSend`) — the
+    /// thread `id`'s compose, or the new-thread compose's when nil — from the
+    /// nest's current figures (`mail-mass-mailing.md` § Composing a list
+    /// message). Called when a recipient chip commits and when a thread opens;
+    /// the manager itself refreshes after every send.
+    public func refreshListSend(_ id: ThreadId?) async { await manager.refreshListSend(id: id) }
+    public func refreshMessageScanResults(_ id: ThreadId) async { await manager.refreshMessageScanResults(id: id) }
 
     // ── Membership / rename ─────────────────────────────────────────────────
     /// On a `FaunaMls` 1:1 this forks a new `MlsGroup` thread and returns its
@@ -736,6 +753,32 @@ public final class ConversationsVM {
     public func applyRoomSettings(_ id: ThreadId, _ edits: [RoomSettingsEdit]) async -> Bool {
         await manager.applyRoomSettings(id: id, edits: edits)
     }
+
+    // ── The community room's controls (`ui/conversations.md` § Element IDs) ──
+    // One-call forwards to the manager; the gates, the refusals and the
+    // follow-into-the-room are all its.
+
+    /// `recipient-picker-home-nest-toggle` — stage whether the room about to be
+    /// created seats the user's home nest (checked → a community room).
+    public func setNewThreadHomeNest(_ include: Bool) { manager.setNewThreadHomeNest(include: include) }
+
+    /// `room-invitation-accept-button[i]` — the manager seats the account and
+    /// selects the room's thread itself; a refusal lands on the page error.
+    @discardableResult
+    public func acceptRoomInvitation(_ id: Int64) async -> ThreadId? { await manager.acceptRoomInvitation(id: id) }
+
+    /// `room-invitation-decline-button[i]`.
+    public func declineRoomInvitation(_ id: Int64) async { await manager.declineRoomInvitation(id: id) }
+
+    /// `room-pending-invite-withdraw-button[i]` — acts at once, no confirm.
+    public func withdrawRoomInvite(_ id: ThreadId, inviteeActorHex: String) async {
+        await manager.withdrawRoomInvite(id: id, inviteeActorHex: inviteeActorHex)
+    }
+
+    /// `room-leave-confirm` — the walk-out. One manager call: the room's class
+    /// picks the door inside shared Rust, and a refusal lands on the page error;
+    /// the thread stays in the leaver's own list.
+    public func leaveRoom(_ id: ThreadId) async { await manager.leaveRoom(id: id) }
 
     // ── Attachments (outbound staging) ──────────────────────────────────────
     /// Client-glue error for the page's `error-message` element — set by shell

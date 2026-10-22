@@ -14,8 +14,8 @@ import javax.inject.Inject
  * Renders the shared `AtprotoSettingsMachine` (libs/fauna-atproto-settings-machine,
  * over UniFFI, via [AtprotoSettingsHost]) for the `atproto` page (docs/goal/ui/atproto.md):
  * the four-rung integration-depth selector, the transition card, the hosted panel, and the F1
- * login-plane surface (app credentials, connected-app sessions, the
- * external-apps kill-switch). Per priority #2 this view-model holds **no**
+ * login-plane surface (app credentials; the external-apps switch lives on
+ * Connected apps). Per priority #2 this view-model holds **no**
  * ATProto logic (level semantics, transition-card content, gate interpretation
  * — all of it lives in shared Rust); it dispatches gestures to the host's
  * machine and mirrors its snapshot. Hybrid of [MailSettingsVM]'s secret-needing build
@@ -76,7 +76,6 @@ class AtprotoVM @Inject constructor(
         host.refreshSnapshot()
     }
 
-    fun setExternalAppsEnabled(enabled: Boolean) = dispatch { it.setExternalAppsEnabled(enabled) }
 
     /**
      * Mint a new app credential and return its `(credentialId, secret)` so the

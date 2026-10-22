@@ -79,6 +79,26 @@ fn claim_error_to_rpc(e: ClaimError) -> RpcError {
     }
 }
 
+/// The SSH door's one address (`installers/vps.md` § The SSH door): hand the
+/// claimant's source address — the anonymous connection's peer, the PROXY-v2
+/// source behind the SNI router — to the host through the maintenance channel,
+/// once, and return the address written (canonical form, as in the file) for
+/// the claim reply to echo. Best-effort: a box with no maintenance mount, a
+/// connection with no recorded peer, or a failed write leaves the door shut,
+/// returns `None`, and never fails the claim, which has already committed.
+fn record_ssh_door_source(state: &crate::routes::AppState) -> Option<String> {
+    let ip = crate::dispatch_core::current_caller().and_then(|c| c.peer_ip)?;
+    let dir = crate::mail_enable::data_dir_from_db_path(&state.config.nest.db_path)?;
+    match crate::host_maintenance::write_ssh_door_source(&dir, ip) {
+        Ok(true) => Some(ip.to_canonical().to_string()),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!("claim: failed to write ssh-door-source: {e}");
+            None
+        }
+    }
+}
+
 // ── fauna.auth.claim_admin (≡ POST /api/v1/claim-admin) ─────────────────────
 
 fn claim_admin_handler() -> RpcHandler {
@@ -96,6 +116,7 @@ fn claim_admin_handler() -> RpcHandler {
             )
             .await
             .map_err(claim_error_to_rpc)?;
+            let ssh_door_source = record_ssh_door_source(&state);
             // Hand the deployment signing seed to the claiming admin's client so it
             // can custody the nest's identity off-box and re-install it after total
             // box loss (box-recovery.md § Mechanism — claim-an-existing box). Gated
@@ -112,6 +133,7 @@ fn claim_admin_handler() -> RpcHandler {
                 domain: outcome.domain,
                 handle: outcome.handle,
                 deployment_seed,
+                ssh_door_source,
                 extra: Default::default(),
             })
         })

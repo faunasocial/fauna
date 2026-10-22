@@ -805,6 +805,18 @@ mod tests {
     /// `review-method.md` § Evidence standard sanctions asserting the source
     /// shape instead: each of `finish` and `take` takes `self.state()` exactly
     /// once, and that one acquisition is the whole transition.
+    ///
+    /// That — the missing handle — is the only reason this pin is not
+    /// threaded. The earlier claim that a threaded witness "would be
+    /// timing-dependent, which convention 14 forbids" was wrong: convention 14
+    /// (`e2e-latency-independent-assertions.md` § *CONTEND for the race*)
+    /// prescribes exactly that witness — one core pinned, the thread count
+    /// stated, a state invariant asserted, never a duration. Run over
+    /// `HostState` with a fake handle, it measured the split shape at 3987 of
+    /// 4000 rounds against 0 of 4000 for `settle_install`.
+    /// Contention never sees the host's own lock use, though, and this pin
+    /// does. Reach for that instrument, not a sleep, whenever the host can be
+    /// built with a fake handle.
     #[test]
     fn install_and_teardown_each_take_the_host_lock_exactly_once() {
         let finish = method_code("pub async fn finish(");

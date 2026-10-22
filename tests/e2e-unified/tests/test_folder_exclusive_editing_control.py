@@ -45,6 +45,8 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.android,
     pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 _FLAG_WINDOW_SECS = 30.0

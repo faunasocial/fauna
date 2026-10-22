@@ -9,12 +9,14 @@
 //! server at all) onto `muted_words.rs`'s self-contained `Widgets`/`Ctx` +
 //! `spawn_with_snapshot` shape (priority #4 — richest existing pattern). The
 //! create/edit dropdown↔wire mapping is the shared
-//! `fauna_protocol::email::{encode_filter_rule, encode_filter_action,
-//! describe_filter_rule, describe_filter_action, filter_is_editable_for}` every
-//! app's dialog shares — the Rust-native linux app calls it directly. The form
-//! holds the whole [`FilterActionInputs`] (the Forward destination and copy
-//! mode, plus the Reject reason an edit writes back unchanged), so it offers
-//! and opens every `SUPPORTED_ACTION_KINDS` entry.
+//! `fauna_protocol::email::{encode_filter_rule_inputs, encode_filter_action,
+//! describe_filter_rule_inputs, describe_filter_action, filter_is_editable,
+//! parse_filter_priority}` every app's dialog shares — the Rust-native linux
+//! app calls it directly. The form collects every v1 condition and action, the
+//! rule's order and its `continue` flag (`email-filters.md` § Email filter
+//! rules) — tui's `settings/privacy.rs` shape — so it opens every filter the
+//! full form can show; the Reject reason, which it has no field for, is
+//! written back unchanged.
 //!
 //! **The post-succession review mark, and its Keep half** (`succession-aftermath.md` § Adjudicating what the aftermath carries
 //! across, the fourth plane) — ported near-verbatim from tui's
@@ -38,10 +40,10 @@ use adw::prelude::*;
 use fauna_client_email::EmailClient;
 use fauna_core::data::UnattestedVerdict;
 use fauna_protocol::email::{
-    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs,
+    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs, FilterRuleInputs,
     SUPPORTED_ACTION_KINDS as ACTION_KINDS, SUPPORTED_RULE_KINDS as RULE_KINDS,
-    describe_filter_action, describe_filter_rule, encode_filter_action, encode_filter_rule,
-    filter_is_editable_for,
+    describe_filter_action, describe_filter_rule_inputs, encode_filter_action,
+    encode_filter_rule_inputs, filter_is_editable, parse_filter_priority,
 };
 
 use crate::async_helper::spawn_with_snapshot;
@@ -68,6 +70,24 @@ struct FormWidgets {
     /// `filter-keep-local-copy` — checked by default (copy); unchecked is a
     /// redirect. Shown only while the action is Forward.
     keep_local_copy: gtk::CheckButton,
+    /// `filter-rule-header-value` — shown only for a header-contains condition.
+    header_value: gtk::Entry,
+    /// `filter-rule-spam-score` — points as typed, shown only for a
+    /// spam-score condition.
+    spam_score: gtk::Entry,
+    /// `filter-file-into-mailbox` — shown only while the action is FileInto.
+    file_into_mailbox: gtk::Entry,
+    /// `filter-add-label` — shown only while the action is AddLabel.
+    add_label: gtk::Entry,
+    /// `filter-auto-reply-{subject,body,interval-hours}` — shown only while
+    /// the action is AutoReply.
+    auto_reply_subject: gtk::Entry,
+    auto_reply_body: gtk::Entry,
+    auto_reply_interval_hours: gtk::Entry,
+    /// `filter-priority-input` — the rule's order; blank is 0.
+    priority: gtk::Entry,
+    /// `filter-continue-toggle` — keep checking later rules after a match.
+    continue_toggle: gtk::CheckButton,
     create_btn: gtk::Button,
     save_btn: gtk::Button,
 }
@@ -234,15 +254,59 @@ fn build_form_widgets() -> FormWidgets {
     set_test_id(&keep_local_copy, ids::FILTER_KEEP_LOCAL_COPY);
     container.append(&keep_local_copy);
 
-    {
-        let forward_address = forward_address.clone();
-        let keep_local_copy = keep_local_copy.clone();
-        action_dd.connect_selected_notify(move |dd| {
-            let forward = dropdown_value(dd) == "Forward";
-            forward_address.set_visible(forward);
-            keep_local_copy.set_visible(forward);
-        });
+    // The other conditions' and actions' own inputs, each present only while
+    // its kind is selected — the Forward shape (tui's `settings/privacy.rs`).
+    let hidden_entry = |placeholder: &str, id: &str| {
+        let entry = gtk::Entry::builder()
+            .placeholder_text(placeholder)
+            .visible(false)
+            .build();
+        set_test_id(&entry, id);
+        entry
+    };
+    let header_value = hidden_entry(privacy_page::HEADER_VALUE, ids::FILTER_RULE_HEADER_VALUE);
+    let spam_score = hidden_entry(privacy_page::SPAM_SCORE, ids::FILTER_RULE_SPAM_SCORE);
+    let file_into_mailbox = hidden_entry(
+        privacy_page::FILE_INTO_MAILBOX,
+        ids::FILTER_FILE_INTO_MAILBOX,
+    );
+    let add_label = hidden_entry(privacy_page::ADD_LABEL, ids::FILTER_ADD_LABEL);
+    let auto_reply_subject = hidden_entry(
+        privacy_page::AUTO_REPLY_SUBJECT,
+        ids::FILTER_AUTO_REPLY_SUBJECT,
+    );
+    let auto_reply_body = hidden_entry(privacy_page::AUTO_REPLY_BODY, ids::FILTER_AUTO_REPLY_BODY);
+    let auto_reply_interval_hours = hidden_entry(
+        privacy_page::AUTO_REPLY_INTERVAL_HOURS,
+        ids::FILTER_AUTO_REPLY_INTERVAL_HOURS,
+    );
+    // The header value sits beside the condition it qualifies; the action
+    // inputs follow the action dropdown.
+    container.insert_child_after(&header_value, Some(&value_entry));
+    container.insert_child_after(&spam_score, Some(&header_value));
+    for entry in [
+        &file_into_mailbox,
+        &add_label,
+        &auto_reply_subject,
+        &auto_reply_body,
+        &auto_reply_interval_hours,
+    ] {
+        container.append(entry);
     }
+
+    // The rule's place in the order and its `continue` flag
+    // (`email-filters.md` § Email filter rules: rules run in order, the first
+    // match wins unless it is marked to keep going).
+    let priority = gtk::Entry::builder()
+        .placeholder_text(privacy_page::PRIORITY)
+        .build();
+    set_test_id(&priority, ids::FILTER_PRIORITY_INPUT);
+    container.append(&priority);
+    let continue_toggle = gtk::CheckButton::builder()
+        .label(privacy_page::CONTINUE_MATCHING)
+        .build();
+    set_test_id(&continue_toggle, ids::FILTER_CONTINUE_TOGGLE);
+    container.append(&continue_toggle);
 
     let create_btn = gtk::Button::with_label(common::CREATE);
     create_btn.add_css_class("suggested-action");
@@ -265,8 +329,56 @@ fn build_form_widgets() -> FormWidgets {
         action_dd,
         forward_address,
         keep_local_copy,
+        header_value,
+        spam_score,
+        file_into_mailbox,
+        add_label,
+        auto_reply_subject,
+        auto_reply_body,
+        auto_reply_interval_hours,
+        priority,
+        continue_toggle,
         create_btn,
         save_btn,
+    }
+}
+
+impl FormWidgets {
+    /// Show exactly the inputs the selected condition and action take.
+    fn sync_visibility(&self) {
+        let rule = dropdown_value(&self.rule_type);
+        self.header_value.set_visible(rule == "HeaderContains");
+        self.spam_score.set_visible(rule == "SpamScoreAtLeast");
+        let action = dropdown_value(&self.action_dd);
+        self.forward_address.set_visible(action == "Forward");
+        self.keep_local_copy.set_visible(action == "Forward");
+        self.file_into_mailbox.set_visible(action == "FileInto");
+        self.add_label.set_visible(action == "AddLabel");
+        for entry in [
+            &self.auto_reply_subject,
+            &self.auto_reply_body,
+            &self.auto_reply_interval_hours,
+        ] {
+            entry.set_visible(action == "AutoReply");
+        }
+    }
+
+    /// Load every condition input from `inputs` (the dropdown included).
+    fn apply_rule_inputs(&self, inputs: &FilterRuleInputs) {
+        select_dropdown(&self.rule_type, RULE_KINDS, &inputs.kind);
+        self.value_entry.set_text(&inputs.value);
+        self.header_value.set_text(&inputs.header_value);
+        self.spam_score.set_text(&inputs.spam_score);
+    }
+
+    /// The form's condition inputs, as the shared encoder reads them.
+    fn rule_inputs(&self) -> FilterRuleInputs {
+        FilterRuleInputs {
+            kind: dropdown_value(&self.rule_type),
+            value: self.value_entry.text().to_string(),
+            header_value: self.header_value.text().to_string(),
+            spam_score: self.spam_score.text().to_string(),
+        }
     }
 }
 
@@ -280,6 +392,10 @@ fn wire(client: &Rc<FaunaClient>, widgets: Widgets) -> Rc<Ctx> {
 
     refresh(&ctx);
 
+    for dd in [&ctx.w.form.rule_type, &ctx.w.form.action_dd] {
+        let ctx = Rc::clone(&ctx);
+        dd.connect_selected_notify(move |_| ctx.w.form.sync_visibility());
+    }
     {
         let ctx = Rc::clone(&ctx);
         ctx.w
@@ -424,7 +540,7 @@ fn build_filter_row(ctx: &Rc<Ctx>, filter: &EmailFilter) -> gtk::Box {
     // Gated: a filter only a raw API call could have produced (multi-rule, or
     // a richer rule/action no dialog collects) never opens a form that would
     // silently narrow it on save.
-    if filter_is_editable_for(&filter.rules, &filter.action, ACTION_KINDS) {
+    if filter_is_editable(filter) {
         let edit_btn = gtk::Button::builder()
             .icon_name("document-edit-symbolic")
             .valign(gtk::Align::Center)
@@ -486,10 +602,10 @@ fn open_form_for_create(ctx: &Rc<Ctx>) {
     *ctx.w.editing_id.borrow_mut() = None;
     clear_error(ctx);
     ctx.w.form.name_entry.set_text("");
-    ctx.w.form.value_entry.set_text("");
-    ctx.w.form.rule_type.set_selected(0);
-    ctx.w.form.action_dd.set_selected(0);
+    ctx.w.form.apply_rule_inputs(&FilterRuleInputs::default());
     apply_inputs(ctx, &FilterActionInputs::default());
+    ctx.w.form.priority.set_text("");
+    ctx.w.form.continue_toggle.set_active(false);
     ctx.w.form.create_btn.set_visible(true);
     ctx.w.form.save_btn.set_visible(false);
     ctx.w.form.container.set_visible(true);
@@ -524,9 +640,9 @@ fn apply_get(ctx: &Rc<Ctx>, result: Result<EmailFilter, String>) {
     let described = filter
         .rules
         .first()
-        .and_then(describe_filter_rule)
+        .and_then(describe_filter_rule_inputs)
         .zip(describe_filter_action(&filter.action));
-    let Some(((rule_kind, value), inputs)) = described else {
+    let Some((rule_inputs, inputs)) = described else {
         // The row's own filter_is_editable gate should have prevented this —
         // only reachable if the filter changed server-side between list-load
         // and the edit click.
@@ -537,24 +653,33 @@ fn apply_get(ctx: &Rc<Ctx>, result: Result<EmailFilter, String>) {
     clear_error(ctx);
     *ctx.w.editing_id.borrow_mut() = Some(filter.id);
     ctx.w.form.name_entry.set_text(&filter.name);
-    ctx.w.form.value_entry.set_text(&value);
-    select_dropdown(&ctx.w.form.rule_type, RULE_KINDS, rule_kind);
-    select_dropdown(&ctx.w.form.action_dd, ACTION_KINDS, &inputs.kind);
+    ctx.w.form.apply_rule_inputs(&rule_inputs);
     apply_inputs(ctx, &inputs);
+    ctx.w.form.priority.set_text(&filter.priority.to_string());
+    ctx.w
+        .form
+        .continue_toggle
+        .set_active(filter.continue_on_match);
     ctx.w.form.create_btn.set_visible(false);
     ctx.w.form.save_btn.set_visible(true);
     ctx.w.form.container.set_visible(true);
 }
 
-/// Load every non-dropdown action input from `inputs` into the form (the
-/// dropdown itself is the caller's, so it can select the kind first).
+/// Load every action input from `inputs` into the form (the dropdown
+/// included), then show the inputs the selected kinds take.
 fn apply_inputs(ctx: &Rc<Ctx>, inputs: &FilterActionInputs) {
-    ctx.w.form.forward_address.set_text(&inputs.forward_address);
-    ctx.w
-        .form
-        .keep_local_copy
-        .set_active(inputs.keep_local_copy);
+    let f = &ctx.w.form;
+    select_dropdown(&f.action_dd, ACTION_KINDS, &inputs.kind);
+    f.forward_address.set_text(&inputs.forward_address);
+    f.keep_local_copy.set_active(inputs.keep_local_copy);
+    f.file_into_mailbox.set_text(&inputs.file_into_mailbox);
+    f.add_label.set_text(&inputs.label);
+    f.auto_reply_subject.set_text(&inputs.auto_reply_subject);
+    f.auto_reply_body.set_text(&inputs.auto_reply_body);
+    f.auto_reply_interval_hours
+        .set_text(&inputs.auto_reply_interval_hours);
     *ctx.w.reject_reason.borrow_mut() = inputs.reject_reason.clone();
+    f.sync_visibility();
 }
 
 fn select_dropdown(dd: &gtk::DropDown, values: &[&str], selected: &str) {
@@ -572,39 +697,56 @@ fn dropdown_value(dd: &gtk::DropDown) -> String {
         .unwrap_or_default()
 }
 
-/// Read + encode the form fields, surfacing an unknown-kind error instead of
-/// the pre-lift clients' silent coercion.
-fn read_form(ctx: &Rc<Ctx>) -> Option<(String, EmailFilterRule, EmailFilterAction)> {
-    let name = ctx.w.form.name_entry.text().to_string();
-    let value = ctx.w.form.value_entry.text().to_string();
-    let rule_kind = dropdown_value(&ctx.w.form.rule_type);
-    let inputs = FilterActionInputs {
-        kind: dropdown_value(&ctx.w.form.action_dd),
-        reject_reason: ctx.w.reject_reason.borrow().clone(),
-        forward_address: ctx.w.form.forward_address.text().to_string(),
-        keep_local_copy: ctx.w.form.keep_local_copy.is_active(),
-    };
+/// The form, encoded: everything a create or an update writes.
+struct FormValues {
+    name: String,
+    rule: EmailFilterRule,
+    action: EmailFilterAction,
+    priority: i32,
+    continue_on_match: bool,
+}
 
-    let rule = match encode_filter_rule(&rule_kind, &value) {
-        Ok(r) => r,
-        Err(e) => {
-            show_error(ctx, &e.to_string());
-            return None;
-        }
+/// Read + encode the form fields through the shared encoders, surfacing a
+/// bad input on `error-message` instead of the pre-lift clients' silent
+/// coercion.
+fn read_form(ctx: &Rc<Ctx>) -> Option<FormValues> {
+    let f = &ctx.w.form;
+    let inputs = FilterActionInputs {
+        kind: dropdown_value(&f.action_dd),
+        reject_reason: ctx.w.reject_reason.borrow().clone(),
+        forward_address: f.forward_address.text().to_string(),
+        keep_local_copy: f.keep_local_copy.is_active(),
+        file_into_mailbox: f.file_into_mailbox.text().to_string(),
+        label: f.add_label.text().to_string(),
+        auto_reply_subject: f.auto_reply_subject.text().to_string(),
+        auto_reply_body: f.auto_reply_body.text().to_string(),
+        auto_reply_interval_hours: f.auto_reply_interval_hours.text().to_string(),
     };
-    let action = match encode_filter_action(&inputs) {
-        Ok(a) => a,
+    let encoded = encode_filter_rule_inputs(&f.rule_inputs())
+        .map_err(|e| e.to_string())
+        .and_then(|rule| {
+            let action = encode_filter_action(&inputs).map_err(|e| e.to_string())?;
+            let priority = parse_filter_priority(&f.priority.text()).map_err(|e| e.to_string())?;
+            Ok((rule, action, priority))
+        });
+    match encoded {
+        Ok((rule, action, priority)) => Some(FormValues {
+            name: f.name_entry.text().to_string(),
+            rule,
+            action,
+            priority,
+            continue_on_match: f.continue_toggle.is_active(),
+        }),
         Err(e) => {
-            show_error(ctx, &e.to_string());
-            return None;
+            show_error(ctx, &e);
+            None
         }
-    };
-    Some((name, rule, action))
+    }
 }
 
 fn submit_create(ctx: &Rc<Ctx>) {
-    if let Some((name, rule, action)) = read_form(ctx) {
-        dispatch(ctx, Mutation::Create { name, rule, action });
+    if let Some(values) = read_form(ctx) {
+        dispatch(ctx, Mutation::Create(values));
     }
 }
 
@@ -612,16 +754,8 @@ fn submit_save(ctx: &Rc<Ctx>) {
     let Some(id) = *ctx.w.editing_id.borrow() else {
         return;
     };
-    if let Some((name, rule, action)) = read_form(ctx) {
-        dispatch(
-            ctx,
-            Mutation::Update {
-                id,
-                name,
-                rule,
-                action,
-            },
-        );
+    if let Some(values) = read_form(ctx) {
+        dispatch(ctx, Mutation::Update { id, values });
     }
 }
 
@@ -635,21 +769,9 @@ fn submit_delete(ctx: &Rc<Ctx>, id: i64) {
 }
 
 enum Mutation {
-    Create {
-        name: String,
-        rule: EmailFilterRule,
-        action: EmailFilterAction,
-    },
-    Update {
-        id: i64,
-        name: String,
-        rule: EmailFilterRule,
-        action: EmailFilterAction,
-    },
-    Delete {
-        id: i64,
-        was_marked: bool,
-    },
+    Create(FormValues),
+    Update { id: i64, values: FormValues },
+    Delete { id: i64, was_marked: bool },
 }
 
 fn dispatch(ctx: &Rc<Ctx>, mutation: Mutation) {
@@ -672,20 +794,30 @@ async fn run_mutation(nest: Nest, mutation: Mutation) -> (LoadResult, Option<Vec
     let mut new_marks = None;
     let outcome: Result<(), String> = async {
         match mutation {
-            Mutation::Create { name, rule, action } => {
+            Mutation::Create(v) => {
                 email
-                    .filters_create(name, vec![rule], "all", action, 0)
+                    .filters_create(
+                        v.name,
+                        vec![v.rule],
+                        "all",
+                        v.action,
+                        v.priority,
+                        v.continue_on_match,
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
             }
-            Mutation::Update {
-                id,
-                name,
-                rule,
-                action,
-            } => {
+            Mutation::Update { id, values: v } => {
                 email
-                    .filters_update(id, name, vec![rule], "all", action, 0)
+                    .filters_update(
+                        id,
+                        v.name,
+                        vec![v.rule],
+                        "all",
+                        v.action,
+                        v.priority,
+                        v.continue_on_match,
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
             }
@@ -770,8 +902,10 @@ fn apply_mutation(ctx: &Rc<Ctx>, result: (LoadResult, Option<Vec<i64>>)) {
 fn close_form(ctx: &Rc<Ctx>) {
     *ctx.w.editing_id.borrow_mut() = None;
     ctx.w.form.name_entry.set_text("");
-    ctx.w.form.value_entry.set_text("");
+    ctx.w.form.apply_rule_inputs(&FilterRuleInputs::default());
     apply_inputs(ctx, &FilterActionInputs::default());
+    ctx.w.form.priority.set_text("");
+    ctx.w.form.continue_toggle.set_active(false);
     ctx.w.form.container.set_visible(false);
 }
 
@@ -811,6 +945,15 @@ mod tests {
                 "filter-action-select",
                 "filter-forward-address",
                 "filter-keep-local-copy",
+                "filter-rule-header-value",
+                "filter-rule-spam-score",
+                "filter-file-into-mailbox",
+                "filter-add-label",
+                "filter-auto-reply-subject",
+                "filter-auto-reply-body",
+                "filter-auto-reply-interval-hours",
+                "filter-priority-input",
+                "filter-continue-toggle",
                 "create-filter",
                 "save-filter",
             ] {

@@ -22,12 +22,11 @@ The cheap half of the gate is ``tests/docker/test_entrypoint_overlay.py``
 key. This file proves the consequence end-to-end — that a container from the real
 image answers ``/app`` with the SPA.
 
-Run against a **published** image rather than a local build (local nest-image
-builds are forbidden on dev VMs)::
+Run against a **published** image rather than this tree's local build
+(``helpers.docker_build``)::
 
-    docker pull --platform linux/amd64 ghcr.io/faunasocial/nest:latest
-    docker tag ghcr.io/faunasocial/nest:latest fauna-nest-test:local
-    FAUNA_REUSE_IMAGE=1 pytest tests/e2e-unified/tests/platform/docker/test_spa_serving.py -v
+    docker pull ghcr.io/faunasocial/nest:dev
+    FAUNA_NEST_TEST_IMAGE=ghcr.io/faunasocial/nest:dev pytest tests/e2e-unified/tests/platform/docker/test_spa_serving.py -v
 """
 
 import html
@@ -61,15 +60,15 @@ pytestmark = [
 ]
 
 # A marker unique to the BUILT SvelteKit SPA: `apps/fauna-web/src/app.html` hard-codes
-# this manifest link, and `svelte.config.js` sets `paths.base = '/app'`. Deliberately
-# not `<title>Fauna</title>` — the info page's `<title>Fauna Nest</title>` contains it
+# this manifest link, and `vite.config.ts` sets `paths.base = '/app'`. Deliberately
+# not `<title>Fauna</title>` — the info page's `<title>Fauna nest</title>` contains it
 # as a prefix, so that assertion would pass on the bug.
 SPA_MARKER = '/app/manifest.json'
 
 # The info page's own heading (`lib.rs::info_page`). Its presence at /app IS the
 # bug: a positive-only assert cannot catch this, because the info page is also
 # 200 + text/html.
-INFO_PAGE_MARKER = 'Fauna Nest API'
+INFO_PAGE_MARKER = '<h1>Fauna nest</h1>'
 
 
 def _get(port: int, path: str):

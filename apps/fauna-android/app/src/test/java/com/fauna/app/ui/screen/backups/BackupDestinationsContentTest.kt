@@ -159,7 +159,8 @@ class BackupDestinationsContentTest {
         reseedRows: List<String?> = emptyList(),
         reseedRunning: Boolean = false,
         reseedResultText: String? = null,
-        onReseed: () -> Unit = {},
+        onReseed: (String?) -> Unit = {},
+        reseedRunsPullBack: (String) -> Boolean = { false },
     ) {
         composeTestRule.setContent {
             // Scrollable, because production mounts this section as a header item
@@ -196,6 +197,7 @@ class BackupDestinationsContentTest {
                 reseedRunning = reseedRunning,
                 reseedResultText = reseedResultText,
                 onReseed = onReseed,
+                reseedRunsPullBack = reseedRunsPullBack,
             )
             }
         }
@@ -661,6 +663,29 @@ class BackupDestinationsContentTest {
         node("backup-destination-reseed-confirm-button").performClick()
         assertEquals(1, runs)
         composeTestRule.onAllNodesWithTag("backup-destination-reseed-confirm-modal").assertCountEquals(0)
+    }
+
+    /**
+     * A surviving nest's row carries the button too, and its confirm names the
+     * nest whose copy it pulls back and runs the restore from THAT row — the
+     * pressed source travels to the VM, which picks the pull-back leg.
+     */
+    @Test
+    fun reseedOnANestRow_namesTheNest_andRunsFromThatRow() {
+        val ran = mutableListOf<String?>()
+        render(
+            destinations = listOf(dest()),
+            reseedRows = listOf("id-a"),
+            onReseed = { ran += it },
+            reseedRunsPullBack = { it == "id-a" },
+        )
+
+        node("backup-destination-reseed-button").performClick()
+        node("backup-destination-reseed-confirm-modal").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Restore the copy on Aunt's nest to this nest?").assertIsDisplayed()
+
+        node("backup-destination-reseed-confirm-button").performClick()
+        assertEquals(listOf<String?>("id-a"), ran)
     }
 
     @Test

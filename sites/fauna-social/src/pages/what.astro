@@ -1,0 +1,61 @@
+---
+import Base from '../layouts/Base.astro';
+import Critter from '../components/Critter.astro';
+// Every word on this page is single-sourced from docs/sites/fauna-social/
+// and imported at build time. Edit the copy THERE; this file owns structure
+// and styling only. The body IS the page: sections render in document order,
+// an `*Illustration: fox*` line turns one into an illustrated feature block,
+// and a blockquote is a boxed aside (plain CSS, no parsing).
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/what.md';
+import { fill } from '../data/fill.ts';
+import { splitSections, takeOpening } from '../data/copy.ts';
+
+const { heading, lead, rest } = takeOpening(fill(await compiledContent()));
+const sections = splitSections(rest);
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <h1 set:html={heading} />
+      <p class="lead" set:html={lead} />
+
+      {sections.map((s) => s.illustration ? (
+        <section class="thing">
+          <Critter name={s.illustration} size={64} />
+          <div>
+            <h2 set:html={s.title} />
+            <Fragment set:html={s.body} />
+          </div>
+        </section>
+      ) : (
+        <section>
+          <h2 set:html={s.title} />
+          <Fragment set:html={s.body} />
+        </section>
+      ))}
+
+      <p class="center next">
+        <a href={fm.next.href} class="btn btn-secondary">{fm.next.label}</a>
+      </p>
+    </article>
+  </div>
+</Base>
+
+<style>
+  .thing {
+    display: flex;
+    gap: 1.25rem;
+    align-items: flex-start;
+    margin-bottom: 1.75rem;
+  }
+  .thing:first-of-type { margin-top: 2rem; }
+  .thing :global(.critter) { flex-shrink: 0; }
+  .thing :global(h2) { font-size: 1.2rem; margin: 0 0 0.2rem; }
+  .thing :global(p) { margin: 0; color: var(--text-muted); }
+
+  .next { margin-top: 2.5rem; }
+
+  @media (max-width: 560px) {
+    .thing { flex-direction: column; gap: 0.5rem; }
+  }
+</style>

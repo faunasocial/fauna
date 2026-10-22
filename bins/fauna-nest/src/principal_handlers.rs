@@ -26,7 +26,8 @@
 //!
 //! Each handler lives beside its actor twin (`feed_handlers`,
 //! `bridge_blob_handlers`, `nostr::bunker_handlers`, `folder_deposit`,
-//! `subscription_handlers`); this module owns the table and the gate.
+//! `subscription_handlers`, `profile_handlers`, `notifications_handlers`);
+//! this module owns the table and the gate.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
@@ -37,7 +38,8 @@ use futures_util::future::BoxFuture;
 use fauna_protocol::RpcError;
 
 use crate::bridge_method_allowlist::{
-    CallerClass, class_refusal_namespace, is_permitted, scope_covers,
+    CallerClass, PrincipalReach, class_refusal_namespace, is_permitted, principal_reach,
+    scope_covers,
 };
 use crate::routes::AppState;
 use crate::rpc_errors::{central_permission_denied, internal, permission_denied_ns};
@@ -76,6 +78,10 @@ pub struct PrincipalCaller {
     /// `writer_id` its puts may carry; `None` when it attested none, which
     /// leaves it read-only over its kinds.
     pub writer_ed25519: Option<[u8; 32]>,
+    /// The row's execution form — what the principal fetch's form gate reads
+    /// (TP4: a `remote` caller is served no reserved tuple,
+    /// `fauna_mls::wrapped_blob::format::ScopeTuple::reserved_for_device_or_hosted`).
+    pub execution_form: crate::db::third_party_principals::ExecutionForm,
 }
 
 /// Resolve a session's binding for one call. `None` — the every-kind refusal —
@@ -90,7 +96,7 @@ pub async fn resolve_principal(
     state: &AppState,
     binding: &PrincipalBinding,
 ) -> anyhow::Result<Option<PrincipalCaller>> {
-    let Some((granted, keys)) = state
+    let Some((granted, keys, execution_form)) = state
         .db
         .get_third_party_principal_reach(&binding.account, &binding.principal_id)
         .await?
@@ -134,6 +140,7 @@ pub async fn resolve_principal(
         scopes,
         holder_x25519: keys.holder_x25519,
         writer_ed25519: keys.writer_ed25519,
+        execution_form,
     }))
 }
 
@@ -155,6 +162,33 @@ static PRINCIPAL_HANDLERS: LazyLock<BTreeMap<&'static str, PrincipalHandler>> =
             "fauna.capabilities.fetch",
             crate::bridge_blob_handlers::principal_fetch_grants_handler(),
         );
+        // The admin plane (`authorization-server.md` § Scope grammar → *The
+        // admin arms*): every kind an admin arm names, each its actor
+        // handler behind `admin_twin`.
+        for (kind, handler) in [
+            crate::admin_ws_handlers::principal_admin_handlers(),
+            crate::node_policy_handlers::principal_admin_handlers(),
+            crate::feature_gate::principal_admin_handlers(),
+            crate::content_policy_handlers::principal_admin_handlers(),
+            crate::update_channel::principal_admin_handlers(),
+            crate::web_app_origin::principal_admin_handlers(),
+            crate::region_tier::principal_admin_handlers(),
+            crate::transport_policy_handlers::principal_admin_handlers(),
+            crate::host_maintenance::principal_admin_handlers(),
+            crate::moderation_handlers::principal_admin_handlers(),
+            crate::oauth_issuer_handlers::principal_admin_handlers(),
+            crate::web_handlers::principal_admin_handlers(),
+            crate::dns_handlers::principal_admin_handlers(),
+            crate::tls_handlers::principal_admin_handlers(),
+            crate::bridge_routing_handlers::principal_admin_handlers(),
+            crate::bridge_blob_handlers::principal_admin_handlers(),
+            crate::bridge_imap_handlers::principal_admin_handlers(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            table.insert(kind, handler);
+        }
         // The fourth arm's three custom-feed reads (`authorization-server.md`
         // § Scope grammar → *The fourth arm*).
         table.insert(
@@ -176,6 +210,12 @@ static PRINCIPAL_HANDLERS: LazyLock<BTreeMap<&'static str, PrincipalHandler>> =
         table.insert(
             "fauna.feed.trending.posts",
             crate::feed_handlers::principal_feed_trending_posts_handler(),
+        );
+        // The author arm's one kind (`authorization-server.md` § Scope
+        // grammar → *The author arm*).
+        table.insert(
+            "fauna.feed.author.posts",
+            crate::feed_handlers::principal_feed_author_posts_handler(),
         );
         // The `records` arm's two doors (`third-party-kinds.md` § The record
         // doors): a principal's own `ext:<kind>` scopes, written as its own
@@ -230,6 +270,17 @@ static PRINCIPAL_HANDLERS: LazyLock<BTreeMap<&'static str, PrincipalHandler>> =
         for (kind, handler) in crate::subscription_handlers::principal_handlers() {
             table.insert(kind, handler);
         }
+        // The profile arm's one kind (`authorization-server.md` § Scope
+        // grammar → *The profile arm*): any actor's public profile.
+        table.insert(
+            "fauna.profile.get",
+            crate::profile_handlers::principal_profile_get_handler(),
+        );
+        // The notifications arms' three kinds (*The notifications arms*):
+        // read the list and the count, mark read — never dismiss or clear.
+        for (kind, handler) in crate::notifications_handlers::principal_handlers() {
+            table.insert(kind, handler);
+        }
         // The oracle's door (TP11). Gated with the bunker cluster it binds
         // into: without the `nostr` feature the actor router carries no
         // `fauna.nostr.bunker.*` kind, so the ceiling the sweep test reads
@@ -255,6 +306,12 @@ static PRINCIPAL_HANDLERS: LazyLock<BTreeMap<&'static str, PrincipalHandler>> =
         table.insert(
             fauna_protocol::post_author::KIND_DELETE,
             crate::post_author_oracle::principal_delete_handler(),
+        );
+        // The oracle's profile door (TP11). Ungated, for the posting door's
+        // reason: the same sub-key, and the one profile write door.
+        table.insert(
+            fauna_protocol::profile_author::KIND_SET,
+            crate::profile_author_oracle::principal_set_handler(),
         );
         // The oracle's ATProto door (TP11). Ungated: its custodian is the
         // first-party `atproto.pds` bridge, a role every nest can enroll.
@@ -304,7 +361,7 @@ pub async fn dispatch_hosted_install(
     payload: Bytes,
 ) -> Result<Bytes, RpcError> {
     let owner = crate::db::third_party_principals::NEST_OWNER_ACTOR;
-    let Some((granted, keys)) = state
+    let Some((granted, keys, execution_form)) = state
         .db
         .get_third_party_principal_reach(&owner, principal_id)
         .await
@@ -323,6 +380,7 @@ pub async fn dispatch_hosted_install(
         scopes: granted.split_whitespace().map(str::to_string).collect(),
         holder_x25519: keys.holder_x25519,
         writer_ed25519: keys.writer_ed25519,
+        execution_form,
     };
     dispatch_resolved(state, caller, kind, payload).await
 }
@@ -350,12 +408,83 @@ pub(crate) async fn dispatch_resolved(
     if !scope_covers(&caller.scopes, kind) {
         return Err(refuse("not covered by the principal's scopes"));
     }
+    // Rule (e): an admin-plane kind takes the ACCOUNT's live admin authority
+    // as a fourth predicate, read here on every call — the class stays
+    // `ThirdParty` (rule (a)), the string is the admin's consent, and the
+    // roster row is whether the account may still administer. Removing the
+    // role severs live admin reach at the next RPC, as a revoke does.
+    if principal_reach(kind).is_some_and(PrincipalReach::is_admin_plane)
+        && !state
+            .db
+            .is_admin(&caller.account[..])
+            .await
+            .map_err(internal)?
+    {
+        return Err(refuse("the account holds no admin authority"));
+    }
     let Some(handler) = PRINCIPAL_HANDLERS.get(kind) else {
         // Unreachable while the sweep test holds the table equal to the
         // ceiling; refused rather than panicking if that ever slips.
         return Err(central_permission_denied());
     };
     handler(state, caller, payload).await
+}
+
+/// The admin-plane handler's own re-read of the account's admin authority —
+/// defense in depth behind the gate's rule (e) predicate above, the
+/// per-handler `require_permission` pattern every actor handler keeps
+/// (`apps/bridges.md` § Capability-allowlist enforcement). A principal
+/// handler registered for an admin-plane kind calls this first.
+pub(crate) async fn require_admin(
+    state: &AppState,
+    caller: &PrincipalCaller,
+    kind: &str,
+) -> Result<(), RpcError> {
+    if state
+        .db
+        .is_admin(&caller.account[..])
+        .await
+        .map_err(internal)?
+    {
+        return Ok(());
+    }
+    tracing::warn!(
+        target: "permission_gate",
+        kind,
+        "principal call refused: the account holds no admin authority"
+    );
+    Err(match class_refusal_namespace(kind) {
+        Some(ns) => {
+            permission_denied_ns(ns, format!("{kind}: the account holds no admin authority"))
+        }
+        None => central_permission_denied(),
+    })
+}
+
+/// An admin-plane kind's principal twin: [`require_admin`] first, then the
+/// kind's own actor handler run as the account — one body for the account's
+/// socket and its admin-consented principal, so the twin can never drift from
+/// what an admin's app is served. Every audit row the handler writes names the
+/// principal ([`crate::db::admin::scope_audit_via_principal`]), so the admin's
+/// log tells the principal's act from their own. The actor handler's own class gate passes
+/// for exactly the accounts `require_admin` admits (an admin account resolves
+/// the `Admin` class), a third read of the same fact, harmless.
+pub(crate) fn admin_twin(
+    kind: &'static str,
+    actor: crate::rpc_router::RpcHandler,
+) -> PrincipalHandler {
+    let actor = Arc::new(actor);
+    Box::new(move |state, caller, payload| {
+        let actor = actor.clone();
+        Box::pin(async move {
+            require_admin(&state, &caller, kind).await?;
+            crate::db::admin::scope_audit_via_principal(
+                caller.principal_id,
+                actor(state, caller.account, payload),
+            )
+            .await
+        })
+    })
 }
 
 #[cfg(test)]
@@ -392,6 +521,16 @@ mod tests {
     const NEVER: i64 = i64::MAX;
 
     async fn consent(db: &CacheDb, actor: &[u8; 32], family: &[u8], scopes: &str) {
+        consent_as(db, actor, family, scopes, ExecutionForm::Device).await;
+    }
+
+    async fn consent_as(
+        db: &CacheDb,
+        actor: &[u8; 32],
+        family: &[u8],
+        scopes: &str,
+        execution_form: ExecutionForm,
+    ) {
         db.record_atproto_oauth_grant(
             actor,
             family,
@@ -408,7 +547,7 @@ mod tests {
                     holder_x25519: Some(HOLDER),
                     writer_ed25519: None,
                 },
-                execution_form: ExecutionForm::Device,
+                execution_form,
                 manifest: None,
             },
         )
@@ -571,6 +710,286 @@ mod tests {
             .expect_err("another account's feed's posts");
     }
 
+    /// The author arm (`authorization-server.md` § Scope grammar → *The
+    /// author arm*): neither the bare arm nor the account arm reaches the
+    /// author read; a session holding `fauna:feed:read:author` is served it,
+    /// and a malformed author is the caller's invalid request.
+    #[tokio::test]
+    async fn the_author_arm_reaches_the_author_read() {
+        use fauna_protocol::feed::{FeedAuthorPostsReply, FeedAuthorPostsRequest};
+        let read = |author: String| {
+            fauna_protocol::encode_canonical(&FeedAuthorPostsRequest {
+                author,
+                cursor: None,
+                limit: None,
+                extra: Default::default(),
+            })
+            .unwrap()
+        };
+        let (state, bare) = fixture(&["fauna:feed:read", "openid"]).await;
+        let err = call(
+            &state,
+            &bare,
+            "fauna.feed.author.posts",
+            read(hex::encode(OTHER)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "fauna.feed.permission_denied", "the bare arm");
+
+        consent(
+            &state.db,
+            &ACCOUNT,
+            b"family-3",
+            "fauna:feed:read:account fauna:feed:read:author openid",
+        )
+        .await;
+        let account_only = PrincipalBinding {
+            token_scopes: vec!["fauna:feed:read:account".into()],
+            ..bare.clone()
+        };
+        let err = call(
+            &state,
+            &account_only,
+            "fauna.feed.author.posts",
+            read(hex::encode(OTHER)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "fauna.feed.permission_denied", "the account arm");
+
+        for scopes in [
+            vec!["fauna:feed:read:author".to_string()],
+            vec![
+                "fauna:feed:read:author".to_string(),
+                "fauna:feed:read:account".to_string(),
+            ],
+        ] {
+            let b = PrincipalBinding {
+                token_scopes: scopes.clone(),
+                ..bare.clone()
+            };
+            let reply: FeedAuthorPostsReply = fauna_protocol::decode_strict(
+                &call(
+                    &state,
+                    &b,
+                    "fauna.feed.author.posts",
+                    read(hex::encode(OTHER)),
+                )
+                .await
+                .expect("in scope"),
+            )
+            .unwrap();
+            assert!(reply.posts.is_empty(), "{scopes:?}: no posts seeded");
+            call(&state, &b, "fauna.feed.author.posts", read("zz".into()))
+                .await
+                .expect_err("a malformed author");
+        }
+    }
+
+    /// The profile arm (`authorization-server.md` § Scope grammar → *The
+    /// profile arm*): refused before the arm is held; held, any actor's
+    /// stored profile is served verbatim — the account's own and another's —
+    /// and an actor with none is `not_found`, as the account's own read gets.
+    #[tokio::test]
+    async fn the_profile_arm_reads_any_actors_stored_profile() {
+        use fauna_protocol::profile::{ProfileGetReply, ProfileGetRequest};
+        let get = |actor: &[u8; 32]| {
+            fauna_protocol::encode_canonical(&ProfileGetRequest {
+                actor_id: hex::encode(actor),
+                extra: Default::default(),
+            })
+            .unwrap()
+        };
+        let (state, bare) = fixture(&["fauna:feed:read", "openid"]).await;
+        for (actor, body) in [(ACCOUNT, b"own-signed".as_slice()), (OTHER, b"theirs")] {
+            state
+                .db
+                .conn()
+                .await
+                .execute(
+                    "INSERT INTO content (id, author, schema, created_at, payload)
+                     VALUES (?1, ?2, 'profile', 1, ?3)",
+                    rusqlite::params![blake3::hash(body).as_bytes().as_slice(), &actor[..], body],
+                )
+                .unwrap();
+        }
+        let err = call(&state, &bare, "fauna.profile.get", get(&OTHER))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.profile.permission_denied", "arm absent");
+
+        consent(
+            &state.db,
+            &ACCOUNT,
+            b"family-4",
+            "fauna:profile:read openid",
+        )
+        .await;
+        let b = PrincipalBinding {
+            token_scopes: vec!["fauna:profile:read".into()],
+            ..bare
+        };
+        for (actor, body) in [(ACCOUNT, b"own-signed".as_slice()), (OTHER, b"theirs")] {
+            let reply: ProfileGetReply = fauna_protocol::decode_strict(
+                &call(&state, &b, "fauna.profile.get", get(&actor))
+                    .await
+                    .expect("in scope"),
+            )
+            .unwrap();
+            assert_eq!(reply.body.as_slice(), body, "served verbatim");
+        }
+        let err = call(&state, &b, "fauna.profile.get", get(&[0xC3; 32]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.profile.not_found");
+        let err = call(&state, &b, "fauna.profile.set", Bytes::new())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.profile.permission_denied", "the write");
+    }
+
+    /// The notifications arms (*The notifications arms*): refused before
+    /// either is held; `read` lists and counts the account's own rows and
+    /// never another's, and cannot mark; `write` marks the account's rows
+    /// read; neither reaches dismiss or clear.
+    #[tokio::test]
+    async fn the_notifications_arms_read_and_mark_the_accounts_inbox() {
+        use crate::db::notifications::NotificationText;
+        use fauna_protocol::notifications::{
+            NotifCountReply, NotifCountRequest, NotifDismissRequest, NotifListReply,
+            NotifListRequest, NotifMarkReadReply, NotifMarkReadRequest, NotifType,
+        };
+        let (state, bare) = fixture(&["fauna:feed:read", "openid"]).await;
+        for (actor, sender) in [
+            (ACCOUNT, [0x11; 32]),
+            (ACCOUNT, [0x12; 32]),
+            (OTHER, [0x13; 32]),
+        ] {
+            state
+                .db
+                .insert_notification(
+                    &actor,
+                    &NotifType::Like,
+                    "local",
+                    Some(&sender),
+                    None,
+                    None,
+                    &NotificationText::new(
+                        fauna_protocol::LocalizedText::new("notifications.row_like"),
+                        "liked your post",
+                    ),
+                    10,
+                )
+                .await
+                .unwrap()
+                .expect("inserted");
+        }
+        let list = fauna_protocol::encode_canonical(&NotifListRequest {
+            cursor: None,
+            limit: None,
+            extra: Default::default(),
+        })
+        .unwrap();
+        let count = fauna_protocol::encode_canonical(&NotifCountRequest {
+            extra: Default::default(),
+        })
+        .unwrap();
+        let mark = fauna_protocol::encode_canonical(&NotifMarkReadRequest {
+            up_to: Some(i64::MAX),
+            extra: Default::default(),
+        })
+        .unwrap();
+        for (kind, p) in [
+            ("fauna.notifications.list", list.clone()),
+            ("fauna.notifications.count", count.clone()),
+            ("fauna.notifications.mark_read", mark.clone()),
+        ] {
+            let err = call(&state, &bare, kind, p).await.unwrap_err();
+            assert_eq!(err.code, "fauna.notifications.permission_denied", "{kind}");
+        }
+
+        consent(
+            &state.db,
+            &ACCOUNT,
+            b"family-5",
+            "fauna:notifications:read fauna:notifications:write openid",
+        )
+        .await;
+        let read = PrincipalBinding {
+            token_scopes: vec!["fauna:notifications:read".into()],
+            ..bare.clone()
+        };
+        let listed: NotifListReply = fauna_protocol::decode_strict(
+            &call(&state, &read, "fauna.notifications.list", list.clone())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(listed.notifications.len(), 2, "the account's own rows only");
+        let unread = |state: Arc<AppState>, b: PrincipalBinding, p: Bytes| async move {
+            let r: NotifCountReply = fauna_protocol::decode_strict(
+                &call(&state, &b, "fauna.notifications.count", p)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            r.count
+        };
+        assert_eq!(unread(state.clone(), read.clone(), count.clone()).await, 2);
+        let err = call(&state, &read, "fauna.notifications.mark_read", mark.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "fauna.notifications.permission_denied",
+            "read cannot mark"
+        );
+
+        let write = PrincipalBinding {
+            token_scopes: vec!["fauna:notifications:write".into()],
+            ..bare.clone()
+        };
+        let err = call(&state, &write, "fauna.notifications.list", list)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code, "fauna.notifications.permission_denied",
+            "write cannot list"
+        );
+        let marked: NotifMarkReadReply = fauna_protocol::decode_strict(
+            &call(&state, &write, "fauna.notifications.mark_read", mark)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marked.marked_read, 2);
+        assert_eq!(unread(state.clone(), read, count).await, 0);
+        assert_eq!(
+            state.db.count_unread_notifications(&OTHER).await.unwrap(),
+            1,
+            "another account's rows are untouched"
+        );
+
+        let both = PrincipalBinding {
+            token_scopes: vec![
+                "fauna:notifications:read".into(),
+                "fauna:notifications:write".into(),
+            ],
+            ..bare
+        };
+        let dismiss = fauna_protocol::encode_canonical(&NotifDismissRequest {
+            id: listed.notifications[0].id,
+            extra: Default::default(),
+        })
+        .unwrap();
+        for kind in ["fauna.notifications.dismiss", "fauna.notifications.clear"] {
+            let err = call(&state, &both, kind, dismiss.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "fauna.notifications.permission_denied", "{kind}");
+        }
+    }
+
     /// The scope set is the row's ∩ the token's: a token without the arm
     /// cannot reach the scoped kind even though the row holds it — while the
     /// session kind still answers.
@@ -683,6 +1102,72 @@ mod tests {
         let reply: FetchGrantsReply = fauna_protocol::decode_strict(&reply).unwrap();
         let grants: Vec<&[u8]> = reply.grants.iter().map(|g| g.as_ref()).collect();
         assert_eq!(grants, vec![&b"mine"[..]]);
+    }
+
+    /// The form gate's fetch door (TP4, `encryption-at-rest.md` § Capability
+    /// tiering → *Third-party holders*): a `remote` principal is served no
+    /// blob carrying a key-bearing tuple over a kind it did not create, even
+    /// one stored before its row existed; its `ext.*` grant and an
+    /// undecodable blob are served as before. A `device` principal is
+    /// served all three.
+    #[tokio::test]
+    async fn fetch_serves_a_remote_principal_no_reserved_tuple() {
+        use fauna_mls::wrapped_blob::{GrantBlob, GrantIndex, GrantWindow, ScopeTuple};
+        let blob = |id: u8, scope: ScopeTuple| {
+            GrantBlob {
+                version: 1,
+                kind: GrantBlob::KIND.to_string(),
+                index: GrantIndex(ACCOUNT.to_vec(), vec![id; 16]),
+                holder: serde_bytes::ByteBuf::from(HOLDER.to_vec()),
+                window: GrantWindow(0, u64::MAX),
+                scope: vec![scope],
+                wrapped_keys: Vec::new(),
+            }
+            .to_canonical_bytes()
+            .unwrap()
+        };
+        let reserved = blob(
+            1,
+            ScopeTuple::delegable_kind_read("fauna.state.personalization"),
+        );
+        let ext = blob(2, ScopeTuple::ext_kind_read("ext.app.example.notes"));
+        let opaque = b"opaque".to_vec();
+        for (form, mut served) in [
+            (ExecutionForm::Remote, vec![ext.clone(), opaque.clone()]),
+            (
+                ExecutionForm::Device,
+                vec![reserved.clone(), ext.clone(), opaque.clone()],
+            ),
+        ] {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+            // Deposited before the consent wrote the row: the mint gate saw
+            // no form to read, so the fetch is the door that holds.
+            for (id, bytes) in [(1u8, &reserved), (2, &ext), (3, &opaque)] {
+                db.put_capability_grant(&ACCOUNT, &[id; 16], &HOLDER, NEVER, bytes)
+                    .await
+                    .unwrap();
+            }
+            consent_as(&db, &ACCOUNT, b"family-1", "fauna:feed:read", form).await;
+            let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+                .principal_id
+                .clone();
+            let state = Arc::new(AppState::for_test(db));
+            let b = PrincipalBinding {
+                account: ACCOUNT,
+                principal_id,
+                token_scopes: vec!["fauna:feed:read".into()],
+                family_id: None,
+            };
+            let reply = call(&state, &b, "fauna.capabilities.fetch", fetch())
+                .await
+                .unwrap();
+            let reply: FetchGrantsReply = fauna_protocol::decode_strict(&reply).unwrap();
+            let mut grants: Vec<Vec<u8>> = reply.grants.iter().map(|g| g.to_vec()).collect();
+            grants.sort();
+            served.sort();
+            assert_eq!(grants, served, "{form:?}");
+        }
     }
 
     /// A principal that attested no key reads an empty list, not an error.
@@ -1157,6 +1642,8 @@ mod tests {
 
     fn subscribe(tier: &str) -> Bytes {
         fauna_protocol::encode_canonical(&SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: fauna_core::identity::ActorId(AUTHOR),
             tier: tier.into(),
             mlkem_encaps_key: None,
@@ -1167,6 +1654,8 @@ mod tests {
 
     fn unsubscribe() -> Bytes {
         fauna_protocol::encode_canonical(&UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: fauna_core::identity::ActorId(AUTHOR),
             extra: Default::default(),
         })
@@ -1369,6 +1858,423 @@ mod tests {
     }
 
     /// A session without the arm reaches none of the three kinds.
+    /// Rule (e) (`apps/bridges.md` § Capability-allowlist enforcement): an
+    /// admin-plane kind is served to a principal only for an account that
+    /// holds admin authority NOW — the string alone serves nothing to a
+    /// member, the authority alone serves nothing without the string, and
+    /// removing the role severs live admin reach at the next call.
+    #[tokio::test]
+    async fn the_admin_plane_is_served_only_while_the_account_is_an_admin() {
+        use fauna_protocol::admin::{AdminStatsReply, AdminStatsRequest, AdminStatusRequest};
+        let stats = fauna_protocol::encode_canonical(&AdminStatsRequest::default()).unwrap();
+        let status = fauna_protocol::encode_canonical(&AdminStatusRequest::default()).unwrap();
+        async fn admin_fixture() -> (Arc<AppState>, PrincipalBinding) {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+            consent(
+                &db,
+                &ACCOUNT,
+                b"family-1",
+                "fauna:admin:read:dashboard openid",
+            )
+            .await;
+            let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+                .principal_id
+                .clone();
+            let state = Arc::new(AppState::for_test(db));
+            let binding = PrincipalBinding {
+                account: ACCOUNT,
+                principal_id,
+                token_scopes: vec!["fauna:admin:read:dashboard".into(), "openid".into()],
+                family_id: None,
+            };
+            (state, binding)
+        }
+
+        // A member's principal holding the string: refused.
+        let (state, b) = admin_fixture().await;
+        let err = call(&state, &b, "fauna.admin.stats", stats.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // The same account promoted: served, both dashboard reads.
+        state.db.add_admin_actor(&ACCOUNT).await.unwrap();
+        let reply = call(&state, &b, "fauna.admin.stats", stats.clone())
+            .await
+            .expect("an admin's principal reads the dashboard");
+        let _: AdminStatsReply = fauna_protocol::decode_strict(&reply).unwrap();
+        call(&state, &b, "fauna.admin.status", status)
+            .await
+            .expect("the running version too");
+
+        // An admin's principal WITHOUT the string: refused — the authority is
+        // never the consent.
+        let (state2, bare) = fixture(&["fauna:feed:read", "openid"]).await;
+        state2.db.add_admin_actor(&ACCOUNT).await.unwrap();
+        let err = call(&state2, &bare, "fauna.admin.stats", stats.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // Demoted (another admin seated first — the roster never drops its
+        // last superadmin): the next call on the live session is refused.
+        state.db.add_admin_actor(&OTHER).await.unwrap();
+        assert_eq!(
+            state.db.remove_admin_actor(&ACCOUNT).await.unwrap(),
+            crate::db::admin::RosterWrite::Applied
+        );
+        let err = call(&state, &b, "fauna.admin.stats", stats)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+    }
+
+    /// The users page's two verbs (`authorization-server.md` § Scope grammar
+    /// → *The admin arms*): `read:users` serves its reads and no write,
+    /// `rw:users` serves both, a member holding `rw:users` is served nothing,
+    /// and a sovereign act — deleting a user — is refused under either.
+    #[tokio::test]
+    async fn the_users_page_reads_under_either_verb_and_writes_under_rw() {
+        use fauna_protocol::admin::{
+            AdminUserCreateRequest, AdminUserDeleteRequest, AdminUsersListReply,
+            AdminUsersListRequest,
+        };
+        const ADMITTED: [u8; 32] = [0xC3; 32];
+        async fn users_fixture(scope: &str) -> (Arc<AppState>, PrincipalBinding) {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+            consent(&db, &ACCOUNT, b"family-1", &format!("{scope} openid")).await;
+            let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+                .principal_id
+                .clone();
+            let state = Arc::new(AppState::for_test(db));
+            let binding = PrincipalBinding {
+                account: ACCOUNT,
+                principal_id,
+                token_scopes: vec![scope.into(), "openid".into()],
+                family_id: None,
+            };
+            (state, binding)
+        }
+        let list = fauna_protocol::encode_canonical(&AdminUsersListRequest::default()).unwrap();
+        let admit = fauna_protocol::encode_canonical(&AdminUserCreateRequest {
+            actor_id: serde_bytes::ByteBuf::from(ADMITTED.to_vec()),
+            tier: "free".into(),
+            handle: Some("admitted".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let delete = fauna_protocol::encode_canonical(&AdminUserDeleteRequest {
+            actor_id: serde_bytes::ByteBuf::from(ADMITTED.to_vec()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // `read:users`, an admin's: the list served, the admit refused.
+        let (state, b) = users_fixture("fauna:admin:read:users").await;
+        state.db.add_admin_actor(&ACCOUNT).await.unwrap();
+        let reply = call(&state, &b, "fauna.admin.users.list", list.clone())
+            .await
+            .expect("read:users serves the member list");
+        let listed: AdminUsersListReply = fauna_protocol::decode_strict(&reply).unwrap();
+        assert_eq!(listed.total, 1);
+        let err = call(&state, &b, "fauna.admin.users.create", admit.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // `rw:users`, a member's: nothing served.
+        let (state, b) = users_fixture("fauna:admin:rw:users").await;
+        let err = call(&state, &b, "fauna.admin.users.list", list.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // The same account promoted: the read and the admit both served, the
+        // admitted member listed, and the sovereign delete still refused.
+        state.db.add_admin_actor(&ACCOUNT).await.unwrap();
+        call(&state, &b, "fauna.admin.users.create", admit)
+            .await
+            .expect("rw:users admits a member");
+        let reply = call(&state, &b, "fauna.admin.users.list", list)
+            .await
+            .expect("rw:users covers the page's reads");
+        let listed: AdminUsersListReply = fauna_protocol::decode_strict(&reply).unwrap();
+        assert!(listed.users.iter().any(|u| u.actor_id.as_ref() == ADMITTED));
+        let err = call(&state, &b, "fauna.admin.users.delete", delete)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+    }
+
+    /// An admin-plane write a principal makes is audited as the principal's
+    /// act on the account's authority (`apps/bridges.md` rule (e)): the row
+    /// the actor handler writes names the principal, and the admin's own act
+    /// through the same handler names none — so the admin can scope incident
+    /// response to one grant.
+    #[tokio::test]
+    async fn an_admin_plane_write_by_a_principal_is_audited_as_the_principals() {
+        use fauna_protocol::admin::AdminUserCreateRequest;
+        let admit = |id: [u8; 32], handle: &str| {
+            fauna_protocol::encode_canonical(&AdminUserCreateRequest {
+                actor_id: serde_bytes::ByteBuf::from(id.to_vec()),
+                tier: "free".into(),
+                handle: Some(handle.into()),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+        db.add_admin_actor(&ACCOUNT).await.unwrap();
+        consent(&db, &ACCOUNT, b"family-1", "fauna:admin:rw:users openid").await;
+        let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+            .principal_id
+            .clone();
+        let state = Arc::new(AppState::for_test(db));
+        let b = PrincipalBinding {
+            account: ACCOUNT,
+            principal_id: principal_id.clone(),
+            token_scopes: vec!["fauna:admin:rw:users".into(), "openid".into()],
+            family_id: None,
+        };
+
+        call(
+            &state,
+            &b,
+            "fauna.admin.users.create",
+            admit([0xC4; 32], "via-cli"),
+        )
+        .await
+        .expect("rw:users admits a member");
+        let router = crate::build_rpc_router();
+        let actor = &router
+            .kind_meta("fauna.admin.users.create")
+            .unwrap()
+            .handler;
+        actor(state.clone(), ACCOUNT, admit([0xC5; 32], "by-hand"))
+            .await
+            .expect("the admin admits a member on their own socket");
+
+        let rows = state.db.list_audit(10, None).await.unwrap();
+        let detail_for = |target: [u8; 32]| {
+            rows.iter()
+                .find(|r| r.action == "user.create" && r.target == Some(hex::encode(target)))
+                .and_then(|r| r.detail.clone())
+                .expect("the admit is audited")
+        };
+        let marker = format!("via_principal={}", hex::encode(&principal_id));
+        let via_cli = detail_for([0xC4; 32]);
+        assert!(via_cli.ends_with(&marker), "{via_cli}");
+        assert!(
+            via_cli.starts_with("tier=free, handle=via-cli"),
+            "{via_cli}"
+        );
+        let by_hand = detail_for([0xC5; 32]);
+        assert!(!by_hand.contains("via_principal"), "{by_hand}");
+    }
+
+    /// The nest-side pages (`authorization-server.md` § Scope grammar → *The
+    /// admin arms*): each page's string serves its own kinds to an admin's
+    /// principal, a member's is served nothing, a page's string covers no
+    /// other page, and the nest page's sovereign acts are refused under its
+    /// `rw` string.
+    #[tokio::test]
+    async fn the_nest_side_pages_serve_their_own_kinds_and_no_sovereign_act() {
+        use fauna_protocol::admin::{
+            AdminAuditListReply, AdminAuditListRequest, AdminTierCreateRequest,
+            AdminTiersListRequest,
+        };
+        use fauna_protocol::tls::{CertStatusReply, CertStatusRequest};
+        use fauna_protocol::web::{WebGetApexActorReply, WebGetApexActorRequest};
+        async fn page_fixture(scope: &str, admin: bool) -> (Arc<AppState>, PrincipalBinding) {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+            if admin {
+                db.add_admin_actor(&ACCOUNT).await.unwrap();
+            }
+            consent(&db, &ACCOUNT, b"family-1", &format!("{scope} openid")).await;
+            let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+                .principal_id
+                .clone();
+            let state = Arc::new(AppState::for_test(db));
+            let binding = PrincipalBinding {
+                account: ACCOUNT,
+                principal_id,
+                token_scopes: vec![scope.into(), "openid".into()],
+                family_id: None,
+            };
+            (state, binding)
+        }
+        let audit = fauna_protocol::encode_canonical(&AdminAuditListRequest::default()).unwrap();
+        let apex = fauna_protocol::encode_canonical(&WebGetApexActorRequest::default()).unwrap();
+        let certs = fauna_protocol::encode_canonical(&CertStatusRequest::default()).unwrap();
+        let tier = fauna_protocol::encode_canonical(&AdminTierCreateRequest {
+            name: "plus".into(),
+            max_storage_bytes: 1 << 30,
+            ..Default::default()
+        })
+        .unwrap();
+        let tiers = fauna_protocol::encode_canonical(&AdminTiersListRequest::default()).unwrap();
+
+        // `read:logs`: the audit log served to an admin's principal, nothing
+        // to a member's, and no other page's kind.
+        let (state, b) = page_fixture("fauna:admin:read:logs", true).await;
+        let reply = call(&state, &b, "fauna.admin.audit.list", audit.clone())
+            .await
+            .expect("read:logs serves the audit log");
+        let _: AdminAuditListReply = fauna_protocol::decode_strict(&reply).unwrap();
+        let err = call(&state, &b, "fauna.web.get_apex_actor", apex.clone())
+            .await
+            .unwrap_err();
+        assert!(err.code.ends_with(".permission_denied"), "{}", err.code);
+        let (state, b) = page_fixture("fauna:admin:read:logs", false).await;
+        let err = call(&state, &b, "fauna.admin.audit.list", audit.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // `rw:web`: the apex designation read.
+        let (state, b) = page_fixture("fauna:admin:rw:web", true).await;
+        let reply = call(&state, &b, "fauna.web.get_apex_actor", apex)
+            .await
+            .expect("rw:web covers the apex read");
+        let read: WebGetApexActorReply = fauna_protocol::decode_strict(&reply).unwrap();
+        assert_eq!(read.actor_id, None);
+
+        // `read:dns`: the served certificates' health.
+        let (state, b) = page_fixture("fauna:admin:read:dns", true).await;
+        let reply = call(&state, &b, "fauna.tls.cert_status", certs)
+            .await
+            .expect("read:dns serves the certificate health");
+        let _: CertStatusReply = fauna_protocol::decode_strict(&reply).unwrap();
+
+        // `rw:settings`: a tier defined, and the tier list (`read:users`') is
+        // not this string's.
+        let (state, b) = page_fixture("fauna:admin:rw:settings", true).await;
+        call(&state, &b, "fauna.admin.tiers.create", tier)
+            .await
+            .expect("rw:settings defines a tier");
+        let err = call(&state, &b, "fauna.admin.tiers.list", tiers)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.admin.permission_denied");
+
+        // `rw:nest`: the factory reset, the deployment seed and the issuer-key
+        // rotation are sovereign, refused before any handler runs.
+        let (state, b) = page_fixture("fauna:admin:rw:nest", true).await;
+        for sovereign in [
+            "fauna.admin.factory_reset",
+            "fauna.admin.deployment_seed.get",
+            "fauna.oauth.rotate_issuer_key",
+            "fauna.moderation.legal_takedown",
+        ] {
+            let err = call(&state, &b, sovereign, audit.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                err.code.ends_with(".permission_denied"),
+                "{sovereign}: {}",
+                err.code
+            );
+        }
+    }
+
+    /// The mail-side pages (`authorization-server.md` § Scope grammar → *The
+    /// admin arms*): `read:mail` serves the mail config and no policy write,
+    /// `rw:calendar` serves the CalDAV switch and nothing of the mail page,
+    /// and a sovereign act — rotating the SRS secret, approving a pending
+    /// bridge — is refused under `rw:mail` and `read:bridges-pending`.
+    #[tokio::test]
+    async fn the_mail_side_pages_serve_their_strings_and_never_a_sovereign_act() {
+        use fauna_protocol::bridge_routing::{
+            GetMailConfigRequest, PutSpamPolicyRequest, RotateSrsSecretRequest,
+        };
+        use fauna_protocol::wrapped_blob::{
+            ApprovePendingBridgeRequest, ListPendingBridgesRequest, SetCalDavEnabledRequest,
+        };
+        async fn fixture(scope: &str) -> (Arc<AppState>, PrincipalBinding) {
+            let db = Arc::new(CacheDb::open_in_memory().unwrap());
+            db.create_user(&ACCOUNT, "free", "test").await.unwrap();
+            db.add_admin_actor(&ACCOUNT).await.unwrap();
+            consent(&db, &ACCOUNT, b"family-1", &format!("{scope} openid")).await;
+            let principal_id = db.list_third_party_principals(&ACCOUNT).await.unwrap()[0]
+                .principal_id
+                .clone();
+            let state = Arc::new(AppState::for_test(db));
+            let binding = PrincipalBinding {
+                account: ACCOUNT,
+                principal_id,
+                token_scopes: vec![scope.into(), "openid".into()],
+                family_id: None,
+            };
+            (state, binding)
+        }
+        let config = fauna_protocol::encode_canonical(&GetMailConfigRequest::default()).unwrap();
+        let spam = fauna_protocol::encode_canonical(&PutSpamPolicyRequest::default()).unwrap();
+        let rotate = fauna_protocol::encode_canonical(&RotateSrsSecretRequest::default()).unwrap();
+        let caldav = fauna_protocol::encode_canonical(&SetCalDavEnabledRequest {
+            enabled: true,
+            extra: Default::default(),
+        })
+        .unwrap();
+
+        let (state, b) = fixture("fauna:admin:read:mail").await;
+        call(&state, &b, "fauna.bridges.get_mail_config", config.clone())
+            .await
+            .expect("read:mail serves the mail config");
+        let err = call(&state, &b, "fauna.bridges.put_spam_policy", spam.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+
+        let (state, b) = fixture("fauna:admin:rw:mail").await;
+        call(&state, &b, "fauna.bridges.get_mail_config", config.clone())
+            .await
+            .expect("rw:mail covers the page's reads");
+        call(&state, &b, "fauna.bridges.put_spam_policy", spam)
+            .await
+            .expect("rw:mail saves a policy");
+        let err = call(&state, &b, "fauna.bridges.rotate_srs_secret", rotate)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+
+        let (state, b) = fixture("fauna:admin:rw:calendar").await;
+        call(&state, &b, "fauna.bridges.set_caldav_enabled", caldav)
+            .await
+            .expect("rw:calendar flips the CalDAV switch");
+        let err = call(&state, &b, "fauna.bridges.get_mail_config", config)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+
+        let (state, b) = fixture("fauna:admin:read:bridges-pending").await;
+        call(
+            &state,
+            &b,
+            "fauna.bridges.list_pending_bridges",
+            fauna_protocol::encode_canonical(&ListPendingBridgesRequest {}).unwrap(),
+        )
+        .await
+        .expect("read:bridges-pending lists the pending roster");
+        let err = call(
+            &state,
+            &b,
+            "fauna.bridges.approve_pending_bridge",
+            fauna_protocol::encode_canonical(&ApprovePendingBridgeRequest {
+                ed25519_pubkey: vec![0x11; 32],
+                role: "mta".into(),
+                extra: Default::default(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "fauna.bridges.permission_denied");
+    }
+
     #[tokio::test]
     async fn a_session_without_the_arm_cannot_follow() {
         let (state, b) = fixture(&["fauna:feed:read", "openid"]).await;

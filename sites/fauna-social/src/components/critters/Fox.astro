@@ -1,0 +1,35 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="30" ry="5" class="critter-shadow" />
+  <!-- tail -->
+  <ellipse cx="95" cy="105" rx="18" ry="9" transform="rotate(-40 95 105)" fill="#d0702a" />
+  <circle cx="105" cy="92" r="6" fill="#f7e8d4" />
+  <!-- waving arm (behind body) -->
+  <g class="wave" style="transform-origin: 82px 96px;">
+    <ellipse cx="88" cy="86" rx="6" ry="14" transform="rotate(-30 88 86)" fill="#d0702a" />
+    <circle cx="93" cy="74" r="5" fill="#e8863a" />
+  </g>
+  <!-- body -->
+  <ellipse cx="60" cy="105" rx="26" ry="26" fill="#e8863a" />
+  <ellipse cx="60" cy="112" rx="15" ry="16" fill="#f7e8d4" />
+  <ellipse cx="48" cy="130" rx="7" ry="4" fill="#d0702a" />
+  <ellipse cx="72" cy="130" rx="7" ry="4" fill="#d0702a" />
+  <ellipse cx="40" cy="108" rx="6" ry="12" transform="rotate(20 40 108)" fill="#d0702a" />
+  <!-- head -->
+  <path d="M40 40 L34 18 Q46 22 50 34 Z" fill="#e8863a" />
+  <path d="M80 40 L86 18 Q74 22 70 34 Z" fill="#e8863a" />
+  <path d="M42 36 L38 25 Q45 28 47 34 Z" fill="#a5522e" />
+  <path d="M78 36 L82 25 Q75 28 73 34 Z" fill="#a5522e" />
+  <circle cx="60" cy="56" r="24" fill="#e8863a" />
+  <circle cx="50" cy="66" r="10" fill="#f7e8d4" />
+  <circle cx="70" cy="66" r="10" fill="#f7e8d4" />
+  <ellipse cx="60" cy="68" rx="13" ry="9" fill="#f7e8d4" />
+  <circle cx="50" cy="52" r="3" fill="#2b2a24" />
+  <circle cx="70" cy="52" r="3" fill="#2b2a24" />
+  <ellipse cx="60" cy="62" rx="3.5" ry="2.8" fill="#2b2a24" />
+  <path d="M54 68 Q60 73 66 68" stroke="#2b2a24" stroke-width="2" fill="none" stroke-linecap="round" />
+</svg>

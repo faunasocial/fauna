@@ -312,6 +312,9 @@
                     <TextBlock x:Name="AftermathGrantRemintText" Visibility="Collapsed"
                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitGrantRemintStatus}"
                                TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    <TextBlock x:Name="AftermathPeriodRotationText" Visibility="Collapsed"
+                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitPeriodRotationStatus}"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
                     <TextBlock x:Name="AftermathDraftsResealText" Visibility="Collapsed"
                                AutomationProperties.AutomationId="{x:Bind ids:Ids.RecoveryKitDraftsResealStatus}"
                                TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
@@ -600,6 +603,12 @@
             <StackPanel Spacing="12">
                 <TextBlock Style="{StaticResource SubtitleTextBlockStyle}" Foreground="Red" Text="{loc:Localize Key=common/danger_zone}" />
                 <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="{loc:Localize Key=settings/danger_zone_desc}" />
+
+                <TextBlock
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.SettingsDeleteConfirmText}"
+                    Opacity="0.7"
+                    TextWrapping="Wrap"
+                    Text="{loc:Localize Key=settings/account_page/delete_confirm_text}" />
 
                 <TextBox
                     x:Name="DeleteConfirmBox"

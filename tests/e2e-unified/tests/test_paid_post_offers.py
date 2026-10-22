@@ -30,6 +30,7 @@ from clients._ws_rpc_core import RpcCallError
 from common.auth import create_actor_and_register
 from drivers.http_bridge import SelectOptionNotOffered
 from helpers.e2e_session import login_as
+from helpers.waiting import await_feed_reload_after, feed_reload_baseline
 
 pytestmark = [pytest.mark.tier_3]
 
@@ -283,6 +284,59 @@ def test_buying_a_subscribers_free_post_makes_you_a_follower(app, request, offer
     followers = _api(offers_nest, seller).subscription_subscribers_list(FOLLOWERS_TIER)
     assert any(bytes(s["subscriber_id"]) == buyer["actor_id_bytes"] for s in followers), (
         f"the buyer should be on the seller's followers roster, got {followers!r}"
+    )
+
+
+@pytest.mark.feature("paid-posts-and-tips")
+def test_a_bought_post_is_not_offered_again_while_the_approval_is_on_its_way(
+    app, request, offers_nest,
+):
+    """Outcome: a post you have bought is not offered to you again while the
+    author's approval is still on its way (`monetization.md` § Per-post
+    pay-to-unlock → *a completed buy must not be re-offered*).
+
+    "Not again" is about a LATER resolve pass, so the absence is read behind a
+    positive trace of that pass (convention 14): the buy sets
+    `unlock_purchase_pending`, a feed reload rebuilds the post without it, and
+    only the guarded resolve re-sets it. So: buy → the pending line → a reload
+    that began after it COMMITS → the pending line again → no buy button on the
+    same card. The seller never approves, so the grant stays on its way. A
+    restart is out of scope — the in-memory guard deliberately does not survive
+    one (§ Per-post pay-to-unlock)."""
+    app.subscriptions.require_sell_post_authoring_supported()
+    app.feed.require_purchase_pending_supported()
+    seller = _register(offers_nest)
+    buyer = _register(offers_nest)
+    _login_as(app, request, offers_nest, seller, handle=_unique("e2e-seller"))
+    preview = _unique("bought-pending")
+    _sell(app, preview)
+
+    _login_as(app, request, offers_nest, buyer, handle=_unique("e2e-buyer"))
+    card = _card_for(app, preview)
+    assert app.feed.wait_for_unlock_offer_price(card=card), (
+        f"the buyer should be offered the post; error={app.error_text()!r}"
+    )
+    app.feed.buy_unlock_offer(card=card)
+    assert app.feed.wait_for_purchase_pending(card=card), (
+        f"the buy should leave the post marked purchase pending; "
+        f"error={app.error_text()!r}"
+    )
+
+    # ── A later resolve pass: reload, and wait for the reload to commit. ─────
+    baseline = feed_reload_baseline(app.driver)
+    app.feed.reenter()
+    await_feed_reload_after(
+        app.driver, baseline, budget_s=AUTHOR_GRANT_BUDGET_S,
+        what="re-entering the feed after the buy",
+    )
+    card = _card_for(app, preview)
+    assert app.feed.wait_for_purchase_pending(card=card), (
+        f"the resolve after the reload should mark the bought post pending again; "
+        f"error={app.error_text()!r}"
+    )
+    assert app.driver.count("gated-post-buy-button", scope=f"post-card[{card}]") == 0, (
+        f"a bought post must not be offered again while the approval is on its "
+        f"way; error={app.error_text()!r}"
     )
 
 

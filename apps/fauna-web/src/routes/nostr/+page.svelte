@@ -4,10 +4,10 @@
   // ratified 2026-06-13). A thin wrapper: page chrome (`page-heading` +
   // MessageBanner) around the shared `NostrSettingsSection`, which the settings
   // rail's "Nostr" sub-page renders identically (one component, priority #2).
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import NostrSettingsSection from '$lib/components/NostrSettingsSection.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import NostrSettingsSection from '#lib/components/NostrSettingsSection.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   let error = $state('');
 </script>

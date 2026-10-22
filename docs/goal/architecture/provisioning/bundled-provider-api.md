@@ -100,6 +100,8 @@ Rules the adapter relies on, pinned by the conformance suite:
 - **Integer cents, never floats.**
 - **Labels are a flat string map**; the orchestrator always sends `managed-by: fauna` (`vps/mod.rs::MANAGED_BY_LABEL`), and the `label=` filter must match it.
 
+One rule the suite cannot observe, binding by this doc alone: **the server `POST /v1/servers` creates boots Ubuntu 26.04 LTS, 64-bit** — the release every server Fauna creates runs (`../installers/vps.md` § Minimum VPS Requirements). The request carries no image field because the intermediary picks the image from its own supplier, but the release is not its choice: the verbatim `user_data` is written for that release (its packages, its systemd units), so a box on another OS or release fails to become a nest. The `Server` shape has no image field, so nothing on the wire carries or checks it.
+
 ## Error envelope
 
 Every non-2xx response is `{"error":{"code":"<snake_case>","message":"<human-readable>","details":{…}?}}` with a matching HTTP status. Codes the adapter understands (anything else maps to the status alone):
@@ -147,7 +149,7 @@ The intermediary owns the supplier accounts (console, reinstall, snapshots) and 
 
 ## Notes for implementers (not legal advice)
 
-The intermediary's own counsel owns everything below. What the wizard itself already does for every registrar — bundled or not — is owned by `onboarding.md` § 4 (the price-confirm acknowledgement) and § 6 (the renewal line on the BoM):
+The intermediary owns the wording of everything below. What the wizard itself already does for every registrar — bundled or not — is owned by `onboarding.md` § 4 (the price-confirm acknowledgement) and § 6 (the renewal line on the BoM):
 
 - **Domains.** ccTLD eligibility rules map to `tld_not_supported`.
 - **Servers.** Partner / reseller terms with the supplier; the intermediary must be able to act on abuse notices (suspend), like any provider today.
@@ -168,6 +170,7 @@ Ratified 2026-08-26; nothing below the spec existed before that date. Status per
 - **Registry + codegen, shared Rust, conformance suite, the machine's hosted sign-in — BUILT 2026-08-26** (`registry.md` § Implementation status today owns the code-side detail). The reference server `tests/e2e-unified/fakes/fake_bundled.py` implements this whole spec, and the tier_2 journey `tests/e2e-unified/tests/test_bundled_provider.py` completes onboarding through the one row against it (tui, linux, web, android).
 - **`hosted-auth` glue** — tui, linux, web, android, macOS and iOS render the button; windows' button landed 2026-09-03 but isn't yet provable through the shared journey test (two separate, tracked prerequisites — no §6 BoM UI, and an id-convention divergence) (§ Authentication, rendering rule; per-app detail and the open row are `registry.md` § Implementation status today's).
 - **Curated list / inclusion policy** — none; BYO `base-url` only. A user decision once an implementer exists (§ Neutrality).
+- **Server release** — the Ubuntu 26.04 LTS rule (§ Endpoints, after the adapter's rules) stated 2026-10-20; nothing on the wire carries or checks it.
 - **No implementer exists.** The `bundled` row is visible and functional for a user who holds a conformant base URL; a provider-level `disabled` flag was considered and not added — the row is the invitation, and it costs nothing to a user who ignores it.
 
 ## Related docs

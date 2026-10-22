@@ -3,8 +3,8 @@
 //     deno test apps/fauna-web/src/lib/backup-audit-alerts.test.ts
 
 import { auditAlertBanners, auditAlertReasons } from './backup-audit-alerts.ts';
-import type { DestinationAuditRow } from '$lib/rpc';
-import type { BackupAuditAlertReason } from '$lib/wasm';
+import type { DestinationAuditRow } from '#lib/rpc';
+import type { BackupAuditAlertReason } from '#lib/wasm';
 
 function eq<T>(actual: T, expected: T, msg: string) {
   const a = JSON.stringify(actual);

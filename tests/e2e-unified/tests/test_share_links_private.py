@@ -107,6 +107,8 @@ def private_file_app(request, app, nest_instance):
 @pytest.mark.web
 @pytest.mark.android
 @pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.feature("share-links")
 def test_the_author_links_a_private_file_and_the_link_is_the_key(private_file_app):
     app, content, chunk_count = private_file_app

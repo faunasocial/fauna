@@ -54,7 +54,7 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+cdb1bad0 standalone |
+| web | ✅ full | 0.1.2-dev+8b423269 standalone |
 | linux | ✅ full | 0.1.2-dev+8b423269 standalone |
 | windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |

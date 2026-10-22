@@ -108,6 +108,11 @@ fauna-client-labelers = { path = "../fauna-client-labelers" }
 # the web build for a region document's bundled scorers.
 fauna-labeler = { workspace = true }
 fauna-client-config = { path = "../fauna-client-config" }
+# The remote author's byline (`FeedManager::resolve_author_face`, `ui/feed.md`
+# § The read model → The remote author's byline): the one shared
+# `profile_get_remote` relay the Profile page reads through. In-repo and
+# wasm-clean by that crate's own charter (fauna-wasm already carries it).
+fauna-client-profile = { path = "../fauna-client-profile" }
 
 # Layer-B engagement-signal producer (engagement-cues.md § Layer B write path):
 # `record_observation` submits a derived cue verdict for a public post to the

@@ -1,10 +1,10 @@
-// Relative, not the `$lib/i18n/strings` alias it resolves to: the alias is a
+// Relative, not the `#lib/i18n/strings` alias it resolves to: the alias is a
 // SvelteKit/vite one that plain `deno test` cannot resolve, and it would make
 // this shared resolver — and every module reaching it — unloadable in a unit
 // test (`just web-unit-test`). Same file either way.
 import { t } from './strings.ts';
-import type { RowCell } from '$lib/rpc';
-import type { EditorCell } from '$lib/wasm';
+import type { RowCell } from '#lib/rpc';
+import type { EditorCell } from '#lib/wasm';
 
 /**
  * A runtime localized string — an i18n key plus a flat substitution map.

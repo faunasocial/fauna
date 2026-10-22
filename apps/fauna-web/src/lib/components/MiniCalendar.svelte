@@ -6,8 +6,8 @@
     nextMonth as caltimeNextMonth,
     localeWeekStart,
     weekdayCells,
-  } from '$lib/caltime';
-  import { t } from '$lib/i18n/strings';
+  } from '#lib/caltime';
+  import { t } from '#lib/i18n/strings';
 
   interface Props {
     selectedDate: Date;
@@ -96,7 +96,7 @@
   );
 
   // The 42-cell month grid rides the shared `fauna_core::caltime::month_grid`
-  // (via `$lib/caltime`) instead of re-deriving the prev/next-month padding in
+  // (via `#lib/caltime`) instead of re-deriving the prev/next-month padding in
   // JS `Date` arithmetic — priority #2/#4, events.md § Where logic lives. The
   // calendar starts on the locale's first day (the `DOW` header is rotated to
   // match, off the same value); `inMonth` marks the padding days.

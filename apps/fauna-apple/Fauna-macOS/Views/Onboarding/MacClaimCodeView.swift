@@ -58,6 +58,8 @@ struct MacClaimCodeView: View {
                 ErrorBanner(message: error)
             }
 
+            TermsNotice()
+
             HStack {
                 Button(L.common.back) { vm.machine.back() }
                     .accessibilityIdentifier(Ids.claimCodeBackButton)

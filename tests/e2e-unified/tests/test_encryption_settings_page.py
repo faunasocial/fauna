@@ -33,10 +33,18 @@ account's identity over the nest's own upload kind. Every user gesture — openi
 the page, Refresh — goes through the app (convention 8). Latency-independent
 (convention 14): each assertion waits on state, never a clock.
 
-tui is the lead app; windows binds the three ids but joins this file's markers
-only once its sign-in publishes the starter-key top-up (outcomes 1 and 11 — a
-windows run finds the nest count at 0 after sign-in); the other five carry the
-ids in their trickle-down rows and join then.
+tui is the lead app and windows the second; the other five carry the ids in
+their trickle-down rows and join then. windows runs the two sign-in journeys
+in full; the three that open the page take a ``skip_unbuilt`` at the rail
+click until its Settings rail rows carry ``settings-nav-row[<key>]``.
+
+``real_conversations``: the sign-in top-up (outcomes 1, 10 and 11, and every
+journey's opening ``_wait_signed_in_supply``) is published by the shared
+``ConversationsSession::start_receive_loop``. A native app's e2e login starts
+that loop only under the marker's launch-time gate — without it windows keeps
+its mock conversations backend and the nest's count stays at 0 — while a real
+sign-in always starts it. The gate is session-wide on the native apps, so run
+this file in its own pytest invocation there (``pytest.ini``).
 """
 
 from __future__ import annotations
@@ -47,10 +55,16 @@ import urllib.request
 import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
+from helpers.app_surface import skip_unbuilt
 from helpers.waiting import wait_until
 from tests.api.conv_api import mint_key_packages
 
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.windows,
+    pytest.mark.real_conversations,
+]
 
 COUNT = "fauna.conversations.keypackage.count"
 UPLOAD = "fauna.conversations.keypackage.upload"
@@ -110,6 +124,14 @@ def _open_page(driver) -> None:
     """Reach Settings → Encryption the way a human does, from wherever the app
     is: leave the page if it is open (so this visit is a fresh one), then
     ``settings-tab`` and the rail row."""
+    if driver.is_windows():
+        skip_unbuilt(
+            driver,
+            surface=ROW,
+            detail="windows paints the Encryption page, but its Settings rail rows carry no "
+            "settings-nav-row[<key>] ids yet, so no click reaches it",
+            tracked="ui.yaml navigation.sub_page_nav_rows",
+        )
     if driver.is_visible(COUNT_ID):
         driver.click("settings-nav-back")
     if not driver.is_visible(ROW):

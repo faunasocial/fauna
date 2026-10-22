@@ -35,6 +35,7 @@ fn mail(sender: &str, subject: &str, body: &str, timestamp_ms: i64) -> RailInbou
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -296,9 +297,15 @@ fn native(seq: u64, own: bool) -> MessageSnapshot {
         deleted: false,
         is_own: own,
         legal_takedown_ref: None,
+        admin_block_reason: None,
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        undelivered: false,
+        warmup_hold: None,
+        scan_result_lines: Vec::new(),
+        delivered_to: None,
+        withheld: None,
     }
 }
 

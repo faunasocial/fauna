@@ -418,6 +418,7 @@ async fn flow_a_provision_new_domain() {
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
 
     // Submit Continue → expect DnsConfig with buy_domain=true.
@@ -464,6 +465,7 @@ async fn domain_available_inside_a_zone_lands_with_buy_domain_off() {
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
     m.set_handle_enclosing_zone_for_test(Some("example.com".into()));
 
@@ -501,6 +503,7 @@ async fn registered_no_nest_continue_sets_domain_status() {
         continue_enabled: false,
         control_checkbox_visible: true,
         control_checkbox_checked: true,
+        ..Default::default()
     });
 
     let next = m.submit_handle_check_continue().await;
@@ -538,6 +541,7 @@ async fn flow_c_already_on_nest() {
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
 
     let next = m.submit_handle_check_continue().await;
@@ -798,7 +802,66 @@ async fn pending_poll_typed_verdicts_end_on_the_terminal_error() {
             snap.state
         );
         assert!(!snap.recheck_visible, "{label}: poll must stop");
+        // No re-trust affordance: the page stays on the invite error — never
+        // the trust prompt, never an outcome the glue would act on.
+        assert_eq!(m.step(), OnboardingStep::InviteRequest, "{label}");
+        assert!(m.wizard_outcome().is_none(), "{label}: no outcome");
     }
+}
+
+/// A cancel raised while the not-found probe is in flight must not route the
+/// page anywhere: `Success` means the nest admitted this identity, but the user
+/// asked to stop, so the snapshot stays at its pending state (`cancel_invite_op`).
+#[tokio::test]
+async fn pending_poll_cancel_during_probe_does_not_route_to_trust_offer() {
+    use fauna_onboarding_machine::InviteRequestState;
+    use fauna_onboarding_machine::nest_api::{
+        FakeNestApi, InviteRequestError, NestApi, SilentChallengeOutcome,
+    };
+
+    let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
+    let fake = Arc::new(FakeNestApi::new());
+    let m = OnboardingMachine::with_nest_api(observer, fake.clone() as Arc<dyn NestApi>);
+    m.seed_identity("0".repeat(64));
+    let pending_status = serde_json::json!({
+        "PendingReview": { "request_id": "REQ1", "last_checked_ms": 0 }
+    });
+    m.seed_pending_invite(
+        "https://a.example".into(),
+        "alice@a.example".into(),
+        "REQ1".into(),
+        pending_status.to_string(),
+    );
+    fake.set_recheck_invite_request_response(Err(InviteRequestError::NotFound));
+    fake.set_silent_challenge_response(SilentChallengeOutcome::Success(
+        fauna_protocol::auth::VerifyReply {
+            token: "bearer".into(),
+            token_id: "0".repeat(16),
+            handle: "alice".into(),
+            domain: "a.example".into(),
+            tier: "free".into(),
+            expires_at: 0,
+            ..Default::default()
+        },
+    ));
+    // The user cancels while the probe is in flight.
+    let mc = m.clone();
+    fake.set_silent_challenge_hook(move || mc.cancel_invite_op());
+
+    let step = m.recheck_invite_status().await;
+
+    assert_eq!(step, OnboardingStep::InviteRequest);
+    assert_eq!(m.step(), OnboardingStep::InviteRequest);
+    assert!(m.wizard_outcome().is_none(), "no outcome after a cancel");
+    // `Rechecking` is a transient spinner: the cancel restores the pending
+    // state, so the next poll tick re-derives admission.
+    let snap = m.invite_request_snapshot();
+    assert!(
+        matches!(snap.state, InviteRequestState::PendingReview { .. }),
+        "got {:?}",
+        snap.state
+    );
+    assert!(snap.recheck_visible);
 }
 
 /// An unreachable probe is the one answer that keeps the poll going.

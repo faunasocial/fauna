@@ -214,3 +214,86 @@ def test_muted_message_collapses_behind_reveal(logged_in_app):
         assert d.count("dm-message-muted") == 0, "the placeholder should be gone after reveal"
     finally:
         _clear_muted_words(app.muted_words)
+
+
+# The level picker's two terms: one softened to Show less, one left at Hide.
+SOFT_TERM = "lottery"
+HARD_TERM = "jackpotscam"
+SOFT_BODY = "Congratulations — you just won the LOTTERY!"
+HARD_BODY = "Claim your JACKPOTSCAM prize today"
+
+
+@pytest.mark.tui
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.android
+@pytest.mark.feature("muted-words")
+def test_muted_word_level_show_less_does_not_collapse_a_message(logged_in_app):
+    """The per-row level picker (``docs/goal/ui/settings.md`` § Muted words —
+    the level picker; the levels' meaning is
+    ``content-moderation-and-ranking.md`` § Composition): a new term is Hide;
+    picking *Show less* saves at once and survives a re-visit; a conversation
+    message matching a Show-less term is NOT collapsed while one matching a
+    Hide term still is; picking Hide again brings the collapse back.
+
+    tui leads; web, linux and android followed in the trickle-down; windows,
+    macos and ios add their marker when their picker lands (the follow-up rows
+    on their own machines).
+    """
+    app = logged_in_app
+    mw = app.muted_words
+    conv = app.conversations
+    d = app.driver
+
+    mw.navigate()
+    mw.add(SOFT_TERM)
+    try:
+        assert mw.wait_for_word(SOFT_TERM), f"term did not persist; words={mw.words()!r}"
+        mw.add(HARD_TERM)
+        assert mw.wait_for_word(HARD_TERM), f"term did not persist; words={mw.words()!r}"
+
+        # A new term is Hide.
+        assert mw.wait_for_level(SOFT_TERM, "hide"), (
+            f"a new term must read hide; level={mw.level(mw.index_of(SOFT_TERM))!r} "
+            f"error={app.error_text()!r}; {d.diagnose('muted-word-level-select')}"
+        )
+
+        mw.set_level("show-less", mw.index_of(SOFT_TERM))
+        assert mw.wait_for_level(SOFT_TERM, "show-less"), (
+            "the picked level never repainted from the returned record; "
+            f"level={mw.level(mw.index_of(SOFT_TERM))!r} error={app.error_text()!r}"
+        )
+        # Re-read from the store, not the page's copy.
+        mw.revisit()
+        assert mw.wait_for_level(SOFT_TERM, "show-less"), (
+            "Show less did not survive a re-visit; "
+            f"level={mw.level(mw.index_of(SOFT_TERM))!r} error={app.error_text()!r}"
+        )
+        assert mw.level(mw.index_of(HARD_TERM)) == "hide", "the other row's level moved"
+
+        sender = "carol-level@self-nest.test"
+        conv.inject_inbound_for_test(rail="FaunaMls", sender=sender, body=SOFT_BODY)
+        thread_id = conv.inject_and_open_thread(rail="FaunaMls", sender=sender, body=HARD_BODY)
+
+        assert d.count("dm-message-muted") == 1, (
+            "only the Hide match may collapse — a Show less match shows as usual; "
+            f"muted={d.count('dm-message-muted')} text={d.count('dm-message-text')} "
+            f"error={app.error_text()!r}"
+        )
+        assert d.count("dm-message-text") == 1, (
+            f"the Show less match must render its body; text={d.count('dm-message-text')}"
+        )
+
+        # Back to Hide: the collapse returns.
+        mw.navigate()
+        mw.set_level("hide", mw.index_of(SOFT_TERM))
+        assert mw.wait_for_level(SOFT_TERM, "hide"), (
+            f"level={mw.level(mw.index_of(SOFT_TERM))!r} error={app.error_text()!r}"
+        )
+        conv.open_thread_by_id(thread_id)
+        assert d.count("dm-message-muted") == 2, (
+            "a term set back to Hide must collapse its match again; "
+            f"muted={d.count('dm-message-muted')} text={d.count('dm-message-text')}"
+        )
+    finally:
+        _clear_muted_words(mw)

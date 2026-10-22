@@ -349,3 +349,43 @@ def test_build_launch_env_headless_store_mode(tmp_path):
     env = build_launch_env({}, 8, str(tmp_path))
     assert env["FAUNA_E2E_CREDENTIAL_DIR"]
     assert "FAUNA_E2E_FORCE_HEADLESS_STORE" not in env
+    assert "FAUNA_E2E_FORCE_LOCKED_KEYRING" not in env
+
+
+def test_build_launch_env_locked_keyring_mode(tmp_path):
+    """``locked_keyring`` drives the SEALED backend through the probe's LOCKED
+    answer, the desktop-session-with-a-locked-store case (apps/tui.md
+    § Credential storage, cause ``KeyringLocked``): the e2e file backend is
+    disabled and the locked-keyring force var is set — never the headless
+    force var, which skips the probe and stands in for the SSH case."""
+    env = build_launch_env({"locked_keyring": True}, 9, str(tmp_path))
+    assert env["FAUNA_E2E_CREDENTIAL_DIR"] == ""
+    assert env["FAUNA_E2E_FORCE_LOCKED_KEYRING"] == "1"
+    assert "FAUNA_E2E_FORCE_HEADLESS_STORE" not in env
+    # The headless mode stays the absent case: no locked-keyring var.
+    env = build_launch_env({"headless_store": True}, 10, str(tmp_path))
+    assert "FAUNA_E2E_FORCE_LOCKED_KEYRING" not in env
+
+
+def test_build_launch_env_probed_store_mode(tmp_path, monkeypatch):
+    """``probed_store`` runs the production resolution unforced: the e2e file
+    backend is disabled and neither force var reaches the app — not even one
+    the harness's own environment carries — so the store's own keyring probe
+    picks the arm, on the caller's bus."""
+    monkeypatch.setenv("FAUNA_E2E_FORCE_HEADLESS_STORE", "1")
+    bus = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/nowhere"}
+    env = build_launch_env(
+        {"probed_store": True, "environment": bus}, 11, str(tmp_path), sys_platform="linux"
+    )
+    assert env["FAUNA_E2E_CREDENTIAL_DIR"] == ""
+    assert "FAUNA_E2E_FORCE_HEADLESS_STORE" not in env
+    assert "FAUNA_E2E_FORCE_LOCKED_KEYRING" not in env
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/nowhere"
+
+
+def test_build_launch_env_probed_store_refuses_the_ambient_bus(tmp_path):
+    """On linux the probe asks the session bus's Secret Service, so a
+    ``probed_store`` launch with no caller-owned bus is refused — it would
+    resolve the developer's own keyring."""
+    with pytest.raises(RuntimeError, match="caller-owned DBUS_SESSION_BUS_ADDRESS"):
+        build_launch_env({"probed_store": True}, 12, str(tmp_path), sys_platform="linux")

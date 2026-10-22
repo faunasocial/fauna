@@ -62,9 +62,9 @@ pub enum Custodian {
     ActivityPubActorKey,
     /// The account's delegated authoring sub-key `K`, sealed under the
     /// nest-internal key-encryption key and authorized by the account's
-    /// identity-signed `DeviceAuthorization` carrying `Capability::Post`;
-    /// signs Fauna `Post` and post-`Tombstone` envelopes
-    /// (`docs/goal/behavior/atproto-pds-full.md` § D10).
+    /// identity-signed `DeviceAuthorization` carrying `Capability::Post` and
+    /// `Capability::UpdateProfile`; signs Fauna `Post`, post-`Tombstone` and
+    /// `Profile` envelopes (`docs/goal/behavior/atproto-pds-full.md` § D10).
     AccountAuthoringKey,
     /// The account's ATProto repo signing key, held by the first-party
     /// `atproto.pds` bridge — sealed to that bridge's attested X25519, which
@@ -73,6 +73,24 @@ pub enum Custodian {
     /// (`docs/goal/architecture/key-material-hierarchy.md` § The oracle →
     /// *The bridge-held custodian*).
     AtprotoRepoKey,
+    /// The account's MLS leaf and group state, held only by the user's own
+    /// devices — so the custodian is the signed-in first-party app hosting
+    /// the account's conversations engine **on the same device**, serving the
+    /// oracle's second `fauna-ipc` door. The first custodian that is a device
+    /// and not the nest or a bridge: no nest kind reaches it
+    /// (`docs/goal/behavior/conversations-oracle.md` § The custodian and the
+    /// door).
+    DeviceConversationsEngine,
+}
+
+impl Custodian {
+    /// Whether the custodian is a user's device rather than the nest or a
+    /// bridge — its door is a local `fauna-ipc` endpoint, never a nest kind,
+    /// and a remote-form principal has no device door to reach.
+    #[must_use]
+    pub const fn is_device(self) -> bool {
+        matches!(self, Custodian::DeviceConversationsEngine)
+    }
 }
 
 /// An operation class the oracle performs — the built rows of the goal doc's
@@ -94,10 +112,22 @@ pub enum IdentityOpClass {
     /// retract one this principal authored, signed with the account's
     /// delegated authoring sub-key.
     PostAuthor,
+    /// `profile.author` — edit the display fields of the account's profile
+    /// (name, bio, links, pictures) as the account, every other field carried
+    /// from the stored profile, signed with the account's delegated authoring
+    /// sub-key under `Capability::UpdateProfile`.
+    ProfileAuthor,
     /// `atproto.service_auth` — a short-lived ATProto service JWT for an
     /// `(aud, lxm)` pair in the principal's declared set, minted by the PDS
     /// bridge with the account's repo signing key.
     AtprotoServiceAuth,
+    /// `conversation.read` — list the account's rooms, read one page of a
+    /// room's messages, or search, through the device's own conversations
+    /// engine; the result is the page's projection, never MLS material.
+    ConversationRead,
+    /// `conversation.send` — send a text message as the account into a room,
+    /// the page's own send for the room's rail; never a membership operation.
+    ConversationSend,
 }
 
 impl IdentityOpClass {
@@ -107,7 +137,10 @@ impl IdentityOpClass {
         IdentityOpClass::NostrNip44,
         IdentityOpClass::ActivityPubHttpSig,
         IdentityOpClass::PostAuthor,
+        IdentityOpClass::ProfileAuthor,
         IdentityOpClass::AtprotoServiceAuth,
+        IdentityOpClass::ConversationRead,
+        IdentityOpClass::ConversationSend,
     ];
 
     /// The class's name — the `identity.op` tuple's `kind` and the scope
@@ -119,7 +152,10 @@ impl IdentityOpClass {
             IdentityOpClass::NostrNip44 => "nostr.nip44",
             IdentityOpClass::ActivityPubHttpSig => "activitypub.http_sig",
             IdentityOpClass::PostAuthor => "post.author",
+            IdentityOpClass::ProfileAuthor => "profile.author",
             IdentityOpClass::AtprotoServiceAuth => "atproto.service_auth",
+            IdentityOpClass::ConversationRead => "conversation.read",
+            IdentityOpClass::ConversationSend => "conversation.send",
         }
     }
 
@@ -132,8 +168,13 @@ impl IdentityOpClass {
                 Custodian::NostrDepositedKey
             }
             IdentityOpClass::ActivityPubHttpSig => Custodian::ActivityPubActorKey,
-            IdentityOpClass::PostAuthor => Custodian::AccountAuthoringKey,
+            IdentityOpClass::PostAuthor | IdentityOpClass::ProfileAuthor => {
+                Custodian::AccountAuthoringKey
+            }
             IdentityOpClass::AtprotoServiceAuth => Custodian::AtprotoRepoKey,
+            IdentityOpClass::ConversationRead | IdentityOpClass::ConversationSend => {
+                Custodian::DeviceConversationsEngine
+            }
         }
     }
 
@@ -154,8 +195,17 @@ impl IdentityOpClass {
             IdentityOpClass::PostAuthor => {
                 "Post public posts as you, and delete the ones this app posted (your key is never shared — your nest signs for it)"
             }
+            IdentityOpClass::ProfileAuthor => {
+                "Edit your profile's name, bio and links as you (your key is never shared — your nest signs for it)"
+            }
             IdentityOpClass::AtprotoServiceAuth => {
                 "Ask your nest to issue short-lived tokens for the Bluesky services this app names, signed with your Bluesky account's key (the key itself is never shared)"
+            }
+            IdentityOpClass::ConversationRead => {
+                "Read your conversations through the Fauna app open on this device (your conversation keys are never shared)"
+            }
+            IdentityOpClass::ConversationSend => {
+                "Send messages as you into your conversations through the Fauna app open on this device (your conversation keys are never shared)"
             }
         }
     }
@@ -379,9 +429,19 @@ mod tests {
                 ("nostr.nip44", Custodian::NostrDepositedKey),
                 ("activitypub.http_sig", Custodian::ActivityPubActorKey),
                 ("post.author", Custodian::AccountAuthoringKey),
+                ("profile.author", Custodian::AccountAuthoringKey),
                 ("atproto.service_auth", Custodian::AtprotoRepoKey),
+                ("conversation.read", Custodian::DeviceConversationsEngine),
+                ("conversation.send", Custodian::DeviceConversationsEngine),
             ]
         );
+        // The device custodian is the one whose door is not the nest.
+        let devices: Vec<Custodian> = IdentityOpClass::ALL
+            .iter()
+            .map(|c| c.custodian())
+            .filter(|c| c.is_device())
+            .collect();
+        assert_eq!(devices, [Custodian::DeviceConversationsEngine; 2]);
     }
 
     /// The deny list, read back as refusals: every sovereign name is refused
@@ -422,9 +482,16 @@ mod tests {
             "post",
             "post.write",
             "post.author.delete",
+            "profile",
+            "profile.write",
+            "profile.author.set",
             "atproto",
             "atproto.service_auth.x",
             "atproto.service",
+            "conversation",
+            "conversation.write",
+            "conversation.read.page",
+            "conversation.invite",
         ] {
             assert_eq!(
                 IdentityOpClass::parse(bad),

@@ -169,7 +169,7 @@ async fn upgrade_with(state: &Arc<AppState>, token: &str) -> Arc<fauna_nest::ws:
     let actor_id = session.actor_id.0;
     let bound = fauna_nest::ws::bound_device_key_for(&actor_id, session.minted_by_device);
     let (conn, _rx) = state
-        .register_upgraded_connection(actor_id, Some(session.token_id), bound, false)
+        .register_upgraded_connection(actor_id, Some(session.token_id), bound, false, None)
         .await;
     conn
 }
@@ -272,6 +272,7 @@ async fn another_actors_connection_with_the_same_key_paints_nothing_here() {
         Some("feedfeedfeedfeed".into()),
         Some(key),
         false,
+        None,
     );
     assert!(
         !online(&router, &state, &account, &device_id_hex).await,

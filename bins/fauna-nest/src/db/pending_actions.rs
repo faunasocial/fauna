@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use rusqlite::OptionalExtension;
 
 use super::{CacheDb, now_epoch_secs};
-use crate::db::chain_version::{self, ChainVersion};
 use crate::pending_actions::{ActionType, PendingActionRow};
+use fauna_core::chain_version::{self, ChainVersion};
 
 /// Genesis hash for the pending-actions chain (distinct from the audit log
 /// chain). `pub(crate)` for the one-time version classification in
@@ -16,11 +16,14 @@ pub(crate) fn genesis_hash() -> Vec<u8> {
     sha2::Sha256::digest(b"fauna-pending-actions-genesis-v1").to_vec()
 }
 
-/// Test-only pause point in the window between `cancel_pending_action` /
-/// `approve_pending_action`'s status pre-check and their guarded `UPDATE`
-/// (two lock holds, so a claim can land between them). The write path signals
-/// `reached`, then waits for `proceed`; a test claims the row in between and
-/// pins the `updated == 0` arm.
+/// Test-only pause point in the window between a pre-check and its guarded
+/// write, taken as two lock holds so another writer can land between them:
+/// `cancel_pending_action` / `approve_pending_action`'s status pre-check and
+/// their guarded `UPDATE` (a test claims the row in between and pins the
+/// `updated == 0` arm), and the emailed-invitation placement's UID pre-check
+/// and its create-only insert (a test stores the same UID in between —
+/// `bridge_caldav_handlers::place_sealed_invite`). The write path signals
+/// `reached`, then waits for `proceed`.
 #[cfg(test)]
 pub(crate) struct PrecheckGate {
     pub reached: std::sync::Arc<tokio::sync::Notify>,
@@ -31,7 +34,7 @@ impl CacheDb {
     /// Runs once a pre-check has passed, just before the write takes the
     /// connection lock. A no-op outside tests.
     #[cfg(test)]
-    async fn after_precheck(&self) {
+    pub(crate) async fn after_precheck(&self) {
         let gate = self.precheck_gate.lock().unwrap().take();
         if let Some(gate) = gate {
             gate.reached.notify_one();
@@ -41,7 +44,14 @@ impl CacheDb {
 
     #[cfg(not(test))]
     #[inline(always)]
-    async fn after_precheck(&self) {}
+    pub(crate) async fn after_precheck(&self) {}
+
+    /// Arm the [`PrecheckGate`] for the next [`Self::after_precheck`] — for a
+    /// test outside the `db` module, which cannot reach the field.
+    #[cfg(test)]
+    pub(crate) fn arm_precheck_gate(&self, gate: PrecheckGate) {
+        *self.precheck_gate.lock().unwrap() = Some(gate);
+    }
 }
 
 /// The `snapshots` rows an action marked `deletion_pending` when it was created.
@@ -141,7 +151,7 @@ impl CacheDb {
     /// it bound their concatenation rather than their column boundaries — the
     /// same defect [`crate::db::admin::audit_on_conn`] carried, and the same
     /// fix. Both preimages and the rule selecting between them live in
-    /// [`crate::db::chain_version`]; the version a row was written under is
+    /// [`fauna_core::chain_version`]; the version a row was written under is
     /// recorded in its own `chain_hash_version` column, so no reader ever has
     /// to try one format and then the other. Unlike `audit_log`, this chain
     /// has **no walker at all** — every reference is a write or a
@@ -237,7 +247,7 @@ impl CacheDb {
 
         // `chain_hash_version` records what `compute_pending_action_hash` just
         // hashed under, so a verifier selects the preimage from the row rather
-        // than trying formats — see [`crate::db::chain_version`].
+        // than trying formats — see [`fauna_core::chain_version`].
         conn.execute(
             "INSERT INTO pending_actions
                  (action_type, actor_id, target, payload, status, created_at, execute_after,

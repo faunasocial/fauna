@@ -42,6 +42,11 @@ INSTALL_ICON="$PREFIX/share/icons/hicolor/scalable/apps/fauna.svg"
 # users' units to go condition-inert instead (linux-desktop.md § Uninstall).
 AGENT_UNIT="fauna-sync-agent.service"
 AGENT_UNIT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$AGENT_UNIT"
+# The GNOME Files Share module the app writes at sign-in (apps/linux.md § The
+# file manager's Share entry (GNOME Files)) — per-user like the unit, so only a
+# user-mode uninstall reaches it; elsewhere the module finds no agent and
+# offers nothing.
+SHARE_MODULE_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/nautilus-python/extensions/fauna_share.py"
 
 uninstall() {
     echo "Uninstalling Fauna from $PREFIX..."
@@ -68,6 +73,12 @@ uninstall() {
             systemctl --user daemon-reload 2>/dev/null || true
         fi
         echo "  Removed $AGENT_UNIT_FILE"
+        removed=$((removed + 1))
+    fi
+
+    if [ -f "$SHARE_MODULE_FILE" ]; then
+        rm -f "$SHARE_MODULE_FILE"
+        echo "  Removed $SHARE_MODULE_FILE"
         removed=$((removed + 1))
     fi
 

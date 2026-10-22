@@ -4,8 +4,9 @@
 //! (`crate::ws`), the anonymous pre-identity plane, and the nest↔nest federation
 //! channel (`crate::federation_channel`). A co-located, sandboxed sidecar process
 //! dials the nest over loopback and both ends speak WS-RPC over the one duplex.
-//! Its one rider today is the iroh relay sidecar (`bins/fauna-iroh-relay`), at
-//! `GET /internal/relay/ws`.
+//! Its riders are the iroh relay sidecar (`bins/fauna-iroh-relay`), at
+//! `GET /internal/relay/ws`, and the sni-router (`bins/fauna-sni-router`), at
+//! `GET /internal/router/ws` for the sidecar log plane alone.
 //!
 //! **Auth model — one-way token handshake.** Unlike federation's mutual
 //! sign-over-CID, the sidecar is a co-located process the nest minted a bearer
@@ -19,12 +20,15 @@
 //!
 //! This module is the **nest listener side**: the token handshake
 //! ([`verify_sidecar_hello`]), the loopback-only upgrade gate
-//! ([`internal_ws_allowlist_gate`], shared with the nest-link worker channel), and
-//! the relay listener ([`relay_ws_handler`]) with its lean serve loop — the
-//! relay-origin kinds (`fauna.relay.fetch_tls_cert`, `fauna.relay.admit`), the
-//! nest-origin `fauna.relay.cert_changed` push, plus the channel-generic
-//! log-plane kind. The dialer side is the shared [`fauna_sidecar_client`] crate,
-//! which the relay binary and this module's tests both drive.
+//! ([`internal_ws_allowlist_gate`], shared with the nest-link worker channel
+//! and `/internal/router-status`), and
+//! the two listeners ([`relay_ws_handler`], [`router_ws_handler`]) over one lean
+//! serve loop parameterised by [`SidecarChannel`] — the channel-generic
+//! log-plane kind on both, and on the relay's class alone the relay-origin kinds
+//! (`fauna.relay.fetch_tls_cert`, `fauna.relay.admit`) and the nest-origin
+//! `fauna.relay.cert_changed` push. The dialer side is the shared
+//! [`fauna_sidecar_client`] crate, which both binaries and this module's tests
+//! drive.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -139,7 +143,42 @@ async fn listener_handshake(
     }
 }
 
-// ── Listener: GET /internal/relay/ws (the iroh relay sidecar) ────────────────────
+// ── Listeners: GET /internal/{relay,router}/ws ──────────────────────────────────
+
+/// Which sidecar a channel serves. Each class is one route, one token scope and
+/// one log-plane source; the lean loop ([`serve_sidecar_channel`]) is shared and
+/// the class decides which kinds beyond the log plane it allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarChannel {
+    /// The iroh relay (`/internal/relay/ws`): attests an X25519 in its hello and
+    /// rides the relay kinds — the sealed cert fetch, admission, cert-changed.
+    Relay,
+    /// The sni-router (`/internal/router/ws`): the log plane only. Its hello
+    /// carries no key and it originates nothing else.
+    Router,
+}
+
+impl SidecarChannel {
+    fn scope(self) -> SidecarScope {
+        match self {
+            SidecarChannel::Relay => SidecarScope::Relay,
+            SidecarChannel::Router => SidecarScope::Router,
+        }
+    }
+
+    /// The log-plane source this channel's events are attributed to — from the
+    /// authenticated channel class, never the payload.
+    fn log_source(self) -> crate::log_plane::LogSource {
+        match self {
+            SidecarChannel::Relay => crate::log_plane::LogSource::Relay,
+            SidecarChannel::Router => crate::log_plane::LogSource::Router,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        self.scope().as_str()
+    }
+}
 
 /// `GET /internal/relay/ws` — the iroh relay sidecar's WS connection class.
 /// **Loopback-only** (mirrors `/internal/worker/ws`): the relay
@@ -147,11 +186,30 @@ async fn listener_handshake(
 /// source is rejected at upgrade time. **No bearer at upgrade**:
 /// the connection authenticates at the L3 layer via the `fauna.sidecar.hello`
 /// token handshake (the FIRST frame), bound to [`SidecarScope::Relay`], and is
-/// driven by [`serve_relay_listener`] (the relay attests its X25519 in the hello
+/// driven by [`serve_sidecar_listener`] (the relay attests its X25519 in the hello
 /// and fetches its sealed TLS cert).
 pub async fn relay_ws_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: axum::extract::Request,
+) -> Response {
+    sidecar_ws_handler(state, req, SidecarChannel::Relay).await
+}
+
+/// `GET /internal/router/ws` — the sni-router's WS connection class: the same
+/// loopback gate and token handshake as the relay's, bound to
+/// [`SidecarScope::Router`], serving only the sidecar log plane
+/// (`observability.md` § The sidecar log plane → § Coverage).
+pub async fn router_ws_handler(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Response {
+    sidecar_ws_handler(state, req, SidecarChannel::Router).await
+}
+
+async fn sidecar_ws_handler(
+    state: Arc<AppState>,
+    req: axum::extract::Request,
+    class: SidecarChannel,
 ) -> Response {
     let ws = match sidecar_ws_upgrade(&state, req).await {
         Ok(ws) => ws,
@@ -164,28 +222,29 @@ pub async fn relay_ws_handler(
         let scope = Arc::clone(&state);
         async move {
             let _ = scope
-                .spawn_scoped(serve_relay_listener(state, socket))
+                .spawn_scoped(serve_sidecar_listener(state, socket, class))
                 .await;
         }
     })
 }
 
-/// Shared loopback-only gate for the internal WS listeners: the
-/// sidecar's `/internal/relay/ws`, and
-/// [`crate::nest_link::proxy::worker_ws_handler`] — both explicitly document
-/// reusing this same allowlist, and had each hand-copied the identical check
-/// under their own name before this lift. `label` names the caller for the
-/// log line and rejection body (`"sidecar"`/`"worker"`).
+/// Shared loopback-only gate for the internal routes on the public listener:
+/// the sidecar WS channels (`/internal/relay/ws`, `/internal/router/ws`),
+/// [`crate::nest_link::proxy::worker_ws_handler`], and
+/// [`crate::router_status::get_router_status`] (`worker.md` § Router Status
+/// Endpoint). `label` names the caller for the log line and rejection body
+/// (`"sidecar WS"`/`"worker WS"`/`"router-status"`).
 ///
 /// Loopback only (no configurable allowlist). ConnectInfo
 /// is injected on BOTH production serving paths — TLS via `serve_tls`'s
 /// `WithConnectInfo` middleware (`lib.rs`), plain-HTTP via
-/// `into_make_service_with_connect_info` — and both these routes are on the
-/// public listener (the IP gate, not the route's absence, is what protects
-/// them). So a missing ConnectInfo is never an expected state; it can only
-/// mean a future middleware-ordering change dropped it. Fail CLOSED (reject)
-/// rather than open, so such a regression can never silently open an
-/// internal channel to a non-loopback source.
+/// `into_make_service_with_connect_info` — and every one of these routes is
+/// on the public listener (the IP gate, not the route's absence, is what
+/// protects them). So a missing ConnectInfo is never an expected state; it
+/// can only mean a future middleware-ordering change dropped it (or a test
+/// fixture serving with a bare `axum::serve`). Fail CLOSED (reject) rather
+/// than open, so such a regression can never silently open an internal route
+/// to a non-loopback source.
 pub(crate) fn internal_ws_allowlist_gate(
     req: &axum::extract::Request,
     label: &str,
@@ -195,12 +254,10 @@ pub(crate) fn internal_ws_allowlist_gate(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
     else {
-        tracing::warn!(
-            "{label} WS upgrade with no ConnectInfo (middleware regression?); rejecting"
-        );
+        tracing::warn!("{label} request with no ConnectInfo (middleware regression?); rejecting");
         return Err((
             axum::http::StatusCode::FORBIDDEN,
-            format!("{label} WS requires a known peer address"),
+            format!("{label} requires a known peer address"),
         )
             .into_response());
     };
@@ -208,7 +265,7 @@ pub(crate) fn internal_ws_allowlist_gate(
     if !ip.is_loopback() {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
-            format!("{label} WS not allowed from this IP"),
+            format!("{label} not allowed from this IP"),
         )
             .into_response());
     }
@@ -216,7 +273,8 @@ pub(crate) fn internal_ws_allowlist_gate(
 }
 
 /// Shared loopback-only gate ([`internal_ws_allowlist_gate`]) + WS
-/// upgrade for the internal sidecar connection class (`/internal/relay/ws`).
+/// upgrade for the internal sidecar connection class (`/internal/relay/ws`,
+/// `/internal/router/ws`).
 /// Returns the size-bounded [`WebSocketUpgrade`] on
 /// success, or the rejection `Response` (403 for a non-loopback IP, or the
 /// upgrade-extractor's own error).
@@ -225,7 +283,7 @@ async fn sidecar_ws_upgrade(
     req: axum::extract::Request,
 ) -> Result<axum::extract::ws::WebSocketUpgrade, Response> {
     use axum::response::IntoResponse;
-    internal_ws_allowlist_gate(&req, "sidecar")?;
+    internal_ws_allowlist_gate(&req, "sidecar WS")?;
 
     let ws = axum::extract::ws::WebSocketUpgrade::from_request(req, state)
         .await
@@ -278,21 +336,14 @@ fn relay_x25519_from_hello(hello: &SidecarHello) -> Option<[u8; 32]> {
     <[u8; 32]>::try_from(bytes.as_slice()).ok()
 }
 
-/// Drive one inbound **relay** sidecar channel (we are the listener at
-/// `/internal/relay/ws`). Runs the `fauna.sidecar.hello` handshake bound to
-/// [`SidecarScope::Relay`], reads + validates the relay's attested X25519 public
-/// key from the hello `extra`, then serves the one relay-origin kind
-/// (`fauna.relay.fetch_tls_cert`): each fetch seals the on-disk `relay.<apex>`
-/// cert to that connection-local X25519 and returns it.
+/// Drive one inbound sidecar channel (we are the listener at the class's route).
+/// Runs the `fauna.sidecar.hello` handshake bound to the class's scope, then the
+/// shared lean loop ([`serve_sidecar_channel`]).
 ///
-/// The X25519 is captured from THIS connection's hello — never an `AppState`
-/// slot, never a peer advertisement — so a cert can only ever be sealed to the
-/// key the token-authenticated relay proved it holds (HPKE is the
-/// proof-of-possession: only the matching secret opens the blob). A lean loop
-/// (no idempotency cache, no router) keeps the channel's allowlist in one
-/// `match`: a relay token can only reach this route (scope-bound at the
-/// handshake) and only the kinds named there.
-async fn serve_relay_listener(state: Arc<AppState>, socket: WebSocket) {
+/// A lean loop (no idempotency cache, no router) keeps each channel's allowlist
+/// in one `match`: a token can only reach its own route (scope-bound at the
+/// handshake) and only the kinds its class names there.
+async fn serve_sidecar_listener(state: Arc<AppState>, socket: WebSocket, class: SidecarChannel) {
     let adapter = WsMessageAdapter::with_heartbeat(socket, state.ws.heartbeat());
     let (dispatcher, driver) = RpcDispatcher::new(adapter);
     let dispatcher = Arc::new(dispatcher);
@@ -308,81 +359,113 @@ async fn serve_relay_listener(state: Arc<AppState>, socket: WebSocket) {
     state.spawn_scoped(driver);
 
     if let Some(inbound) = dispatcher.inbound_requests() {
-        serve_relay_channel(&state, &dispatcher, inbound).await;
+        serve_sidecar_channel(&state, &dispatcher, inbound, class).await;
     }
     // `dispatcher` drops here — the driver drains and exits.
 }
 
-/// The relay listener's channel logic, decoupled from the WS transport setup
+/// What a **relay** channel holds beyond the shared loop: the X25519 its hello
+/// attested, its place in the connected-relay count, and the cert-changed watch.
+///
+/// The X25519 is captured from THIS connection's hello — never an `AppState`
+/// slot, never a peer advertisement — so a cert can only ever be sealed to the
+/// key the token-authenticated relay proved it holds (HPKE is the
+/// proof-of-possession: only the matching secret opens the blob).
+struct RelayRider {
+    x25519: [u8; 32],
+    _connected: RelayConnected,
+    cert_changed: tokio::sync::watch::Receiver<u64>,
+    watching: bool,
+}
+
+/// One sidecar listener's channel logic, decoupled from the WS transport setup
 /// (handshake + serve loop) so it is unit-testable over an in-memory duplex.
-/// Runs the Relay-bound
-/// `fauna.sidecar.hello` handshake, captures the attested X25519, then serves
-/// `fauna.relay.fetch_tls_cert` until the channel closes.
-async fn serve_relay_channel(
+/// Runs the `fauna.sidecar.hello` handshake bound to `class`'s scope, then serves
+/// until the channel closes: the log-plane kind on every class, and — on the
+/// relay's class only — `fauna.relay.fetch_tls_cert`, `fauna.relay.admit` and the
+/// nest-origin `fauna.relay.cert_changed` push. The attested-X25519 requirement
+/// is the relay's alone: the router's hello carries no key.
+async fn serve_sidecar_channel(
     state: &Arc<AppState>,
     dispatcher: &Arc<RpcDispatcher>,
     mut inbound: mpsc::Receiver<Request>,
+    class: SidecarChannel,
 ) {
-    // First frame: the token handshake bound to Relay; pull the attested X25519.
-    let relay_x25519 = match tokio::time::timeout(HANDSHAKE_DEADLINE, inbound.recv()).await {
+    let label = class.label();
+    // First frame: the token handshake bound to this class's scope.
+    let hello = match tokio::time::timeout(HANDSHAKE_DEADLINE, inbound.recv()).await {
         Ok(Some(req)) => {
-            match listener_handshake(dispatcher, &state.sidecar_tokens, SidecarScope::Relay, req)
-                .await
-            {
-                Ok((_scope, hello)) => match relay_x25519_from_hello(&hello) {
-                    Some(pk) => pk,
-                    None => {
-                        tracing::warn!(
-                            "relay sidecar: hello carried no valid x25519 attestation; dropping"
-                        );
-                        return;
-                    }
-                },
+            match listener_handshake(dispatcher, &state.sidecar_tokens, class.scope(), req).await {
+                Ok((_scope, hello)) => hello,
                 Err(()) => return,
             }
         }
         Ok(None) => return,
         Err(_elapsed) => {
-            tracing::warn!("relay sidecar: no hello within deadline; dropping connection");
+            tracing::warn!("{label} sidecar: no hello within deadline; dropping connection");
             return;
         }
     };
 
-    tracing::info!("relay sidecar channel established (listener side)");
-    // Count this relay in for as long as its channel lives: the count is how the
-    // nest knows its deployment runs a relay (`discovery_core::relay_sidecar_connected`).
-    let _connected = RelayConnected::new(state);
+    let mut relay = match class {
+        SidecarChannel::Relay => {
+            let Some(x25519) = relay_x25519_from_hello(&hello) else {
+                tracing::warn!(
+                    "relay sidecar: hello carried no valid x25519 attestation; dropping"
+                );
+                return;
+            };
+            // Count this relay in for as long as its channel lives: the count is
+            // how the nest knows its deployment runs a relay
+            // (`discovery_core::relay_sidecar_connected`).
+            let connected = RelayConnected::new(state);
+            // The cert-changed signal, marked seen as of now: the relay fetches
+            // its cert itself the moment its channel is up, so only a LATER
+            // change needs a push.
+            let mut cert_changed = state.relay_cert_changed.subscribe();
+            cert_changed.borrow_and_update();
+            Some(RelayRider {
+                x25519,
+                _connected: connected,
+                cert_changed,
+                watching: true,
+            })
+        }
+        SidecarChannel::Router => None,
+    };
 
-    // The cert-changed signal, marked seen as of now: the relay fetches its cert
-    // itself the moment its channel is up, so only a LATER change needs a push.
-    let mut cert_changed = state.relay_cert_changed.subscribe();
-    cert_changed.borrow_and_update();
+    tracing::info!("{label} sidecar channel established (listener side)");
 
-    // Serve the relay-origin kinds until the channel closes. Re-sealing on a
-    // retry is cheap and safe (seal-on-read) and the admission answer is a pure
-    // read, so this lean loop needs no idempotency cache: a replayed request
-    // just gets the same answer again.
-    let mut watching = true;
+    // Serve until the channel closes. Re-sealing on a retry is cheap and safe
+    // (seal-on-read), the admission answer is a pure read and a log batch is
+    // best-effort, so this lean loop needs no idempotency cache: a replayed
+    // request just gets the same answer again.
     loop {
-        let req = tokio::select! {
-            req = inbound.recv() => match req {
+        let req = match relay.as_mut().filter(|r| r.watching) {
+            Some(rider) => tokio::select! {
+                req = inbound.recv() => match req {
+                    Some(req) => req,
+                    None => break,
+                },
+                changed = rider.cert_changed.changed() => {
+                    match changed {
+                        Ok(()) => push_relay_cert_changed(state, dispatcher),
+                        // The sender is gone: nothing will change again. Stop
+                        // watching (a closed `watch` resolves at once, for ever).
+                        Err(_) => rider.watching = false,
+                    }
+                    continue;
+                }
+            },
+            None => match inbound.recv().await {
                 Some(req) => req,
                 None => break,
             },
-            changed = cert_changed.changed(), if watching => {
-                match changed {
-                    Ok(()) => push_relay_cert_changed(state, dispatcher),
-                    // The sender is gone: nothing will change again. Stop
-                    // watching (a closed `watch` resolves at once, for ever).
-                    Err(_) => watching = false,
-                }
-                continue;
-            }
         };
         let correlation_id = req.correlation_id;
-        let payload = match req.kind.as_str() {
-            KIND_RELAY_FETCH_TLS_CERT => {
-                let blob = relay_fetch_tls_cert(state, &relay_x25519);
+        let payload = match (req.kind.as_str(), relay.as_ref()) {
+            (KIND_RELAY_FETCH_TLS_CERT, Some(rider)) => {
+                let blob = relay_fetch_tls_cert(state, &rider.x25519);
                 to_value(&RelayFetchTlsCertReply {
                     blob: blob.map(ByteBuf::from),
                     extra: Default::default(),
@@ -391,7 +474,7 @@ async fn serve_relay_channel(
             // Who may use the relay (`p2p.md` § The relay): the nest answers
             // from its own tables, the relay holds no list. A key that does
             // not parse is not a known key.
-            KIND_RELAY_ADMIT => {
+            (KIND_RELAY_ADMIT, Some(_)) => {
                 let admitted = match value_to::<RelayAdmitRequest>(&req.payload) {
                     Ok(parsed) => match fauna_core::hex32::decode(&parsed.endpoint_key) {
                         Ok(key) => crate::relay_admission::key_is_known(&state.db, &key).await,
@@ -405,20 +488,17 @@ async fn serve_relay_channel(
                 })
             }
             // The sidecar log plane's internal-duplex leg (`observability.md`
-            // § The sidecar log plane). The relay channel is deliberately lean
-            // — no idempotency cache, no router — so the kind is served
-            // inline. Source is `relay` because *this channel* is the relay's:
-            // attribution comes from the authenticated channel class, never
-            // the payload.
-            KIND_SIDECAR_LOG_EVENTS => {
+            // § The sidecar log plane), served on every class. The source is
+            // the authenticated channel class's — never the payload.
+            (KIND_SIDECAR_LOG_EVENTS, _) => {
                 match value_to::<ReportLogEventsRequest>(&req.payload) {
                     Ok(parsed) => {
-                        crate::log_plane::admit(crate::log_plane::LogSource::Relay, &parsed);
+                        crate::log_plane::admit(class.log_source(), &parsed);
                     }
                     Err(()) => {
                         // Malformed report: drop it and keep the channel up —
-                        // the plane must never disturb the relay's real work.
-                        tracing::debug!("relay sidecar: malformed log-event batch; ignoring");
+                        // the plane must never disturb the sidecar's real work.
+                        tracing::debug!("{label} sidecar: malformed log-event batch; ignoring");
                     }
                 }
                 to_value(&ReportLogEventsReply::default())
@@ -426,7 +506,7 @@ async fn serve_relay_channel(
             _ => {
                 tracing::debug!(
                     kind = %req.kind,
-                    "relay sidecar: kind not allowed on this channel; rejecting unauthenticated"
+                    "{label} sidecar: kind not allowed on this channel; rejecting unauthenticated"
                 );
                 send_error(dispatcher, correlation_id, unauthenticated()).await;
                 continue;
@@ -436,7 +516,7 @@ async fn serve_relay_channel(
             fauna_peer_channel::send_reply_bounded(dispatcher, correlation_id, payload, true).await;
     }
 
-    tracing::info!("relay sidecar channel closed (listener side)");
+    tracing::info!("{label} sidecar channel closed (listener side)");
 }
 
 /// One connected relay sidecar, counted in [`AppState::relay_channels`] from the
@@ -729,14 +809,141 @@ mod tests {
 
     /// Spawn the relay listener half over one duplex end (handshake + serve loop).
     fn spawn_relay_listener(state: Arc<AppState>, transport: MpscTransport) {
+        spawn_listener(state, transport, SidecarChannel::Relay);
+    }
+
+    /// Spawn one class's listener half over one duplex end.
+    fn spawn_listener(state: Arc<AppState>, transport: MpscTransport, class: SidecarChannel) {
         let (dispatcher, driver) = RpcDispatcher::new(transport);
         let dispatcher = Arc::new(dispatcher);
         // spawn-ok(test)
         tokio::spawn(driver);
         let inbound = dispatcher.inbound_requests().unwrap();
+        // spawn-ok(test)
         tokio::spawn(async move {
-            serve_relay_channel(&state, &dispatcher, inbound).await;
+            serve_sidecar_channel(&state, &dispatcher, inbound, class).await;
         });
+    }
+
+    // ── router sidecar channel ───────────────────────────────────────────────
+
+    /// A test AppState holding both a router and a relay token, as a real boot
+    /// mints them side by side.
+    fn router_test_state() -> Arc<AppState> {
+        let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let mut state = AppState::for_test(db);
+        state
+            .sidecar_tokens
+            .insert("router-token".to_string(), vec![SidecarScope::Router]);
+        state
+            .sidecar_tokens
+            .insert("relay-token".to_string(), vec![SidecarScope::Relay]);
+        Arc::new(state)
+    }
+
+    /// Dial one class's listener over a fresh duplex and run the hello with
+    /// `token`/`scope` and no `extra` — the router's hello carries no key.
+    async fn dial_keyless(
+        state: Arc<AppState>,
+        class: SidecarChannel,
+        token: &str,
+        scope: &str,
+    ) -> (Arc<RpcDispatcher>, Result<(), SidecarDialError>) {
+        let (nest_t, sidecar_t) = make_pair();
+        spawn_listener(state, nest_t, class);
+        let (disp, drv) = RpcDispatcher::new(sidecar_t);
+        // spawn-ok(test)
+        tokio::spawn(drv);
+        let disp = Arc::new(disp);
+        let hello =
+            fauna_sidecar_client::sidecar_hello(&disp, token, scope, Default::default()).await;
+        (disp, hello)
+    }
+
+    /// The router's leg of the log plane: a keyless hello with the router token
+    /// is admitted, and its `fauna.sidecar.log_events` land as `router:<event>`
+    /// — attributed from the channel class, never the payload.
+    #[tokio::test]
+    async fn router_channel_serves_the_log_plane_with_a_keyless_hello() {
+        let (disp, hello) = dial_keyless(
+            router_test_state(),
+            SidecarChannel::Router,
+            "router-token",
+            "router",
+        )
+        .await;
+        hello.expect("the router's keyless hello is admitted");
+
+        let _: ReportLogEventsReply = fauna_sidecar_client::request_typed(
+            &disp,
+            KIND_SIDECAR_LOG_EVENTS,
+            &ReportLogEventsRequest {
+                events: vec![fauna_protocol::log_plane::SidecarLogEvent {
+                    timestamp_ms: 1_000,
+                    level: "warn".into(),
+                    event: "connection_cap_shed".into(),
+                    message: "router connection cap reached; shed 7 connections (unit)".into(),
+                    ..Default::default()
+                }],
+                dropped: 0,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("log_events reply on the router channel");
+
+        let ring = fauna_log::snapshot_remote();
+        let entry = ring
+            .iter()
+            .find(|e| e.message == "router connection cap reached; shed 7 connections (unit)")
+            .expect("the reported event reached the remote ring");
+        assert_eq!(entry.target, "router:connection_cap_shed");
+        assert_eq!(entry.level, fauna_log::LogLevel::Warn);
+    }
+
+    /// Scope isolation across the two routes: the relay's token is refused on
+    /// the router's route and the router's on the relay's, whatever scope the
+    /// hello declares.
+    #[tokio::test]
+    async fn each_route_refuses_the_other_sidecars_token() {
+        for (class, token, scope) in [
+            (SidecarChannel::Router, "relay-token", "router"),
+            (SidecarChannel::Router, "relay-token", "relay"),
+            (SidecarChannel::Relay, "router-token", "relay"),
+            (SidecarChannel::Relay, "router-token", "router"),
+        ] {
+            let (_disp, hello) = dial_keyless(router_test_state(), class, token, scope).await;
+            match hello {
+                Err(SidecarDialError::Rejected(code)) => assert_eq!(
+                    code, "fauna.protocol.unauthenticated",
+                    "{token} declaring {scope} on the {class:?} route"
+                ),
+                other => panic!("{token} declaring {scope} on the {class:?} route: {other:?}"),
+            }
+        }
+    }
+
+    /// The router channel serves the log plane and nothing else: the relay's
+    /// kinds are refused on it, so a router token can never fetch a sealed cert
+    /// or answer an admission question.
+    #[tokio::test]
+    async fn router_channel_refuses_the_relay_kinds() {
+        let (disp, hello) = dial_keyless(
+            router_test_state(),
+            SidecarChannel::Router,
+            "router-token",
+            "router",
+        )
+        .await;
+        hello.expect("router handshake");
+        for kind in [KIND_RELAY_FETCH_TLS_CERT, KIND_RELAY_ADMIT] {
+            let call = disp
+                .request_raw(kind, [9u8; 16], Value::Null, None)
+                .await
+                .unwrap();
+            let err = call.await_reply().await.unwrap_err();
+            assert_eq!(err.code, "fauna.protocol.unauthenticated", "{kind}");
+        }
     }
 
     fn relay_hello_extra(x25519_pub: &[u8; 32]) -> std::collections::BTreeMap<String, Value> {
@@ -865,7 +1072,7 @@ mod tests {
         let (nest_t, relay_t) = make_pair();
         let state = relay_test_state("relay-token", acme.path().to_path_buf());
 
-        // The listener, in the shape `serve_relay_listener` runs it: spawn the
+        // The listener, in the shape `serve_sidecar_listener` runs it: spawn the
         // driver, serve, and tear down by DROPPING the dispatcher — no abort.
         let (dispatcher, driver) = RpcDispatcher::new(nest_t);
         let dispatcher = Arc::new(dispatcher);
@@ -874,7 +1081,7 @@ mod tests {
         let inbound = dispatcher.inbound_requests().unwrap();
         // spawn-ok(test)
         tokio::spawn(async move {
-            serve_relay_channel(&state, &dispatcher, inbound).await;
+            serve_sidecar_channel(&state, &dispatcher, inbound, SidecarChannel::Relay).await;
             // `dispatcher` drops here, closing `out_tx`.
         });
 

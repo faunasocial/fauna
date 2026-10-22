@@ -30,7 +30,9 @@ use fauna_onboarding_machine::nest_api::SetupStatus;
 use fauna_onboarding_machine::observer::NullObserver;
 use fauna_onboarding_machine::{
     FakeNestApi, HandleCheckOutcome, HandleCheckPhase, OnboardingMachine, OnboardingObserver,
+    OnboardingStep,
 };
+use fauna_protocol::auth::{SilentChallengeOutcome, VerifyReply};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -284,4 +286,64 @@ async fn recreating_identity_resets_stale_handle_check() {
         "phase must reset to idle"
     );
     assert_eq!(m.nest_url(), "", "resolved nest_url must clear");
+}
+
+/// A registered-probe whose verify carries `first_sign_in` as given — the
+/// nest's own statement of whether this was the actor's first session
+/// (`login.md` § Direct Auth → the verify reply).
+fn machine_registered(first_sign_in: bool) -> Arc<OnboardingMachine> {
+    let observer: Arc<dyn OnboardingObserver> = Arc::new(NullObserver);
+    let fake = Arc::new(FakeNestApi::new());
+    fake.set_silent_challenge_response(SilentChallengeOutcome::Success(VerifyReply {
+        token: "bearer".into(),
+        handle: "admin".into(),
+        first_sign_in,
+        ..Default::default()
+    }));
+    let m = OnboardingMachine::with_nest_api(observer, fake);
+    m.seed_identity("01".repeat(32));
+    m.set_renders_trust_prompt(true);
+    m
+}
+
+/// Run the real handle check against a registered probe, then press Continue.
+async fn continue_from_already_on_nest(m: &OnboardingMachine) -> OnboardingStep {
+    let server = MockServer::start().await;
+    mount_unclaimed_nest(&server).await;
+    let port = server.address().port();
+    m.set_provider_base_urls(std::collections::HashMap::from([(
+        "nest".to_string(),
+        server.uri(),
+    )]));
+    m.start_handle_check(format!("admin@127.0.0.1:{port}"))
+        .await;
+    let outcome = m.handle_check_snapshot().outcome;
+    assert!(
+        matches!(outcome, HandleCheckOutcome::AlreadyOnNest { .. }),
+        "a registered probe concludes AlreadyOnNest (got {outcome:?})"
+    );
+    m.submit_handle_check_continue().await
+}
+
+/// An admin-admitted user's first sign-in (`onboarding.md` § 3b-ter, the
+/// `AlreadyOnNest` ruling): the nest says first, so Continue reaches the trust
+/// offer rather than the app.
+#[tokio::test]
+async fn a_first_sign_in_on_already_on_nest_reaches_the_trust_offer() {
+    let m = machine_registered(true);
+    assert_eq!(
+        continue_from_already_on_nest(&m).await,
+        OnboardingStep::TrustPrompt
+    );
+}
+
+/// A returning user's sign-in on a new device: the nest says not first, so
+/// Continue goes straight to the app.
+#[tokio::test]
+async fn a_returning_sign_in_on_already_on_nest_skips_the_offer() {
+    let m = machine_registered(false);
+    assert_eq!(
+        continue_from_already_on_nest(&m).await,
+        OnboardingStep::Done
+    );
 }

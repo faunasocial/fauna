@@ -6,7 +6,7 @@
  *  fleet keeps this set in the Rust type — `fauna_client::token_cache::TokenCache`
  *  (and through it all three `Ws*Bearer`s) and
  *  `fauna_launch_machine::LaunchMachine`. Web is the one seat whose bearer cache
- *  is not Rust: `$lib/api.ts`'s `tokenCache` is a plain module-level `Map`, and
+ *  is not Rust: `#lib/api.ts`'s `tokenCache` is a plain module-level `Map`, and
  *  the goal doc names it directly (wasm `challengeVerify` emits it and the SPA's
  *  token cache keeps it). So this file mirrors the Rust rule — and nothing
  *  else: no verdict, no policy, no second definition of what "expired" means.
@@ -23,7 +23,7 @@
  *  **Reads no clock.** Every method takes `now` (Unix **seconds**) as a
  *  parameter, exactly as the Rust twin does — which is what makes the pruning
  *  direction pinnable without mocking time. The caller supplies it;
- *  `$lib/api.ts` has its own `nowSecs()` for that.
+ *  `#lib/api.ts` has its own `nowSecs()` for that.
  *
  *  One deliberate difference from the Rust twin: `OwnSessionIds::prune` there
  *  takes an `Option<u64>` because a native clock read can fail, and a failed

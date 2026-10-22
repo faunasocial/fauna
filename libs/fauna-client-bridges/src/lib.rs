@@ -52,13 +52,25 @@ use fauna_protocol::bridge_routing::{
 };
 use fauna_protocol::bridge_routing::{
     BlocklistSelfCheckRunReply, BlocklistSelfCheckRunRequest, MailHealthReply, MailHealthRequest,
-    OutboundWarmupResetRequest, OutboundWarmupStatusReply, RunDeliverabilityDiagnosticsReply,
-    RunDeliverabilityDiagnosticsRequest,
+    OutboundWarmupResetRequest, OutboundWarmupStatusReply, RotateListUnsubscribeSecretReply,
+    RotateListUnsubscribeSecretRequest, RotateSrsSecretReply, RotateSrsSecretRequest,
+    RunDeliverabilityDiagnosticsReply, RunDeliverabilityDiagnosticsRequest,
 };
 use fauna_protocol::bridge_routing::{
     ListListSendHistoryReply, ListListSendHistoryRequest, ListSendHistoryRow, SendListMessageReply,
     SendListMessageRequest,
 };
+// The mail-reports page's failure-report, TLS-report and check-history reads,
+// and the warm-up read.
+use fauna_protocol::bridge_routing::{
+    GetDmarcForensicReportReply, GetDmarcForensicReportRequest, GetTlsrptInboundReportReply,
+    GetTlsrptInboundReportRequest, ListBlocklistSelfCheckHistoryReply,
+    ListBlocklistSelfCheckHistoryRequest, ListDeliverabilityDiagnosticRunsReply,
+    ListDeliverabilityDiagnosticRunsRequest, ListDmarcForensicReportsReply,
+    ListDmarcForensicReportsRequest, ListTlsrptInboundReportsReply,
+    ListTlsrptInboundReportsRequest, OutboundWarmupStatusRequest,
+};
+use fauna_protocol::wrapped_blob::{GetCaldavPortReply, GetCaldavPortRequest};
 // `AliasControls` + `AliasRow` come in via the `pub use` re-export below
 // (used internally here *and* re-exported as the crate's typed surface).
 use fauna_protocol::bridges_ui::{
@@ -86,6 +98,9 @@ use fauna_protocol::wrapped_blob::{
 // surfaced on `fauna.setup.status` (not in `FetchConfigReply`); the admin read
 // twin for the `admin-mail` toggle reads it from there.
 use fauna_protocol::discovery::{SetupStatusReply, SetupStatusRequest};
+use fauna_protocol::microsoft_registration::{
+    MicrosoftRegistrationStatus, SetMicrosoftRegistrationReply, SetMicrosoftRegistrationRequest,
+};
 
 // Re-exported so a client reads the DKIM deliverability surface
 // (`DkimSelectorInfo`, the bridge-pubkey reply, the service-user list, the
@@ -120,6 +135,14 @@ pub use fauna_protocol::bridge_routing::{
 // (`get_alias_policy` → the effective `AliasPolicy`; tracked internally).
 pub use fauna_protocol::bridge_routing::{
     AliasPolicy, GetAliasPolicyRequest, PutAliasPolicyRequest,
+};
+// The inbound DMARC aggregate reports the admin reads on `admin-mail-reports`
+// (`list_dmarc_aggregate_reports` / `get_dmarc_aggregate_report`), re-exported
+// so the shared `DmarcReportsMachine` seam names them through this crate.
+pub use fauna_protocol::bridge_routing::{
+    DmarcAggregateReportEntry, DmarcAggregateSummary, DmarcOversizeEntry,
+    GetDmarcAggregateReportReply, GetDmarcAggregateReportRequest, ListDmarcAggregateReportsReply,
+    ListDmarcAggregateReportsRequest, ReportCountEntry,
 };
 // The deployment-wide DMARC catalog payload + its admin read twin
 // (`get_dmarc_policy` → the effective `DmarcReportingPolicy`).
@@ -157,8 +180,14 @@ pub use labels::{
 };
 pub use link_block::{LinkBlock, applicable_modes, link_block, link_block_of, mode_applies};
 pub use nostr_settings::{BridgeToggleOption, nostr_content_toggle_options};
-pub use plugins::{InstalledPluginRow, PluginsClient, installed_plugin_row};
-pub use settings::{RELAY_LIST_KEY, bool_setting, relay_list_setting};
+pub use plugins::{
+    InstalledPluginRow, InstalledPluginText, PluginCard, PluginCardAction, PluginCardText,
+    PluginsClient, installed_plugin_row, installed_plugin_text, plugin_card, plugin_card_text,
+    plugin_publisher_text, plugin_status_lines, principal_id_from_hex,
+};
+pub use settings::{
+    RELAY_LIST_KEY, SettingControl, bool_setting, relay_list_setting, setting_control,
+};
 
 // ── Content-processor holder discovery ──────────────────────────────
 //
@@ -1244,6 +1273,61 @@ impl<R: RpcRequester> MailAdminClient<R> {
         Ok(reply.auto_enable_mail_for_new_users)
     }
 
+    /// Whether this box cannot enable mail, off `fauna.setup.status`
+    /// ([`SetupStatusReply::mail_unavailable_here`] — the box's NAT axis and
+    /// content-scanner report through the shared predicate). The admin-mail
+    /// toggle's read twin of the `fauna.bridges.mail_unavailable_here` refusal
+    /// (`mail-bridge-lifecycle.md` § Default-off on first claim → *A box with
+    /// no content scanners cannot enable mail*). Read-only; anonymous on the
+    /// nest.
+    pub async fn get_mail_unavailable_here(&self) -> Result<bool, R::Error> {
+        let reply: SetupStatusReply = self
+            .nest
+            .request("fauna.setup.status", SetupStatusRequest::default())
+            .await?;
+        Ok(reply.mail_unavailable_here())
+    }
+
+    /// `fauna.bridges.set_microsoft_registration` — set the deployment's own
+    /// Microsoft app registration for the Outlook import, or clear it back to
+    /// the project's with both strings empty (`mailbox-migration.md`
+    /// § Microsoft sign-in, *An admin-supplied registration*). The nest
+    /// validates with the same rule the caller should have run first
+    /// (`fauna_protocol::microsoft_registration::normalize`). Admin-only; the
+    /// `{ ok: true }` reply is discarded.
+    pub async fn set_microsoft_registration(
+        &self,
+        client_id: String,
+        tenant: String,
+    ) -> Result<(), R::Error> {
+        let _: SetMicrosoftRegistrationReply = self
+            .nest
+            .request(
+                "fauna.bridges.set_microsoft_registration",
+                SetMicrosoftRegistrationRequest {
+                    client_id,
+                    tenant,
+                    extra: Default::default(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// The read twin of [`Self::set_microsoft_registration`], off
+    /// `fauna.setup.status` (`SetupStatusReply.microsoft_registration`; `None`
+    /// is the project's registration). Read-only; works on any authed
+    /// connection — the import wizard of every user reads the same field.
+    pub async fn get_microsoft_registration(
+        &self,
+    ) -> Result<Option<MicrosoftRegistrationStatus>, R::Error> {
+        let reply: SetupStatusReply = self
+            .nest
+            .request("fauna.setup.status", SetupStatusRequest::default())
+            .await?;
+        Ok(reply.microsoft_registration)
+    }
+
     /// `fauna.bridges.get_mail_config` — the **admin read twin** of the
     /// bridge's `fetch_config`. Returns the overlaid effective config (catalog
     /// defaults with every `put_<substruct>_policy` override applied) so the
@@ -1406,6 +1490,35 @@ impl<R: RpcRequester> MailAdminClient<R> {
             .await
     }
 
+    /// `fauna.bridges.rotate_list_unsubscribe_secret` — rotate the
+    /// deployment-wide newsletter unsubscribe secret and re-key every
+    /// subscription under it (`mail-mass-mailing.md` § Secret rotation).
+    /// Unsubscribe links in mail already sent stop working; the secret itself
+    /// is never returned.
+    pub async fn rotate_list_unsubscribe_secret(
+        &self,
+    ) -> Result<RotateListUnsubscribeSecretReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.rotate_list_unsubscribe_secret",
+                RotateListUnsubscribeSecretRequest::default(),
+            )
+            .await
+    }
+
+    /// `fauna.bridges.rotate_srs_secret` — mint a fresh forwarding (SRS)
+    /// secret, the prior one held through the rotation overlap so bounces to
+    /// mail forwarded before still decode (`mail-forwarding.md` § SRS scheme).
+    /// The secret itself is never returned.
+    pub async fn rotate_srs_secret(&self) -> Result<RotateSrsSecretReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.rotate_srs_secret",
+                RotateSrsSecretRequest::default(),
+            )
+            .await
+    }
+
     /// `fauna.bridges.put_auth_policy` — overlay the `AuthPolicy` sub-struct
     /// (DMARC/SPF/DKIM enforcement gates, AUTH-failure lockout).
     pub async fn put_auth_policy(&self, policy: PutAuthPolicyRequest) -> Result<(), R::Error> {
@@ -1507,6 +1620,49 @@ impl<R: RpcRequester> MailAdminClient<R> {
             .await
     }
 
+    /// `fauna.bridges.list_dmarc_aggregate_reports` — the inbound aggregate
+    /// reports received within the last `window_days` days, newest first, on
+    /// every domain or only `our_domain` (`dmarc-reporting.md` § What the page
+    /// shows). Capped at the nest's page cap, `truncated` past it. Admin-class.
+    pub async fn list_dmarc_aggregate_reports(
+        &self,
+        window_days: u32,
+        our_domain: Option<String>,
+    ) -> Result<ListDmarcAggregateReportsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_dmarc_aggregate_reports",
+                ListDmarcAggregateReportsRequest {
+                    window_days,
+                    our_domain,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.get_dmarc_aggregate_report` — one stored report by the
+    /// storage key a list entry names, with its gzipped XML archive (the raw
+    /// view). Admin-class, read-only.
+    pub async fn get_dmarc_aggregate_report(
+        &self,
+        our_domain: String,
+        submitter: String,
+        report_id: String,
+    ) -> Result<GetDmarcAggregateReportReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.get_dmarc_aggregate_report",
+                GetDmarcAggregateReportRequest {
+                    our_domain,
+                    submitter,
+                    report_id,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
     /// `fauna.bridges.create_forwarder` — create an admin external forwarder
     /// (`mail-aliases.md` § Kind 7): an address with no local mailbox that
     /// forwards inbound to `forward_target`, attributed to the calling admin.
@@ -1554,6 +1710,140 @@ impl<R: RpcRequester> MailAdminClient<R> {
                 },
             )
             .await
+    }
+
+    /// `fauna.bridges.list_dmarc_forensic_reports` — the inbound failure
+    /// (forensic) reports received within the last `window_days` days, newest
+    /// first, on every domain or only `our_domain`; `truncated` past the
+    /// nest's page cap. Admin-class, read-only.
+    pub async fn list_dmarc_forensic_reports(
+        &self,
+        window_days: u32,
+        our_domain: Option<String>,
+    ) -> Result<ListDmarcForensicReportsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_dmarc_forensic_reports",
+                ListDmarcForensicReportsRequest {
+                    window_days,
+                    our_domain,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.get_dmarc_forensic_report` — one stored failure report
+    /// by the id a list entry carries. Admin-class, read-only.
+    pub async fn get_dmarc_forensic_report(
+        &self,
+        id: i64,
+    ) -> Result<GetDmarcForensicReportReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.get_dmarc_forensic_report",
+                GetDmarcForensicReportRequest {
+                    id,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.list_tlsrpt_inbound_reports` — the inbound TLS reports
+    /// (RFC 8460) received within the last `window_days` days, on every
+    /// domain or only `our_domain`. Admin-class, read-only.
+    pub async fn list_tlsrpt_inbound_reports(
+        &self,
+        window_days: u32,
+        our_domain: Option<String>,
+    ) -> Result<ListTlsrptInboundReportsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_tlsrpt_inbound_reports",
+                ListTlsrptInboundReportsRequest {
+                    window_days,
+                    our_domain,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.get_tlsrpt_inbound_report` — one stored TLS report by
+    /// the storage key a list entry names. Admin-class, read-only.
+    pub async fn get_tlsrpt_inbound_report(
+        &self,
+        our_domain: String,
+        submitter: String,
+        report_id: String,
+    ) -> Result<GetTlsrptInboundReportReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.get_tlsrpt_inbound_report",
+                GetTlsrptInboundReportRequest {
+                    our_domain,
+                    submitter,
+                    report_id,
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.list_blocklist_self_check_history` — the persisted
+    /// blocklist self-checks of the last `window_days` days (0 = the nest's
+    /// default window). Admin-class, read-only.
+    pub async fn list_blocklist_self_check_history(
+        &self,
+        window_days: i64,
+    ) -> Result<ListBlocklistSelfCheckHistoryReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_blocklist_self_check_history",
+                ListBlocklistSelfCheckHistoryRequest { window_days },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.list_deliverability_diagnostic_runs` — the most recent
+    /// deliverability diagnostic runs, at most `limit` (0 = the nest's
+    /// default). Admin-class, read-only.
+    pub async fn list_deliverability_diagnostic_runs(
+        &self,
+        limit: i64,
+    ) -> Result<ListDeliverabilityDiagnosticRunsReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.list_deliverability_diagnostic_runs",
+                ListDeliverabilityDiagnosticRunsRequest { limit },
+            )
+            .await
+    }
+
+    /// `fauna.bridges.outbound_warmup_status` — the fresh-IP warm-up's day,
+    /// today's sends and cap. Admin-class, read-only; the reset is
+    /// [`Self::outbound_warmup_reset`].
+    pub async fn outbound_warmup_status(&self) -> Result<OutboundWarmupStatusReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.bridges.outbound_warmup_status",
+                OutboundWarmupStatusRequest {},
+            )
+            .await
+    }
+
+    /// `fauna.bridges.get_caldav_port` — the port the CalDAV listener is set
+    /// to serve on (the read twin of [`Self::set_caldav_port`]).
+    pub async fn get_caldav_port(&self) -> Result<u16, R::Error> {
+        let reply: GetCaldavPortReply = self
+            .nest
+            .request(
+                "fauna.bridges.get_caldav_port",
+                GetCaldavPortRequest::default(),
+            )
+            .await?;
+        Ok(reply.port)
     }
 }
 
@@ -1919,6 +2209,29 @@ impl<R: RpcRequester> MailAccountClient<R> {
         self.get_mail_switches().await
     }
 
+    /// `fauna.bridges.set_mail_switches` carrying only the
+    /// `mail.account.scan_result_visible` switch, then a confirming re-read.
+    /// Off, the shared conversations projection paints no scan-verdict row on
+    /// the account's received messages (`mail-content-scanning.md`
+    /// § Per-account opt-out for visible scan details); the nest keeps the
+    /// scan rows either way.
+    pub async fn set_scan_result_visible_and_reload(
+        &self,
+        scan_result_visible: bool,
+    ) -> Result<GetMailSwitchesReply, R::Error> {
+        let _: SetMailSwitchesReply = self
+            .nest
+            .request(
+                "fauna.bridges.set_mail_switches",
+                SetMailSwitchesRequest {
+                    scan_result_visible: Some(scan_result_visible),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        self.get_mail_switches().await
+    }
+
     /// `fauna.bridges.get_mail_quotas` — the calling actor's own mailbox
     /// quota (bytes + message count, used and limit) and daily submission
     /// allowance (remote RECIPIENT units spent today and the daily maximum),
@@ -1985,9 +2298,11 @@ impl<R: RpcRequester> MailAccountClient<R> {
     /// `InboxMessage.message_id` (`mail-content-scanning.md` § User sees their
     /// own message's row). A message that is not the caller's — or that no
     /// scanner touched — answers `fauna.bridges.not_found`, which the message
-    /// detail shows as "no scan details". Hiding the row under the account's
-    /// `scan_result_visible` toggle is the app's rendering decision, not this
-    /// read's. Replay-safe pure read.
+    /// detail shows as "no scan details". This read never consults the
+    /// account's `scan_result_visible` switch: hiding the row is the shared
+    /// conversations projection's decision
+    /// (`ConversationsManager::refresh_message_scan_results`), which skips this
+    /// read while the switch is off. Replay-safe pure read.
     pub async fn get_message_scan_result(
         &self,
         message_id: Vec<u8>,
@@ -2747,6 +3062,24 @@ mod tests {
             "fauna.bridges.get_dmarc_policy" => {
                 fauna_protocol::encode_canonical(&DmarcReportingPolicy::default())
             }
+            "fauna.bridges.list_dmarc_aggregate_reports" => {
+                fauna_protocol::encode_canonical(&ListDmarcAggregateReportsReply {
+                    reports: vec![DmarcAggregateReportEntry {
+                        our_domain: "example.test".into(),
+                        report_id: "r-1".into(),
+                        ..Default::default()
+                    }],
+                    truncated: true,
+                    ..Default::default()
+                })
+            }
+            "fauna.bridges.get_dmarc_aggregate_report" => {
+                fauna_protocol::encode_canonical(&GetDmarcAggregateReportReply {
+                    report: DmarcAggregateReportEntry::default(),
+                    payload_xml_gz: vec![0x1f, 0x8b],
+                    extra: Default::default(),
+                })
+            }
             "fauna.bridges.fetch_spam_model" => {
                 fauna_protocol::encode_canonical(&FetchSpamModelReply {
                     blob: Some(ByteBuf::from(vec![0x99u8; 8])),
@@ -2802,9 +3135,15 @@ mod tests {
                     email_enabled: true,
                     admin_exists: true,
                     claimed: true,
+                    content_scanners: "wired".into(),
                     version: "test".into(),
                     mail_subsystem_ok: true,
                     auto_enable_mail_for_new_users: false,
+                    microsoft_registration: Some(MicrosoftRegistrationStatus {
+                        client_id: "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c".into(),
+                        tenant: "contoso.example".into(),
+                        extra: Default::default(),
+                    }),
                     registration_mode: None,
                     max_free_users: None,
                     subhandles: false,
@@ -2814,10 +3153,12 @@ mod tests {
                     serving_port: 443,
                     fronted_by_router: false,
                     dkim_records: Vec::new(),
+                    os_host_status_present: false,
                     os_security_updates_pending: 0,
                     os_reboot_pending: false,
                     os_reboot_deferred_since: None,
                     os_last_patched_at: None,
+                    ssh_door_admitted_from: None,
                     web_app_origin: "bundled".into(),
                     web_app_origin_target: None,
                     web_app_origin_domainless: false,
@@ -3129,6 +3470,48 @@ mod tests {
     }
 
     #[test]
+    fn get_mail_unavailable_here_reads_setup_status() {
+        // The fold itself is pinned beside `SetupStatusReply`; this pins the
+        // kind. The mock's box reports `wired`, so mail stays available.
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        let unavailable = block_on(client.get_mail_unavailable_here()).expect("infallible mock");
+        let (kind, _) = last_call(&rec);
+        assert_eq!(kind, "fauna.setup.status");
+        assert!(!unavailable, "a box with scanners wired can enable mail");
+    }
+
+    #[test]
+    fn set_microsoft_registration_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        block_on(client.set_microsoft_registration("id".into(), "common".into()))
+            .expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.set_microsoft_registration");
+        let req: SetMicrosoftRegistrationRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(
+            (req.client_id.as_str(), req.tenant.as_str()),
+            ("id", "common")
+        );
+    }
+
+    #[test]
+    fn get_microsoft_registration_reads_setup_status() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        let registration = block_on(client.get_microsoft_registration()).expect("infallible mock");
+        let (kind, _) = last_call(&rec);
+        assert_eq!(kind, "fauna.setup.status");
+        let registration = registration.expect("the mock's setup.status carries one");
+        assert_eq!(registration.tenant, "contoso.example");
+    }
+
+    #[test]
     fn get_mail_config_composes_kind_and_decodes_reply() {
         let rec = std::sync::Arc::new(RecordingRequester::new(reply));
         let client = MailAdminClient::new(rec.clone());
@@ -3304,6 +3687,49 @@ mod tests {
         let (kind, _payload) = last_call(&rec);
         assert_eq!(kind, "fauna.bridges.get_dmarc_policy");
         assert_eq!(policy, DmarcReportingPolicy::default());
+    }
+
+    #[test]
+    fn list_dmarc_aggregate_reports_composes_window_and_domain() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        let got = block_on(client.list_dmarc_aggregate_reports(30, Some("example.test".into())))
+            .expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.list_dmarc_aggregate_reports");
+        let req =
+            fauna_protocol::decode_strict::<ListDmarcAggregateReportsRequest>(&payload).unwrap();
+        assert_eq!(req.window_days, 30);
+        assert_eq!(req.our_domain.as_deref(), Some("example.test"));
+        assert_eq!(got.reports.len(), 1);
+        assert!(got.truncated);
+    }
+
+    #[test]
+    fn get_dmarc_aggregate_report_composes_the_storage_key() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = MailAdminClient::new(rec.clone());
+
+        let got = block_on(client.get_dmarc_aggregate_report(
+            "example.test".into(),
+            "Peer <reports@peer.test>".into(),
+            "r-1".into(),
+        ))
+        .expect("infallible mock");
+        let (kind, payload) = last_call(&rec);
+        assert_eq!(kind, "fauna.bridges.get_dmarc_aggregate_report");
+        let req =
+            fauna_protocol::decode_strict::<GetDmarcAggregateReportRequest>(&payload).unwrap();
+        assert_eq!(
+            (
+                req.our_domain.as_str(),
+                req.submitter.as_str(),
+                req.report_id.as_str()
+            ),
+            ("example.test", "Peer <reports@peer.test>", "r-1")
+        );
+        assert_eq!(got.payload_xml_gz, vec![0x1f, 0x8b]);
     }
 
     #[test]

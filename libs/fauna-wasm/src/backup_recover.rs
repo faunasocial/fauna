@@ -60,8 +60,8 @@ fauna_client_backup::impl_backup_nest_seam!(struct RecoveryDestinationNest<Token
 /// is content-addressed with a deterministic seal, so re-putting a chunk the
 /// nest already holds is idempotent — the check is an economy, never a
 /// correctness question.
-struct PageBytePlane {
-    nest: InnerClient,
+pub(crate) struct PageBytePlane {
+    pub(crate) nest: InnerClient,
 }
 
 impl PageBytePlane {

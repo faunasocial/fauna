@@ -15,6 +15,7 @@ use fauna_bridge_nostr::types::{Event, Filter};
 use fauna_segment_store::SegmentManager;
 
 use crate::db::CacheDb;
+use crate::nostr::relay_pool::RelayPool;
 use crate::nostr::relays::{nest_url_to_relay_url, resolve_relay_hints};
 use crate::nostr::store;
 use crate::nostr::{bunker, db, inbound_lifecycle};
@@ -148,6 +149,15 @@ pub struct NostrSyncWorker {
     dial_policy: RelayDialPolicy,
 }
 
+/// The most one [`NostrSyncWorker::drain_inbound_events`] pass reads from a
+/// single relay. The drain stops at EOSE, a close, an error or a
+/// 10 ms silence, and a relay that streams frames without pausing gives none
+/// of those; the relay URL is caller-supplied (F7 (a)), so without a slice it
+/// holds the worker's one loop for every account. Whatever the relay still
+/// has waits in the socket for the next pass. A Rust constant, not a knob
+/// (`nest/network-exposure.md` § Rulings F8).
+pub(crate) const INBOUND_DRAIN_SLICE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Receive on an optional wake channel; an absent one never fires.
 async fn recv_wake(rx: &mut Option<mpsc::Receiver<()>>) -> Option<()> {
     match rx {
@@ -197,7 +207,7 @@ impl NostrSyncWorker {
     pub async fn run(mut self) {
         tracing::info!("Nostr sync worker started");
 
-        let mut relay_connections: HashMap<String, RelayClient> = HashMap::new();
+        let mut relay_connections = RelayPool::new(self.dial_policy);
         let mut inbound_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         let mut active_subscriptions: HashMap<String, Vec<String>> = HashMap::new(); // relay_url -> [sub_ids]
         // relay_url -> the spawned low-latency NIP-46 drain on that paired
@@ -379,19 +389,15 @@ impl NostrSyncWorker {
         inbound_lifecycle::sweep_expired_inbound(&self.db).await;
     }
 
-    async fn handle_outbound(
-        &self,
-        relay_connections: &mut HashMap<String, RelayClient>,
-        outbound: OutboundEvent,
-    ) {
-        for relay_url in &outbound.relay_urls {
-            let client = match get_or_connect(relay_connections, relay_url, self.dial_policy).await
-            {
-                Some(c) => c,
-                None => continue,
-            };
-
-            match client.publish(outbound.event.clone()).await {
+    async fn handle_outbound(&self, relay_connections: &mut RelayPool, outbound: OutboundEvent) {
+        // Every relay at once, so N silent relays on one list cost one bound,
+        // not N (`relay_pool`).
+        relay_connections.connect_all(&outbound.relay_urls).await;
+        let outcomes = relay_connections
+            .publish_all(&outbound.relay_urls, &outbound.event)
+            .await;
+        for (relay_url, outcome) in outcomes {
+            match outcome {
                 Ok(true) => {
                     tracing::debug!("nostr sync: published {} to {relay_url}", outbound.event.id);
                 }
@@ -403,7 +409,6 @@ impl NostrSyncWorker {
                 }
                 Err(e) => {
                     tracing::warn!("nostr sync: publish to {relay_url} failed: {e}");
-                    relay_connections.remove(relay_url);
                 }
             }
         }
@@ -411,7 +416,7 @@ impl NostrSyncWorker {
 
     async fn refresh_inbound_subscriptions(
         &self,
-        relay_connections: &mut HashMap<String, RelayClient>,
+        relay_connections: &mut RelayPool,
         active_subscriptions: &mut HashMap<String, Vec<String>>,
     ) {
         // Get all follows across all local users
@@ -479,10 +484,11 @@ impl NostrSyncWorker {
             }
         }
 
-        // Subscribe on each relay
+        // Dial every relay at once (`relay_pool`), then subscribe on
+        // each that answered.
+        relay_connections.connect_all(relay_to_pubkeys.keys()).await;
         for (relay_url, pubkeys) in &relay_to_pubkeys {
-            let client = match get_or_connect(relay_connections, relay_url, self.dial_policy).await
-            {
+            let client = match relay_connections.get_mut(relay_url) {
                 Some(c) => c,
                 None => continue,
             };
@@ -503,11 +509,23 @@ impl NostrSyncWorker {
                 .take(30)
                 .collect();
 
-            // Close previous subscription if any
+            // Close previous subscription if any. A failed write — a relay
+            // that stopped reading times out here — drops the
+            // connection into its backoff, as a failed publish does.
+            let mut close_failed = None;
             if let Some(old_subs) = active_subscriptions.get(relay_url) {
                 for old_sub in old_subs {
-                    let _ = client.close_subscription(old_sub).await;
+                    if let Err(e) = client.close_subscription(old_sub).await {
+                        close_failed = Some(e);
+                        break;
+                    }
                 }
+            }
+            if let Some(e) = close_failed {
+                tracing::warn!("nostr sync: close subscription on {relay_url} failed: {e}");
+                relay_connections.drop_failed(relay_url);
+                active_subscriptions.remove(relay_url);
+                continue;
             }
 
             let post_filter = Filter {
@@ -561,7 +579,8 @@ impl NostrSyncWorker {
                 .await
             {
                 tracing::warn!("nostr sync: subscribe on {relay_url} failed: {e}");
-                relay_connections.remove(relay_url);
+                relay_connections.drop_failed(relay_url);
+                active_subscriptions.remove(relay_url);
                 continue;
             }
 
@@ -650,18 +669,28 @@ impl NostrSyncWorker {
         respond_to_bunker_request(&self.db, &self.nest_signing_key_bytes, request).await
     }
 
-    async fn drain_inbound_events(&self, relay_connections: &mut HashMap<String, RelayClient>) {
-        let relay_urls: Vec<String> = relay_connections.keys().cloned().collect();
+    async fn drain_inbound_events(&self, relay_connections: &mut RelayPool) {
+        let relay_urls = relay_connections.urls();
         for relay_url in relay_urls {
             let client = match relay_connections.get_mut(&relay_url) {
                 Some(c) => c,
                 None => continue,
             };
 
-            // Non-blocking receive — drain available messages
+            // Non-blocking receive — drain available messages, for at most
+            // this relay's slice of the pass.
+            let slice_ends = tokio::time::Instant::now() + INBOUND_DRAIN_SLICE;
             loop {
-                let recv =
-                    tokio::time::timeout(std::time::Duration::from_millis(10), client.recv()).await;
+                let now = tokio::time::Instant::now();
+                if now >= slice_ends {
+                    tracing::debug!("nostr sync: relay {relay_url} used its drain slice");
+                    break;
+                }
+                let recv = tokio::time::timeout_at(
+                    (now + std::time::Duration::from_millis(10)).min(slice_ends),
+                    client.recv(),
+                )
+                .await;
 
                 match recv {
                     Ok(Ok(Some(RelayMessage::Event { event, .. }))) => {
@@ -682,7 +711,7 @@ impl NostrSyncWorker {
                                 tracing::warn!(
                                     "nostr bunker proxy: publish response to {relay_url} failed: {e}"
                                 );
-                                relay_connections.remove(&relay_url);
+                                relay_connections.drop_failed(&relay_url);
                                 break;
                             }
                         } else {
@@ -1439,29 +1468,6 @@ async fn respond_to_bunker_request(
     }
 }
 
-/// Get an existing relay connection or create a new one. `url` is always
-/// caller-supplied (a publish list, a follow's hints, a paired nest's URL), so
-/// the dial runs under `dial_policy` and a refused target costs no socket.
-async fn get_or_connect<'a>(
-    connections: &'a mut HashMap<String, RelayClient>,
-    url: &str,
-    dial_policy: RelayDialPolicy,
-) -> Option<&'a mut RelayClient> {
-    if !connections.contains_key(url) {
-        match RelayClient::connect(url, dial_policy).await {
-            Ok(c) => {
-                tracing::info!("nostr sync: connected to {url}");
-                connections.insert(url.to_string(), c);
-            }
-            Err(e) => {
-                tracing::warn!("nostr sync: failed to connect to {url}: {e}");
-                return None;
-            }
-        }
-    }
-    connections.get_mut(url)
-}
-
 #[cfg(test)]
 mod tests {
     //! The S8.9 at-rest contract for inbound gift-wrap DMs: the worker
@@ -1658,7 +1664,7 @@ mod tests {
                 )
                 .unwrap();
             }
-            let mut connections = HashMap::new();
+            let mut connections = RelayPool::new(policy);
             let mut active = HashMap::new();
             // The connect either lands on the probe (allowance) or is refused
             // before a socket opens (production); a WebSocket handshake against
@@ -2899,6 +2905,72 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the dispatcher must apply a followed author's kind-5, not drop it"
+        );
+    }
+
+    /// A loopback relay that completes the handshake and then streams
+    /// `["NOTICE","x"]` frames with no pause, for as long as it is read.
+    async fn chatty_relay() -> String {
+        use futures_util::SinkExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        // spawn-ok(test)
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            loop {
+                for _ in 0..64 {
+                    let notice = r#"["NOTICE","x"]"#.to_string();
+                    if ws
+                        .feed(tokio_tungstenite::tungstenite::Message::Text(notice.into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if ws.flush().await.is_err() {
+                    return;
+                }
+            }
+        });
+        url
+    }
+
+    /// **A relay that never pauses cannot hold the drain.** The
+    /// drain stops reading a relay at EOSE, close, error or a 10 ms silence; a
+    /// relay that streams frames without pausing gives none of those, so the
+    /// drain also gives each relay at most [`INBOUND_DRAIN_SLICE`] per pass and
+    /// returns. The relay stays connected — a busy relay is not a failed one —
+    /// and the next pass reads on from where this one stopped.
+    #[tokio::test]
+    async fn a_relay_that_never_pauses_gets_one_slice_of_the_drain() {
+        let (worker, _db) = worker().await;
+        let url = chatty_relay().await;
+        let mut connections = RelayPool::new(RelayDialPolicy::PublicOrLoopback);
+        connections.connect_all([&url]).await;
+        assert_eq!(
+            connections.urls(),
+            vec![url.clone()],
+            "the handshake completes"
+        );
+
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            INBOUND_DRAIN_SLICE + std::time::Duration::from_secs(5),
+            worker.drain_inbound_events(&mut connections),
+        )
+        .await
+        .expect("a relay that never pauses must not hold the drain past its slice");
+        assert!(
+            started.elapsed() >= INBOUND_DRAIN_SLICE - std::time::Duration::from_millis(100),
+            "beside-control: the drain ran its slice, not an early error: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            connections.urls(),
+            vec![url],
+            "a busy relay stays connected"
         );
     }
 }

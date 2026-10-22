@@ -63,6 +63,43 @@
 # The bridge terminates `pds.<domain>` TLS itself (sealed cert blob) — the router
 # stays pure L4 pass-through and never sees plaintext.
 export FAUNA_ROUTER_PROXY_SECRET="$(cat /data/keys/router/proxy-secret 2>/dev/null || true)"
+# The router's one link to nest — the sidecar log plane (observability.md § The
+# sidecar log plane): with --nest-url it dials nest's loopback
+# /internal/router/ws, runs the fauna.sidecar.hello token handshake as the
+# `router` scope (no key in its hello — it fetches nothing), and reports its
+# catalogue (serving, backend_unreachable, the two cap-shed counts,
+# nest_unreachable) to the admin Logs page. Routing never waits on it.
+#
+# FAUNA_SIDECAR_TOKEN: the boot-minted per-sidecar token (sidecar_tokens.rs writes
+# /data/sidecar-token-router, mode 0600 nest-owned), read here as ROOT and
+# exported BEFORE dropping to fauna-router — the router UID never reads the file.
+#
+# ⚠ So the value is a START-TIME snapshot, and nest re-mints every sidecar token
+# on EVERY boot: when nest refuses the router's hello, the router EXITS (78,
+# EX_CONFIG) and s6's restart re-runs this `cat` against nest's current token —
+# the sidecar channel's credential rule (transport.md, the internal sidecar
+# channel → the credential's lifetime). For the router that exit DROPS EVERY LIVE
+# :443 SPLICE (nest, CalDAV, relay, PDS) and unbinds :443 for the restart's
+# moment, once per in-container nest restart. Accepted: a nest restart (crash,
+# factory reset) already severs everything routed to nest, which is nearly all of
+# :443, and every client re-dials. Nest merely unreachable is NOT a refusal
+# (retried in-process), so the router starting before nest does not restart-loop.
+#
+# The router STARTS BEFORE the nest and stops after it (fauna-nest depends on
+# fauna-sni-router, so at `docker stop` s6-rc stops the nest while the router
+# still splices its WS 1001 drain out — installers/docker.md § s6-overlay
+# Services, the shutdown order). So at container start the token file is the
+# PREVIOUS boot's, which the nest is about to re-mint: snapshotting it would earn
+# one refusal and one :443 drop at every start. entrypoint.sh deletes it before
+# s6 starts, and this script waits for the nest's fresh one (the nest writes it
+# temp-then-rename, so it appears whole). Bounded: a nest that never mints in
+# time leaves the token empty, the hello is refused once nest is up, and the
+# exit-78 restart above re-runs this wait.
+for _ in $(seq 1 600); do
+  [ -s /data/sidecar-token-router ] && break
+  sleep 0.1
+done
+export FAUNA_SIDECAR_TOKEN="$(cat /data/sidecar-token-router 2>/dev/null || true)"
 # Domain-agnostic leading-label routes (`mail.*` / `relay.*`): the box boots
 # DOMAINLESS and learns its domain only at claim, so the run-script cannot name
 # `mail.<domain>` here. `mail.*` matches `mail.<any-domain>` → the MDA CalDAV
@@ -78,4 +115,5 @@ exec s6-setuidgid fauna-router \
     --route "pds.*=127.0.0.1:8447" \
     --send-proxy-to "127.0.0.1:${FAUNA_PORT:-3000}" \
     --send-proxy-to "127.0.0.1:8444" \
-    --send-proxy-to "127.0.0.1:8447"
+    --send-proxy-to "127.0.0.1:8447" \
+    --nest-url "https://127.0.0.1:${FAUNA_PORT:-3000}"

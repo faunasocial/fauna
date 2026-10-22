@@ -11,6 +11,39 @@ use super::{CacheDb, now_epoch_millis};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
+/// The account's own on/off mail switches (`mail-policy-config.md` § Tier 3):
+/// `mail.account.receive_enabled`, `mail.account.send_enabled` and
+/// `mail.account.scan_result_visible`. All on by default — what an actor with
+/// no settings row reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MailSwitches {
+    pub receive_enabled: bool,
+    pub send_enabled: bool,
+    /// Off hides the scan-verdict row from the account's received messages
+    /// (`mail-content-scanning.md` § Per-account opt-out for visible scan
+    /// details); the scan rows themselves stay.
+    pub scan_result_visible: bool,
+}
+
+impl Default for MailSwitches {
+    fn default() -> Self {
+        Self {
+            receive_enabled: true,
+            send_enabled: true,
+            scan_result_visible: true,
+        }
+    }
+}
+
+/// A write of [`MailSwitches`]: each `Some` switch is overwritten, each
+/// `None` keeps its stored value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MailSwitchesUpdate {
+    pub receive_enabled: Option<bool>,
+    pub send_enabled: Option<bool>,
+    pub scan_result_visible: Option<bool>,
+}
+
 impl CacheDb {
     // ── Per-account mail settings ──────────────────────────────────────
 
@@ -133,43 +166,53 @@ impl CacheDb {
         Ok(())
     }
 
-    /// The actor's receive and send switches (`mail.account.receive_enabled`
-    /// / `mail.account.send_enabled`, `mail-policy-config.md` § Tier 3) as
-    /// `(receive_enabled, send_enabled)`. An actor with no settings row has
-    /// both on — the catalog default.
-    pub async fn get_mail_switches(&self, actor_id: &[u8; 32]) -> Result<(bool, bool)> {
+    /// The actor's on/off mail switches ([`MailSwitches`]). An actor with no
+    /// settings row has every one on — the catalog default.
+    pub async fn get_mail_switches(&self, actor_id: &[u8; 32]) -> Result<MailSwitches> {
         let conn = self.conn.lock().await;
-        let value: Option<(bool, bool)> = conn
+        let value: Option<MailSwitches> = conn
             .query_row(
-                "SELECT receive_enabled, send_enabled FROM mail_account_settings
-                 WHERE actor_id = ?1",
+                "SELECT receive_enabled, send_enabled, scan_result_visible
+                 FROM mail_account_settings WHERE actor_id = ?1",
                 rusqlite::params![actor_id.as_slice()],
-                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+                |row| {
+                    Ok(MailSwitches {
+                        receive_enabled: row.get(0)?,
+                        send_enabled: row.get(1)?,
+                        scan_result_visible: row.get(2)?,
+                    })
+                },
             )
             .optional()?;
-        Ok(value.unwrap_or((true, true)))
+        Ok(value.unwrap_or_default())
     }
 
-    /// Overwrite whichever of the two switches is `Some`, leaving the other
-    /// and every sibling column as they are (a fresh row takes the column
+    /// Overwrite whichever switches `update` carries, leaving the others and
+    /// every sibling column as they are (a fresh row takes the column
     /// defaults for the rest).
     pub async fn set_mail_switches(
         &self,
         actor_id: &[u8; 32],
-        receive_enabled: Option<bool>,
-        send_enabled: Option<bool>,
+        update: MailSwitchesUpdate,
     ) -> Result<()> {
         let now = now_epoch_millis();
         let conn = self.conn.lock().await;
         conn.execute(
             "INSERT INTO mail_account_settings
-                (actor_id, receive_enabled, send_enabled, updated_at)
-             VALUES (?1, COALESCE(?2, 1), COALESCE(?3, 1), ?4)
+                (actor_id, receive_enabled, send_enabled, scan_result_visible, updated_at)
+             VALUES (?1, COALESCE(?2, 1), COALESCE(?3, 1), COALESCE(?4, 1), ?5)
              ON CONFLICT(actor_id) DO UPDATE SET
                 receive_enabled = COALESCE(?2, receive_enabled),
                 send_enabled = COALESCE(?3, send_enabled),
+                scan_result_visible = COALESCE(?4, scan_result_visible),
                 updated_at = excluded.updated_at",
-            rusqlite::params![actor_id.as_slice(), receive_enabled, send_enabled, now],
+            rusqlite::params![
+                actor_id.as_slice(),
+                update.receive_enabled,
+                update.send_enabled,
+                update.scan_result_visible,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -177,6 +220,7 @@ impl CacheDb {
 
 #[cfg(test)]
 mod tests {
+    use super::{MailSwitches, MailSwitchesUpdate};
     use crate::db::CacheDb;
 
     #[tokio::test]
@@ -259,26 +303,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mail_switches_default_on_and_set_one_leaves_the_other() {
+    async fn mail_switches_default_on_and_set_one_leaves_the_others() {
         let db = CacheDb::open_in_memory().unwrap();
         let actor = [11u8; 32];
-        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, true));
-        db.set_mail_switches(&actor, Some(false), None)
-            .await
-            .unwrap();
-        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (false, true));
-        db.set_mail_switches(&actor, None, Some(false))
-            .await
-            .unwrap();
-        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (false, false));
-        db.set_mail_switches(&actor, Some(true), None)
-            .await
-            .unwrap();
-        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, false));
+        let switches = |receive_enabled, send_enabled, scan_result_visible| MailSwitches {
+            receive_enabled,
+            send_enabled,
+            scan_result_visible,
+        };
+        assert_eq!(
+            db.get_mail_switches(&actor).await.unwrap(),
+            switches(true, true, true)
+        );
+        let steps = [
+            (
+                MailSwitchesUpdate {
+                    receive_enabled: Some(false),
+                    ..Default::default()
+                },
+                switches(false, true, true),
+            ),
+            (
+                MailSwitchesUpdate {
+                    send_enabled: Some(false),
+                    ..Default::default()
+                },
+                switches(false, false, true),
+            ),
+            (
+                MailSwitchesUpdate {
+                    scan_result_visible: Some(false),
+                    ..Default::default()
+                },
+                switches(false, false, false),
+            ),
+            (
+                MailSwitchesUpdate {
+                    receive_enabled: Some(true),
+                    ..Default::default()
+                },
+                switches(true, false, false),
+            ),
+        ];
+        for (update, expected) in steps {
+            db.set_mail_switches(&actor, update).await.unwrap();
+            assert_eq!(db.get_mail_switches(&actor).await.unwrap(), expected);
+        }
         // A sibling upsert never clobbers the switches.
         db.set_forward_all_to(&actor, Some("a@example.net"))
             .await
             .unwrap();
-        assert_eq!(db.get_mail_switches(&actor).await.unwrap(), (true, false));
+        assert_eq!(
+            db.get_mail_switches(&actor).await.unwrap(),
+            switches(true, false, false)
+        );
+        // A fresh row written by a sibling upsert reads every switch on.
+        let other = [12u8; 32];
+        db.set_forward_all_to(&other, Some("b@example.net"))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_mail_switches(&other).await.unwrap(),
+            MailSwitches::default()
+        );
     }
 }

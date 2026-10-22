@@ -22,10 +22,10 @@ tui is the lead app; the other six follow in their batched trickle-down.
 
 import time
 import urllib.error
-import urllib.request
 
 import pytest
 
+from common.auth import no_redirect_opener
 from conftest import _login_admin_as
 from helpers.app_surface import app_name, skip_unbuilt
 from i18n.strings import S
@@ -33,15 +33,13 @@ from i18n.strings import S
 pytestmark = pytest.mark.tier_3
 
 # The apps whose admin-nest renders the section. tui leads.
-BUILT = {"tui", "web", "linux", "windows"}
+BUILT = {"tui", "web", "linux", "windows", "macos", "ios", "android"}
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
+# A redirect is the assertion here, so it is handed back rather than
+# followed — under the floor-cert rule a TLS-serving nest needs
+# (`common.auth.no_redirect_opener`).
+_OPENER = no_redirect_opener()
 
 
 def _get_app(url: str):

@@ -156,8 +156,16 @@ def test_a_room_is_born_governed_and_its_roles_govern_removal(room_seats, nest_i
     )
     owner_chip = _index_of(leaver_open, owner.actor_hex)
     stayer_chip = _index_of(leaver_open, stayer.actor_hex)
-    assert leaver.app.driver.get_attr("thread-member-chip", "role", index=owner_chip) == "owner", (
-        f"the owner's chip carries the owner role: {leaver.app.driver.diagnose('thread-member-chip')}"
+    # A wait, not a read: the chips can paint a frame before the room's roster
+    # roles reach them, which reads every chip as "member".
+    wait_for(
+        "the owner's chip carrying the owner role",
+        lambda: leaver.app.driver.get_attr("thread-member-chip", "role", index=owner_chip),
+        lambda role: role == "owner",
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"the owner's chip carries the owner role: {leaver.app.driver.diagnose('thread-member-chip')}"
+        ),
     )
     assert leaver.app.driver.get_attr("thread-member-chip", "role", index=stayer_chip) == "member"
     assert not leaver.app.driver.is_enabled("thread-member-chip"), (

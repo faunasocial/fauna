@@ -15,7 +15,7 @@
 //!
 //! Under the `no-http-ws-rpc-everywhere` directive the production seam consumes
 //! only WS-RPC kinds (`fauna.folders.list`,
-//! `fauna.filesync.snapshot.{list,create_folder,delete,delete_immediate,prune_set_policy,check}`)
+//! `fauna.filesync.snapshot.{list,create_folder,create_message_kind,delete,delete_immediate,prune_set_policy,check}`)
 //! through the shared `fauna-client-{snapshots,folders}` adapters — there is no
 //! HTTP impl.
 //!

@@ -366,6 +366,193 @@ pub trait Admission: std::fmt::Debug + Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
+/// How long a cached "admitted" verdict stands. `RelayAdmitReply` carries no
+/// lease, so this is a constant of the relay: it is also the longest a revoked
+/// device can keep reconnecting (`behavior/p2p.md` § The relay).
+const ADMIT_TTL: Duration = Duration::from_secs(60);
+
+/// How long a cached "refused" verdict stands. Short, so a device enrolled just
+/// after being refused is not locked out for minutes.
+const DENY_TTL: Duration = Duration::from_secs(5);
+
+/// Burst size of the global budget for admission questions to nest.
+const QUESTION_BURST: f64 = 100.0;
+
+/// Sustained rate (questions per second) of the global budget. Only a key with
+/// no cached verdict spends it. One global budget, not one per source: relay
+/// connects on tcp 443 reach the relay from the SNI router's loopback with no
+/// PROXY header, so the source address names the router, not the caller (the
+/// router's own per-IP cap is the per-source brake).
+const QUESTION_RATE_PER_SEC: f64 = 20.0;
+
+/// How long the relay remembers that it once admitted a key, after its admit
+/// verdict lapsed. A remembered key is re-asked from the reserved budget, which
+/// fresh keys cannot reach, so a flood of strangers that keeps the global budget
+/// empty does not lock out members (`behavior/p2p.md` § The relay). It grants
+/// nothing by itself: the nest is still asked, and a refusal forgets the key.
+const KNOWN_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Burst size of the reserved budget for re-asking about remembered keys.
+const KNOWN_QUESTION_BURST: f64 = 50.0;
+
+/// Sustained rate (questions per second) of the reserved budget. Only keys the
+/// nest has admitted before spend it, so it is bounded by the nest's own
+/// devices, never by a stranger's key supply.
+const KNOWN_QUESTION_RATE_PER_SEC: f64 = 10.0;
+
+/// Cap on remembered verdicts per kind; past it a new verdict is not cached
+/// (a cached verdict is an optimisation, never needed for correctness).
+const VERDICT_CACHE_CAPACITY: usize = 8192;
+
+/// Wraps an [`Admission`] with a verdict cache and a global budget on the
+/// questions that reach it, so connection attempts from strangers with fresh
+/// keys do not become nest RPCs one-for-one.
+///
+/// A cached verdict (either way) answers without spending the budget, so members
+/// that are already known stay admitted while a flood of unknown keys drains it.
+/// A key whose admit lapsed but which the relay admitted within [`KNOWN_TTL`] is
+/// re-asked from a reserved budget first, so a flood that never lets the global
+/// budget refill still cannot lock out members. An uncached key past both
+/// budgets is refused without a question — fail closed, like every other failure
+/// here; its own reconnect asks again.
+#[derive(Debug)]
+pub struct GuardedAdmission {
+    inner: Arc<dyn Admission>,
+    state: std::sync::Mutex<GuardState>,
+}
+
+#[derive(Debug)]
+struct GuardState {
+    admitted: std::collections::HashMap<[u8; 32], std::time::Instant>,
+    refused: std::collections::HashMap<[u8; 32], std::time::Instant>,
+    /// Keys the inner rule admitted, kept for [`KNOWN_TTL`] past each admit.
+    known: std::collections::HashMap<[u8; 32], std::time::Instant>,
+    strangers: TokenBucket,
+    reserved: TokenBucket,
+}
+
+/// A token bucket refilled continuously from the instant it was last read.
+#[derive(Debug)]
+struct TokenBucket {
+    burst: f64,
+    rate_per_sec: f64,
+    tokens: f64,
+    refilled_at: std::time::Instant,
+}
+
+impl TokenBucket {
+    fn full(burst: f64, rate_per_sec: f64, now: std::time::Instant) -> Self {
+        Self {
+            burst,
+            rate_per_sec,
+            tokens: burst,
+            refilled_at: now,
+        }
+    }
+
+    /// Refill to `now`, then spend one token if there is one.
+    fn take(&mut self, now: std::time::Instant) -> bool {
+        let elapsed = now
+            .saturating_duration_since(self.refilled_at)
+            .as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate_per_sec).min(self.burst);
+        self.refilled_at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
+
+/// Insert `key` until `until`, sweeping lapsed entries first when full; past
+/// [`VERDICT_CACHE_CAPACITY`] live entries the key is not remembered.
+fn remember_until(
+    map: &mut std::collections::HashMap<[u8; 32], std::time::Instant>,
+    key: [u8; 32],
+    until: std::time::Instant,
+    now: std::time::Instant,
+) {
+    if map.len() >= VERDICT_CACHE_CAPACITY && !map.contains_key(&key) {
+        map.retain(|_, u| *u > now);
+    }
+    if map.len() < VERDICT_CACHE_CAPACITY || map.contains_key(&key) {
+        map.insert(key, until);
+    }
+}
+
+impl GuardedAdmission {
+    pub fn new(inner: Arc<dyn Admission>) -> Self {
+        Self::new_at(inner, std::time::Instant::now())
+    }
+
+    fn new_at(inner: Arc<dyn Admission>, now: std::time::Instant) -> Self {
+        Self {
+            inner,
+            state: std::sync::Mutex::new(GuardState {
+                admitted: Default::default(),
+                refused: Default::default(),
+                known: Default::default(),
+                strangers: TokenBucket::full(QUESTION_BURST, QUESTION_RATE_PER_SEC, now),
+                reserved: TokenBucket::full(KNOWN_QUESTION_BURST, KNOWN_QUESTION_RATE_PER_SEC, now),
+            }),
+        }
+    }
+
+    /// `Some(verdict)` from the cache, else spend a budget token (`None` ⇒ ask
+    /// the inner rule) or refuse (`Some(false)`) when the budget is empty. A
+    /// remembered key spends the reserved budget first, then the global one.
+    fn lookup(&self, key: &[u8; 32], now: std::time::Instant) -> Option<bool> {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.admitted.get(key).is_some_and(|until| *until > now) {
+            return Some(true);
+        }
+        if s.refused.get(key).is_some_and(|until| *until > now) {
+            return Some(false);
+        }
+        if s.known.get(key).is_some_and(|until| *until > now) && s.reserved.take(now) {
+            return None;
+        }
+        if s.strangers.take(now) {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
+    fn remember(&self, key: [u8; 32], admitted: bool, now: std::time::Instant) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        // The other kind is now stale.
+        if admitted {
+            remember_until(&mut s.admitted, key, now + ADMIT_TTL, now);
+            remember_until(&mut s.known, key, now + KNOWN_TTL, now);
+            s.refused.remove(&key);
+        } else {
+            remember_until(&mut s.refused, key, now + DENY_TTL, now);
+            s.admitted.remove(&key);
+            s.known.remove(&key);
+        }
+    }
+
+    async fn admits_at(&self, endpoint_key: [u8; 32], now: std::time::Instant) -> bool {
+        if let Some(verdict) = self.lookup(&endpoint_key, now) {
+            return verdict;
+        }
+        let verdict = self.inner.admits(endpoint_key).await;
+        self.remember(endpoint_key, verdict, now);
+        verdict
+    }
+}
+
+impl Admission for GuardedAdmission {
+    fn admits<'a>(
+        &'a self,
+        endpoint_key: [u8; 32],
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(self.admits_at(endpoint_key, std::time::Instant::now()))
+    }
+}
+
 /// Adapts an [`Admission`] to the relay server's access hook — the one place the
 /// dependency's access types are named.
 #[derive(Debug)]
@@ -499,7 +686,8 @@ pub async fn run() -> Result<()> {
     let opts = production_options(args.https_bind, args.http_bind);
 
     let link = Arc::new(NestLink::default());
-    let mut server = spawn_relay(opts, config, link.clone()).await?;
+    let guarded = Arc::new(GuardedAdmission::new(link.clone()));
+    let mut server = spawn_relay(opts, config, guarded).await?;
     let https_port = server.https_addr().map(|a| a.port()).unwrap_or_default();
     tracing::info!(
         https_addr = ?server.https_addr(),
@@ -1149,6 +1337,159 @@ mod tests {
             DISCOVERY_PORT, 7842,
             "the port the artifact and guide publish"
         );
+    }
+
+    /// An [`Admission`] that counts the questions it is asked.
+    #[derive(Debug)]
+    struct Counting {
+        members: std::sync::Mutex<Vec<[u8; 32]>>,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Counting {
+        fn new(members: Vec<[u8; 32]>) -> Arc<Self> {
+            Arc::new(Self {
+                members: std::sync::Mutex::new(members),
+                asked: Default::default(),
+            })
+        }
+        fn revoke(&self, key: &[u8; 32]) {
+            self.members.lock().unwrap().retain(|m| m != key);
+        }
+        fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Admission for Counting {
+        fn admits<'a>(
+            &'a self,
+            endpoint_key: [u8; 32],
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move {
+                self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.members.lock().unwrap().contains(&endpoint_key)
+            })
+        }
+    }
+
+    fn stranger(n: u32) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k[..4].copy_from_slice(&n.to_be_bytes());
+        k[31] = 0xee;
+        k
+    }
+
+    /// 1 000 connects from unknown endpoints cost far fewer than 1 000 questions
+    /// to nest, and a repeat from the same endpoint costs none.
+    #[tokio::test]
+    async fn a_flood_of_unknown_keys_costs_far_fewer_questions_than_connects() {
+        let inner = Counting::new(vec![]);
+        let t0 = std::time::Instant::now();
+        let guard = GuardedAdmission::new_at(inner.clone(), t0);
+        for n in 0..1000 {
+            assert!(!guard.admits_at(stranger(n), t0).await);
+        }
+        assert!(
+            inner.asked() <= QUESTION_BURST as usize,
+            "asked {} of 1000",
+            inner.asked()
+        );
+        let before = inner.asked();
+        for _ in 0..50 {
+            assert!(!guard.admits_at(stranger(0), t0).await);
+        }
+        assert_eq!(inner.asked(), before, "a cached refusal asks nothing");
+    }
+
+    /// A known member's admit is cached; a member already known still gets in
+    /// while a flood of unknown keys has emptied the budget; and the verdicts
+    /// lapse (admit after `ADMIT_TTL`, refusal after `DENY_TTL`).
+    #[tokio::test]
+    async fn a_known_member_still_gets_in_during_a_flood_of_unknown_keys() {
+        let member = endpoint_key(0x42);
+        let late = endpoint_key(0x43);
+        let inner = Counting::new(vec![member, late]);
+        let t0 = std::time::Instant::now();
+        let guard = GuardedAdmission::new_at(inner.clone(), t0);
+
+        assert!(guard.admits_at(member, t0).await);
+        assert_eq!(inner.asked(), 1);
+        for n in 0..1000 {
+            guard.admits_at(stranger(n), t0).await;
+        }
+        assert!(
+            guard.admits_at(member, t0).await,
+            "cached member refused during a flood"
+        );
+        assert!(guard.admits_at(member, t0).await);
+        // The budget is empty: an uncached member is refused without a question.
+        let asked = inner.asked();
+        assert!(!guard.admits_at(late, t0).await);
+        assert_eq!(inner.asked(), asked, "an empty budget asks nothing");
+
+        // The budget refills, and a refused key is asked again after DENY_TTL.
+        let t1 = t0 + DENY_TTL + Duration::from_secs(1);
+        assert!(
+            guard.admits_at(late, t1).await,
+            "refilled budget, later ask"
+        );
+        // An admit lapses after ADMIT_TTL and is asked again.
+        let asked = inner.asked();
+        let t2 = t1 + ADMIT_TTL + Duration::from_secs(1);
+        assert!(guard.admits_at(member, t2).await);
+        assert_eq!(inner.asked(), asked + 1);
+    }
+
+    /// A flood of fresh keys that never stops (faster than the strangers' budget
+    /// refills) runs past `ADMIT_TTL`: a member the relay admitted before is
+    /// asked again from the reserved budget and still gets in, a member revoked
+    /// meanwhile is refused by the nest's answer, and no stranger is asked once
+    /// the strangers' budget is spent.
+    #[tokio::test]
+    async fn a_member_whose_admit_lapsed_still_gets_in_during_a_sustained_flood() {
+        let member = endpoint_key(0x42);
+        let revoked = endpoint_key(0x44);
+        let inner = Counting::new(vec![member, revoked]);
+        let t0 = std::time::Instant::now();
+        let guard = GuardedAdmission::new_at(inner.clone(), t0);
+        assert!(guard.admits_at(member, t0).await);
+        assert!(guard.admits_at(revoked, t0).await);
+        inner.revoke(&revoked);
+
+        // 50 fresh keys per second for ADMIT_TTL + 10 s, in 100 ms steps.
+        let step = Duration::from_millis(100);
+        let mut now = t0;
+        let mut n = 0u32;
+        while now < t0 + ADMIT_TTL + Duration::from_secs(10) {
+            for _ in 0..5 {
+                assert!(!guard.admits_at(stranger(n), now).await);
+                n += 1;
+            }
+            now += step;
+        }
+        // The member connects in the same instant the flood spends the budget.
+        for _ in 0..5 {
+            assert!(!guard.admits_at(stranger(n), now).await);
+            n += 1;
+        }
+        let asked = inner.asked();
+        assert!(
+            guard.admits_at(member, now).await,
+            "a member whose admit lapsed was refused during a sustained flood"
+        );
+        assert_eq!(
+            inner.asked(),
+            asked + 1,
+            "the lapsed member was asked again"
+        );
+        assert!(
+            !guard.admits_at(revoked, now).await,
+            "a revoked member's lapsed admit is re-asked, and the nest refuses it"
+        );
+        assert_eq!(inner.asked(), asked + 2);
+        assert!(guard.admits_at(member, now).await);
+        assert_eq!(inner.asked(), asked + 2, "the fresh admit is cached again");
     }
 
     /// [`NestLink`] fails closed: with no channel to nest it admits nobody.

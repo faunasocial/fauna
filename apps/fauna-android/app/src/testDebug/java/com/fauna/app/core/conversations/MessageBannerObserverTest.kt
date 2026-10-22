@@ -75,6 +75,7 @@ class MessageBannerObserverTest {
                     contentWarning = null,
                 ),
                 legalTakedownRef = null,
+                adminBlockReason = null,
                 planeRef = null,
             ),
         )

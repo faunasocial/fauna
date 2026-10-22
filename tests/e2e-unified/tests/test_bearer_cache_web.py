@@ -91,6 +91,7 @@ from actions import ActionLayer
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from common.auth import register_handled_actor
 from conftest import MAIL_PRIMARY_DOMAIN
+from common.accounts import single_account_seed
 from drivers import create_driver
 from helpers.connection import ConnectionBarrierTimeout, wait_until_online
 from helpers import web_store
@@ -110,13 +111,6 @@ def _text_or_absent(driver, element_id: str) -> str:
         return driver.get_text(element_id)
     except Exception:
         return "<absent>"
-
-
-def _seed_registry_identity(driver, *, secret_hex: str, node_url: str) -> None:
-    """Write one signed-in identity in the registry shape `identity.init()`
-    reads (`helpers/web_store.seed_identity`); the nest URL rides along so
-    the boot silent sign-in has somewhere to go."""
-    web_store.seed_identity(driver, secret_hex, nest_url=node_url)
 
 
 def _wait_bearer_minted(driver, timeout: float = 40.0) -> None:
@@ -356,11 +350,12 @@ def test_web_sign_out_then_new_identity_posts_as_itself(
     body = "bearer-leak probe " + secrets.token_hex(4)
 
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({
+        "url": spa + "/app/",
+        "seed_credentials": single_account_seed(secret_a, nest_url=spa),
+    })
     try:
         # ── A signs in, minting + caching a bearer for this nest ──
-        _seed_registry_identity(driver, secret_hex=secret_a, node_url=spa)
-        driver.hard_reload()
         _wait_bearer_minted(driver)
 
         # ── Sign out through the real UI. Client-side `goto`, no reload: module

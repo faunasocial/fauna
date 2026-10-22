@@ -26,6 +26,8 @@ public final class TaskDelegationVM {
 
     private var view: FfiTaskDelegationView?
     private var api: APIClient?
+    /// Bumped at the start and end of every pin write (see ``resync()``).
+    private var writeEpoch = 0
 
     public init() {}
 
@@ -82,12 +84,29 @@ public final class TaskDelegationVM {
         await loadDeviceLabels()
     }
 
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — Task delegation): a pin
+    /// another device stored, or a lease it claimed, lands on the open page.
+    /// Unlike `reload()` it raises no loading flag and no banner, replaces
+    /// `rows` / `deviceLabels` only when they differ, and drops its answer if
+    /// a pin write ran meanwhile (that write's own reload is the fresher one).
+    public func resync() async {
+        guard let view else { return }
+        let epoch = writeEpoch
+        guard let fresh = try? await view.load(), epoch == writeEpoch else { return }
+        if fresh != rows { rows = fresh }
+        let labels = await currentDeviceLabels()
+        if labels != deviceLabels, epoch == writeEpoch { deviceLabels = labels }
+    }
+
     /// Persist a pin change, then reload so the runner column + picker reflect
     /// authoritative state. On failure the error shows and the rows are left
     /// as-is (the write is a CAS read-modify-write — a failure changed
     /// nothing).
     public func setAssignment(taskKind: String, option: FfiPinOption) async {
         guard let view else { return }
+        writeEpoch += 1
+        defer { writeEpoch += 1 }
         do {
             try await view.setAssignment(taskKind: taskKind, option: option)
         } catch {
@@ -102,14 +121,18 @@ public final class TaskDelegationVM {
     /// callers then fall back to a short-hex abbreviation rather than showing
     /// nothing. Mirrors linux's `device_labels`.
     private func loadDeviceLabels() async {
-        guard let api else { return }
+        deviceLabels = await currentDeviceLabels()
+    }
+
+    private func currentDeviceLabels() async -> [String: String] {
+        guard let api else { return [:] }
         do {
             let machine = try await api.devicesMachine(observer: NoopTaskDelegationDevicesObserver())
             await machine.refresh()
-            deviceLabels = Dictionary(
+            return Dictionary(
                 uniqueKeysWithValues: machine.snapshot().devices.map { ($0.deviceId, $0.label) })
         } catch {
-            deviceLabels = [:]
+            return [:]
         }
     }
 }

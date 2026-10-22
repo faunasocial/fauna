@@ -99,7 +99,7 @@ async fn with_nest_api_routes_claim_admin_through_fake() {
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
     let observer: Arc<dyn fauna_onboarding_machine::OnboardingObserver> = Arc::new(NullObserver);
     let nest_api: Arc<dyn NestApi> = fake.clone();

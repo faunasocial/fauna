@@ -86,7 +86,7 @@ pub trait CommitCatchUp {
 /// `send_on_channel`, so a gated commit and an ordinary application send route
 /// through the same one place.
 ///
-/// The rule this seam serves: `federation.md` § Cross-nest shared folders +
+/// The rule this seam serves: `federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append — *"a foreign member's device-owned-epoch takeover must
 /// land"*.
 pub trait GatedCommitSend {

@@ -73,6 +73,14 @@ fn nest_info_handler() -> RpcHandler {
             // reject a malformed (non-map) payload, then ignore.
             let _req: NestInfoRequest = decode(&payload).map_err(malformed)?;
             let info = discovery_core::nest_info_core(&state).await;
+            // The admin's published rules, signed (`nest-rules.md` § Carriage —
+            // the self-description). An unreadable row fails the read rather
+            // than answering "no rules": a member keeps its last-accepted rules
+            // on a failed read, and would drop them on a false absence.
+            let content_policy = crate::content_policy_handlers::rules_in_force(&state)
+                .await
+                .map_err(crate::rpc_errors::internal)?
+                .map(|stored| stored.policy);
             encode_reply(&NestInfoReply {
                 domain: info.domain,
                 nest_id: hex::encode(info.nest_id),
@@ -88,6 +96,7 @@ fn nest_info_handler() -> RpcHandler {
                     extra: Default::default(),
                 }),
                 moderation: ModerationInfo {
+                    content_policy,
                     extra: Default::default(),
                 },
                 web_serving_domain: Some(info.web_serving_domain),
@@ -179,9 +188,11 @@ fn setup_status_handler() -> RpcHandler {
                 admin_exists: s.admin_exists,
                 claimed: s.claimed,
                 node_mode: s.node_mode.as_str().to_string(),
+                content_scanners: s.content_scanners.as_wire_str().to_string(),
                 version: s.version.to_string(),
                 mail_subsystem_ok: s.mail_subsystem_ok,
                 auto_enable_mail_for_new_users: s.auto_enable_mail_for_new_users,
+                microsoft_registration: s.microsoft_registration,
                 registration_mode: s.registration_mode,
                 max_free_users: s.max_free_users,
                 subhandles: s.subhandles,
@@ -191,10 +202,12 @@ fn setup_status_handler() -> RpcHandler {
                 serving_port: s.serving_port,
                 fronted_by_router: s.fronted_by_router,
                 dkim_records: s.dkim_records,
+                os_host_status_present: s.os_host_status_present,
                 os_security_updates_pending: s.os_security_updates_pending,
                 os_reboot_pending: s.os_reboot_pending,
                 os_reboot_deferred_since: s.os_reboot_deferred_since,
                 os_last_patched_at: s.os_last_patched_at,
+                ssh_door_admitted_from: s.ssh_door_admitted_from,
                 web_app_origin: s.web_app_origin.mode,
                 web_app_origin_target: s.web_app_origin.redirect_target,
                 web_app_origin_domainless: s.web_app_origin.domainless,

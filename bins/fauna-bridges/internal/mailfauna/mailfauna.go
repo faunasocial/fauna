@@ -1387,6 +1387,21 @@ func ForwardSelfAlreadyForwarded(forwardedByValues []string, ourActorID string) 
 	return faunaFfi.ForwardSelfAlreadyForwarded(forwardedByValues, ourActorID)
 }
 
+// ForwardUnauthenticatedLocalFrom reports whether the MX door must not forward
+// a message: its From: names a served domain (or one beneath or above it), or
+// lies under primaryDomain's last two labels, and its inbound DMARC verdict
+// was not pass, so the unsigned forward's SRS envelope (on primaryDomain)
+// would SPF-align with the spoofed From: and pass DMARC downstream
+// (mail-forwarding.md § Spoof floor — a local From: must have authenticated).
+// A nil verdict set (verification never ran) counts as not pass.
+func ForwardUnauthenticatedLocalFrom(raw []byte, localDomains []string, primaryDomain string, v *AuthVerdicts) bool {
+	var dmarc faunaCore.DmarcVerdict = faunaCore.DmarcVerdictNone{}
+	if v != nil {
+		dmarc = v.Dmarc
+	}
+	return faunaFfi.ForwardUnauthenticatedLocalFrom(raw, localDomains, primaryDomain, dmarc)
+}
+
 // AtprotoIdentityKeyBundle re-exports the UniFFI-generated record carrying
 // the plaintext side of an HPKE-Opened `AtprotoIdentityBlob` — the
 // bridge-custodied half of the did:plc key-custody split (signing + junior
@@ -1549,6 +1564,8 @@ const (
 //   - credentialID: the credential identifier the blob is sealed
 //     under; bound into the AAD for substitution-resistance.
 //   - kind: which KDF arm to dispatch.
+//   - source: the attempt's client address, the KDF gate's fairness key
+//     (an Argon2id unwrap waits at most kdfMaxWait, then fails ErrKDFBusy).
 //
 // The bridge MUST call MLSCapability.Zeroize() on session close;
 // the generated finalizer also runs Zeroize on GC as a backstop.
@@ -1558,7 +1575,13 @@ func UnwrapMLSBlob(
 	actorID []byte,
 	credentialID string,
 	kind KdfKind,
+	source string,
 ) (*MLSCapability, error) {
+	release, err := acquireKDF(kind, source)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return faunaFfi.UnwrapMsekBlob(blobBytes, credential, actorID, credentialID, kind)
 }
 
@@ -1597,8 +1620,9 @@ type SubmissionTokenFfi = faunaFfi.SubmissionTokenFfi
 //     the AAD for substitution-resistance.
 //   - kind: which KDF arm to dispatch (Argon2id for PLAIN, Hkdf for
 //     OAUTHBEARER).
+//   - source: the attempt's client address, the KDF gate's fairness key.
 //
-// Returns nil + error on any failure. The plaintext token carries no
+// Returns nil + error on any failure (ErrKDFBusy when the gate had no slot). The plaintext token carries no
 // secret material (just signed policy data), so callers don't need to
 // zeroize it on session close.
 //
@@ -1610,8 +1634,14 @@ func UnsealSubmissionTokenBlob(
 	actorID []byte,
 	credentialID string,
 	kind KdfKind,
+	source string,
 ) (*SubmissionTokenFfi, error) {
+	release, err := acquireKDF(kind, source)
+	if err != nil {
+		return nil, err
+	}
 	tok, err := faunaFfi.UnsealSubmissionTokenBlob(blobBytes, credential, actorID, credentialID, kind)
+	release()
 	if err != nil {
 		return nil, err
 	}

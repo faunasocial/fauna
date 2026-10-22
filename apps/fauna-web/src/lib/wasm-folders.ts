@@ -1,14 +1,15 @@
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
+import { registerIdentityStoreChunk } from './identity-store';
 import { sharedAccountPort } from './account-runtime';
 import type { DevicesMachine, SharedRpcPort } from '../../static/fauna_wasm_folders.js';
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 import type {
   CustodyFacetView,
   DeviceSummary,
   FolderMember,
   FolderSummary,
   PlaceRow,
-} from '$lib/devices-machine';
+} from '#lib/devices-machine';
 
 // Loader for the folder / Devices WASM chunk (`libs/fauna-wasm-folders`:
 // `DevicesMachine` + the embedded `FolderWizardMachine`). A separate wasm
@@ -19,7 +20,7 @@ import type {
 // elsewhere would hit uninitialized memory).
 //
 // The Devices page builds one `DevicesMachine` over the SPA singleton's socket,
-// lent through `sharedRpcPort` (`$lib/rpc`) — pure data across the chunk
+// lent through `sharedRpcPort` (`#lib/rpc`) — pure data across the chunk
 // boundary, one WebSocket per actor; see the chunk's constructor doc.
 
 let wasmModule: typeof import('../../static/fauna_wasm_folders.js') | null = null;
@@ -36,7 +37,10 @@ export function ensureFoldersWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_folders.js');
-      await mod.default(`${base}/fauna_wasm_folders_bg.wasm`);
+      await mod.default(asset('fauna_wasm_folders_bg.wasm'));
+      // The identity store's key, if this page holds it, goes in before
+      // anything reads the registry through this chunk (identity-store.ts).
+      registerIdentityStoreChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -59,7 +63,7 @@ export interface DevicesMachineObserver {
 
 /**
  * Build the page-level `DevicesMachine` over the SPA singleton's socket —
- * `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`. `secretHex` is the
+ * `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`. `secretHex` is the
  * owner's own actor secret: the folder create and delete write the set's
  * custody under it before the nest call. State starts empty — the caller
  * drives `refresh()`.
@@ -451,7 +455,7 @@ export async function custodyRevoke(
  * One stored follow record, as [`followPublicFolder`] / [`followedFolders`]
  * resolve it — the record WITHOUT an availability verdict. Rows that carry one
  * come from the snapshot's `followed` ({@link FollowedFolderSummary}'s home,
- * `$lib/devices-machine`); this is the raw `fauna.state.follows` row value
+ * `#lib/devices-machine`); this is the raw `fauna.state.follows` row value
  * (serde snake_case, like every snapshot type).
  */
 export interface FollowedFolderRecord {

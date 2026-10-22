@@ -196,7 +196,7 @@ pub struct SyncChangesListRequest {
     /// set skips its own changes). Only honored in the `folder` branch.
     #[serde(default)]
     pub device_id: Option<String>,
-    /// Cross-nest relay (additive, Phase 2 — `federation.md` § Cross-nest
+    /// Cross-nest relay (additive, Phase 2 — `federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append): when set (with `channel_id`), the
     /// caller's own nest relays the read to the set's home nest via
     /// `fauna.federation.folder.changes.fetch` instead of reading locally.
@@ -469,7 +469,7 @@ pub struct SyncChangesListReply {
     /// [`crate::folders::ContentKeyGetReply::caller_access`]: same refresh
     /// contract, same `None` semantics (asserts nothing — never a revocation),
     /// same **advisory-for-UI-only, never an authz input** rule.
-    /// `docs/goal/architecture/federation.md` § Cross-nest → *Recipient-side
+    /// `docs/goal/architecture/federation-shared-folders.md` § Cross-nest → *Recipient-side
     /// access discovery*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_access: Option<String>,
@@ -574,7 +574,7 @@ pub struct SyncChangeRecordRequest {
     /// nest stores it opaque and surfaces it via `fauna.media.list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thumbnail_hash: Option<String>,
-    /// Cross-nest relay (additive, Phase 3 — `federation.md` § Cross-nest shared
+    /// Cross-nest relay (additive, Phase 3 — `federation-shared-folders.md` § Cross-nest shared
     /// folders + channel append): when set (with `channel_id`), a **writer**
     /// member's own nest relays the record to the set's home nest via
     /// `fauna.federation.folder.changes.record` instead of recording locally.

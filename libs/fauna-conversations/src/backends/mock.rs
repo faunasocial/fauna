@@ -18,6 +18,9 @@ use std::sync::Mutex;
 pub struct MockRailBackend {
     pub rail: Rail,
     pub sent: Mutex<Vec<MessageSnapshot>>,
+    /// What [`RailBackend::own_withheld_records`] answers — the account's
+    /// own queue rows for withheld conversation records.
+    pub withheld_records: Mutex<Vec<crate::message::WithheldRecord>>,
     pub resolve_overrides: Mutex<std::collections::HashMap<String, ResolveResult>>,
     /// Optional self address for test scenarios that need `me_actor()` to resolve
     /// (e.g. the reactions/delete manager tests). Defaults to `None`.
@@ -91,6 +94,14 @@ pub struct MockRailBackend {
     /// (`room_invitations`). Empty by default. Accepting or declining one
     /// drops it, the way a settled inbox envelope stops being listed.
     room_invitations: Mutex<Vec<crate::room::RoomInvitation>>,
+    /// What `room_search` answers, per thread — the home nest's hits. A thread
+    /// with none answers `NotSupported`, the trait's default.
+    room_search_answers:
+        Mutex<std::collections::HashMap<ThreadId, crate::backend::RoomSearchAnswer>>,
+    /// The envelopes `read_room_search_post` answers, by post id hex — the
+    /// post-read seam's stand-in. An id with none answers `NotSupported`.
+    room_search_posts:
+        Mutex<std::collections::HashMap<String, crate::backend::RoomSearchPostEnvelope>>,
 }
 
 impl MockRailBackend {
@@ -98,6 +109,7 @@ impl MockRailBackend {
         Self {
             rail,
             sent: Mutex::new(Vec::new()),
+            withheld_records: Mutex::new(Vec::new()),
             resolve_overrides: Mutex::new(Default::default()),
             self_address: Mutex::new(None),
             mint_on_ensure: Mutex::new(0),
@@ -113,7 +125,35 @@ impl MockRailBackend {
             sent_attachments: Mutex::new(Vec::new()),
             resolve_calls: Mutex::new(Vec::new()),
             room_invitations: Mutex::new(Vec::new()),
+            room_search_answers: Mutex::new(Default::default()),
+            room_search_posts: Mutex::new(Default::default()),
         }
+    }
+
+    /// Answer every search of `thread`'s room with `answer` from now on (see
+    /// the `room_search_answers` field).
+    pub fn set_room_search_answer(
+        &self,
+        thread: ThreadId,
+        answer: crate::backend::RoomSearchAnswer,
+    ) {
+        self.room_search_answers
+            .lock()
+            .unwrap()
+            .insert(thread, answer);
+    }
+
+    /// Serve `envelope` for post hit `post_id_hex` (see the
+    /// `room_search_posts` field).
+    pub fn set_room_search_post(
+        &self,
+        post_id_hex: String,
+        envelope: crate::backend::RoomSearchPostEnvelope,
+    ) {
+        self.room_search_posts
+            .lock()
+            .unwrap()
+            .insert(post_id_hex, envelope);
     }
 
     /// Every raw address [`RailBackend::resolve_address`] was called with, in
@@ -223,12 +263,42 @@ impl RailBackend for MockRailBackend {
         self.rail
     }
 
+    async fn own_withheld_records(&self) -> Result<Vec<crate::message::WithheldRecord>, String> {
+        Ok(self.withheld_records.lock().unwrap().clone())
+    }
+
     fn seated_on_room(&self, thread: &ThreadDetail) -> bool {
         !self.unseated.lock().unwrap().contains(&thread.thread_id)
     }
 
     async fn room_invitations(&self) -> Result<Vec<crate::room::RoomInvitation>, BackendError> {
         Ok(self.room_invitations.lock().unwrap().clone())
+    }
+
+    async fn room_search(
+        &self,
+        thread_id: ThreadId,
+        _query: String,
+    ) -> Result<crate::backend::RoomSearchAnswer, BackendError> {
+        self.room_search_answers
+            .lock()
+            .unwrap()
+            .get(&thread_id)
+            .cloned()
+            .ok_or(BackendError::NotSupported)
+    }
+
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        _home_nest_url: Option<String>,
+    ) -> Result<crate::backend::RoomSearchPostEnvelope, BackendError> {
+        self.room_search_posts
+            .lock()
+            .unwrap()
+            .get(&post_id_hex)
+            .cloned()
+            .ok_or(BackendError::NotSupported)
     }
 
     async fn accept_room_invitation(
@@ -441,6 +511,7 @@ impl RailBackend for MockRailBackend {
                 deleted: false,
                 is_own: false,
                 legal_takedown_ref: msg.legal_takedown_ref,
+                admin_block_reason: msg.admin_block_reason,
                 labels: vec![],
                 // Carried through from the driver, never invented here: the
                 // driver is the layer that holds the sealed record bytes the
@@ -448,6 +519,11 @@ impl RailBackend for MockRailBackend {
                 // not on the plane at all.
                 plane_ref: msg.plane_ref,
                 can_delete: false,
+                undelivered: false,
+                warmup_hold: None,
+                scan_result_lines: Vec::new(),
+                delivered_to: None,
+                withheld: None,
             },
         })
     }
@@ -593,6 +669,7 @@ impl crate::backend::ConversationsRpc for InertConversationsRpc {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
         _b: Vec<u8>,
     ) -> Result<(), crate::backend::ConvRpcError> {
@@ -602,6 +679,7 @@ impl crate::backend::ConversationsRpc for InertConversationsRpc {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
     ) -> Result<Option<Vec<u8>>, crate::backend::ConvRpcError> {
         Ok(None)

@@ -31,11 +31,11 @@ import {
   renderDocumentQuotedPost,
   renderDocumentFirstImageHash,
   renderDocumentMediaBlocks,
-  renderDocumentProxiedImages,
+  renderDocumentProxiedPostImage,
   renderDocumentResolvingLinkPreviewUrls,
   renderDocumentResolvedLinkPreviews,
-} from '$lib/wasm';
-import { IDS } from '$lib/generated/uiIds';
+} from '#lib/wasm';
+import { IDS } from '#lib/generated/uiIds';
 
 // The serde **externally-tagged** JS shapes of `fauna_core::render` — each enum value is an
 // object with a single key naming the variant. Kept in lockstep with `libs/fauna-core/src/render.rs`.
@@ -161,6 +161,10 @@ export interface QuotedPostEmbed {
   verification: string;
   authoring_origin: string;
   legal_takedown_ref: string | null;
+  /** The admin block's reason token (`moderation.md` § Admin block of a reported
+   *  item): the card paints the shared notice in place of a withheld body, or
+   *  beside the author's own. Absent/`null` for every unblocked quote. */
+  admin_block_reason?: string | null;
 }
 
 /** The payload of a `RenderBlock::QuotedMessage` — the serde (snake_case) shape of the
@@ -404,13 +408,14 @@ export function mediaImageHash(doc: RenderDocument | undefined): string | null {
 
 /**
  * The nest-relative path a post's single `post-image` slot paints when it is a bridged picture —
- * the first `ProxiedImage` of a post with no blob image (render-model.md § D6c; the precedence of
- * `RenderDocument::proxied_post_image`), or null. The post-detail pane's one image reads it; the
- * list card paints every media block.
+ * the first `ProxiedImage` of a post with no blob image (render-model.md § D6c), or null. The
+ * precedence is Rust's — `RenderDocument::proxied_post_image_ref` over the
+ * `renderDocumentProxiedPostImage` wasm boundary; nothing is composed here. The post-detail pane's
+ * one image reads it; the list card paints every media block.
  */
 export function proxiedPostImage(doc: RenderDocument | undefined): { path: string; alt: string } | null {
-  if (!doc || !doc.blocks || mediaImageHash(doc)) return null;
-  return renderDocumentProxiedImages(doc)[0] ?? null;
+  if (!doc || !doc.blocks) return null;
+  return renderDocumentProxiedPostImage(doc);
 }
 
 /**

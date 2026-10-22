@@ -322,6 +322,11 @@ public struct RecoveryKitSection: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        if let line = progress.periodRotation {
+            automationText(Ids.recoveryKitPeriodRotationStatus, renderLocalizedText(line))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
         // Leg 5 — always nil on this app today; see `AftermathProgress.corpusReseal`.
         if let line = progress.corpusReseal {
             automationText(Ids.recoveryKitCorpusResealStatus, renderLocalizedText(line))

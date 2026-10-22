@@ -123,8 +123,8 @@ public static class Providers
             Capabilities: new[] { Capability.Vps },
             CorsPolicy: CorsPolicy.Open,
             Fields: new[] { new FieldMeta("app-key", FieldType.Secret, "provisioning.ovh.app_key", true, new[] { Capability.Vps }), new FieldMeta("app-secret", FieldType.Secret, "provisioning.ovh.app_secret", true, new[] { Capability.Vps }), new FieldMeta("consumer-key", FieldType.Secret, "provisioning.ovh.consumer_key", true, new[] { Capability.Vps }) },
-            PostVerifySelect: new PostVerifySelect("project-select", "provisioning.ovh.project", "projects", true),
-            CuratedOffers: System.Array.Empty<string>(),
+            PostVerifySelect: new PostVerifySelect("location-select", "provisioning.ovh.location", "regions", true),
+            CuratedOffers: new[] { "d2-2", "d2-4", "d2-8", "b2-7" },
             TldPricingEndpoint: null,
             RegistrarNotesKey: null
         ),

@@ -39,6 +39,8 @@ account-driver = [
     "dep:async-trait",
     "dep:fauna-client-delegation",
     "dep:fauna-client-personalization",
+    # `custodian_restore`'s bound-identity read (`nest_trust::read_bound_identity`).
+    "fauna-client-core/auth-ceremony",
 ]
 # Escape hatch to build the driver's `FAUNA_E2E_STATED_ROW` override into a
 # --release profile (debug_assertions off) — the engine's `e2e-agent` forwards

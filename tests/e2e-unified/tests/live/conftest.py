@@ -5,16 +5,18 @@ This is the one e2e tier that stands up a *real, paid* VPS at a real cloud
 provider, drives DNS in a real zone, and tears it all down. It is therefore
 **opt-in** and never runs in default CI:
 
-  * ``HETZNER_API_TOKEN`` — REQUIRED, from the env **or the token file of the
-    cloud project the run's box lives in** (``~/.config/fauna/cloud/uat.token``
-    for the uat boxes and the throwaway ones; the env wins when both are set —
-    ``helpers.live_provision.hetzner_token``, the map in
-    ``scripts/_cloud_project.py``). A single
-    Hetzner **Cloud** API token with Read&Write on the project. It covers *both*
-    server provisioning and DNS (Hetzner's standalone DNS API went read-only
-    2026-05-20; zones are now Cloud resources under the same Bearer token —
-    ``i18n/providers.yaml`` hetzner ``api-token`` ``kinds:[vps,dns]``). This is
-    the *only* required input.
+  * ``HETZNER_API_TOKEN`` — REQUIRED, from the env **or the token files of the
+    two cloud projects the run touches**: the box's (``~/.config/fauna/cloud/
+    uat.token`` for the uat boxes and the throwaway ones) for its server and
+    firewall, and the zone's (``~/.config/fauna/cloud/zone.token`` under
+    ``fauna.build``) for its DNS records — the env wins for both when set
+    (``helpers.live_provision.hetzner_token``, the map in
+    ``scripts/_cloud_project.py``; the cut: ``deployment-threat-model.md``
+    § Concern 2, path 5). Each is a Hetzner **Cloud** API token with Read&Write
+    on its project (Hetzner's standalone DNS API went read-only 2026-05-20;
+    zones are Cloud resources, a token reaches every resource of its project —
+    ``i18n/providers.yaml`` hetzner ``api-token`` ``kinds:[vps,dns]``). These
+    are the *only* required input.
   * ``FAUNA_E2E_LIVE=1`` — REQUIRED explicit opt-in (belt-and-suspenders so a
     stray token in the env can never trigger a paid provision). ``just
     e2e-live-provision`` sets it for you.
@@ -97,15 +99,15 @@ def _live_provisioning_gate(request):
     for ``tests/live/``, but the marker check keeps it harmless regardless)."""
     if request.node.get_closest_marker("live_provisioning") is None:
         return
-    token = hetzner_token()
-    if not token:
-        pytest.skip(
-            "live Hetzner provisioning needs a Cloud R/W token: " + hetzner_token_hint()
-        )
-    # A file-sourced token is promoted into the env so the four live tests and
-    # the `hetzner` fixture keep their one name (`os.environ["HETZNER_API_TOKEN"]`)
-    # — one resolver, one home for every reader downstream of this gate.
-    os.environ.setdefault("HETZNER_API_TOKEN", token)
+    for purpose in ("cloud", "dns"):
+        if not hetzner_token(purpose=purpose):
+            pytest.skip(
+                f"live Hetzner provisioning needs a {purpose} Cloud R/W token: "
+                + hetzner_token_hint(purpose=purpose)
+            )
+    # Never promote a file-sourced token into the env: the env wins for BOTH
+    # purposes, so promoting the cloud token would hand it to every DNS write
+    # too. Every reader downstream of this gate calls `hetzner_token` itself.
     if not _truthy(os.environ.get("FAUNA_E2E_LIVE")):
         pytest.skip(
             "live Hetzner provisioning is opt-in (real € cost): set FAUNA_E2E_LIVE=1 "
@@ -113,15 +115,21 @@ def _live_provisioning_gate(request):
         )
 
 
-# ── Hetzner Cloud API (server + DNS, one token) ────────────────────────────
+# ── Hetzner Cloud API (servers with one token, DNS with another) ──────────
 class HetznerApi:
     """Thin direct client for the Hetzner Cloud API, mirroring the wire shapes
     the production crate uses (`libs/fauna-provisioning/src/{vps,dns}/hetzner.rs`).
     Used only for zone resolution, the DKIM TXT publish, and teardown — the
-    *provisioning* itself goes through the real crate via the onboarding bridge."""
+    *provisioning* itself goes through the real crate via the onboarding bridge.
 
-    def __init__(self, token: str, base: str = HETZNER_API, timeout: float = 30.0):
+    Two tokens: ``token`` (the box's cloud project) for servers, ``dns_token``
+    (the zone's project) for zones and RRsets — under ``fauna.build`` they are
+    different projects' (``deployment-threat-model.md`` § Concern 2, path 5)."""
+
+    def __init__(self, token: str, dns_token: str, base: str = HETZNER_API,
+                 timeout: float = 30.0):
         self._h = {"Authorization": f"Bearer {token}"}
+        self._dns_h = {"Authorization": f"Bearer {dns_token}"}
         self._base = base
         self._timeout = timeout
 
@@ -134,7 +142,7 @@ class HetznerApi:
                 params.update(extra_params)
             r = requests.get(
                 f"{self._base}{path}",
-                headers=self._h,
+                headers=self._dns_h if path.startswith("/zones") else self._h,
                 params=params,
                 timeout=self._timeout,
             )
@@ -161,6 +169,14 @@ class HetznerApi:
         heuristic — cleaner, and robust to a server-name scheme change."""
         return self._get_paged("/servers", "servers", {"label_selector": selector})
 
+    # GET /v1/servers/{id} -> {"server": {"id", "image": {"name", "os_flavor", "os_version"}, ...}}
+    def get_server(self, server_id) -> dict:
+        r = requests.get(
+            f"{self._base}/servers/{server_id}", headers=self._h, timeout=self._timeout
+        )
+        r.raise_for_status()
+        return r.json()["server"]
+
     def delete_server(self, server_id) -> None:
         r = requests.delete(
             f"{self._base}/servers/{server_id}", headers=self._h, timeout=self._timeout
@@ -178,7 +194,7 @@ class HetznerApi:
         requires the TXT value zone-file-quoted."""
         r = requests.post(
             f"{self._base}/zones/{zone_id}/rrsets",
-            headers=self._h,
+            headers=self._dns_h,
             json={"name": name, "type": "TXT", "ttl": ttl,
                   "records": [{"value": _zone_file_txt(value)}]},
             timeout=self._timeout,
@@ -194,7 +210,7 @@ class HetznerApi:
             return
         r = requests.post(
             f"{self._base}/zones/{zone_id}/rrsets/{name}/{rtype}/actions/remove_records",
-            headers=self._h,
+            headers=self._dns_h,
             json={"records": [{"value": v} for v in values]},
             timeout=self._timeout,
         )
@@ -204,7 +220,7 @@ class HetznerApi:
 
 @pytest.fixture
 def hetzner() -> HetznerApi:
-    return HetznerApi(hetzner_token())
+    return HetznerApi(hetzner_token(), hetzner_token(purpose="dns"))
 
 
 @pytest.fixture

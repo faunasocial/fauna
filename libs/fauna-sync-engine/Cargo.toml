@@ -18,6 +18,12 @@ default = ["format_blob", "format_text"]
 # raw engine (the Go mail-bridge builds fauna-ffi `--no-default-features`)
 # compiles none of it.
 engine-lifecycle = ["dep:fauna-client-config"]
+# The nest-held pull-back host (`reseed_pull::pull_back_from_destination`): it
+# signs the re-homed change records with the owner's identity key through
+# `fauna_client_folders::record_signing`, which sits behind that crate's `mls`
+# feature. Its own feature so a seed-holding app (tui, linux) takes it while
+# the bearer-only sync agent keeps `engine-lifecycle` free of the MLS graph.
+pull-back = ["engine-lifecycle", "fauna-client-folders/mls"]
 # The account plane's `fauna-client-config` seam (`fauna-account-plane`'s
 # feature of the same name owns what it gates). Needs only the lean
 # `fauna-client-config` (wasm-clean), deliberately NOT the whole

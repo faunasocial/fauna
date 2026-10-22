@@ -6,6 +6,12 @@
 //! per docs/goal/architecture/message-segment-store.md § Segment file
 //! format). HTTP/1.1 `Range` supported for resumable fetches (`crate::http_range`).
 //!
+//! Every half is **streamed** off its file (`crate::http_range::serve_file`),
+//! never read whole: a segment has no size ceiling, so a whole-file read would
+//! allocate whatever one scope wrote in one month, once per request, in the
+//! process every other user of this nest shares (`message-segment-store.md`
+//! § Segment size).
+//!
 //! Auth: BearerAuth, owner-or-custodian — the path's `actor_hex` must equal
 //! the Bearer's actor, or the Bearer must hold a live custody row covering
 //! that owner's `content:<kind>:<actor_hex>` plane
@@ -30,7 +36,7 @@
 //! holding the `.dat` alone could not be reopened by anything
 //! (`message-segment-store.md` § Cross-location backup protocol → *The backup
 //! corpus carries the pair*). The nest's own coordinator reads the same pair
-//! off disk (`SegmentManager::read_segment_pair`) rather than through here.
+//! off disk (`SegmentManager::open_segment_pair`) rather than through here.
 //! So the pair is served as two parts of one route family rather than as a
 //! second plane — they are one file pair, they share the owner-only auth and
 //! the finalize-on-read, and they retire together if the by-CID byte plane
@@ -45,7 +51,6 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -121,7 +126,7 @@ async fn serve_part(
             Part::Dat => fauna_peer_sync::store_serve::SegmentPart::Dat,
             Part::Meta => fauna_peer_sync::store_serve::SegmentPart::Meta,
         };
-        let file_bytes = match crate::custody_fleet::serve_segment_part(
+        let body = match crate::custody_fleet::serve_segment_part(
             &state,
             &bearer.0.0,
             &actor_bytes,
@@ -131,7 +136,7 @@ async fn serve_part(
         )
         .await
         {
-            Ok(Some(bytes)) => bytes,
+            Ok(Some(body)) => body,
             Ok(None) => return StatusCode::NOT_FOUND.into_response(),
             Err(FleetSegmentError::Refused) => {
                 return ApiError::forbidden("non-owner").into_response();
@@ -141,7 +146,14 @@ async fn serve_part(
                 return ApiError::internal("read segment file").into_response();
             }
         };
-        return serve_bytes(&headers, file_bytes);
+        return match body {
+            fauna_peer_sync::store_serve::SegmentPartBody::Dat(file) => {
+                serve_file(&headers, file).await
+            }
+            fauna_peer_sync::store_serve::SegmentPartBody::Meta(bytes) => {
+                serve_bytes(&headers, bytes)
+            }
+        };
     }
 
     if actor_bytes != bearer.0.0
@@ -178,29 +190,44 @@ async fn serve_part(
         Part::Meta => mgr.meta_path(&actor_bytes, segment_id),
     };
 
-    let file_bytes = match tokio::fs::read(&path).await {
-        Ok(b) => b,
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return StatusCode::NOT_FOUND.into_response();
         }
         Err(e) => {
-            tracing::error!("read segment file: {e}");
+            tracing::error!("open segment file: {e}");
             return ApiError::internal("read segment file").into_response();
         }
     };
 
-    serve_bytes(&headers, file_bytes)
+    serve_file(&headers, file).await
 }
 
-/// Answer one segment half's bytes, honouring `Range` — the one response shape
-/// both the owner/custodian path and the custodied-fleet path return.
+/// Answer one segment half off its open file, honouring `Range` — the response
+/// both the owner/custodian path and the custodied-fleet path's `.dat` return,
+/// streamed through the nest's one file-serving door.
+async fn serve_file(headers: &HeaderMap, file: tokio::fs::File) -> axum::response::Response {
+    match crate::http_range::serve_file(headers, file, "application/octet-stream").await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("serve segment file: {e}");
+            ApiError::internal("read segment file").into_response()
+        }
+    }
+}
+
+/// Answer a held sidecar's bytes, honouring `Range` — the custodied-fleet
+/// path's `.meta`, which its store keeps in its segment row rather than in a
+/// file of its own.
 fn serve_bytes(headers: &HeaderMap, file_bytes: Vec<u8>) -> axum::response::Response {
     // Range support — partial fetch on resume, through the nest's one range
     // parser (`crate::http_range`, shared with the blob route).
     let total = file_bytes.len() as u64;
     match crate::http_range::requested(headers, total) {
         crate::http_range::ByteRange::Satisfiable { start, end } => {
-            let slice = Bytes::copy_from_slice(&file_bytes[start as usize..=end as usize]);
+            let slice =
+                axum::body::Bytes::copy_from_slice(&file_bytes[start as usize..=end as usize]);
             return crate::http_range::partial_content(Response::builder(), start, end, total)
                 .header(header::CONTENT_TYPE, "application/octet-stream")
                 .body(axum::body::Body::from(slice))
@@ -219,7 +246,7 @@ fn serve_bytes(headers: &HeaderMap, file_bytes: Vec<u8>) -> axum::response::Resp
             (header::CONTENT_TYPE, "application/octet-stream"),
             (header::ACCEPT_RANGES, "bytes"),
         ],
-        Bytes::from(file_bytes),
+        axum::body::Bytes::from(file_bytes),
     )
         .into_response()
 }

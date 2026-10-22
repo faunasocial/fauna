@@ -16,6 +16,15 @@ public final class NotificationsVM {
     public private(set) var unreadCount = 0
     public var errorMessage: String?
 
+    /// Row ids the user tapped `notification-muted-reveal-button` on
+    /// (`notifications.md` § Muted words, rule 3: per-row, session-local, the
+    /// mute stays). A shared static like `FeedVM.revealedMutedPostIds`, so a
+    /// reveal outlives the page's own mount for the session and
+    /// `ActorScope.resetSharedState` drops it with the account. Observed
+    /// through ``revealTick``, since a static is not `@Observable` state.
+    public static var revealedMutedIds: Set<String> = []
+    private var revealTick = 0
+
     private var api: APIClient?
     private var actorId: String?
 
@@ -82,6 +91,22 @@ public final class NotificationsVM {
         guard let client else { return }
         configure(api: client.api, actorId: actorId)
         await loadNotifications()
+    }
+
+    /// Whether this row paints collapsed: the shared decision over the
+    /// process-held list (``MutedWordsHolder``), unless revealed this session.
+    /// Reading both the holder and ``revealTick`` here is what re-renders the
+    /// page when a word is muted or a row revealed.
+    public func isCollapsed(_ item: NotificationItem) -> Bool {
+        _ = revealTick
+        return !Self.revealedMutedIds.contains(item.id)
+            && notificationMuted(item, mutedKeywords: MutedWordsHolder.shared.words)
+    }
+
+    /// The collapsed row's one gesture: paint it in full for the session.
+    public func revealMuted(_ item: NotificationItem) {
+        Self.revealedMutedIds.insert(item.id)
+        revealTick += 1
     }
 
     public func markAllRead() async {

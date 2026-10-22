@@ -355,6 +355,40 @@ fn validate_policy(p: &ReachPolicy) -> Result<(), RpcError> {
                 )));
             }
         }
+        // A present rule document is the guardian's, validated by the one
+        // shared validator for publisher `guardian` (`nest-rules.md` § The
+        // nest content policy → *One grammar, three publishers*). The editor
+        // pre-validates with the same module, so this is a defence; a newer
+        // grammar than this nest implements is refused rather than stored as
+        // rules no device on this nest's build could apply.
+        if let Some(document) = &cp.document {
+            use fauna_core::content_policy::{
+                MAX_CONTENT_POLICY_PAYLOAD_BYTES, PolicyStatus, Publisher, encode_document,
+            };
+            let encoded = encode_document(document)
+                .map_err(|e| invalid_params(&format!("content_policy.document: {e}")))?;
+            if encoded.len() > MAX_CONTENT_POLICY_PAYLOAD_BYTES {
+                return Err(invalid_params(&format!(
+                    "content_policy.document is {} bytes, over the \
+                     {MAX_CONTENT_POLICY_PAYLOAD_BYTES}-byte bound",
+                    encoded.len()
+                )));
+            }
+            match document.status(&Publisher::Guardian) {
+                PolicyStatus::Applied => {}
+                PolicyStatus::InertUnimplementedVersion { version } => {
+                    return Err(invalid_params(&format!(
+                        "content_policy.document is grammar version {version}, \
+                         which this nest does not implement"
+                    )));
+                }
+                PolicyStatus::Malformed(defect) => {
+                    return Err(invalid_params(&format!(
+                        "content_policy.document: {defect}"
+                    )));
+                }
+            }
+        }
     }
     // A *present* screen_time sub-document is range/shape-checked by the shared
     // rule on the policy type itself (family-safety.md § Screen time — window

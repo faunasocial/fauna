@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connectionStatus, identity } from '$lib/store';
+  import { connectionStatus, identity } from '#lib/store';
   import {
     fetchMessageKindSnapshots,
     fetchRestoreHistory,
@@ -13,15 +13,17 @@
     backupDestinationStatus,
     backupAuditRunPass,
     backupRecoverFromDestination,
+    backupPullBackFromDestination,
     type DestinationAuditRow,
+    type ReseedResult,
     type MessageKindSnapshot,
     type RestoreHistoryRow,
     type RestoreDivergenceRow,
     type BackupDestination,
     type BackupDestinationStatus,
-  } from '$lib/rpc';
-  import { nodeUrl } from '$lib/api';
-  import { sharedRpcPort, downloadSnapshotFileBytes } from '$lib/rpc';
+  } from '#lib/rpc';
+  import { nodeUrl } from '#lib/api';
+  import { sharedRpcPort, downloadSnapshotFileBytes } from '#lib/rpc';
   import {
     ensureWasm,
     backupDestinationLabel,
@@ -32,28 +34,31 @@
     backupSelfAuditIsAlerting,
     backupSelfReportedAlertReason,
     snapshotRestoreOptionLabel,
-  } from '$lib/wasm';
-  import { makeOfflineGate } from '$lib/offline-gate';
+    backupReseedRows,
+    backupReseedRunsPullBack,
+  } from '#lib/wasm';
+  import { makeOfflineGate } from '#lib/offline-gate';
   import {
     createBackupsMachine,
     busyText as sharedBusyText,
     snapshotStateText,
     snapshotIntegrityText,
-  } from '$lib/wasm-backups';
+  } from '#lib/wasm-backups';
   import {
     snapshotLifecycle,
+    type BackupFolderRow,
     type BackupOp,
     type BackupsSnapshot,
     type SnapshotFileRow,
     type SnapshotRow,
-  } from '$lib/backups-machine';
-  import { bytesFromHex } from '$lib/hex';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
+  } from '#lib/backups-machine';
+  import { bytesFromHex } from '#lib/hex';
+  import { resolveKey, resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import type { BackupsMachine } from '../../../static/fauna_wasm_backups.js';
   import { onMount, onDestroy } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
+  import { onStoreChange } from '#lib/store-change';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
   import {
     byteSize,
     backupLastUploadText,
@@ -63,13 +68,13 @@
     backupAuditAlertText,
     backupDestinationKindText,
     backupUsageText,
-  } from '$lib/value-format';
-  import { auditAlertBanners } from '$lib/backup-audit-alerts';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/value-format';
+  import { auditAlertBanners } from '#lib/backup-audit-alerts';
+  import { IDS } from '#lib/generated/uiIds';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). The verdict is the shared rule's, never a class
-  // test written here; `$lib/offline-gate` owns how a reactive tree obeys it.
+  // test written here; `#lib/offline-gate` owns how a reactive tree obeys it.
   const offlineGate = makeOfflineGate(offlineAffordance, connectionStatus.subscribe);
 
   let error = $state('');
@@ -176,6 +181,16 @@
     | { kind: 'running' }
     | { kind: 'done'; text: string };
   let recoverView: RecoverView = $state({ kind: 'closed' });
+  // The restore after losing the nest (backups.md § Restore after losing the
+  // nest): closed → confirming one nest-kind row → running → done with the
+  // shared result lines. linux's reseed confirm + result, the same states; web
+  // hosts only the nest-held pull-back (it is never a custodian).
+  type ReseedView =
+    | { kind: 'closed' }
+    | { kind: 'confirming'; destinationId: string; name: string }
+    | { kind: 'running' }
+    | { kind: 'done'; text: string };
+  let reseedView: ReseedView = $state({ kind: 'closed' });
 
   // The restore button arms only when the typed id exactly matches the
   // selected snapshot's id (same friction bar as the immediate-delete modal).
@@ -312,6 +327,34 @@
 
   async function triggerSnapshot() {
     await machine?.createSnapshot();
+    await rereadRestoreSnapshots();
+  }
+
+  /** A selector row's label: a folder's own name, or a kind entry's label key
+   *  resolved (§ Snapshot-list shape → *Kind entries*). Paint-only — the
+   *  option's value stays the key. */
+  function folderRowLabel(row: BackupFolderRow): string {
+    return row.message_kind ? resolveKey(row.name) : row.name;
+  }
+
+  /** Re-read the restore picker after a gesture that changed which snapshots
+   *  exist: a kind entry's snapshot restores from that picker, so one just
+   *  taken is listed there without a page re-entry (§ Snapshot-list shape →
+   *  *Kind entries*). A failed read keeps what the picker paints — the page's
+   *  next whole read reports a real fault. */
+  async function rereadRestoreSnapshots() {
+    const id = $identity;
+    if (!id) return;
+    let rows: MessageKindSnapshot[];
+    try {
+      rows = await fetchMessageKindSnapshots(id.secretHex);
+    } catch {
+      return;
+    }
+    restoreSnapshots = rows;
+    if (!rows.some((r) => String(r.id) === selectedRestoreId)) {
+      selectedRestoreId = rows.length > 0 ? String(rows[0].id) : '';
+    }
   }
 
   function goBack() {
@@ -417,7 +460,7 @@
     // builds only (testing.md § convention 15): a production `vite build` folds the
     // constant to false and strips the import.
     if (__FAUNA_E2E_AUTOMATION__) {
-      const { setBackupAuditRerunHook } = await import('$lib/backup-audit-e2e');
+      const { setBackupAuditRerunHook } = await import('#lib/backup-audit-e2e');
       setBackupAuditRerunHook(refreshAudit);
     }
     await ensureWasm();
@@ -464,7 +507,7 @@
     // Drop the rerun hook with the page, so the command fails loudly ("the Backups
     // page is not mounted") instead of poking a torn-down closure.
     if (__FAUNA_E2E_AUTOMATION__) {
-      void import('$lib/backup-audit-e2e').then((m) => m.setBackupAuditRerunHook(null));
+      void import('#lib/backup-audit-e2e').then((m) => m.setBackupAuditRerunHook(null));
     }
   });
 
@@ -474,6 +517,7 @@
     // `DeletionPending`.
     if (!confirm(t.backups.delete_snapshot_confirm)) return;
     await machine?.deleteSnapshot(snapId);
+    await rereadRestoreSnapshots();
   }
 
   // Recovery is offered ONLY out of `SoftDeleted` (backups.md § *Soft-deleted
@@ -481,6 +525,7 @@
   // guard below is the affordance rule, not the enforcement.
   async function handleUndeleteSnapshot(snapId: number) {
     await machine?.undeleteSnapshot(snapId);
+    await rereadRestoreSnapshots();
   }
 
   // --- Immediate-delete handlers (backups.md § User actions) ---
@@ -506,6 +551,7 @@
       immediateDeleteConfirmId,
       immediateDeleteAcknowledge,
     );
+    await rereadRestoreSnapshots();
   }
 
   /** Prune OPENS the dry-run preview; nothing is deleted until the user executes
@@ -519,6 +565,7 @@
 
   async function executePrune() {
     await machine?.pruneExecute();
+    await rereadRestoreSnapshots();
   }
 
   function cancelPrune() {
@@ -663,7 +710,7 @@
     showPageError(destinationsReadError);
   }
 
-  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // The open page's re-read on a store-change notice (`#lib/store-change`):
   // the destination list rests in the account store, so another device's add
   // or edit walking in repaints it. Level-shaped: skipped while a gesture is in
   // flight or overtaken by one (its own re-read follows), one read with no retries, a failed read
@@ -717,7 +764,7 @@
   // `backup-destination-last-upload-time` / `-backlog-count` text. The never-vs-real key
   // selection, the epoch-`0` guard, the seconds→ms conversion, and the absent-status 0
   // baseline all live in shared Rust (`fauna_core::format`), reached through
-  // `$lib/value-format` — the single web surface for these. No status entry = a
+  // `#lib/value-format` — the single web surface for these. No status entry = a
   // not-yet/failed read, which carries the same "never"/0 baseline as an empty one.
   function lastUploadText(destId: string): string {
     return backupLastUploadText(destStatus[destId]?.last_upload_time ?? null);
@@ -850,6 +897,63 @@
   // (`backup_destination_label`) — one source of truth across the six apps.
   function destLabel(d: BackupDestination): string {
     return backupDestinationLabel(d.display_name ?? null, d.destination_nest_url);
+  }
+
+  // --- The restore after losing the nest (backups.md § Restore after losing the
+  // nest; the leg: client-device-custodian.md § The nest-held pull-back) ---
+  //
+  // Web implements NO restore logic. Which rows carry the button is the shared
+  // `reseed_rows` over the legs web hosts (a surviving nest-kind row, never a
+  // custodian's), what the confirm runs is the shared `reseed_runs_pull_back`
+  // read at press time, and the run, its verdict and the post-ceremony
+  // re-enrollment are one `backupPullBackFromDestination` call into shared Rust.
+  // The page opens the confirm naming the nest, shows the run, renders the
+  // shared lines, and re-lists afterwards.
+  let reseedRowIds: string[] = $derived(
+    destinationsHydrated ? backupReseedRows($state.snapshot(destinations)) : [],
+  );
+
+  function openReseedConfirm(d: BackupDestination) {
+    if (reseedView.kind === 'running') return;
+    if (!backupReseedRunsPullBack($state.snapshot(destinations), d.destination_id)) return;
+    reseedView = { kind: 'confirming', destinationId: d.destination_id, name: destLabel(d) };
+  }
+
+  function cancelReseed() {
+    reseedView = { kind: 'closed' };
+  }
+
+  async function confirmReseed() {
+    const id = $identity;
+    if (!id || reseedView.kind !== 'confirming') return;
+    const { destinationId, name } = reseedView;
+    reseedView = { kind: 'running' };
+    error = '';
+    let result: ReseedResult;
+    try {
+      result = await backupPullBackFromDestination(id.secretHex, destinationId);
+    } catch (e: any) {
+      result = { stopped: e?.message ?? String(e), resultLines: [], isWhole: false, reenrollError: null };
+    }
+    if (result.stopped !== null) {
+      reseedView = { kind: 'closed' };
+      showPageError(t.backups.backup_reseed_failed({ reason: result.stopped }));
+      return;
+    }
+    reseedView = {
+      kind: 'done',
+      text: result.resultLines.map((line) => resolveLocalizedNested(line)).join('\n'),
+    };
+    if (result.reenrollError !== null) {
+      // The data IS back; say so, and say what did not happen. No re-list: its
+      // successful load would clear this message.
+      showPageError(
+        t.backups.backup_reseed_pull_back_reenroll_failed({ name, reason: result.reenrollError }),
+      );
+      return;
+    }
+    // Re-list: the re-enrolled row is read back from the box, never assumed.
+    await loadDestinations();
   }
 
   // --- The client-device destination kind (backups.md § Third destination kind) ---
@@ -1136,7 +1240,7 @@
       onchange={(e) => selectFolder((e.currentTarget as HTMLSelectElement).value)}
     >
       {#each snap?.folders ?? [] as fs}
-        <option value={fs.name}>{fs.name}</option>
+        <option value={fs.name}>{folderRowLabel(fs)}</option>
       {/each}
     </select>
     {#if (snap?.folders.length ?? 0) === 0}
@@ -1212,6 +1316,11 @@
         <tr><th>{t.backups.file}</th><th>{t.common.size}</th><th></th></tr>
       </thead>
       <tbody>
+        {#if snap.detail.message_kind}
+          <!-- A kind entry's snapshot holds messages, not files: one line says
+               where it restores from, never an empty list without a reason. -->
+          <tr><td colspan="3" class="muted">{t.backups.kind_snapshot_restores_below}</td></tr>
+        {/if}
         {#each snap.detail.files as file}
           <tr>
             <td>{file.path}</td>
@@ -1498,6 +1607,17 @@
             class="btn danger"
             onclick={() => armRemoveDest(d.destination_id)}
           >{t.backups.backup_destination_remove_button}</button>
+          <!-- The restore after losing the nest — present ONLY on the rows the
+               shared `reseed_rows` names (on web: a surviving nest-kind row,
+               the nest-held pull-back); disarmed while a run is in flight. -->
+          {#if reseedRowIds.includes(d.destination_id)}
+            <button
+              data-testid={IDS.BACKUP_DESTINATION_RESEED_BUTTON}
+              class="btn"
+              disabled={reseedView.kind === 'running'}
+              onclick={() => openReseedConfirm(d)}
+            >{t.backups.backup_destination_reseed_button}</button>
+          {/if}
           <!-- The post-succession review mark and its Keep half — present ONLY
                while this row is actually raised (succession-aftermath.md
                § Adjudicating what the aftermath carries across). Three shape
@@ -1554,6 +1674,32 @@
           >{t.backups.backup_destination_remove_confirm_button}</button>
         </div>
       </div>
+    {/if}
+
+    {#if reseedView.kind === 'confirming'}
+      <!-- Plain confirm, no re-type: the ceremony deletes nothing on either
+           side and refuses a lived-in nest by itself. It names the nest whose
+           copy it pulls back. -->
+      <div data-testid={IDS.BACKUP_DESTINATION_RESEED_CONFIRM_MODAL} class="dest-remove-confirm">
+        <p><strong>{t.backups.backup_reseed_pull_back_confirm_title({ name: reseedView.name })}</strong></p>
+        <p>{t.backups.backup_reseed_pull_back_confirm_body({ name: reseedView.name })}</p>
+        <div class="dest-form-actions">
+          <button
+            data-testid={IDS.BACKUP_DESTINATION_RESEED_CANCEL_BUTTON}
+            class="btn"
+            onclick={cancelReseed}
+          >{t.backups.backup_reseed_cancel_button}</button>
+          <button
+            data-testid={IDS.BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON}
+            class="btn primary"
+            onclick={confirmReseed}
+          >{t.backups.backup_reseed_confirm_button}</button>
+        </div>
+      </div>
+    {:else if reseedView.kind === 'running'}
+      <p data-testid={IDS.BACKUP_DESTINATION_RESEED_RESULT} class="recover-result">{t.backups.backup_reseed_running}</p>
+    {:else if reseedView.kind === 'done'}
+      <p data-testid={IDS.BACKUP_DESTINATION_RESEED_RESULT} class="recover-result">{reseedView.text}</p>
     {/if}
   </section>
 {/if}
@@ -1724,7 +1870,7 @@
     margin: 0.25rem 0;
     padding: 0.375rem 0.625rem;
   }
-  /* The recovery's result: the shared lines, verdict first, one per line. */
+  /* The recovery's and the restore's results: the shared lines, verdict first, one per line. */
   .recover-result {
     white-space: pre-line;
     margin: 0.25rem 0;

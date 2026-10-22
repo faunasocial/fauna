@@ -34,20 +34,28 @@ arm*): a public client attesting a holder key consents the arm, the owner
 deposits its grant twin before resolving (the production
 ``mint_personalization_grant`` through ``fauna_ffi``), and the principal finds
 both pairs on its grant, trains and reads a model, lists ``state`` and opens
-the owner's registry row with the wrapped pair, and — holding
+the owner's registry row with the wrapped pair — and opens no row of a delegable
+kind the twin does not carry, listed beside it — and, holding
 ``fauna:events:subscribe`` beside the arm — hears the owner's next ``state``
 put on the events long-poll (``docs/goal/architecture/transport.md`` § Push
 events → *Third-party event doors*) — while the ``state`` put, the model delete
-and an ``ext:`` list refuse. The confidential client's PAR
-refusal of the same string sits beside its TP4 sibling in
-``test_ext_kinds.py``, whose fixture serves the ``https`` document a
-confidential client needs.
+and an ``ext:`` list refuse; the owner's ``fauna.principals.revoke`` then
+deletes the twin (``fauna.capabilities.reconcile`` no longer lists it) and
+closes the session. The confidential client's PAR refusal of the same string,
+and the nest's refusal to mint the twin to a ``remote`` principal's key, sit
+beside their TP4 sibling in ``test_ext_kinds.py``, whose fixture serves the
+``https`` document a confidential client needs.
 
 A third journey covers the fourth arm, ``fauna:feed:read:account``
 (``docs/goal/behavior/authorization-server.md`` § Scope grammar → *The fourth
 arm*): the bare arm alone reaches no custom-feed read and no viewer state; a
 ceremony adding the account arm reads the account's own feed and its like
 state, and never a gated post.
+
+A fourth journey covers the author arm, ``fauna:feed:read:author`` (§ Scope
+grammar → *The author arm*): the bare arm alone is refused the author read; a
+ceremony consenting the author arm pages one author's public posts with no
+viewer state, and one adding the account arm reads them as the account.
 
 No wall-clock assertion anywhere (convention 14): the ``exp`` close is pinned
 at tier_1 (``principal_session::tests::the_session_closes_at_its_tokens_exp``)
@@ -97,6 +105,8 @@ EVENTS = "fauna:events:subscribe"
 LONG_POLL_WAIT_S = 25
 REGISTRY_KIND = "fauna.state.personalization"
 MODEL_KIND = "fauna.personalization.model"
+#: A delegable-rung kind the personalization twin does not carry.
+UNGRANTED_KIND = "fauna.state.moderation"
 TOPIC = "topic:" + "c4" * 16
 STATE_FEED = "state-entry"
 
@@ -297,7 +307,27 @@ def test_the_personalization_arm_reads_and_trains_the_accounts_models(
     with alice_client(nest) as ws:
         ws.call("fauna.account.state.put", state_put)
 
-    tokens = _approve_personalization(nest, client, holder_pub, secrets.token_bytes(16))
+    # A row of a delegable kind the twin does not carry — on the same
+    # listed scope, so only the grant's wraps keep the principal out of it.
+    other_device = ed25519.Ed25519PrivateKey.generate()
+    other_writer = _raw(other_device.public_key())
+    ungranted_key, ungranted_envelope = fauna_ffi.account_state_seal_delegable_row(
+        bytes(alice["signing_key"]), _secret(other_device), UNGRANTED_KIND, "labeler",
+        b"hide", 1,
+    )
+    with alice_client(nest) as ws:
+        ws.call(
+            "fauna.account.state.put",
+            {
+                **state_put,
+                "writer_id": other_writer.hex(),
+                "item_key": ungranted_key,
+                "entry": ungranted_envelope,
+            },
+        )
+
+    grant_id = secrets.token_bytes(16)
+    tokens = _approve_personalization(nest, client, holder_pub, grant_id)
     session = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
 
     # ── The grant twin: both pairs, over the principal's own session. ──
@@ -339,6 +369,15 @@ def test_the_personalization_arm_reads_and_trains_the_accounts_models(
     )
     assert opened["kind"] == REGISTRY_KIND and opened["key"] == TOPIC, opened
     assert bytes(opened["value"]) == b"learn_from_engagement", opened
+
+    # ── An ungranted kind: listed beside it, opened by no pair the twin wraps. ──
+    ungranted = [c for c in reply["changes"] if c.get("path_hash") == ungranted_key.hex()]
+    assert len(ungranted) == 1, f"the owner's {UNGRANTED_KIND} row is listed: {reply!r}"
+    with pytest.raises(RuntimeError, match="fauna_personalization_open_state_row"):
+        fauna_ffi.personalization_open_state_row(
+            grants[0], _secret(holder), other_writer, ungranted[0]["origin_seq"],
+            ungranted_key, bytes(ungranted[0]["entry"]),
+        )
 
     # ── The events doors: the owner's next `state` put answers the long-poll. ──
     status, first = events_poll(nest, client, tokens["access_token"], None, wait=0)
@@ -387,6 +426,27 @@ def test_the_personalization_arm_reads_and_trains_the_accounts_models(
     assert not ok and refusal_code(reply).endswith("permission_denied"), (
         f"the list dispatches on the scope — an ext: scope is the records arm's: {reply!r}"
     )
+
+    # ── Revoke: the twin goes with the principal (`encryption-at-rest.md` §
+    # Capability tiering → *Third-party holders*, the per-kind revoke bound). ──
+    with alice_client(nest) as ws:
+        assert grant_id in [
+            bytes(g) for g in ws.call("fauna.capabilities.reconcile", {})["grant_ids"]
+        ], "precondition: the twin is on the nest"
+        row = next(
+            p
+            for p in ws.call("fauna.principals.list", {})["principals"]
+            if p["client_id"] == client.client_id
+        )
+        revoked = ws.call(
+            "fauna.principals.revoke", {"principal_id": bytes(row["principal_id"])}
+        )
+        assert revoked["revoked"] is True, revoked
+        owned = [bytes(g) for g in ws.call("fauna.capabilities.reconcile", {})["grant_ids"]]
+    assert grant_id not in owned, "the revoke deletes the twin nest-side; no fetch serves it"
+    assert session.close_code() == CLOSE_AUTH_EXPIRED, "the revoke closes the live socket 4401"
+    status, _ = refused_status(nest, client, tokens["access_token"])
+    assert status == 401, "an unexpired token of a revoked principal opens no session"
 #: The fourth arm's client: its document declares both feed arms, so one
 #: ceremony may consent the bare arm alone and a later one add the account arm.
 ACCOUNT_DECLARED = "fauna:feed:read fauna:feed:read:account openid"
@@ -507,3 +567,112 @@ def test_the_account_arm_reads_the_accounts_feeds_over_public_posts(
         )
     for kind in ("fauna.feed.list", "fauna.feed.get"):
         assert gated not in repr(replies[kind]), f"{kind} names no gated post"
+
+
+#: The author arm's client: its document declares the bare arm, the author
+#: arm and the account arm, so one ceremony may consent the bare arm alone,
+#: a second the author arm, and a third add the account arm's refinement.
+AUTHOR_DECLARED = "fauna:feed:read fauna:feed:read:author fauna:feed:read:account openid"
+
+
+@pytest.mark.feature("connected-apps")
+def test_the_author_arm_reads_one_authors_public_posts(consent_nest, consent_bridge):
+    """``fauna:feed:read:author`` (``docs/goal/behavior/authorization-server.md``
+    § Scope grammar → *The author arm*; ``docs/goal/ui/feed.md`` § The read
+    model → *The author read*): the bare arm alone is refused the author read
+    at the gate; after a ceremony consenting the author arm the session pages
+    the owner's posts public-only — the gated post the owner can read never
+    appears — with no viewer state, and reaches no timeline; a ceremony adding
+    the account arm reads the same posts as the account, its like state
+    filled."""
+    nest = consent_nest
+    alice = nest["user"]
+    secret = bytes(alice["signing_key"])
+    author = bytes(alice["actor_id_bytes"]).hex()
+
+    # ── Fixture setup over the account's own connection (convention 8 (b)). ──
+    # A tier of its own: the module-scoped nest already holds the account
+    # arm's journey's tier.
+    platinum_key = bytes(range(1, 33))
+    with alice_client(nest) as ws:
+        ws.call(
+            "fauna.subscriptions.tiers.create",
+            {
+                "name": "platinum",
+                "rank": 3,
+                "description": None,
+                "price_hint": "9 EUR / month",
+                "payment_url": "https://pay.example/platinum",
+                "auto_approve": False,
+                "encrypted_upload": fauna_ffi.build_tier_birth_upload(
+                    secret, "platinum", platinum_key
+                ),
+            },
+        )
+    gated_body, sealed = fauna_ffi.build_gated_post(
+        secret,
+        "Restricted: authorarmbeacon",
+        "Restricted: authorarmbeacon\n\nThe part you pay for.",
+        "platinum",
+        3,
+        b"\x12" * 32,
+        platinum_key,
+    )
+    upload_blob(
+        nest["port"], alice["token"], sealed,
+        audience_class="PeriodRestrictedPost", mime=SEALED_MIME,
+    )
+    with alice_client(nest) as ws:
+        gated = ws.call("fauna.posts.create", {"body": gated_body})["post_id"]
+        public = ws.call(
+            "fauna.posts.create",
+            {"body": fauna_ffi.build_post(secret, "Public: authorarmbeacon")},
+        )["post_id"]
+        ws.call("fauna.posts.interact", {"post_id": public, "action": "like"})
+        own = ws.call("fauna.feed.author.posts", {"author": author})["posts"]
+    assert {gated, public} <= {p["post_id"] for p in own}, (
+        f"the control: the owner's own author read holds both posts: {own!r}"
+    )
+
+    # ── The bare arm alone. ──
+    client, tokens = ceremony(nest, DECLARED, declared=AUTHOR_DECLARED)
+    bare = PrincipalSession(upgrade(nest, client, tokens["access_token"]))
+    ok, reply = bare.call("fauna.feed.author.posts", {"author": author})
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
+        f"the bare arm never covers the author read: {reply!r}"
+    )
+
+    # ── A ceremony consenting the author arm. ──
+    author_client, author_tokens = ceremony(
+        nest, "fauna:feed:read:author openid", declared=AUTHOR_DECLARED
+    )
+    assert author_client.client_id == client.client_id, "the same client, re-consenting"
+    session = PrincipalSession(upgrade(nest, author_client, author_tokens["access_token"]))
+    ok, reply = session.call("fauna.feed.author.posts", {"author": author})
+    assert ok, f"the author arm reaches the author read: {reply!r}"
+    rows = {p["post_id"]: p for p in reply["posts"]}
+    assert public in rows and gated not in rows, (
+        f"the author arm reads public posts only: {sorted(rows)!r}"
+    )
+    assert not rows[public]["viewer_liked"], (
+        f"the author arm alone reads nothing of the account's own state: {rows[public]!r}"
+    )
+    ok, reply = session.call("fauna.feed.local.posts", {})
+    assert not ok and refusal_code(reply).endswith("permission_denied"), (
+        f"the author arm covers no timeline: {reply!r}"
+    )
+
+    # ── A ceremony adding the account arm's refinement. ──
+    wide_client, wide_tokens = ceremony(
+        nest, "fauna:feed:read:author fauna:feed:read:account openid", declared=AUTHOR_DECLARED
+    )
+    wide = PrincipalSession(upgrade(nest, wide_client, wide_tokens["access_token"]))
+    ok, reply = wide.call("fauna.feed.author.posts", {"author": author})
+    assert ok, f"the author read under both arms: {reply!r}"
+    rows = {p["post_id"]: p for p in reply["posts"]}
+    assert public in rows and gated not in rows, (
+        f"the account's view, public posts only: {sorted(rows)!r}"
+    )
+    assert rows[public]["viewer_liked"], (
+        f"the account arm fills the owner's like state: {rows[public]!r}"
+    )

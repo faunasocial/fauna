@@ -131,7 +131,7 @@ def docker_mail_nest(app):
         name = f"fauna-mail-uienable-{http_port}"
         start_container_with_ports(
             name,
-            {3000: http_port, **mail_ports},
+            {443: http_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": CLAIM_CODE,
                 "FAUNA_PORT": "3000",
@@ -205,17 +205,18 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
     # On the Docker image the mail-bridge s6 services are down until
     # fauna.bridges.set_mail_enabled writes /data/imap-enabled. The admin's
     # enable_mail above fires that call (design A), so the bridge boots and
-    # self-enrolls. A booted + self-enrolled pending bridge is the minimal
-    # observable "the deployment mail subsystem actually came up."
+    # self-enrolls. A booted + self-enrolled bridge is the minimal observable
+    # "the deployment mail subsystem actually came up." The row is read at ANY
+    # status: the in-host bridges are approved within milliseconds of enrolling,
+    # so a `pending` filter only matches a window the credential wait above has
+    # already outlived.
     deadline = time.monotonic() + 90.0
     flag = False
     enrolled: dict = {}
     with admin_ws(nest) as admin:
         while time.monotonic() < deadline and not (flag and enrolled):
             flag = flag_present(name)
-            rows = admin.call(
-                "fauna.bridges.list_service_users", {"status": "pending"}
-            )["service_users"]
+            rows = admin.call("fauna.bridges.list_service_users", {})["service_users"]
             enrolled = {b["role"]: b for b in rows}
             if flag and enrolled:
                 break
@@ -231,7 +232,7 @@ def test_linux_ui_enable_mail_boots_docker_bridge(app, docker_mail_nest):
         f"bridge diag:\n{bridge_diag(name)}"
     )
     assert enrolled, (
-        "the deployed mail bridge never self-enrolled a pending service-user — the "
+        "the deployed mail bridge never self-enrolled a service-user — the "
         "flag was written but the bridge did not boot/enroll within the timeout.\n"
         f"bridge diag:\n{bridge_diag(name)}"
     )

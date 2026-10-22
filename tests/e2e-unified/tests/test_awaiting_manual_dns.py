@@ -36,8 +36,8 @@ pytestmark = pytest.mark.tier_2
 # `awaiting-dns-fallthrough-button` ("Use a different nest") landed on tui — the
 # lead app — 2026-09-25 (rule-A approved), then windows, then web, linux, android
 # and macOS/iOS — all seven apps now paint it. The
-# tuple stays until android and macOS/iOS have run this file green on their
-# machines; once they have, delete it with the two skip arms that read it.
+# tuple stays until android has run this file green on its machine (macOS/iOS
+# ran green 2026-10-17); once it has, delete it with the two skip arms that read it.
 _FALLTHROUGH_BUTTON_APPS = ("tui", "windows", "web", "linux", "android", "macos", "ios")
 
 

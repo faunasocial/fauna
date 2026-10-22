@@ -191,6 +191,8 @@ async fn the_author_scoped_feed_read_withholds_every_moderation_flag() {
             &[author.to_vec()],
             None,
             100,
+            fauna_nest::db::feeds::FeedAudience::OnBox,
+            fauna_nest::db::feeds::FeedLocality::NestWide,
         )
         .await
         .unwrap()

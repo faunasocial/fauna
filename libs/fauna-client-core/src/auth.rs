@@ -89,6 +89,48 @@ pub fn build_challenge_verify(
     }
 }
 
+/// Build a signed custodied-fleet handshake request
+/// (`fauna.auth.custodied_fleet_handshake` — an owner-fleet device's
+/// restore-read bearer at a CUSTODIAN nest, `account-replica-posture.md`
+/// § Replica posture → *The custody grant + ceremony*, ruling 2).
+///
+/// Signs the domain-tagged, nest-bound
+/// `fauna_protocol::auth::custodied_fleet_handshake_signed_message(owner,
+/// device_key, timestamp, nest_id, nonce)` with the device's principal key and
+/// carries its root-signed `DeviceAuthorization` inline. `nest_id` is the
+/// identity `nest_trust::read_login_binding` proved on the connection the
+/// request rides. The one builder every host's mint calls — the native
+/// anonymous client and the browser socket alike (*Corollary — the cold
+/// device*, the web host).
+pub fn build_custodied_fleet_handshake(
+    owner_actor_id: &[u8; 32],
+    device_signing_key: &ed25519_dalek::SigningKey,
+    authorization: &fauna_core::encoding::EmbedAsBytes,
+    nest_id: &[u8; 32],
+    nonce: &[u8; 32],
+) -> fauna_protocol::auth::CustodiedFleetHandshakeRequest {
+    let device_key = device_signing_key.verifying_key().to_bytes();
+    let timestamp = Timestamp::now_millis();
+    let msg = fauna_protocol::auth::custodied_fleet_handshake_signed_message(
+        owner_actor_id,
+        &device_key,
+        timestamp,
+        nest_id,
+        nonce,
+    );
+    let signature = device_signing_key.sign(&msg);
+    fauna_protocol::auth::CustodiedFleetHandshakeRequest {
+        owner_actor_id: fauna_core::hex32::encode(owner_actor_id),
+        device_key: fauna_core::hex32::encode(&device_key),
+        timestamp,
+        signature: hex::encode(signature.to_bytes()),
+        client_nonce: fauna_protocol::ByteBuf::from(nonce.to_vec()),
+        authorization: authorization.clone(),
+        nest_id: fauna_core::hex32::encode(nest_id),
+        extra: Default::default(),
+    }
+}
+
 /// Build a signed invite-request submission.
 ///
 /// Signs the domain-tagged, length-prefixed

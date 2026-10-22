@@ -374,7 +374,13 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         body = {
             "app": "social.fauna.fauna",
             "environment": env,
+            # This driver's first launch is a new install: the bridge clears the
+            # install-scoped state the other apps' per-test install dir starts
+            # without (today the push intent file — `AppLauncher.launchApp`).
+            # Every later launch of the same driver is the same install.
+            "fresh_install": not getattr(self, "_launched_once", False),
         }
+        self._launched_once = True
         if config.get(self._PRESERVE_STORE_KEY):
             # Pinned: the relaunched process must read back what the previous
             # one wrote, so the seed — a full overwrite of the credential file
@@ -759,20 +765,37 @@ class AndroidBridgeDriver(HttpBridgeDriver):
         ``launch()`` right after the install, since a grant needs the package."""
         self._grant_photos = True
 
+    def grant_notifications(self) -> None:
+        """Pre-grant ``POST_NOTIFICATIONS`` (API 33+) before ``launch()``
+        starts the app. The shell asks for it at launch and the push toggle at
+        toggle-on (``PushNotificationsSection.kt``); both dialogs belong to the
+        permission controller, which no in-app driver reaches, so ``pm grant``
+        answers up front, as a user who already allowed notifications would
+        have — the push journeys then run the toggle, not the prompt."""
+        self._grant_notifications = True
+
     def _apply_permission_grants(self) -> None:
-        if not getattr(self, "_grant_photos", False):
+        grant_photos = getattr(self, "_grant_photos", False)
+        grant_notifications = getattr(self, "_grant_notifications", False)
+        if not (grant_photos or grant_notifications):
             return
-        # The same split the screen's own request makes: the READ_MEDIA_* pair
-        # from API 33, READ_EXTERNAL_STORAGE below it.
         sdk = subprocess.run(
             [*self._adb_cmd(), "shell", "getprop", "ro.build.version.sdk"],
             check=True, capture_output=True, text=True, timeout=15,
         ).stdout.strip()
-        permissions = (
-            ("android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO")
-            if sdk.isdigit() and int(sdk) >= 33
-            else ("android.permission.READ_EXTERNAL_STORAGE",)
-        )
+        api33 = sdk.isdigit() and int(sdk) >= 33
+        permissions: tuple[str, ...] = ()
+        if grant_photos:
+            # The same split the screen's own request makes: the READ_MEDIA_*
+            # pair from API 33, READ_EXTERNAL_STORAGE below it.
+            permissions += (
+                ("android.permission.READ_MEDIA_IMAGES", "android.permission.READ_MEDIA_VIDEO")
+                if api33
+                else ("android.permission.READ_EXTERNAL_STORAGE",)
+            )
+        if grant_notifications and api33:
+            # Below API 33 notifications need no runtime grant.
+            permissions += ("android.permission.POST_NOTIFICATIONS",)
         for permission in permissions:
             subprocess.run(
                 [*self._adb_cmd(), "shell", "pm", "grant", "social.fauna.fauna", permission],

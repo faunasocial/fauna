@@ -1458,6 +1458,34 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<FfiAuthoredRow>> FeaturesAuthoredRowsAsync(string tier)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Features().AuthoredRows(tier).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<FfiAuthoredRow>> FeaturesWardAuthoredRowsAsync(byte[] ward)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Features().WardAuthoredRows(ward).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IFfiPolicyEditor> FeaturesOpenEditorAsync(string tier, string feature)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Features().OpenEditor(tier, feature).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IFfiPolicyEditor> FeaturesOpenEditorForWardAsync(byte[] ward, string feature)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Features().OpenEditorForWard(ward, feature).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public async Task<FfiNodeLeg> StatusNodeAsync()
     {
         var nest = await ConnectedAsync().ConfigureAwait(false);
@@ -1877,6 +1905,18 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
     public async Task<CrossGroupEviction> MemberReviewRemoveAsync(ConversationsManager manager, byte[] person)
     {
         return await FaunaFfiMethods.MemberReviewRemove(manager, person).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<FfiRefusedChange>> RefusedChangesOpenAsync(ConversationsManager manager)
+    {
+        return await FaunaFfiMethods.RefusedChangesOpen(manager).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> RefusedChangeDismissAsync(string key)
+    {
+        return await FaunaFfiMethods.RefusedChangeDismiss(key).ConfigureAwait(false);
     }
 
     // ── fauna.notifications.* ───────────────────────────────────────────
@@ -2302,6 +2342,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         return await nest.Moderation()
             .LegalTakedown(contentId, conversation, legalReference, restore)
             .ConfigureAwait(false);
+    }
+
+    public async Task<string> ModerationAppealAsync(string contentId, string reason)
+    {
+        var nest = await ConnectedAsync().ConfigureAwait(false);
+        return await nest.Moderation().Appeal(contentId, reason).ConfigureAwait(false);
     }
 
     // ── fauna.moderation.abuse_report.* (user-initiated reporting) ──────
@@ -3337,9 +3383,12 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
         using var registry = RequireRegistry();
         try
         {
-            var body = await nest.Profile()
+            // The base's lastDirectBody (the owner's last identity-signed row)
+            // is not threaded on windows yet, so a save over an external app's
+            // edit degrades as before.
+            var body = (await nest.Profile()
                 .LoadEditBase(_crypto.SecretBytes, registry)
-                .ConfigureAwait(false);
+                .ConfigureAwait(false))?.body;
             if (body is null)
                 return null;
             var d = FaunaFfiMethods.DecodeProfileDisplay(body);
@@ -3366,8 +3415,8 @@ internal sealed class NestRpcClient : INestRpcClient, IAsyncDisposable
             .Select(l => new FfiProfileLink(l.Label, l.Uri))
             .ToArray();
         var body = FaunaFfiMethods.BuildEditedProfileWithImages(
-            _crypto.SecretBytes, baseBody, ProfilePredecessors(), edited.DisplayName, edited.Bio,
-            links, avatar, banner);
+            _crypto.SecretBytes, baseBody, null, ProfilePredecessors(), edited.DisplayName,
+            edited.Bio, links, avatar, banner, null);
         await nest.Profile().ProfileSet(body).ConfigureAwait(false);
     }
 

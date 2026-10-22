@@ -141,6 +141,8 @@ where
             // (`"public"` / `"private"`); a spelling this build does not know
             // → None.
             node_mode: crate::state::NodeMode::from_wire_str(&reply.node_mode),
+            // Open parse: a nest predating the field sends "" → Unknown.
+            content_scanners: crate::state::ContentScanners::from_wire(&reply.content_scanners),
         })
     }
 
@@ -230,6 +232,7 @@ where
             // Hand-off of the deployment signing seed for total-box-loss recovery
             // (`box-recovery.md` § Mechanism). `None` when the nest holds no signing key.
             deployment_seed: reply.deployment_seed,
+            ssh_door_source: reply.ssh_door_source,
         })
     }
 

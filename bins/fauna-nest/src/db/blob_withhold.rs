@@ -25,19 +25,59 @@ use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use std::collections::HashSet;
 
+/// Which withhold reaches a blob — it picks the door's status
+/// (`moderation.md` § Admin block of a reported item, decision 3: honesty about
+/// the ground extends to the status code). Ordered so the stronger ground is
+/// the greater: a blob both grounds reach is withheld as `Legal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WithholdGround {
+    /// The admin's block of a reported item — the door answers 403.
+    AdminBlock,
+    /// A legal takedown — the door answers 451.
+    Legal,
+}
+
+impl WithholdGround {
+    /// The stored `blob_legal_withhold.ground` token.
+    pub fn token(self) -> &'static str {
+        match self {
+            WithholdGround::AdminBlock => "admin_block",
+            WithholdGround::Legal => "legal",
+        }
+    }
+
+    /// Read a stored token; anything unrecognised reads as `Legal`, the
+    /// stronger ground — a row is withheld either way.
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "admin_block" => WithholdGround::AdminBlock,
+            _ => WithholdGround::Legal,
+        }
+    }
+}
+
 impl CacheDb {
     /// Is this blob withheld by a legal takedown? The blob-serve door's whole
     /// question — one primary-key probe, so it is affordable on every
     /// `GET /api/v1/blob/{id}`.
     pub async fn blob_is_legally_withheld(&self, blob_hash: &[u8; 32]) -> Result<bool> {
+        Ok(self.blob_withhold_ground(blob_hash).await?.is_some())
+    }
+
+    /// The ground a blob is withheld on, or `None` when the door serves it.
+    pub async fn blob_withhold_ground(
+        &self,
+        blob_hash: &[u8; 32],
+    ) -> Result<Option<WithholdGround>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
-            .prepare_cached("SELECT 1 FROM blob_legal_withhold WHERE blob_hash = ?1")
-            .context("prepare blob_is_legally_withheld")?;
-        let found = stmt
-            .exists(rusqlite::params![&blob_hash[..]])
-            .context("query blob_is_legally_withheld")?;
-        Ok(found)
+            .prepare_cached("SELECT ground FROM blob_legal_withhold WHERE blob_hash = ?1")
+            .context("prepare blob_withhold_ground")?;
+        let ground = stmt
+            .query_row(rusqlite::params![&blob_hash[..]], |r| r.get::<_, String>(0))
+            .optional()
+            .context("query blob_withhold_ground")?;
+        Ok(ground.as_deref().map(WithholdGround::from_token))
     }
 
     /// The whole withheld set, for a caller that must test **many** digests
@@ -81,23 +121,26 @@ impl CacheDb {
     /// namer is one of them — the one direction a compelled withhold may never
     /// fail in. An incomplete walk uses [`Self::add_blob_legal_withhold`].
     pub async fn replace_blob_legal_withhold(&self, hashes: &[[u8; 32]]) -> Result<usize> {
+        let rows: Vec<([u8; 32], WithholdGround)> =
+            hashes.iter().map(|h| (*h, WithholdGround::Legal)).collect();
+        self.replace_blob_withhold(&rows).await
+    }
+
+    /// Replace the whole withheld set with `rows`, each on its ground — the
+    /// complete walk's write ([`crate::moderation_withhold::WithholdSets::store`]).
+    pub async fn replace_blob_withhold(
+        &self,
+        rows: &[([u8; 32], WithholdGround)],
+    ) -> Result<usize> {
         let conn = self.conn.lock().await;
         let tx = conn
             .unchecked_transaction()
-            .context("begin replace_blob_legal_withhold")?;
+            .context("begin replace_blob_withhold")?;
         tx.execute("DELETE FROM blob_legal_withhold", [])
             .context("clear blob_legal_withhold")?;
-        {
-            let mut stmt = tx
-                .prepare("INSERT OR IGNORE INTO blob_legal_withhold (blob_hash) VALUES (?1)")
-                .context("prepare insert blob_legal_withhold")?;
-            for h in hashes {
-                stmt.execute(rusqlite::params![&h[..]])
-                    .context("insert blob_legal_withhold row")?;
-            }
-        }
-        tx.commit().context("commit replace_blob_legal_withhold")?;
-        Ok(hashes.len())
+        upsert_withhold_rows(&tx, rows)?;
+        tx.commit().context("commit replace_blob_withhold")?;
+        Ok(rows.len())
     }
 
     /// Add to the withheld set without clearing it — what an **incomplete**
@@ -110,22 +153,14 @@ impl CacheDb {
     /// So a partial walk only ever adds: it fails toward over-withholding,
     /// which the next complete walk corrects, rather than toward serving
     /// legally compelled bytes, which nothing corrects.
-    pub async fn add_blob_legal_withhold(&self, hashes: &[[u8; 32]]) -> Result<usize> {
+    pub async fn add_blob_withhold(&self, rows: &[([u8; 32], WithholdGround)]) -> Result<usize> {
         let conn = self.conn.lock().await;
         let tx = conn
             .unchecked_transaction()
-            .context("begin add_blob_legal_withhold")?;
-        {
-            let mut stmt = tx
-                .prepare("INSERT OR IGNORE INTO blob_legal_withhold (blob_hash) VALUES (?1)")
-                .context("prepare insert blob_legal_withhold")?;
-            for h in hashes {
-                stmt.execute(rusqlite::params![&h[..]])
-                    .context("insert blob_legal_withhold row")?;
-            }
-        }
-        tx.commit().context("commit add_blob_legal_withhold")?;
-        Ok(hashes.len())
+            .context("begin add_blob_withhold")?;
+        upsert_withhold_rows(&tx, rows)?;
+        tx.commit().context("commit add_blob_withhold")?;
+        Ok(rows.len())
     }
 
     /// Every post currently under a legal takedown. Tiny by construction (a
@@ -277,11 +312,16 @@ impl CacheDb {
     /// the caller's set difference is what resolves it, and the answer is
     /// "served", because a takedown withholds a record, never bytes another
     /// live record still stands behind.
-    pub async fn conv_attachment_refs_by_takedown(&self) -> Result<Vec<([u8; 32], bool)>> {
+    pub async fn conv_attachment_refs_by_withhold(
+        &self,
+    ) -> Result<Vec<([u8; 32], Option<WithholdGround>)>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT r.blob_hash, s.legal_takedown_ref IS NOT NULL
+                "SELECT DISTINCT r.blob_hash,
+                        CASE WHEN s.legal_takedown_ref IS NOT NULL THEN 'legal'
+                             WHEN s.admin_block_report_id IS NOT NULL THEN 'admin_block'
+                             ELSE NULL END
                    FROM conv_attachment_refs r
                    JOIN segment_records s
                      ON s.scope_id = r.channel_id
@@ -289,17 +329,39 @@ impl CacheDb {
                     AND s.seq = r.seq
                     AND s.tombstoned = 0",
             )
-            .context("prepare conv_attachment_refs_by_takedown")?;
+            .context("prepare conv_attachment_refs_by_withhold")?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)))
-            .context("query conv_attachment_refs_by_takedown")?;
+            .query_map([], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<String>>(1)?))
+            })
+            .context("query conv_attachment_refs_by_withhold")?;
         let mut out = Vec::new();
         for row in rows {
-            let (hash, flagged) = row.context("read conv_attachment_refs_by_takedown row")?;
+            let (hash, ground) = row.context("read conv_attachment_refs_by_withhold row")?;
             if let Ok(arr) = <[u8; 32]>::try_from(hash.as_slice()) {
-                out.push((arr, flagged));
+                out.push((arr, ground.as_deref().map(WithholdGround::from_token)));
             }
         }
         Ok(out)
     }
+}
+
+/// Insert `rows`, a blob already present keeping the stronger ground — so an
+/// incomplete walk's ADD can raise a block to a takedown and never lower one.
+fn upsert_withhold_rows(
+    tx: &rusqlite::Transaction<'_>,
+    rows: &[([u8; 32], WithholdGround)],
+) -> Result<()> {
+    let mut stmt = tx
+        .prepare(
+            "INSERT INTO blob_legal_withhold (blob_hash, ground) VALUES (?1, ?2)
+             ON CONFLICT(blob_hash) DO UPDATE SET ground =
+                 CASE WHEN excluded.ground = 'legal' THEN 'legal' ELSE blob_legal_withhold.ground END",
+        )
+        .context("prepare upsert blob_legal_withhold")?;
+    for (h, ground) in rows {
+        stmt.execute(rusqlite::params![&h[..], ground.token()])
+            .context("upsert blob_legal_withhold row")?;
+    }
+    Ok(())
 }

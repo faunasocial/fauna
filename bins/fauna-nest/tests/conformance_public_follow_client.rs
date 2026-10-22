@@ -3,7 +3,7 @@
 //!
 //! Owner docs: `docs/goal/behavior/folders.md` § Publicly-synced follow
 //! (follow state lives solely in the follower's own account store),
-//! `docs/goal/architecture/federation.md` § The public folder read plane.
+//! `docs/goal/architecture/federation-shared-folders.md` § The public folder read plane.
 //!
 //! # Why this file exists
 //!
@@ -101,9 +101,8 @@ async fn start_nest(db: CacheDb) -> (String, Arc<AppState>) {
     // A real blob-store-backed `BackupService`, as every nest fixture in this
     // suite has: the record rail's own metering reads through it. No bytes are
     // fetched here (see the module docs), so it only has to exist.
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlives the test process; the OS reaps the temp root
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc = Arc::new(
         fauna_nest::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
             .unwrap(),
@@ -140,7 +139,7 @@ async fn start_nest(db: CacheDb) -> (String, Arc<AppState>) {
             token_store: Arc::new(TokenStore::new()),
             ..Default::default()
         },
-        ..AppState::for_test(db)
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());
@@ -260,6 +259,8 @@ struct World {
     follows: Arc<fauna_client_config::test_helpers::FakeFollowsStore>,
     /// H's database FILE — re-opened by a test to run H's boot pass.
     home_db_path: std::path::PathBuf,
+    /// Owns the directory `home_db_path` lies in; removed when the world drops.
+    _home_dir: tempfile::TempDir,
 }
 
 impl World {
@@ -268,7 +269,6 @@ impl World {
         // needs one.
         let home_dir = tempfile::tempdir().unwrap();
         let home_db_path = home_dir.path().join("nest.db");
-        std::mem::forget(home_dir); // outlives the test process; the OS reaps the temp root
         let (home_base, h_state) = start_nest(CacheDb::open(&home_db_path).unwrap()).await;
         let (follower_base, f_state) = start_nest(CacheDb::open_in_memory().unwrap()).await;
 
@@ -296,6 +296,7 @@ impl World {
             follower,
             follows: Arc::new(fauna_client_config::test_helpers::FakeFollowsStore::empty()),
             home_db_path,
+            _home_dir: home_dir,
         };
         world.set_audience("public").await;
         world.record("published.txt").await;

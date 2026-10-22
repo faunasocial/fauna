@@ -3,7 +3,7 @@
 // `notification_text` (`local-clock`, off on the wasm leg), so web formats
 // them here with the browser's own `Date` — `docs/goal/behavior/
 // notifications.md` § Security notices, `value-formatting.md` § Absolute local
-// timestamp display. Kept free of any `$lib/wasm` import so it is testable
+// timestamp display. Kept free of any `#lib/wasm` import so it is testable
 // under plain deno.
 
 import type { NotificationText } from './wasm';

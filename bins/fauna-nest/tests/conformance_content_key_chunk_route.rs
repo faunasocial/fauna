@@ -71,11 +71,14 @@ const CONTENT_KEY: [u8; 32] = [0x7c; 32];
 /// The nest-standing body is `fauna_nest::test_support::start_test_nest`, shared
 /// with `bins/fauna-sync-agent`'s `tier3-nest` harnesses; only the handler set
 /// and the blob dir are this file's. The `tempdir` stays here because
-/// `tempfile` is a dev-only dependency of `fauna-nest`.
-async fn start_test_nest(owner_secret: [u8; 32]) -> (String, Arc<AppState>, String) {
+/// `tempfile` is a dev-only dependency of `fauna-nest`; its guard is returned
+/// as the last tuple element, so the caller keeps the blob dir alive for the
+/// test and it is removed when the caller's binding drops.
+async fn start_test_nest(
+    owner_secret: [u8; 32],
+) -> (String, Arc<AppState>, String, tempfile::TempDir) {
     let blob_dir = tempfile::tempdir().unwrap();
     let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the process; never deleted under test
 
     let nest = fauna_nest::test_support::start_test_nest(owner_secret, Some(blob_path), |b| {
         fauna_nest::auth_handlers::register_auth_handlers(b);
@@ -84,7 +87,7 @@ async fn start_test_nest(owner_secret: [u8; 32]) -> (String, Arc<AppState>, Stri
         fauna_nest::folder_handlers::register_folders_handlers(b);
     })
     .await;
-    (nest.base_url, nest.state, nest.http_token)
+    (nest.base_url, nest.state, nest.http_token, blob_dir)
 }
 
 /// This file's engine fixture — the half every builder here shares.
@@ -130,7 +133,7 @@ fn bound_engine(dest_url: &str, http_token: &str, watch_path: std::path::PathBuf
 /// on the HTTP chunk/manifest uploads, which is exactly the route under test.)
 #[tokio::test]
 async fn bound_engine_upload_accepted_by_real_chunk_route() {
-    let (url, _state, token) = start_test_nest(OWNER_SECRET).await;
+    let (url, _state, token, _blob_dir) = start_test_nest(OWNER_SECRET).await;
 
     let watch = tempfile::tempdir().unwrap();
     let engine = bound_engine(&url, &token, watch.path().to_path_buf());
@@ -165,7 +168,7 @@ async fn bound_engine_upload_accepted_by_real_chunk_route() {
 /// untouched and why the ciphertext-hash keying was required.
 #[tokio::test]
 async fn real_chunk_route_accepts_serves_and_f9_rejects_content_key_ciphertext() {
-    let (url, _state, token) = start_test_nest(OWNER_SECRET).await;
+    let (url, _state, token, _blob_dir) = start_test_nest(OWNER_SECRET).await;
 
     // A single content-key chunk, sealed exactly as the engine's content-key path
     // does: key/nonce derive from the *plaintext* hash; the store key is the
@@ -273,7 +276,7 @@ fn backup_engine(dest_url: &str, http_token: &str, watch_path: std::path::PathBu
 /// chunk by its ciphertext hash, which the route's path (a) accepts unchanged.
 #[tokio::test]
 async fn backup_upload_bytes_round_trips_real_chunk_route() {
-    let (url, _state, token) = start_test_nest(OWNER_SECRET).await;
+    let (url, _state, token, _blob_dir) = start_test_nest(OWNER_SECRET).await;
 
     let watch = tempfile::tempdir().unwrap();
     let engine = backup_engine(&url, &token, watch.path().to_path_buf());

@@ -16,7 +16,7 @@
 //
 // The rule: a 2-space-indented `let`/`const` initializer in a route's script
 // may not call a synchronous wasm read, bare or inside `$state(...)`, whichever
-// `$lib` module it is imported through. `$derived(...)` is exempt — it is lazy,
+// `#lib` module it is imported through. `$derived(...)` is exempt — it is lazy,
 // evaluated at its first read, and the routes gate their template on a
 // post-`ensureWasm()` loading flag. Seed a plain default and assign the real
 // read after `ensureWasm()`.
@@ -63,9 +63,9 @@ function directSyncReads(code: string): Set<string> {
   return out;
 }
 
-/** `$lib/<module>` → its sync wasm reads, re-exports followed: `push.ts`
+/** `#lib/<module>` → its sync wasm reads, re-exports followed: `push.ts`
  *  re-exports `wasm.ts`'s `pushOptedIn`, and the settings page imported it
- *  from `$lib/push` — a scan keyed on `$lib/wasm` alone passed that page. */
+ *  from `#lib/push` — a scan keyed on `#lib/wasm` alone passed that page. */
 async function syncReadsByModule(): Promise<Map<string, Set<string>>> {
   const code = new Map<string, string>();
   for await (const e of Deno.readDir(LIB)) {
@@ -104,7 +104,7 @@ async function* svelteFiles(dir: URL): AsyncGenerator<URL> {
 function topLevelViolations(src: string, reads: Map<string, Set<string>>): string[] {
   const script = src.match(/<script[^>]*>([\s\S]*?)<\/script>/)?.[1] ?? "";
   const code = stripComments(script);
-  const imports = importsFrom(code, String.raw`'\$lib/([A-Za-z0-9_-]+)'`);
+  const imports = importsFrom(code, String.raw`'#lib/([A-Za-z0-9_-]+)'`);
   const bad: string[] = [];
   for (const m of code.matchAll(/\n {2}(?:let|const) [^=\n]+=\s*([^\n;]*)/g)) {
     const init = m[1];
@@ -126,15 +126,15 @@ Deno.test("the sync-read scan finds the reads it must ban", async () => {
     ["push", "pushOptedIn"],
   ];
   for (const [mod, name] of want) {
-    if (!reads.get(mod)?.has(name)) throw new Error(`scan missed $lib/${mod}::${name}`);
+    if (!reads.get(mod)?.has(name)) throw new Error(`scan missed #lib/${mod}::${name}`);
   }
   if (reads.get("wasm")?.has("ensureWasm")) throw new Error("ensureWasm is async, not a sync read");
 });
 
 Deno.test("the scan reds the shape that blanked the settings page", () => {
   const src = `<script lang="ts">
-  import { pushOptedIn } from '$lib/push';
-  import { reportLedgerWords } from '$lib/wasm';
+  import { pushOptedIn } from '#lib/push';
+  import { reportLedgerWords } from '#lib/wasm';
   let pushSubscribed = $state(pushOptedIn());
   const words = $derived(reportLedgerWords());
 </script>`;

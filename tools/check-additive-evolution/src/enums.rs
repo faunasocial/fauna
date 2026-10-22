@@ -515,21 +515,46 @@ pub fn diff_enum_maps(
     head_ledger: &EnumLedger,
     allow: &RatifiedBreaks,
 ) -> Vec<Violation> {
-    let in_scope = |ledger: &EnumLedger, key: &str| {
-        ledger
-            .answer_for(key)
-            .is_some_and(|a| !matches!(a, Answer::Local | Answer::Locked | Answer::Foreign))
-    };
-    let ratified = |key: &str, variant: &str| {
-        allow.contains(&(format!("{key}::{variant}"), Transition::Removed))
-    };
+    let mut violations = enum_revivals(head, base_ledger, head_ledger, allow);
+    violations.extend(diff_enum_breaks(
+        base,
+        head,
+        base_ledger,
+        head_ledger,
+        allow,
+    ));
+    violations.sort();
+    violations
+}
+
+fn enum_in_scope(ledger: &EnumLedger, key: &str) -> bool {
+    ledger
+        .answer_for(key)
+        .is_some_and(|a| !matches!(a, Answer::Local | Answer::Locked | Answer::Foreign))
+}
+
+fn enum_variant_ratified(allow: &RatifiedBreaks, key: &str, variant: &str) -> bool {
+    allow.contains(&(format!("{key}::{variant}"), Transition::Removed))
+}
+
+/// The revival half of [`diff_enum_maps`]: every in-scope head variant the
+/// list records as removed. A revival is a violation of the LIST's invariant,
+/// not a break against the base, so `main` refuses it whatever the product
+/// version (the 0.1.x window included); only [`diff_enum_breaks`] is softened
+/// there.
+pub fn enum_revivals(
+    head: &EnumMap,
+    base_ledger: &EnumLedger,
+    head_ledger: &EnumLedger,
+    allow: &RatifiedBreaks,
+) -> Vec<Violation> {
     let mut violations = Vec::new();
     for (key, hs) in head {
-        if !in_scope(head_ledger, key) && !in_scope(base_ledger, key) {
+        if !enum_in_scope(head_ledger, key) && !enum_in_scope(base_ledger, key) {
             continue;
         }
         for variant in &hs.accepted {
-            if ratified(key, variant) {
+            if enum_variant_ratified(allow, key, variant) {
                 violations.push(Violation::new(
                     key,
                     format!(
@@ -538,6 +563,27 @@ pub fn diff_enum_maps(
                     ),
                 ));
             }
+        }
+    }
+    violations.sort();
+    violations
+}
+
+/// The break half of [`diff_enum_maps`]: removals and silent additions
+/// against `base` — what the 0.1.x window reports instead of refusing.
+pub fn diff_enum_breaks(
+    base: &EnumMap,
+    head: &EnumMap,
+    base_ledger: &EnumLedger,
+    head_ledger: &EnumLedger,
+    allow: &RatifiedBreaks,
+) -> Vec<Violation> {
+    let in_scope = enum_in_scope;
+    let ratified = |key: &str, variant: &str| enum_variant_ratified(allow, key, variant);
+    let mut violations = Vec::new();
+    for (key, hs) in head {
+        if !in_scope(head_ledger, key) && !in_scope(base_ledger, key) {
+            continue;
         }
         let Some(bs) = base.get(key) else { continue };
         let removals = in_scope(base_ledger, key).then(|| bs.accepted.difference(&hs.accepted));

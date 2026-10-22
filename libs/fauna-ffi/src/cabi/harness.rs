@@ -44,7 +44,8 @@
 //!   against a harness IMAP source, so a `[nest]` witness of a claim the import
 //!   CLIENT makes (`mailbox-migration.md` § Credential handling) observes a real
 //!   import with no app in it. Its reply is the machine's final snapshot, not a
-//!   nest reply.
+//!   nest reply. [`fauna_harness_mail_import_outlook`] is its Outlook twin,
+//!   signing in with Microsoft against the harness's fake authority.
 //! - [`fauna_harness_archive_import`] — the same for the shared
 //!   `ArchiveImportMachine`: a fixture export archive walked from Source to
 //!   Done, so a witness of what the import CLIENT leaves on the nest
@@ -1606,6 +1607,113 @@ pub unsafe extern "C" fn fauna_harness_mail_import(
                 );
                 for action in source.into_iter().chain(connect) {
                     machine.dispatch(action).await.ok()?;
+                }
+                for action in scope_next_actions("", DEFAULT_MAX_SIZE_MB) {
+                    machine.dispatch(action).await.ok()?;
+                }
+                machine.dispatch(MailImportAction::Start).await.ok()?;
+                if machine.snapshot().step == ImportStep::Progress {
+                    let _ = machine.run_import().await;
+                }
+                Some(())
+            };
+            walk.await;
+            let snap = machine.snapshot();
+            let reply = (
+                format!("{:?}", snap.step),
+                snap.imported_count,
+                snap.skipped_count,
+                snap.errored_count,
+                snap.error.unwrap_or_default(),
+                snap.error_log,
+            );
+            fauna_core::encoding::canonical_encode(&reply)
+                .map(Outcome::Ok)
+                .map_err(encode_err)
+        })
+    };
+    // SAFETY: per the `# Safety` section above.
+    unsafe { run(body, out) }
+}
+
+/// [`fauna_harness_mail_import`]'s Outlook twin: the same machine, built the
+/// same way, walked as the Outlook source signs in — `Refresh` (which adopts
+/// the deployment's Microsoft registration off `fauna.setup.status`, as an
+/// opened page does), Outlook picked, then [`microsoft_sign_in_actions`] for
+/// `username` and, once the code is out, `run_microsoft_sign_in` until the
+/// grant has connected — then Scope (every mailbox, no since date, the default
+/// size limit) → Confirm → Start with the drive loop run to the end. It is the
+/// door for the claims `mailbox-migration.md` § Microsoft sign-in — the
+/// device-code grant makes of the CLIENT: the token lives in the machine's
+/// private state and never reaches the nest.
+///
+/// The call blocks while the sign-in polls: the caller approves the code on
+/// its fake identity authority from another thread. The authority, the
+/// Outlook host's redirect and the source's CA reach this process through the
+/// three gated seeds (`FAUNA_E2E_MICROSOFT_AUTHORITY`, `FAUNA_E2E_IMAP_HOST_MAP`,
+/// `FAUNA_E2E_IMAP_EXTRA_CA_PEM`), which the caller sets in its environment
+/// first (`fauna_ffi.py`'s `harness_mail_import_outlook` does).
+///
+/// `out` receives the reply [`fauna_harness_mail_import`] does; a sign-in that
+/// ended without a grant (declined, expired, refused) is an `ok` reply naming
+/// the Source step with its sentence as the error.
+///
+/// [`microsoft_sign_in_actions`]: fauna_client_mail_settings::microsoft_sign_in_actions
+///
+/// # Safety
+///
+/// `nest_url` and `username` must be valid NUL-terminated C strings; `secret`
+/// must point to `secret_len` readable bytes; `out` must be a valid, aligned,
+/// writable pointer to an `FfiBuffer`. All pointers must stay valid for the
+/// duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fauna_harness_mail_import_outlook(
+    nest_url: *const c_char,
+    secret: *const u8,
+    secret_len: u32,
+    username: *const c_char,
+    out: *mut FfiBuffer,
+) -> i32 {
+    use fauna_client_mail_settings::{
+        DEFAULT_MAX_SIZE_MB, ImportSourceKind, ImportStep, MailImportAction, MicrosoftSignInState,
+        microsoft_sign_in_actions, scope_next_actions,
+    };
+
+    let body = || {
+        // SAFETY: per the `# Safety` section above.
+        let (call, username) = unsafe {
+            (
+                decode_call(nest_url, secret, secret_len, std::ptr::null(), 0)?,
+                cstr_to_string(username)?,
+            )
+        };
+        with_client(call.nest_url, call.identity, |nest| async move {
+            let machine = fauna_client_mail_settings::rpc_glue::build_mail_import_machine(nest);
+            // As in the Generic walk, a refusal lands on the snapshot and the
+            // walk stops there.
+            let walk = async {
+                let source = [
+                    MailImportAction::Refresh,
+                    MailImportAction::SelectSourceKind {
+                        kind: ImportSourceKind::Outlook,
+                    },
+                ];
+                for action in source
+                    .into_iter()
+                    .chain(microsoft_sign_in_actions(&username))
+                {
+                    machine.dispatch(action).await.ok()?;
+                }
+                let waiting = machine
+                    .snapshot()
+                    .microsoft_signin
+                    .is_some_and(|s| s.state == MicrosoftSignInState::Waiting);
+                if !waiting {
+                    return None;
+                }
+                machine.run_microsoft_sign_in().await.ok()?;
+                if machine.snapshot().step != ImportStep::Scope {
+                    return None;
                 }
                 for action in scope_next_actions("", DEFAULT_MAX_SIZE_MB) {
                     machine.dispatch(action).await.ok()?;

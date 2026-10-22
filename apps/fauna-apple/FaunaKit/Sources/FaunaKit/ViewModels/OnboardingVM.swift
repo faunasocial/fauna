@@ -299,10 +299,12 @@ public final class OnboardingVM {
     /// Views call this instead of `vm.machine.confirmGeneratedIdentity()`
     /// directly. Spec acceptance criterion 3 (secret durable post-confirm).
     ///
-    /// The commit stays best-effort + log: a failed store write means the
-    /// user re-onboards on the next launch (the wizard already handles that
-    /// path). Matches the cross-app convention (Linux `tracing::error!`, Web
-    /// `console.warn`, Windows logged-and-swallowed).
+    /// **Loud on failure** (`apps/common.md` § Credential storage: a store
+    /// failure "is a loud error, not a silent fallback"): a write the keychain
+    /// refused — or kept nothing of — goes to the shared machine's
+    /// `identityCommitFailed`, which puts the wizard back on the screen the
+    /// person confirmed on with the error on `error-message`; confirming again
+    /// is the retry. linux's and tui's `commit_confirmed_identity` shape.
     ///
     /// - Parameter append: true for the "Add account" wizard over a live
     ///   session — the caller must pass the CURRENT `appState.isAddingAccount`
@@ -340,6 +342,9 @@ public final class OnboardingVM {
                 secretHex: secret, append: append)
         } catch {
             logMessage(level: .error, target: "fauna.onboarding", message: "[OnboardingVM] persist_confirmed_identity (\(context)) failed: \(error)")
+            machine.identityCommitFailed(
+                message: L.onboarding.sessionError.persistSuccessor(
+                    message: DisplayError.message(error) ?? "\(error)"))
         }
     }
 
@@ -955,6 +960,10 @@ public final class OnboardingVM {
             logMessage(level: .warn, target: "fauna.onboarding", message: "[OnboardingVM] add-account: the confirmed recovery kit is not registered on this path")
         }
         sessionState.pendingRecoveryKitHex = append ? nil : pendingKit
+        // The DNS credential the wizard verified, latched for the post-auth glue
+        // (`MailEnableGlue.sealCapturedDnsCredential`) — like the kit, not on the
+        // append path (the nest being joined is not the one this wizard set up).
+        sessionState.pendingDnsCredential = append ? nil : machine.capturedDnsCredential()
 
         // Cache the handle in the account's server-data cache so the next cold
         // launch (and the switcher row) can show it before the silent sign-in

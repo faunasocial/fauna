@@ -350,3 +350,201 @@ impl CustodyBudgetOutcome {
         )
     }
 }
+
+/// What one restore from a custodian NEST came to — the gesture's answer
+/// (`account-replica-posture.md` § Replica posture → the custodian-NEST serve
+/// door bullet, *Corollary — the cold device*; the surface stating each
+/// outcome is `ui/nests.md` § Trust facet — restore from a custodian nest).
+/// Each variant is its own state of the notice, never collapsed: the user
+/// acts differently on each. *Running* is the surface's own state while the
+/// command is in flight, so it has no variant here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CustodianRestoreOutcome {
+    /// The counterparty URL policy refused the address before anything was
+    /// dialed — the one outcome that never left the box. `reason` is the
+    /// policy's own sentence.
+    AddressRefused { reason: String },
+    /// A custody row on record names this address and its grant is withdrawn
+    /// in this device's revocation view (an underived view refuses too):
+    /// nothing was dialed (bound (b)).
+    Revoked,
+    /// The nest did not admit this device, or could not be reached. One
+    /// opaque answer by design — the handshake does not say which: a wrong
+    /// address, a nest that is down, or one holding nothing for this account.
+    NotAdmitted,
+    /// Admitted and walked: `applied` account-state rows landed that this
+    /// device did not hold. `sealed_rows` counts the rows held after the walk
+    /// that are sealed under a generation this device holds no key for —
+    /// content that came back but waits on a key (bound (e)), stated beside
+    /// the count, never folded into it.
+    Restored { applied: usize, sealed_rows: usize },
+    /// Admitted and walked, and every row was already held.
+    NothingNew,
+    /// The rows landed, but a restored custody row for this address names a
+    /// different nest than the one that answered (bound (c)): the rows stand,
+    /// each verified by its in-seal writer signature; the user is told.
+    IdentityMismatch { expected: [u8; 32], got: [u8; 32] },
+}
+
+impl CustodianRestoreOutcome {
+    /// The `nests-custody-restore-notice` text — one per outcome, stated once
+    /// for every app (`ui/nests.md` § Trust facet — restore from a custodian
+    /// nest owns the copy). A revoked grant reads as the address-refused
+    /// state with its own reason: both never dialed, and the surface names
+    /// six states.
+    pub fn notice(&self) -> String {
+        self.notice_parts()
+            .iter()
+            .map(|part| part.resolve_nested(fauna_i18n::strings::lookup))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Whether the outcome closes the restore form: a restore that reached
+    /// the custodian does; every failure keeps the form open with the
+    /// address kept (`ui/nests.md` § Trust facet — restore from a custodian
+    /// nest) — decided once here for every app.
+    pub fn closes_form(&self) -> bool {
+        matches!(
+            self,
+            Self::Restored { .. } | Self::NothingNew | Self::IdentityMismatch { .. }
+        )
+    }
+
+    /// [`Self::notice`]'s decision as i18n keys + args, for an app that
+    /// resolves through its own string table (the UniFFI apps): the notice's
+    /// sentences in order, joined by a space. An argument may itself be a key
+    /// (the revoked reason), so resolve each part *nested*.
+    pub fn notice_parts(&self) -> Vec<fauna_core::localized::LocalizedText> {
+        use fauna_core::localized::LocalizedText as L;
+        const REFUSED: &str = "nests.custody_restore_refused";
+        match self {
+            Self::AddressRefused { reason } => vec![L::key_arg(REFUSED, "reason", reason)],
+            Self::Revoked => vec![L::key_arg(
+                REFUSED,
+                "reason",
+                "nests.custody_restore_revoked",
+            )],
+            Self::NotAdmitted => vec![L::key("nests.custody_restore_not_admitted")],
+            Self::Restored {
+                applied,
+                sealed_rows,
+            } => {
+                let mut parts = vec![L::key_arg(
+                    "nests.custody_restore_restored",
+                    "count",
+                    applied.to_string(),
+                )];
+                if *sealed_rows > 0 {
+                    parts.push(L::key_arg(
+                        "nests.custody_restore_sealed",
+                        "count",
+                        sealed_rows.to_string(),
+                    ));
+                }
+                parts
+            }
+            Self::NothingNew => vec![L::key("nests.custody_restore_nothing_new")],
+            Self::IdentityMismatch { .. } => vec![L::key("nests.custody_restore_mismatch")],
+        }
+    }
+}
+
+#[cfg(test)]
+mod custodian_restore_notice_tests {
+    use super::CustodianRestoreOutcome as O;
+
+    /// Six states, six texts — never collapsed; the sealed count stands
+    /// beside the restored count and only when there is one.
+    #[test]
+    fn every_outcome_reads_its_own_notice() {
+        let notices = [
+            O::AddressRefused {
+                reason: "empty host".into(),
+            }
+            .notice(),
+            O::Revoked.notice(),
+            O::NotAdmitted.notice(),
+            O::Restored {
+                applied: 3,
+                sealed_rows: 0,
+            }
+            .notice(),
+            O::Restored {
+                applied: 3,
+                sealed_rows: 2,
+            }
+            .notice(),
+            O::NothingNew.notice(),
+            O::IdentityMismatch {
+                expected: [1; 32],
+                got: [2; 32],
+            }
+            .notice(),
+        ];
+        let distinct: std::collections::BTreeSet<_> = notices.iter().collect();
+        assert_eq!(distinct.len(), notices.len(), "{notices:#?}");
+        assert!(notices[0].contains("empty host"));
+        assert!(notices[3].contains('3') && !notices[3].contains("sealed"));
+        assert!(notices[4].contains('3') && notices[4].contains("2 came back sealed"));
+        // The not-admitted copy names all three causes.
+        for cause in ["wrong", "down", "nothing for this account"] {
+            assert!(notices[2].contains(cause), "{}", notices[2]);
+        }
+        // The revoked reason is the localized clause, never its raw key.
+        assert!(!notices[1].contains("nests."), "{}", notices[1]);
+    }
+
+    /// A restore that reached the custodian closes the form; every failure
+    /// keeps it open, the address kept.
+    #[test]
+    fn only_an_admitted_restore_closes_the_form() {
+        assert!(
+            O::Restored {
+                applied: 1,
+                sealed_rows: 0,
+            }
+            .closes_form()
+        );
+        assert!(O::NothingNew.closes_form());
+        assert!(
+            O::IdentityMismatch {
+                expected: [1; 32],
+                got: [2; 32],
+            }
+            .closes_form()
+        );
+        assert!(!O::NotAdmitted.closes_form());
+        assert!(!O::Revoked.closes_form());
+        assert!(!O::AddressRefused { reason: "x".into() }.closes_form());
+    }
+
+    /// Every key the parts name is in the string table — an app resolving
+    /// them through its own table never paints a raw key.
+    #[test]
+    fn every_notice_part_names_a_real_key() {
+        let outcomes = [
+            O::AddressRefused { reason: "x".into() },
+            O::Revoked,
+            O::NotAdmitted,
+            O::Restored {
+                applied: 1,
+                sealed_rows: 1,
+            },
+            O::NothingNew,
+            O::IdentityMismatch {
+                expected: [1; 32],
+                got: [2; 32],
+            },
+        ];
+        for outcome in outcomes {
+            for part in outcome.notice_parts() {
+                assert!(
+                    fauna_i18n::strings::lookup(&part.key).is_some(),
+                    "{}",
+                    part.key
+                );
+            }
+        }
+    }
+}

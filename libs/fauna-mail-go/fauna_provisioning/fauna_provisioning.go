@@ -550,6 +550,51 @@ type FfiDestroyerString struct{}
 
 func (FfiDestroyerString) Destroy(_ string) {}
 
+// One channel's [`ChannelBuild`].
+type ChannelAvailability struct {
+	Channel UpdateChannel
+	Build   ChannelBuild
+}
+
+func (r *ChannelAvailability) Destroy() {
+	FfiDestroyerUpdateChannel{}.Destroy(r.Channel)
+	FfiDestroyerChannelBuild{}.Destroy(r.Build)
+}
+
+type FfiConverterChannelAvailability struct{}
+
+var FfiConverterChannelAvailabilityINSTANCE = FfiConverterChannelAvailability{}
+
+func (c FfiConverterChannelAvailability) Lift(rb RustBufferI) ChannelAvailability {
+	return LiftFromRustBuffer[ChannelAvailability](c, rb)
+}
+
+func (c FfiConverterChannelAvailability) Read(reader io.Reader) ChannelAvailability {
+	return ChannelAvailability{
+		FfiConverterUpdateChannelINSTANCE.Read(reader),
+		FfiConverterChannelBuildINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterChannelAvailability) Lower(value ChannelAvailability) C.RustBuffer {
+	return LowerIntoRustBuffer[ChannelAvailability](c, value)
+}
+
+func (c FfiConverterChannelAvailability) LowerExternal(value ChannelAvailability) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ChannelAvailability](c, value))
+}
+
+func (c FfiConverterChannelAvailability) Write(writer io.Writer, value ChannelAvailability) {
+	FfiConverterUpdateChannelINSTANCE.Write(writer, value.Channel)
+	FfiConverterChannelBuildINSTANCE.Write(writer, value.Build)
+}
+
+type FfiDestroyerChannelAvailability struct{}
+
+func (_ FfiDestroyerChannelAvailability) Destroy(value ChannelAvailability) {
+	value.Destroy()
+}
+
 type ContactInfo struct {
 	FirstName  string
 	LastName   string
@@ -1351,6 +1396,88 @@ func (c FfiConverterVpsLocation) Write(writer io.Writer, value VpsLocation) {
 type FfiDestroyerVpsLocation struct{}
 
 func (_ FfiDestroyerVpsLocation) Destroy(value VpsLocation) {
+	value.Destroy()
+}
+
+// What the registry says of one channel's tag.
+type ChannelBuild interface {
+	Destroy()
+}
+
+// The tag resolves to a build. `version` is its version label as a
+// semantic version, `None` for a build without one.
+type ChannelBuildAvailable struct {
+	Version *string
+}
+
+func (e ChannelBuildAvailable) Destroy() {
+	FfiDestroyerOptionalString{}.Destroy(e.Version)
+}
+
+// The registry answered `404`: nothing has been published on the channel.
+type ChannelBuildNoBuild struct {
+}
+
+func (e ChannelBuildNoBuild) Destroy() {
+}
+
+// Any other outcome — offline, a forwarder that is not live, a registry
+// error. Treated as the status quo, never as a missing build.
+type ChannelBuildUnknown struct {
+}
+
+func (e ChannelBuildUnknown) Destroy() {
+}
+
+type FfiConverterChannelBuild struct{}
+
+var FfiConverterChannelBuildINSTANCE = FfiConverterChannelBuild{}
+
+func (c FfiConverterChannelBuild) Lift(rb RustBufferI) ChannelBuild {
+	return LiftFromRustBuffer[ChannelBuild](c, rb)
+}
+
+func (c FfiConverterChannelBuild) Lower(value ChannelBuild) C.RustBuffer {
+	return LowerIntoRustBuffer[ChannelBuild](c, value)
+}
+
+func (c FfiConverterChannelBuild) LowerExternal(value ChannelBuild) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ChannelBuild](c, value))
+}
+func (FfiConverterChannelBuild) Read(reader io.Reader) ChannelBuild {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return ChannelBuildAvailable{
+			FfiConverterOptionalStringINSTANCE.Read(reader),
+		}
+	case 2:
+		return ChannelBuildNoBuild{}
+	case 3:
+		return ChannelBuildUnknown{}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterChannelBuild.Read()", id))
+	}
+}
+
+func (FfiConverterChannelBuild) Write(writer io.Writer, value ChannelBuild) {
+	switch variant_value := value.(type) {
+	case ChannelBuildAvailable:
+		writeInt32(writer, 1)
+		FfiConverterOptionalStringINSTANCE.Write(writer, variant_value.Version)
+	case ChannelBuildNoBuild:
+		writeInt32(writer, 2)
+	case ChannelBuildUnknown:
+		writeInt32(writer, 3)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterChannelBuild.Write", value))
+	}
+}
+
+type FfiDestroyerChannelBuild struct{}
+
+func (_ FfiDestroyerChannelBuild) Destroy(value ChannelBuild) {
 	value.Destroy()
 }
 

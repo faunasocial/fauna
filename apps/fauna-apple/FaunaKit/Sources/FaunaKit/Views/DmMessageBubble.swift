@@ -101,7 +101,7 @@ public struct DmMessageBubble: View {
     /// target `deleted` (manager rejects a non-own target; the security floor is also
     /// enforced on ingest), and the bubble repaints to the `dm-message-deleted`
     /// tombstone off `message.deleted`. Gated on
-    /// `capabilities.supportsMessageDelete && message.isOwn` (FaunaMls-only).
+    /// `message.canDelete` (the snapshot's own-or-governs-the-room flag).
     public var onDeleteMessage: (MessageId) -> Void
     /// Mark this (received) message as spam — the live `Insert` consumer
     /// (mail-spam.md § Encrypted-mode interaction + § Wire shapes `put_spam_model`
@@ -210,12 +210,13 @@ public struct DmMessageBubble: View {
     /// drifting apart.
     private static let quickSetEmojis = quicksetEmojis()
 
-    /// Capability + ownership gates. `canReact`/`canDelete` derive ONLY from the
-    /// thread capabilities + `message.isOwn` (never a `rail` branch — § Architectural
-    /// rules); `hasActions` decides whether the ⋯ overflow shows at all (keeps mail
+    /// Capability + ownership gates. `canReact` derives ONLY from the thread
+    /// capabilities and `canDelete` from the snapshot's `message.canDelete` (own
+    /// message, or any message for a room owner/admin — never a role or `rail`
+    /// branch, § Architectural rules); `hasActions` decides whether the ⋯ overflow shows at all (keeps mail
     /// bubbles clean when neither action is available).
     private var canReact: Bool { capabilities.supportsReactions }
-    private var canDelete: Bool { capabilities.supportsMessageDelete && message.isOwn }
+    private var canDelete: Bool { message.canDelete }
     /// Mark-as-spam is offered on any received message (`!isOwn`) — you flag
     /// others' content as spam, not your own; unlike `canReact`/`canDelete` this
     /// is NOT capability-gated (mail-spam.md § Encrypted-mode interaction; mirrors
@@ -406,13 +407,13 @@ public struct DmMessageBubble: View {
     /// The mute itself is unaffected — revealing doesn't un-mute the term.
     private var mutedPlaceholder: some View {
         HStack(spacing: 8) {
-            automationText(Ids.dmMessageMuted, L.conversations.detail.mutedWord)
+            automationText(Ids.dmMessageMuted, L.mutedWords.collapsed)
                 .font(.caption)
                 .italic()
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
             timestampLabel
-            Button(L.conversations.detail.mutedReveal) {
+            Button(L.mutedWords.reveal) {
                 mutedRevealed = true
             }
             .buttonStyle(.borderless)
@@ -484,7 +485,10 @@ public struct DmMessageBubble: View {
         // Per-message remote-image reveal (html-mail Slice 3 / D3): shown only while this
         // body has ≥1 still-blocked remote image. Tapping dispatches to the manager, which
         // flips its reveal set + re-emits with `revealed = true` (the sole inbound image
-        // request follows on the repaint) — no client-side flag.
+        // request follows on the repaint) — no client-side flag. Compiled out of the Fauna
+        // Kids target: a child's tap would have the device fetch from a third-party host
+        // (dynamic-features.md, the kids spine paragraph).
+        #if !FAUNA_KIDS
         if hasBlockedRemote {
             Button {
                 onRevealRemoteImages(message.messageId)
@@ -496,6 +500,7 @@ public struct DmMessageBubble: View {
             .accessibilityIdentifier(Ids.loadRemoteContentButton)
             .automationActivate(Ids.loadRemoteContentButton) { onRevealRemoteImages(message.messageId) }
         }
+        #endif
 
         // Attachments — rendered from the document's `.attachment` blocks (render-model.md
         // § D2a), in body order, replacing the former sibling `message.attachments` loop.
@@ -517,6 +522,21 @@ public struct DmMessageBubble: View {
                 index: index)
         }
         #endif
+
+        // The received-mail scan verdict (`mail-content-scanning.md` § User sees
+        // their own message's row): the shared `scan_result_lines`, already
+        // localized through the shared keys — one `dm-message-scan-result`
+        // element, the lines in order, painted only when non-empty (the manager
+        // fills them once `refreshMessageScanResults` ran for the opened thread).
+        // Below the body and its attachments, after delivered-to where that row
+        // exists, before the timestamp's slot (mirrors tui).
+        if !message.scanResultLines.isEmpty {
+            automationText(
+                Ids.dmMessageScanResult,
+                message.scanResultLines.map(renderLocalizedText).joined(separator: "\n"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
 
         // Aggregated reactions under the bubble (conversations.md § Reactions &
         // message delete): one `dm-reaction-pill` per emoji group (emoji + count),

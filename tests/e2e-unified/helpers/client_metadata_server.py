@@ -164,6 +164,9 @@ class ClientMetadataServer:
         self.host = host
         self.hosts = [host, *extra_hosts]
         self.documents: dict[str, dict] = {}
+        # Raw bodies by path — a hosted plugin's module, which a document's
+        # signed `execution.module` names on the same host.
+        self.blobs: dict[str, bytes] = {}
         self.posts: list[tuple[str, dict[str, str], bytes]] = []
         self._posted = threading.Condition()
         self.port = find_free_port()
@@ -173,13 +176,17 @@ class ClientMetadataServer:
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 — the stdlib's name
+                blob = server.blobs.get(self.path)
                 document = server.documents.get(self.path)
-                if document is None:
+                if blob is None and document is None:
                     self.send_error(404)
                     return
-                body = json.dumps(document).encode()
+                body = blob if blob is not None else json.dumps(document).encode()
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+                self.send_header(
+                    "Content-Type",
+                    "application/wasm" if blob is not None else "application/json",
+                )
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)

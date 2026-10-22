@@ -5,6 +5,8 @@ import com.fauna.app.core.ShellLog
 import com.fauna.app.core.conversations.ConversationsManagerHost
 import com.fauna.ffi.FfiCueTracker
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.FfiNestClient
+import com.fauna.ffi.FfiPostBlobHosts
 import com.fauna.ffi.autosaveDebounceMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -120,6 +122,29 @@ class FeedManagerHost @Inject constructor(
             draftsScope.launch { installRoomPostSeam(m) }
         }
         return m
+    }
+
+    private var blobHosts: FfiPostBlobHosts? = null
+    private var blobHostsClient: FfiNestClient? = null
+
+    /**
+     * The session's post-blob planes — this nest's and every foreign home's,
+     * the shared `fauna_client::post_blob::PostBlobHosts` over UniFFI (`feed.md`
+     * § The read model → *A post homed on another nest*). One per signed-in
+     * client, since each foreign home's graduated pin lives as long as the
+     * handle; a rebuilt client (sign-out→sign-in) gets a fresh one. `null`
+     * before the nest is connected. Every post byte leg — the gated body, the
+     * media, the C2PA probe, the video — reads through it with the post's
+     * `postBlobHome` handed back unchanged, never re-derived here.
+     */
+    @Synchronized
+    fun postBlobHosts(): FfiPostBlobHosts? {
+        val client = api.nestClient ?: return null
+        blobHosts?.takeIf { blobHostsClient === client }?.let { return it }
+        return client.postBlobHosts().also {
+            blobHosts = it
+            blobHostsClient = client
+        }
     }
 
     /** The engagement-cue capture tracker of [cueTrackerManager]. */

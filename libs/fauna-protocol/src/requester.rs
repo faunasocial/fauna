@@ -144,6 +144,17 @@ pub trait RpcErrorClass {
     fn is_subprotocol_mismatch(&self) -> bool {
         false
     }
+
+    /// `true` when the connection itself went away under the request — the
+    /// socket closed or failed mid-call — so a fresh dial may succeed where
+    /// this one cannot. Narrower than `!is_rejection()`: a timeout, a decode
+    /// failure or a refused subprotocol says nothing about the socket. The
+    /// typed predicate a redial reads (`apps/cli.md` § The device shell →
+    /// *A dropped session*), never a match on the error's text. Defaults to
+    /// `false`.
+    fn is_connection_lost(&self) -> bool {
+        false
+    }
 }
 
 /// `Infallible` (the error of a never-failing transport — e.g. an in-memory

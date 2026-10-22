@@ -35,16 +35,18 @@
               KeyPath="yes"
               Name="fauna-bridge-svc.exe" />
 
+        <!-- public-text: windows-installer-descriptions -->
         <ServiceInstall
           Id="InstallFaunaBridge"
           Name="FaunaBridge"
           DisplayName="Fauna Bridge Service"
-          Description="IMAP/SMTP bridge for accessing Fauna messages from standard email clients."
+          Description="Mail and calendar server components (IMAP and CalDAV) so standard mail and calendar apps can connect to this nest."
           Type="ownProcess"
           Start="auto"
           Account="NT SERVICE\FaunaBridge"
           ErrorControl="normal"
           Arguments="--service" />
+        <!-- public-text-end: windows-installer-descriptions -->
 
         <ServiceControl
           Id="ControlFaunaBridge"

@@ -139,10 +139,11 @@ impl super::AdoptableJournal for MailPlacementKind {
 /// 2026-09-24).
 ///
 /// Best-effort about exactly ONE thing: a crashed, never-finalized `.dat` (no
-/// `.meta` sidecar) cannot be opened and is skipped with a warning — bounded
-/// to the records appended after the last finalize, and strictly better than
-/// the alternative (a corrupt manifest bricking the actor's mail writes
-/// forever). Restore-design spec § D3 is the authority for this path.
+/// `.meta` sidecar) is rebuilt from its append journal and replayed, and only
+/// one that cannot be rebuilt is skipped — bounded to the records appended
+/// after the last finalize, and strictly better than the alternative (a
+/// corrupt manifest bricking the actor's mail writes forever). Restore-design
+/// spec § D3 is the authority for this path.
 ///
 /// Every OTHER way a segment can refuse to open fails closed, matching the `?`
 /// the record decode below already uses: `FramedSegment::open` has eight
@@ -461,6 +462,55 @@ mod tests {
         // Tombstone modseq is load-bearing for QRESYNC VANISHED.
         assert_eq!(m.tombstones[0].modseq, 11);
         assert_eq!(m.tombstones[0].deleted_at, 1_752_000_000);
+    }
+
+    /// A mailbox `Delete` drops that name's tombstones and only those: the
+    /// restore replays `manifest.tombstones` verbatim into
+    /// `bridge_imap_expunged`, so a surviving one would rebuild the expunge
+    /// log DELETE cleared and report a re-created mailbox's live UIDs as
+    /// VANISHED (imap-server.md, the `DELETE mailbox` row).
+    #[tokio::test]
+    async fn delete_drops_only_the_deleted_mailboxs_tombstones() {
+        let tmp = TempDir::new().expect("tmp");
+        let manager = MailPlacementSegmentManager::new(tmp.path().to_path_buf());
+        let actor = [0x89u8; 32];
+        for mailbox in ["Gone", "Kept"] {
+            for record in [
+                MailPlacementRecord::Create {
+                    mailbox: mailbox.to_string(),
+                    uid_validity: 1,
+                    attrs: vec![],
+                },
+                MailPlacementRecord::Append {
+                    mailbox: mailbox.to_string(),
+                    uid: 1,
+                    modseq: 2,
+                    flags: vec![],
+                    content_record_id: vec![],
+                    internal_date: 0,
+                },
+                MailPlacementRecord::Expunge {
+                    mailbox: mailbox.to_string(),
+                    uid_set: vec![1],
+                    modseq: 3,
+                    deleted_at: 1_752_000_000,
+                },
+            ] {
+                manager.append_event(&actor, &record).await.unwrap();
+            }
+        }
+        manager
+            .append_event(
+                &actor,
+                &MailPlacementRecord::Delete {
+                    mailbox: "Gone".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let m = manager.current_manifest(&actor).await.unwrap();
+        let names: Vec<&str> = m.tombstones.iter().map(|t| t.mailbox.as_str()).collect();
+        assert_eq!(names, vec!["Kept"], "only Kept's tombstone survives");
     }
 
     #[tokio::test]
@@ -929,6 +979,133 @@ mod tests {
         assert!(
             manager.current_manifest(&actor).await.is_err(),
             "a future-versioned manifest must be a hard error"
+        );
+    }
+
+    /// Append two placement records and drop the manager with its segment
+    /// still open — a crash, a SIGKILL or power loss before the
+    /// generation-end finalize. Segment 1 is left a `.dat` and its `.tail`
+    /// append journal, with no `.meta`.
+    async fn crash_with_segment_open(data_dir: &std::path::Path, actor: &[u8; 32]) {
+        let manager = MailPlacementSegmentManager::new(data_dir.to_path_buf());
+        for record in [
+            MailPlacementRecord::Create {
+                mailbox: "INBOX".into(),
+                uid_validity: 7,
+                attrs: vec!["\\Inbox".into()],
+            },
+            MailPlacementRecord::Append {
+                mailbox: "INBOX".into(),
+                uid: 42,
+                modseq: 1,
+                flags: vec![],
+                content_record_id: vec![0xA1],
+                internal_date: 1_000,
+            },
+        ] {
+            assert_eq!(
+                manager.append_event(actor, &record).await.expect("append"),
+                1
+            );
+        }
+        let dat = manager.segment_file_path(actor, 1);
+        drop(manager);
+        assert!(
+            !dat.with_extension("meta").exists() && dat.with_extension("tail").exists(),
+            "seeding bug: segment 1 must be left open with its journal"
+        );
+    }
+
+    /// The next process rebuilds a crash-stranded journal segment from its
+    /// append journal on the actor's first touch (`message-segment-store.md`
+    /// § Segment size): the backup listing reads it again, and the journal —
+    /// not just the manifest cache — holds every acknowledged record.
+    #[tokio::test]
+    async fn a_crash_stranded_open_segment_is_rebuilt_on_first_touch() {
+        let tmp = TempDir::new().expect("tmp");
+        let actor = [0xD7u8; 32];
+        crash_with_segment_open(tmp.path(), &actor).await;
+
+        let next_process = MailPlacementSegmentManager::new(tmp.path().to_path_buf());
+        let (ids, _) = next_process
+            .live_segments_for_backup(&actor)
+            .await
+            .expect("list");
+        assert_eq!(ids, vec![1]);
+        let meta = next_process
+            .describe_segment_for_backup(&actor, 1)
+            .await
+            .expect("the stranded segment must read after the rebuild");
+        assert_eq!(meta.record_count, 2);
+
+        let root = mail_placement_segments_root(tmp.path(), &actor);
+        let replayed = rebuild_mail_placement_manifest_from_segments(&root).expect("replay");
+        let uids: Vec<u32> = replayed.placements.iter().map(|p| p.uid).collect();
+        assert_eq!(
+            uids,
+            vec![42],
+            "every acknowledged placement is in the journal"
+        );
+
+        let seg = next_process
+            .append_event(
+                &actor,
+                &MailPlacementRecord::Subscribe {
+                    mailbox: "INBOX".into(),
+                },
+            )
+            .await
+            .expect("append after the rebuild");
+        assert_eq!(seg, 2, "the next append rotates to a fresh id");
+    }
+
+    /// A manifest rebuild that meets a journaled crash tail replays it from
+    /// its journal instead of skipping it — the tail's placements survive.
+    #[tokio::test]
+    async fn a_journaled_crash_tail_is_replayed_not_skipped() {
+        let tmp = TempDir::new().expect("tmp");
+        let actor = [0xD8u8; 32];
+        crash_with_segment_open(tmp.path(), &actor).await;
+        let root = mail_placement_segments_root(tmp.path(), &actor);
+
+        let m = rebuild_mail_placement_manifest_from_segments(&root)
+            .expect("a journaled tail must replay");
+        let uids: Vec<u32> = m.placements.iter().map(|p| p.uid).collect();
+        assert_eq!(uids, vec![42]);
+        assert_eq!(m.kind_manifest.live_segments, vec![1]);
+    }
+
+    /// A stranded segment with no journal cannot be rebuilt: the first touch
+    /// retires its id (the counter never rewinds) so the backup listing
+    /// reads again, and leaves its bytes on disk.
+    #[tokio::test]
+    async fn an_unjournaled_stranded_segment_is_retired_on_first_touch() {
+        let tmp = TempDir::new().expect("tmp");
+        let actor = [0xD9u8; 32];
+        crash_with_segment_open(tmp.path(), &actor).await;
+        let next_process = MailPlacementSegmentManager::new(tmp.path().to_path_buf());
+        let dat = next_process.segment_file_path(&actor, 1);
+        std::fs::remove_file(dat.with_extension("tail")).expect("drop the journal");
+
+        let (ids, next_seg_id) = next_process
+            .live_segments_for_backup(&actor)
+            .await
+            .expect("the scope must list after the retirement");
+        assert!(ids.is_empty());
+        assert_eq!(next_seg_id, 2, "the counter never rewinds");
+        let m = next_process
+            .current_manifest(&actor)
+            .await
+            .expect("manifest");
+        assert_eq!(m.kind_manifest.tombstoned_segments, vec![1]);
+        assert_eq!(
+            m.placements.len(),
+            1,
+            "the manifest cache keeps its placements"
+        );
+        assert!(
+            dat.exists(),
+            "the bytes stay, never deleted by the reconcile"
         );
     }
 }

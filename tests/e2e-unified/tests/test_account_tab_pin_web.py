@@ -40,6 +40,7 @@ from tests.test_account_switcher_web import (
     SWITCHER_ITEM,
     SWITCHER_LIST,
     _auth_on_account_page,
+    _await_boot_landed,
     _seed_two_accounts,
 )
 
@@ -135,7 +136,7 @@ def test_web_second_tab_switch_does_not_drag_the_first_tab_along(nest_instance, 
         nest_instance, spa_url
     )
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
         # (1) Tab A signs in as the regular user, then SWITCHES to the admin —
@@ -145,7 +146,7 @@ def test_web_second_tab_switch_does_not_drag_the_first_tab_along(nest_instance, 
         # in-memory `set_state` patch cannot produce it and must not be used to
         # fake this precondition; the switch's own reload + silent sign-in is
         # what makes the tab genuinely the admin.
-        _auth_on_account_page(tab_a, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab_a, user_secret, "user", user_actor, spa_url)
         tab_a.click(SWITCHER_ITEM, index=1)
         tab_a.wait_for(ADMIN_TAB, timeout=60)
         assert tab_a.is_visible(ADMIN_TAB), "tab A is now genuinely the admin account"
@@ -158,6 +159,7 @@ def test_web_second_tab_switch_does_not_drag_the_first_tab_along(nest_instance, 
         # (2) A second TAB of the same browser profile — one shared origin store,
         # its own sessionStorage (so its own, initially absent, pin).
         tab_b = tab_a.open_same_context_tab()
+        _await_boot_landed(tab_b)
         tab_b.set_state(ACCOUNT_PAGE_NAV)
         tab_b.wait_for(SWITCHER_LIST, timeout=60)
         tab_b.wait_for(SWITCHER_ITEM, timeout=30)
@@ -210,7 +212,7 @@ def _await_session_actor(driver, expected, *, budget_s=60, what="the session"):
 
     ``session.authenticated`` is deliberately NOT part of the condition: it is
     ``identity.registered``, which only the silent challenge's completion sets
-    (`$lib/store`), so a seat arranged through the session patch publishes no
+    (`#lib/store`), so a seat arranged through the session patch publishes no
     such key at all (measured 2026-09-20 — the state read back carried every
     other session field and no ``authenticated``). What proves a LIVE session
     here is `admin-tab`, which only a real `am-i-admin` call reveals."""
@@ -251,10 +253,10 @@ def test_web_a_pinned_tab_entering_at_the_app_root_is_not_parked(nest_instance, 
         nest_instance, spa_url
     )
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
-        _auth_on_account_page(tab_a, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab_a, user_secret, "user", user_actor, spa_url)
 
         tab_b = tab_a.open_same_context_tab()
         tab_b.eval_js(f"sessionStorage.setItem({PIN_KEY!r}, {user_actor!r})")
@@ -274,7 +276,7 @@ def test_web_a_pinned_tab_entering_at_the_app_root_is_not_parked(nest_instance, 
 # NOT a catalog witness: a regression test for web's BOOT, and the only test
 # here whose tab resolves its identity from the origin store alone.
 #
-# `$lib/store`'s `loadIdentity` derives the actor id through a wasm face, and
+# `#lib/store`'s `loadIdentity` derives the actor id through a wasm face, and
 # every app route calls `identity.init()` BEFORE its own `await ensureWasm()`
 # (deliberately — the actor-scope seam must be live before the module
 # instantiates). So a tab with a registry active account and no pin used to THROW there, and
@@ -293,12 +295,12 @@ def test_web_a_second_tab_boots_into_the_signed_in_account(nest_instance, spa_ur
         nest_instance, spa_url
     )
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
         # Tab A signs in; the helper seeds the registry into
         # localStorage, which is what the second tab will have to read.
-        _auth_on_account_page(tab_a, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab_a, user_secret, "user", user_actor, spa_url)
 
         tab_b = tab_a.open_same_context_tab()
         _await_session_actor(
@@ -324,17 +326,18 @@ def test_web_new_tab_switcher_opens_the_other_identity_in_that_tab(nest_instance
         nest_instance, spa_url
     )
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
         # Tab A serves the regular user.
-        _auth_on_account_page(tab_a, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab_a, user_secret, "user", user_actor, spa_url)
         _await_session_actor(tab_a, user_actor, what="tab A serves the user")
 
         # A new tab of the same profile, on the Account page's switcher. With the
         # user still active, the admin row is index 1 — the same row the switch
         # journey in `test_account_switcher_web.py` picks.
         tab_b = tab_a.open_same_context_tab()
+        _await_boot_landed(tab_b)
         tab_b.set_state(ACCOUNT_PAGE_NAV)
         tab_b.wait_for(SWITCHER_LIST, timeout=60)
         tab_b.wait_for(SWITCHER_ITEM, timeout=30)
@@ -382,10 +385,10 @@ def test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_oth
         nest_instance, spa_url
     )
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     tab_b = None
     try:
-        _auth_on_account_page(tab_a, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab_a, user_secret, "user", user_actor, spa_url)
         _await_session_actor(tab_a, user_actor, what="tab A serves the user")
 
         # The second launch: a new tab of the same profile — no pin, no session
@@ -402,6 +405,7 @@ def test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_oth
         # ... and offers the other identities: its switcher lists both seeded
         # accounts, exactly one of them marked active, the admin's handle among
         # them — the row a user picks to open the other identity in this tab.
+        _await_boot_landed(tab_b)
         tab_b.set_state(ACCOUNT_PAGE_NAV)
         tab_b.wait_for(SWITCHER_LIST, timeout=60)
         tab_b.wait_for(SWITCHER_ITEM, timeout=30)
@@ -435,7 +439,7 @@ def test_web_launching_again_comes_up_on_the_running_identity_and_offers_the_oth
 # `sessionStorage` — and with it a pin to an account removed meanwhile (removal
 # refuses while a tab serves the account, so that tab was closed first). The
 # seed below is exactly the state such a restored tab carries. The door is
-# `$lib/store`'s `accountsBoot` continuation: pinned + unresolvable after the
+# `#lib/store`'s `accountsBoot` continuation: pinned + unresolvable after the
 # succession walk → `clearTabPin()` + one reload.
 def _await_path(driver, expected, *, budget_s=60):
     """Wait until the page's ``location.pathname`` is ``expected`` — a deadline
@@ -474,9 +478,9 @@ def test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity(
         nest_instance, spa_url
     )
     tab = create_driver("web")
-    tab.launch({"url": spa_url + "/app/"})
+    tab.launch({"url": spa_url + "/app/", "seed_credentials": seed})
     try:
-        _auth_on_account_page(tab, seed, user_secret, "user", user_actor, spa_url)
+        _auth_on_account_page(tab, user_secret, "user", user_actor, spa_url)
         _await_session_actor(tab, user_actor, what="the tab serves the user")
         assert _active_secret(tab) == user_secret, (
             "precondition: the store-active account is the user — the identity a "
@@ -505,6 +509,7 @@ def test_web_a_tab_pinned_to_a_gone_account_starts_on_the_running_identity(
             tab, user_actor, what="the tab starts normally on the store-active identity"
         )
         # Not blank: the app renders, and its switcher lists both live identities.
+        _await_boot_landed(tab)
         tab.set_state(ACCOUNT_PAGE_NAV)
         tab.wait_for(SWITCHER_LIST, timeout=60)
         tab.wait_for(SWITCHER_ITEM, timeout=30)

@@ -27,6 +27,7 @@ mod client;
 mod error;
 mod fixed_conn;
 mod identity;
+mod segment_http;
 mod shared_port;
 mod token_client;
 
@@ -41,5 +42,6 @@ pub use client::connection_reports_json;
 pub use client::{ConnectionState, WsRpcClient};
 pub use error::WsRpcError;
 pub use identity::{arc_from_secret_hex, keypair_from_secret_hex};
+pub use segment_http::{SegmentHalfBody, SegmentHalfPath, SegmentHttpError, segment_half};
 pub use shared_port::JsRpcPort;
 pub use token_client::TokenWsRpcClient;

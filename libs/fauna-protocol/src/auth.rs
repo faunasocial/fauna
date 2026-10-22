@@ -919,6 +919,15 @@ pub struct VerifyReply {
     /// (de)serializes transparently as `T`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert_binding: Option<Box<CertBinding>>,
+    /// `true` iff the nest had never minted an actor-own session for this actor
+    /// before this very mint (`login.md` § Direct Auth → the verify reply). Its
+    /// one consumer is the onboarding wizard's handle check, which offers the
+    /// trust set on an `AlreadyOnNest` conclusion only when this is the
+    /// admin-admitted user's first sign-in (`onboarding.md` § 3b-ter). Additive:
+    /// absent — a nest too old to state it — reads `false`, the not-first
+    /// suppression.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_sign_in: bool,
     /// Forward-compat catch-all. (The `storage_mode_pending` flag that once
     /// rode here — always `false` since the storage-mode axis retired, kept
     /// only to steer a client past a wizard step that no longer existed — left the wire 2026-09-24 with the compat-remnant sweep; a
@@ -942,6 +951,7 @@ impl Default for VerifyReply {
             expires_at: 0,
             expires_in: 0,
             cert_binding: None,
+            first_sign_in: false,
             extra: BTreeMap::new(),
         }
     }
@@ -1928,6 +1938,35 @@ mod tests {
         assert_eq!(reply, decoded);
         let bytes2 = encode_canonical(&decoded).unwrap();
         assert_eq!(bytes1, bytes2);
+    }
+
+    /// `first_sign_in` is additive (`login.md` § Direct Auth → the verify
+    /// reply): a `true` round-trips, a `false` is absent from the wire, and a
+    /// reply without the key — a nest too old to state it — reads `false`.
+    #[test]
+    fn verify_reply_first_sign_in_is_additive() {
+        let first = VerifyReply {
+            token: "tok".into(),
+            first_sign_in: true,
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&first).unwrap();
+        assert_eq!(decode::<VerifyReply>(&bytes).unwrap(), first);
+
+        let not_first = VerifyReply {
+            token: "tok".into(),
+            ..Default::default()
+        };
+        let value: crate::Value = decode(&encode_canonical(&not_first).unwrap()).unwrap();
+        let crate::Value::Map(map) = value else {
+            panic!("a verify reply encodes as a map");
+        };
+        assert!(!map.contains_key("first_sign_in"), "a false is not sent");
+        assert!(
+            !decode::<VerifyReply>(&encode_canonical(&map).unwrap())
+                .unwrap()
+                .first_sign_in
+        );
     }
 
     /// The silent-challenge (`fauna.auth.verify`) reply carries the same Axis-1

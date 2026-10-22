@@ -176,6 +176,10 @@ pub struct FfiSetupStatus {
     /// read-only — the port is the router's fixed 443 and a save is rejected (see
     /// [`SetupStatusReply::fronted_by_router`]).
     pub fronted_by_router: bool,
+    /// Host-OS maintenance: whether the nest read a host-status file at all;
+    /// `false` means the other `os_*` fields are defaults, not a report (see
+    /// [`SetupStatusReply::os_host_status_present`]).
+    pub os_host_status_present: bool,
     /// Host-OS maintenance: pending security updates on the host Ubuntu box. The
     /// admin client renders "N security updates pending" when `> 0`. `0` on a nest
     /// without the maintenance channel (dev / desktop nests). See
@@ -225,6 +229,7 @@ impl From<SetupStatusReply> for FfiSetupStatus {
             cors_origins: r.cors_origins,
             serving_port: r.serving_port,
             fronted_by_router: r.fronted_by_router,
+            os_host_status_present: r.os_host_status_present,
             os_security_updates_pending: r.os_security_updates_pending,
             os_reboot_pending: r.os_reboot_pending,
             os_reboot_deferred_since: r.os_reboot_deferred_since,
@@ -808,6 +813,36 @@ pub struct FfiNotification {
     pub summary: String,
     /// Unix **seconds**.
     pub timestamp: u64,
+    /// The row's sentence as a catalog key plus data args, or `None` — carried
+    /// so the push round-trips whole into `notification_push_muted_for` (the
+    /// toast gate matches the relayed args, `behavior/notifications.md`
+    /// § Muted words rule 1). Last and defaulted at the FFI boundary
+    /// (`version-compatibility.md` § I4).
+    #[uniffi(default = None)]
+    pub body: Option<fauna_core::localized::LocalizedText>,
+}
+
+/// The mirror back to the wire payload, for the pure readers (the toast gate).
+/// `extra` is the one field the mirror cannot carry; no shared decision reads it.
+#[cfg(feature = "push-subscription")]
+impl From<FfiNotification> for fauna_protocol::push_events::NotificationPayload {
+    fn from(n: FfiNotification) -> Self {
+        fauna_protocol::push_events::NotificationPayload {
+            notification_id: n.notification_id,
+            notif_type: n.notif_type.into(),
+            source: n.source,
+            sender_id: n.sender_id,
+            content_id: n.content_id,
+            summary: n.summary,
+            body: n.body.map(|b| {
+                let mut wire = fauna_protocol::LocalizedText::new(b.key);
+                wire.args = b.args.into_iter().collect();
+                wire
+            }),
+            timestamp: n.timestamp,
+            extra: Default::default(),
+        }
+    }
 }
 
 /// A decoded push event, flattened for UniFFI — the client-actionable subset of
@@ -921,6 +956,9 @@ impl From<PushEvent> for FfiPushEvent {
                     content_id: p.content_id,
                     summary: p.summary,
                     timestamp: p.timestamp,
+                    body: p
+                        .body
+                        .map(|b| fauna_core::localized::LocalizedText::key_args(b.key, b.args)),
                 },
             },
             PushEvent::AccountUpdated(p) => FfiPushEvent::AccountUpdated {
@@ -1000,6 +1038,16 @@ pub struct FfiStaleSurfaces {
     pub mail_export: bool,
     /// The Import wizard — the `mail_export` twin (`StaleSurfaces::mail_import`).
     pub mail_import: bool,
+    /// The Devices & Folders pages' lists and every open folder row's reads —
+    /// stale on a reconnect and on `ResyncRequired`, from no single kind
+    /// (`StaleSurfaces::devices`). The re-read is what retires a row read's
+    /// nest-down error once the nest answers (`folders.md` § Errors & edge
+    /// cases).
+    pub devices: bool,
+    /// The nest's self-description — its signed rules (`nest-rules.md`
+    /// § Acceptance at joining, and a change of rules): re-read on the nest's
+    /// `fauna.nest.info_changed` and on reconnect (`StaleSurfaces::nest_info`).
+    pub nest_info: bool,
 }
 
 #[cfg(feature = "push-subscription")]
@@ -1020,6 +1068,8 @@ impl From<fauna_protocol::StaleSurfaces> for FfiStaleSurfaces {
             mail_spam: s.mail_spam,
             mail_export: s.mail_export,
             mail_import: s.mail_import,
+            devices: s.devices,
+            nest_info: s.nest_info,
         }
     }
 }
@@ -1759,6 +1809,15 @@ impl FfiNestClient {
             })?;
         Ok(crate::FfiFeedManager::new(Arc::clone(&self.nest), secret))
     }
+
+    /// This session's post-blob planes (`fauna_client::PostBlobHosts`): a
+    /// post's own bytes from this nest or its foreign home, whose pin
+    /// graduates once per home for the handle's life — so take it once per
+    /// session. The native twin of the `PostBlobHosts` tui and linux drive
+    /// directly (`feed.md` § The read model → *A post homed on another nest*).
+    pub fn post_blob_hosts(&self) -> Arc<crate::FfiPostBlobHosts> {
+        crate::FfiPostBlobHosts::new(Arc::clone(&self.nest))
+    }
 }
 
 // Gated `search-manager` (default-on; OFF in the Go mail-bridge `--no-default-features`
@@ -2237,12 +2296,13 @@ impl FfiNestClient {
         // (`NestConversationsRpc` impls both `ConversationsRpc` and `LinkPreviewRpc`), so a
         // conversation bubble's bare-url `LinkPreview` resolves through the manager.
         session.manager().set_link_preview_rpc(rpc.clone());
-        // The room plane's four nest-backed seams, the SAME object again,
+        // The room plane's five nest-backed seams, the SAME object again,
         // registered as one bundle so no seam can be left out
         // (`fauna_conversations::backend::RoomSeams`): the floor-roster report
-        // and read (`conversation-rooms.md` § The floor roster), and the
-        // community class's generation read and ceremony (§ The three classes
-        // → *Community*). The generation read's other half, the group-reception
+        // and read (`conversation-rooms.md` § The floor roster), the community
+        // class's generation read and ceremony (§ The three classes →
+        // *Community*), and the post read behind the room search
+        // (`room-search.md` § The surface). The generation read's other half, the group-reception
         // keys, rests on the account plane and is registered at the
         // account-store-ready edge (`crate::account_runtime::
         // wire_conversation_seams`). Without the ceremony a community room
@@ -3206,6 +3266,118 @@ impl FfiNestClient {
         drive_custody_after_pump(&self.nest, &self.scheduling_session, handle);
         ran
     }
+
+    /// Restore from the custodian NEST at `url` — the Nests page's restore
+    /// gesture (`ui/nests.md` § Trust facet — restore from a custodian nest):
+    /// `AccountStoreHandle::restore_from_custodian`, the one runtime command
+    /// tui dispatches too. Every outcome the user is told is a variant; a
+    /// host that cannot dial (no runtime yet, no enrollment witness) is
+    /// [`FfiCustodianRestoreOutcome::Failed`] carrying why.
+    pub async fn account_restore_from_custodian(&self, url: String) -> FfiCustodianRestoreOutcome {
+        let Some(handle) = crate::account_runtime::handle() else {
+            return FfiCustodianRestoreOutcome::Failed {
+                reason: "the account runtime is not running".into(),
+            };
+        };
+        match handle.restore_from_custodian(url).await {
+            Ok(outcome) => outcome.into(),
+            Err(e) => FfiCustodianRestoreOutcome::Failed {
+                reason: format!("{e:#}"),
+            },
+        }
+    }
+}
+
+/// The boundary projection of
+/// `fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome`, plus `Failed`
+/// for a gesture that could not run at all.
+#[cfg(feature = "account-runtime")]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum FfiCustodianRestoreOutcome {
+    AddressRefused { reason: String },
+    Revoked,
+    NotAdmitted,
+    Restored { applied: u64, sealed_rows: u64 },
+    NothingNew,
+    IdentityMismatch { expected: Vec<u8>, got: Vec<u8> },
+    Failed { reason: String },
+}
+
+/// The `nests-custody-restore-notice` text for an outcome, as i18n keys + args
+/// — `CustodianRestoreOutcome::notice_parts`, the one copy decision every app
+/// renders: resolve each part *nested* (the revoked reason is itself a key)
+/// and join them with a space. Empty for [`FfiCustodianRestoreOutcome::Failed`],
+/// which is no notice state — the shell shows its reason on `error-message`.
+/// `value-format` carries the `LocalizedText` record across the boundary.
+#[cfg(all(feature = "account-runtime", feature = "value-format"))]
+#[uniffi::export]
+pub fn custodian_restore_notice(outcome: FfiCustodianRestoreOutcome) -> Vec<LocalizedText> {
+    shared_restore_outcome(outcome).map_or_else(Vec::new, |o| o.notice_parts())
+}
+
+/// Whether the custodian-restore form closes for an outcome —
+/// `CustodianRestoreOutcome::closes_form`, the one form decision every app
+/// reads. `false` for [`FfiCustodianRestoreOutcome::Failed`]: the gesture never
+/// ran, so the form stays open with the address kept.
+#[cfg(all(feature = "account-runtime", feature = "value-format"))]
+#[uniffi::export]
+pub fn custodian_restore_closes_form(outcome: FfiCustodianRestoreOutcome) -> bool {
+    shared_restore_outcome(outcome).is_some_and(|o| o.closes_form())
+}
+
+/// The shared outcome for a boundary one; `None` for `Failed`, which has no
+/// shared counterpart. A free function: a method in an exported block would be
+/// exported too.
+#[cfg(all(feature = "account-runtime", feature = "value-format"))]
+fn shared_restore_outcome(
+    outcome: FfiCustodianRestoreOutcome,
+) -> Option<fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome> {
+    use fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome as O;
+    let key = |bytes: Vec<u8>| <[u8; 32]>::try_from(bytes).unwrap_or([0; 32]);
+    Some(match outcome {
+        FfiCustodianRestoreOutcome::AddressRefused { reason } => O::AddressRefused { reason },
+        FfiCustodianRestoreOutcome::Revoked => O::Revoked,
+        FfiCustodianRestoreOutcome::NotAdmitted => O::NotAdmitted,
+        FfiCustodianRestoreOutcome::Restored {
+            applied,
+            sealed_rows,
+        } => O::Restored {
+            applied: applied as usize,
+            sealed_rows: sealed_rows as usize,
+        },
+        FfiCustodianRestoreOutcome::NothingNew => O::NothingNew,
+        FfiCustodianRestoreOutcome::IdentityMismatch { expected, got } => O::IdentityMismatch {
+            expected: key(expected),
+            got: key(got),
+        },
+        FfiCustodianRestoreOutcome::Failed { .. } => return None,
+    })
+}
+
+#[cfg(feature = "account-runtime")]
+impl From<fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome>
+    for FfiCustodianRestoreOutcome
+{
+    fn from(outcome: fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome) -> Self {
+        use fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome as O;
+        match outcome {
+            O::AddressRefused { reason } => Self::AddressRefused { reason },
+            O::Revoked => Self::Revoked,
+            O::NotAdmitted => Self::NotAdmitted,
+            O::Restored {
+                applied,
+                sealed_rows,
+            } => Self::Restored {
+                applied: applied as u64,
+                sealed_rows: sealed_rows as u64,
+            },
+            O::NothingNew => Self::NothingNew,
+            O::IdentityMismatch { expected, got } => Self::IdentityMismatch {
+                expected: expected.to_vec(),
+                got: got.to_vec(),
+            },
+        }
+    }
 }
 
 /// The ceremony drive [`FfiNestClient::account_pump_now`] chains — over that
@@ -3429,6 +3601,7 @@ mod tests {
                 content_id: None,
                 summary: "hi".into(),
                 timestamp: 0,
+                body: None,
             },
         };
         let cases = [
@@ -3504,6 +3677,30 @@ mod tests {
             );
         }
         assert!(stale_surfaces_on_reconnect().mail_spam);
+    }
+
+    /// The Devices & Folders re-read reaches the UniFFI apps whole on a
+    /// reconnect and on `ResyncRequired`, and from no single kind — not even
+    /// `fauna.sync.changed`, whose one set the app matches by payload
+    /// (`transport.md` § Which surfaces a push invalidates, the `devices`
+    /// paragraph). It is what retires a folder row's nest-down read error
+    /// (`folders.md` § Errors & edge cases).
+    #[cfg(feature = "push-subscription")]
+    #[test]
+    fn devices_is_stale_on_reconnect_and_resync_only() {
+        assert!(stale_surfaces_on_reconnect().devices);
+        assert!(
+            stale_surfaces_for_push_event(&FfiPushEvent::ResyncRequired { dropped_count: 1 })
+                .devices
+        );
+        assert!(
+            !stale_surfaces_for_push_event(&FfiPushEvent::SyncChanged {
+                folder: "Holiday Photos".into(),
+                folder_hash: None,
+            })
+            .devices
+        );
+        assert!(!stale_surfaces_for_push_kind("fauna.sync.changed".into()).devices);
     }
 
     /// The export and import wizards' events reach the UniFFI apps as `Other`
@@ -3588,9 +3785,11 @@ mod tests {
             admin_exists: true,
             claimed: true,
             node_mode: "public".into(),
+            content_scanners: "wired".into(),
             version: "1.2.3".into(),
             mail_subsystem_ok: false,
             auto_enable_mail_for_new_users: false,
+            microsoft_registration: None,
             registration_mode: None,
             max_free_users: None,
             subhandles: true,
@@ -3600,10 +3799,12 @@ mod tests {
             serving_port: 3443,
             fronted_by_router: true,
             dkim_records: Vec::new(),
+            os_host_status_present: true,
             os_security_updates_pending: 3,
             os_reboot_pending: true,
             os_reboot_deferred_since: Some(1_719_500_000),
             os_last_patched_at: Some(1_719_400_000),
+            ssh_door_admitted_from: None,
             web_app_origin: "bundled".into(),
             web_app_origin_target: None,
             web_app_origin_domainless: false,
@@ -3630,6 +3831,7 @@ mod tests {
         // As must the fronted-by-router wiring flag (gates the field read-only).
         assert!(ffi.fronted_by_router);
         // As must the host-OS-maintenance fields (the admin indicator reads them).
+        assert!(ffi.os_host_status_present);
         assert_eq!(ffi.os_security_updates_pending, 3);
         assert!(ffi.os_reboot_pending);
         assert_eq!(ffi.os_reboot_deferred_since, Some(1_719_500_000));

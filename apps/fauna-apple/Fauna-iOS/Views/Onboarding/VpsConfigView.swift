@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -26,6 +27,8 @@ struct VpsConfigView: View {
                    let provider = PROVIDERS.first(where: { $0.id == providerId }) {
                     vpsProviderSection(vm: vm, provider: provider)
                 }
+
+                vpsUpdateChannelSection(vm: vm)
 
                 Button(L.common.continue) {
                     Task { try? await vm.machine.continueFromVps() }
@@ -58,3 +61,4 @@ struct VpsConfigView: View {
         }
     }
 }
+#endif // !FAUNA_KIDS

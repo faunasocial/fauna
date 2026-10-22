@@ -34,8 +34,11 @@ from helpers.mail_aliases import add_exact_alias
 from helpers.mail_wire import header_value
 from helpers.waiting import wait_until
 
+# `real_conversations`: the apple shells launch the real shared-Rust session
+# (and with it the SMTP rail whose sink reads the account's lists) only under
+# this launch-time gate; the other apps run it for every login regardless.
 pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.linux, pytest.mark.web,
-    pytest.mark.windows]
+    pytest.mark.windows, pytest.mark.macos, pytest.mark.ios, pytest.mark.real_conversations]
 
 # Routed to the stub external MX by the fixture's `mta_mx_override`.
 MEMBER_DOMAIN = "external.test"

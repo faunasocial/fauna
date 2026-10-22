@@ -17,15 +17,27 @@
 //! shares with sibling apps (the account-store root), and a launch-time run of
 //! that sweep once erased a running sibling's live store. So the re-sweep:
 //!
-//! 1. **touches only the recorded paths** — never re-lists a base for more;
+//! 1. **touches only the recorded paths** — and never erases under a recorded
+//!    base at all (rule 3's base arm below);
 //! 2. **asks the sign-out's own question first** ([`SignOutResidue::retry_blocked`],
 //!    the same serving-lock probe as [`crate::sign_out_blocked`]) about every
 //!    account those paths belong to, and erases nothing if any is served;
 //! 3. **leaves alone any path that changed since it was recorded**
-//!    ([`ResiduePath::modified`]): a later sign-in — on this app or a sibling
-//!    sharing the store root — re-creates exactly these directories, and a
-//!    store someone is using again is no longer residue, even while no process
-//!    holds it open;
+//!    ([`ResiduePath::fingerprint`]): a later sign-in — on this app or a
+//!    sibling sharing the store root — re-creates exactly these directories, or
+//!    adopts the `account-store/` that survived inside one and writes only
+//!    there, and a store someone is using again is no longer residue, even
+//!    while no process holds it open. So a scope's fingerprint covers its WHOLE
+//!    tree, not the directory's own mtime — a write one level down moves no
+//!    mtime on the scope itself. **A recorded base has no fingerprint and is
+//!    never re-erased:** it was recorded because the sign-out could not look
+//!    into it, so nothing taken then vouches for any scope under it, and no
+//!    later reading can be a baseline either (a sibling's sign-in that adopted
+//!    a scope and exited before that reading would pass as unchanged). It
+//!    stays on the record, untouched, while it still cannot be listed or still
+//!    holds an actor scope — the line stays honest — and is done once it lists
+//!    and holds none; what erases the scopes under it is the next sign-out's
+//!    own sweep, the gesture that may reach every scope;
 //! 4. **re-erases credentials only when the record says they survived** — a
 //!    clean credential half has nothing of the user's left to remove, and the
 //!    namespace may hold state written since.
@@ -53,13 +65,45 @@ pub struct ResiduePath {
     /// An actor scope (`<base>/<64-hex>/`) or, when the base itself could not
     /// be listed, that base — exactly `EraseSweep::survivors`' two shapes.
     pub path: PathBuf,
-    /// The path's modification time when it was recorded — taken AFTER the
+    /// The path's [`TreeFingerprint`] when it was recorded — taken AFTER the
     /// erase gave up on it, so the erase's own partial deletes are inside it.
-    /// Any later write into the directory (a sign-in re-creating its store, a
-    /// SQLite journal opening) moves it. `None` when the platform reports no
-    /// mtime; such a path is re-swept on the serving-lock gate alone.
-    pub modified: Option<SystemTime>,
+    /// Any later write anywhere under an actor scope (a sign-in re-creating its
+    /// store, adopting the surviving `account-store/` and rewriting its db, a
+    /// SQLite journal opening and closing) moves it. `None` when it could not
+    /// be taken — or the record predates it — and then nothing can vouch that
+    /// the path is still the residue: the re-sweep leaves it alone. Always
+    /// `None` for a recorded base (this module's ⚠ rule 3, the base arm); one
+    /// an older record carries is ignored.
+    #[serde(default)]
+    pub fingerprint: Option<TreeFingerprint>,
 }
+
+/// What a recorded path looked like, so a re-sweep can tell *still the
+/// residue* from *someone's store again* (this module's ⚠ rule 3).
+///
+/// Taken for an **actor scope** only, over the whole tree under it: every
+/// entry's relative name, kind, length and modification time, walked in name
+/// order without following a symlink. A write anywhere below moves it — a
+/// rewritten file its length or mtime, an entry created or removed its parent's
+/// mtime and the entry list. A recorded **base** gets none: the sign-out could
+/// not list it, so there is no tree to take, and the base's own entry — once
+/// used here — does not move when a sibling's sign-in writes inside a scope
+/// below it (the base arm of this module's ⚠ rule 3). The walk runs at
+/// sign-out and at a signed-out launch that finds a record — over a residue,
+/// which is small by definition; a scope past [`FINGERPRINT_MAX_ENTRIES`] gets
+/// no fingerprint (and so is never re-erased) rather than an unbounded walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeFingerprint {
+    /// Entries covered, the recorded path itself included — for the log.
+    pub entries: u64,
+    /// FNV-1a over every covered entry — a fixed function, so a record written
+    /// by one build compares equal under the next (`std`'s `DefaultHasher`
+    /// promises no such thing).
+    pub digest: u64,
+}
+
+/// The most entries a scope's [`TreeFingerprint`] walks before it gives up.
+pub const FINGERPRINT_MAX_ENTRIES: u64 = 100_000;
 
 /// The residue a sign-out left, as the device remembers it. Empty is clean, and
 /// a clean record is never kept on disk ([`Self::save`]).
@@ -97,7 +141,7 @@ impl SignOutResidue {
             }
             paths.push(ResiduePath {
                 path: path.clone(),
-                modified: modified(path),
+                fingerprint: fingerprint(path),
             });
         }
         Self {
@@ -205,13 +249,15 @@ impl SignOutResidue {
         (!served.is_empty()).then_some(EraseBlocked { accounts: served })
     }
 
-    /// Re-remove every recorded path that is still the residue it was, and
+    /// Re-remove every recorded scope that is still the residue it was, and
     /// return what is left of the filesystem half — fingerprinted afresh.
     ///
-    /// A path that is gone is done. A path whose fingerprint moved is dropped
-    /// from the record WITHOUT being touched (this module's ⚠ rule 3). A scope
-    /// is removed whole; a recorded base gets the sign-out's own scope sweep,
-    /// which removes the actor scopes under it and nothing else.
+    /// A path that is gone is done. A scope whose fingerprint moved is dropped
+    /// from the record WITHOUT being touched (this module's ⚠ rule 3); one
+    /// still the residue is removed whole. A recorded base is never erased
+    /// under (rule 3's base arm): it stays recorded while it still cannot be
+    /// listed or still holds an actor scope, and is done once it lists and
+    /// holds none.
     #[must_use]
     fn resweep_paths(&self) -> Vec<PathBuf> {
         let mut survivors: Vec<PathBuf> = Vec::new();
@@ -221,31 +267,52 @@ impl SignOutResidue {
                 tracing::info!("[sign-out residue] {} is gone", path.display());
                 continue;
             }
-            if residue.modified.is_some() && modified(path) != residue.modified {
-                tracing::warn!(
-                    "[sign-out residue] {} changed since the sign-out recorded it — left \
-                     alone and no longer tracked (a later sign-in may be using it)",
-                    path.display()
-                );
-                continue;
-            }
-            if scope_actor(path).is_some() {
-                match std::fs::remove_dir_all(path) {
-                    Ok(()) => tracing::info!("[sign-out residue] removed {}", path.display()),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            if scope_actor(path).is_none() {
+                match fauna_account_store::db::list_account_scopes(path) {
+                    Ok(under) if under.is_empty() => {
+                        tracing::info!(
+                            "[sign-out residue] base {} lists again and holds no account scope",
+                            path.display()
+                        );
+                    }
+                    Ok(under) => {
+                        tracing::warn!(
+                            "[sign-out residue] base {} still holds {} account scope(s) — a \
+                             re-sweep never erases under a base the sign-out could not look \
+                             into; the next sign-out's own sweep does",
+                            path.display(),
+                            under.len()
+                        );
+                        survivors.push(path.clone());
+                    }
                     Err(e) => {
                         tracing::warn!(
-                            "[sign-out residue] {} SURVIVED the re-sweep — {e}",
+                            "[sign-out residue] base {} still cannot be listed — {e}",
                             path.display()
                         );
                         survivors.push(path.clone());
                     }
                 }
-            } else {
-                for left in fauna_account_store::db::erase_all_account_scopes(path).survivors {
-                    if !survivors.contains(&left) {
-                        survivors.push(left);
-                    }
+                continue;
+            }
+            if residue.fingerprint.is_none() || fingerprint(path) != residue.fingerprint {
+                tracing::warn!(
+                    "[sign-out residue] {} changed since the sign-out recorded it, or its \
+                     fingerprint could not be taken — left alone and no longer tracked (a \
+                     later sign-in may be using it)",
+                    path.display()
+                );
+                continue;
+            }
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => tracing::info!("[sign-out residue] removed {}", path.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "[sign-out residue] {} SURVIVED the re-sweep — {e}",
+                        path.display()
+                    );
+                    survivors.push(path.clone());
                 }
             }
         }
@@ -303,10 +370,112 @@ fn scope_actor(path: &Path) -> Option<String> {
     (canonical == path).then(|| name.to_string())
 }
 
-fn modified(path: &Path) -> Option<SystemTime> {
-    std::fs::symlink_metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
+/// `path`'s [`TreeFingerprint`] — the one function the record and the
+/// re-sweep both take it with. `None` when `path` is a base rather than an
+/// actor scope (rule 3's base arm: nothing vouches for a base), cannot be read
+/// at all, or holds more than [`FINGERPRINT_MAX_ENTRIES`] entries. An
+/// unreadable directory or entry below a scope is folded in as a marker, so it
+/// compares equal while it stays unreadable and moves the moment it does not.
+fn fingerprint(path: &Path) -> Option<TreeFingerprint> {
+    scope_actor(path)?;
+    let root = std::fs::symlink_metadata(path).ok()?;
+    let mut fp = Fnv::new();
+    fp.entry(Path::new(""), Some(&root));
+    let mut entries: u64 = 1;
+    if root.is_dir() {
+        // Explicit stack, children pushed in reverse name order: a
+        // deterministic depth-first walk with no recursion to overflow.
+        let mut stack: Vec<PathBuf> = vec![PathBuf::new()];
+        while let Some(rel) = stack.pop() {
+            let mut children: Vec<std::ffi::OsString> = match std::fs::read_dir(path.join(&rel)) {
+                Ok(listing) => {
+                    let mut names = Vec::new();
+                    for entry in listing {
+                        match entry {
+                            Ok(entry) => names.push(entry.file_name()),
+                            Err(_) => fp.marker(&rel, b"unlistable-entry"),
+                        }
+                    }
+                    names
+                }
+                Err(_) => {
+                    fp.marker(&rel, b"unreadable");
+                    continue;
+                }
+            };
+            children.sort();
+            for name in children.into_iter().rev() {
+                entries += 1;
+                if entries > FINGERPRINT_MAX_ENTRIES {
+                    return None;
+                }
+                let child = rel.join(&name);
+                let meta = std::fs::symlink_metadata(path.join(&child)).ok();
+                fp.entry(&child, meta.as_ref());
+                if meta.is_some_and(|m| m.is_dir()) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    Some(TreeFingerprint {
+        entries,
+        digest: fp.0,
+    })
+}
+
+/// 64-bit FNV-1a, spelled out so the digest is the same function in every build.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    /// One entry: its relative name, then its kind, length and mtime — or a
+    /// marker when its metadata could not be read.
+    fn entry(&mut self, rel: &Path, meta: Option<&std::fs::Metadata>) {
+        self.bytes(rel.as_os_str().as_encoded_bytes());
+        self.bytes(&[0]);
+        let Some(meta) = meta else {
+            self.bytes(b"unreadable\0");
+            return;
+        };
+        let kind: &[u8] = if meta.is_dir() {
+            b"d"
+        } else if meta.is_symlink() {
+            b"l"
+        } else if meta.is_file() {
+            b"f"
+        } else {
+            b"o"
+        };
+        self.bytes(kind);
+        self.bytes(&meta.len().to_le_bytes());
+        match meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        {
+            Some(since) => self.bytes(&since.as_nanos().to_le_bytes()),
+            None => self.bytes(b"no-mtime"),
+        }
+        self.bytes(&[0]);
+    }
+
+    fn marker(&mut self, rel: &Path, what: &[u8]) {
+        self.bytes(rel.as_os_str().as_encoded_bytes());
+        self.bytes(&[0]);
+        self.bytes(what);
+        self.bytes(&[0]);
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +542,39 @@ mod tests {
         assert_eq!(SignOutResidue::load(base.path()), None);
     }
 
+    /// A record without a fingerprint — one written before the fingerprint
+    /// covered the tree, carrying the retired `modified` field — still loads
+    /// (the launch never fails on it), and nothing vouches for its paths, so
+    /// they are left alone; its credential half is still re-checked.
+    #[test]
+    fn a_record_without_a_fingerprint_loads_and_erases_nothing() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = scope(base.path(), "e5");
+        let older = serde_json::json!({
+            "paths": [{ "path": dir, "modified": { "secs_since_epoch": 0, "nanos_since_epoch": 0 } }],
+            "credential_keys": ["fauna/e5/secret"],
+        });
+        std::fs::write(
+            base.path().join(SIGN_OUT_RESIDUE_FILE),
+            serde_json::to_vec(&older).expect("json"),
+        )
+        .expect("write");
+        let record = SignOutResidue::load(base.path()).expect("an older record still loads");
+        assert_eq!(record.paths[0].fingerprint, None);
+
+        let mut erased = false;
+        let after = swept(retry_sign_out_residue(&record, no_bases(), |_| {
+            erased = true;
+            CredentialSweep::default()
+        }));
+        assert!(
+            dir.join("mls_state.db").exists(),
+            "an unvouched path is never re-erased"
+        );
+        assert!(erased, "the recorded credential half is still re-checked");
+        assert!(!after.owes_work());
+    }
+
     /// One location recorded twice is one item on the user's line.
     #[test]
     fn a_path_recorded_twice_is_counted_once() {
@@ -430,9 +632,10 @@ mod tests {
     fn a_scope_changed_since_it_was_recorded_is_left_alone_and_forgotten() {
         let base = tempfile::tempdir().expect("base");
         let dir = scope(base.path(), "a1");
-        let mut record =
+        let record =
             SignOutResidue::record(std::slice::from_ref(&dir), &CredentialSweep::default());
-        record.paths[0].modified = Some(SystemTime::UNIX_EPOCH);
+        // A later sign-in re-creating its store beside what survived.
+        std::fs::create_dir_all(dir.join("account-store")).expect("a later sign-in's store");
 
         let after = swept(retry_sign_out_residue(&record, no_bases(), |c| c));
         assert!(
@@ -442,6 +645,40 @@ mod tests {
         assert!(
             !after.owes_work(),
             "and it is no longer this sign-out's residue to report"
+        );
+    }
+
+    /// ⚠ Rule 3 one level down: the shared-root store lives in
+    /// `<root>/<actor>/account-store/`, and a later sign-in that adopts a
+    /// surviving one (the lost-slot self-heal) writes only inside that
+    /// subdirectory — the recorded scope directory's own mtime never moves.
+    /// The fingerprint must see that write all the same.
+    #[test]
+    fn a_scope_written_only_inside_its_account_store_is_left_alone_and_forgotten() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = base.path().join(actor("d4"));
+        let store = dir.join("account-store");
+        std::fs::create_dir_all(&store).expect("store dir");
+        let db = store.join("account-store.db");
+        std::fs::write(&db, b"the user's rows").expect("db");
+        let record =
+            SignOutResidue::record(std::slice::from_ref(&dir), &CredentialSweep::default());
+
+        // A real sign-in's footprint, nothing hand-set: the db rewritten and a
+        // journal opened and closed beside it.
+        std::fs::write(&db, b"the user's rows, and one not yet pushed").expect("rewrite");
+        let wal = store.join("account-store.db-wal");
+        std::fs::write(&wal, b"wal").expect("wal");
+        std::fs::remove_file(&wal).expect("wal gone");
+
+        let after = swept(retry_sign_out_residue(&record, no_bases(), |c| c));
+        assert!(
+            db.exists(),
+            "a store adopted since the sign-out must never be re-erased"
+        );
+        assert!(
+            !after.owes_work(),
+            "and it is no longer this sign-out's residue to report: {after:?}"
         );
     }
 
@@ -478,21 +715,113 @@ mod tests {
         assert!(dir.join("mls_state.db").exists(), "nothing may be erased");
     }
 
-    /// A base the sign-out could not even list is re-swept the sign-out's way:
-    /// its actor scopes go, and install-scoped state beside them stays.
+    /// A base the sign-out could not even list carries no fingerprint and is
+    /// never erased under by a re-sweep: the scope under it stays, and so does
+    /// the base on the record — the line stays up until the next sign-out's
+    /// own sweep takes the scope. Once nothing is under it, it is done.
     #[test]
-    fn a_recorded_base_loses_its_actor_scopes_and_nothing_else() {
+    fn a_recorded_base_erases_nothing_and_stays_recorded_until_it_holds_no_scope() {
         let base = tempfile::tempdir().expect("base");
         let dir = scope(base.path(), "c3");
         let log = base.path().join("fauna.log");
         std::fs::write(&log, b"install-scoped").expect("log");
         let record =
             SignOutResidue::record(&[base.path().to_path_buf()], &CredentialSweep::default());
+        assert_eq!(
+            record.paths[0].fingerprint, None,
+            "nothing vouches for a base"
+        );
 
         let after = swept(retry_sign_out_residue(&record, no_bases(), |c| c));
-        assert!(!dir.exists(), "the actor scope under the base must go");
+        assert!(
+            dir.join("mls_state.db").exists(),
+            "a re-sweep never erases under a recorded base"
+        );
         assert!(log.exists(), "install-scoped state is not residue");
-        assert!(!after.owes_work());
+        assert_eq!(
+            after.paths.len(),
+            1,
+            "the base stays on the line: {after:?}"
+        );
+        assert_eq!(after.paths[0].path, base.path());
+
+        // The next sign-out's own sweep took the scope; the base is done.
+        std::fs::remove_dir_all(&dir).expect("the sign-out's sweep");
+        let after = swept(retry_sign_out_residue(&after, no_bases(), |c| c));
+        assert!(
+            !after.owes_work(),
+            "a base holding no scope is done: {after:?}"
+        );
+        assert!(
+            log.exists(),
+            "and still nothing beside the scopes was touched"
+        );
+    }
+
+    /// An older record carrying a base's own-entry fingerprint still loads,
+    /// and the fingerprint grants nothing: the base arm ignores it.
+    #[test]
+    fn an_older_records_base_fingerprint_vouches_for_nothing() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = scope(base.path(), "a7");
+        let older = serde_json::json!({
+            "paths": [{ "path": base.path(), "fingerprint": { "entries": 1, "digest": 7 } }],
+        });
+        std::fs::write(
+            base.path().join(SIGN_OUT_RESIDUE_FILE),
+            serde_json::to_vec(&older).expect("json"),
+        )
+        .expect("write");
+        let record = SignOutResidue::load(base.path()).expect("an older record still loads");
+
+        let after = swept(retry_sign_out_residue(&record, no_bases(), |c| c));
+        assert!(
+            dir.join("mls_state.db").exists(),
+            "never erased under a base"
+        );
+        assert_eq!(after.paths.len(), 1, "and still reported: {after:?}");
+        assert_eq!(after.paths[0].fingerprint, None, "re-recorded without one");
+    }
+
+    /// ⚠ Rule 3 for a recorded BASE: the sign-out could not look into it, so
+    /// nothing recorded then can vouch for a scope under it, and a sibling's
+    /// sign-in that adopts a surviving `<base>/<actor>/account-store/` adds no
+    /// entry in the base itself. A re-sweep must never erase under a recorded
+    /// base — this one would have taken an adopted store, un-pushed rows and
+    /// all.
+    #[test]
+    fn a_recorded_base_with_an_adopted_scope_below_keeps_the_store() {
+        let base = tempfile::tempdir().expect("base");
+        let dir = base.path().join(actor("f6"));
+        let store = dir.join("account-store");
+        std::fs::create_dir_all(&store).expect("store dir");
+        let db = store.join("account-store.db");
+        std::fs::write(&db, b"the user's rows").expect("db");
+        let record =
+            SignOutResidue::record(&[base.path().to_path_buf()], &CredentialSweep::default());
+
+        // A sibling's adopting sign-in: the db rewritten and a journal opened
+        // and closed beside it — two levels below the base.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&db, b"the user's rows, and one not yet pushed").expect("rewrite");
+        let wal = store.join("account-store.db-wal");
+        std::fs::write(&wal, b"wal").expect("wal");
+        std::fs::remove_file(&wal).expect("wal gone");
+
+        let after = swept(retry_sign_out_residue(&record, no_bases(), |c| c));
+        assert!(
+            db.exists(),
+            "a recorded base's re-sweep erased an adopted store"
+        );
+        assert_eq!(
+            after
+                .paths
+                .iter()
+                .map(|p| p.path.clone())
+                .collect::<Vec<_>>(),
+            vec![base.path().to_path_buf()],
+            "the base still holds a scope, so it stays on the line: {after:?}"
+        );
     }
 
     /// The credential half is re-erased when — and only when — it survived,

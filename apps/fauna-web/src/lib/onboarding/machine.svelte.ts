@@ -22,14 +22,15 @@
 import {
   createOnboardingMachine,
   type OnboardingMachineObserver,
-} from '$lib/wasm-onboarding';
+} from '#lib/wasm-onboarding';
 import {
   loadPendingInvite,
   savePendingInvite,
   deletePendingInvite,
 } from './pending-invite-store';
-import { logMessage } from '$lib/wasm';
-import { setNestDialOverride } from '$lib/api';
+import { logMessage } from '#lib/wasm';
+import { commitConfirmedIdentity as commitIdentity } from './identity-commit';
+import { setNestDialOverride } from '#lib/api';
 
 // Svelte 5 rune-backed observer counter. Components subscribe to machine
 // snapshots by referencing `machineTick.value` inside a `$derived`; any
@@ -153,7 +154,7 @@ export interface VpsConfigState {
 
 /** Mirror of `fauna_onboarding_machine::state::FieldMetaPlain` returned
  * by `m.visibleDnsFields()` / similar getters. Note this is different
- * from `$lib/generated/providers.ts`'s `FieldMeta` (which is the static
+ * from `#lib/generated/providers.ts`'s `FieldMeta` (which is the static
  * registry shape with camelCase + a richer field set). */
 export type FieldTypePlain = 'Text' | 'Secret' | 'Select' | 'HostedAuth';
 export type CapabilityPlain = 'Dns' | 'Vps' | 'Registrar';
@@ -198,7 +199,7 @@ export type LoginPhase =
 //
 // Mirrors `fauna_onboarding_machine::state::LocalizedText`. `key` indexes
 // into `i18n/strings/en.yaml`; `args` is a flat substitution map. Resolve one
-// to display text with `resolveLocalized()` ($lib/i18n/localized).
+// to display text with `resolveLocalized()` (#lib/i18n/localized).
 export interface LocalizedText {
   key: string;
   args: Record<string, string>;
@@ -233,6 +234,9 @@ export interface HandleCheckSnapshot {
   continue_enabled: boolean;
   control_checkbox_visible: boolean;
   control_checkbox_checked: boolean;
+  /** True iff `outcome` is `AlreadyOnNest` — Continue signs in, so the
+   *  by-continuing terms notice shows (shared Rust derives it; never re-derive). */
+  terms_notice_visible: boolean;
 }
 
 // ── ClaimCode snapshot ──
@@ -438,6 +442,23 @@ export interface ProvisionResultPlain {
   ipv4: string;
   domain: string;
   claim_code: string;
+}
+
+/**
+ * What `provisioning-ssh-door-command` shows of a door box's key. Mirrors
+ * `fauna_onboarding_machine::state::SshDoorReadout`; carries no secret.
+ * `onboarding-provisioning.md` § 5.
+ */
+export interface SshDoorReadout {
+  domain: string;
+  /** `ssh -i fauna-<domain> root@<domain>` on web: the key is handed over. */
+  command: string;
+  /** Always `null` on web — the browser has no `~/.ssh`. */
+  key_path: string | null;
+  fingerprint: string;
+  /** The one address the door admits, as the nest echoed it at the claim;
+   * `null` when it echoed none. */
+  admitted_from: string | null;
 }
 
 export interface ProvisioningSnapshot {
@@ -652,6 +673,16 @@ export interface Machine {
   /** Resolved mail-mode for the toggle's checked state — the user's choice,
    * else the handle real-domain default. See onboarding.md §5. */
   provisionMailModeEnabled(): boolean;
+  /** `vps-config-ssh-door-toggle` (default off): a key-only sshd for the
+   * admin, written into the box's cloud-init. See onboarding-provisioning.md § 5. */
+  setProvisionSshDoor(enabled: boolean): void;
+  /** Whether the door toggle is on (its warning shows while it is). */
+  provisionSshDoorEnabled(): boolean;
+  /** `provisioning-ssh-door-command`'s readout after a door run, else `undefined`. */
+  sshDoorReadout(): SshDoorReadout | undefined;
+  /** `provisioning-ssh-door-save-key-button`: the private key, handed over
+   * ONCE — the machine drops its copy. `undefined` once taken. */
+  takeSshDoorPrivateKey(): string | undefined;
   /** `vps-config-update-channel-row[<id>]`: which builds the box's updater
    * follows (`stable` / `test` / `dev`). An id naming no channel is ignored.
    * See onboarding-provisioning.md §5. */
@@ -665,6 +696,8 @@ export interface Machine {
   back(): void;
   setNestUrl(url: string): void;
   clearError(): void;
+  /** The app's moment-1 write failed: back to the confirm screen with `message` on `error-message`. */
+  identityCommitFailed(message: string): void;
   reset(): void;
   beginCreateIdentity(): void;
   beginImportIdentity(): void;
@@ -996,6 +1029,7 @@ const TYPED_JSON_HELPERS = new Set([
   'wizardOutcome', 'identityOrigin', 'dnsStatusTextKey',
   'providerStatus', 'provisioningSnapshot', 'billOfMaterials',
   'vpsContinueBlockedReason', 'provisioningContinueBlockedReason',
+  'sshDoorReadout',
 ]);
 const JSON_GETTER_FOR: Record<string, string> = {
   dnsConfig: 'dnsConfigJson',
@@ -1016,6 +1050,7 @@ const JSON_GETTER_FOR: Record<string, string> = {
   billOfMaterials: 'billOfMaterials',
   vpsContinueBlockedReason: 'vpsContinueBlockedReasonJson',
   provisioningContinueBlockedReason: 'provisioningContinueBlockedReasonJson',
+  sshDoorReadout: 'sshDoorReadoutJson',
 };
 
 // `m.step()` on the wasm-bindgen surface returns the Rust `Debug` name
@@ -1046,22 +1081,28 @@ function camelToSnake(s: string): string {
  * (the wasm machine has already advanced to HandleEntry), while the registry
  * lives in the core wasm chunk behind an async import. Nothing later in the
  * same run reads the identity back from the store — the terminal and every
- * post-`LoggedIn` hand-off read the machine. Failure surfaces log-only — the
- * cross-app convention for a failed store write (Apple `try?`, Linux
- * `eprintln!`).
+ * post-`LoggedIn` hand-off read the machine. A failure is LOUD, not log-only
+ * (`long-term-store.md` § Save-failure handling): it is reported to the machine
+ * (`identityCommitFailed`), which undoes the advance and paints the error on
+ * the confirm screen. `target` is the unproxied wasm machine.
  */
-function commitConfirmedIdentity(secret: string): void {
-  const append = _appendMode;
-  void import('$lib/accounts')
-    .then((m) => m.accountsPersistConfirmedIdentity(secret, append))
-    .catch((e: unknown) => {
+function commitConfirmedIdentity(
+  target: { identityCommitFailed(message: string): void },
+  secret: string,
+): void {
+  void commitIdentity(secret, _appendMode, {
+    persist: (s, append) =>
+      import('#lib/accounts').then((m) => m.accountsPersistConfirmedIdentity(s, append)),
+    commitFailed: (message) => target.identityCommitFailed(message),
+    log: (e) => {
       console.warn('[onboarding] persist_confirmed_identity failed:', e);
       logMessage(
         'warn',
         'fauna_web::onboarding',
         `persist_confirmed_identity (registry commit + read-back) failed: ${e}`,
       );
-    });
+    },
+  });
 }
 
 /** Append ("Add account") mode. Read only by `commitConfirmedIdentity`, which
@@ -1103,7 +1144,7 @@ export function setPendingProviderBaseUrls(urls: Record<string, string>): void {
   // and the post-`LoggedIn` store-read dial can never disagree about which nest
   // this run talks to — the "split brain no test could see" `dial.rs` warns of.
   //
-  // `$lib/api` seeds the same override from the query param on its own module
+  // `#lib/api` seeds the same override from the query param on its own module
   // load, which covers the launch that never mounts this page at all; this call
   // is what covers the window-hook path. Both are idempotent.
   setNestDialOverride(urls.nest);
@@ -1230,7 +1271,7 @@ export async function tryRestorePendingInvite(): Promise<boolean> {
   // see +page.svelte onMount) and apps/fauna-linux Case 3
   // (build_onboarding_window_with_seed + seed_pending_invite). The secret is
   // the registry's active account — the one the pending-invite slot belongs to.
-  const { accountsActiveSessionMaterial } = await import('$lib/accounts');
+  const { accountsActiveSessionMaterial } = await import('#lib/accounts');
   const secret = accountsActiveSessionMaterial()?.secret_hex;
   if (secret) m.seedIdentity(secret);
   m.seedPendingInvite(rec.nestUrl, rec.handle, rec.requestId, rec.statusJson);
@@ -1240,7 +1281,7 @@ export async function tryRestorePendingInvite(): Promise<boolean> {
 // The whole block below is the onboarding machine's e2e automation surface —
 // compiled only into test builds (testing.md § Test-agent build exclusion; a
 // production build folds `__FAUNA_E2E_AUTOMATION__` to false and strips it).
-// It stays in this module (rather than `$lib/e2e-automation`) because it must
+// It stays in this module (rather than `#lib/e2e-automation`) because it must
 // run at MODULE LOAD, before `+page.svelte`'s onMount constructs the machine —
 // see the base-URL comment below.
 if (typeof window !== 'undefined' && __FAUNA_E2E_AUTOMATION__) {
@@ -1456,14 +1497,14 @@ function wrapMachine(inner: object): Machine {
       // Rust side returns the 64-hex secret synchronously (the wasm-bindgen
       // surface declares `confirmGeneratedIdentity(): string`). The wrapper
       // preserves that synchronous shape so the surface matches
-      // Apple/Windows/Linux; the commit's failure is logged and swallowed
-      // (see `commitConfirmedIdentity`) because the wasm machine has already
-      // advanced to HandleEntry.
+      // Apple/Windows/Linux; the commit's failure is reported back to the
+      // machine (see `commitConfirmedIdentity`), which returns to the confirm
+      // screen with the error.
       if (prop === 'confirmGeneratedIdentity') {
         return () => {
           const fn = (target as Record<string, () => string>).confirmGeneratedIdentity.bind(target);
           const secret = fn();
-          commitConfirmedIdentity(secret);
+          commitConfirmedIdentity(target as never, secret);
           return secret;
         };
       }
@@ -1471,7 +1512,7 @@ function wrapMachine(inner: object): Machine {
         return (secret: string) => {
           const fn = (target as Record<string, (s: string) => string>).confirmImportedIdentity.bind(target);
           const validated = fn(secret);
-          commitConfirmedIdentity(validated);
+          commitConfirmedIdentity(target as never, validated);
           return validated;
         };
       }
@@ -1484,7 +1525,7 @@ function wrapMachine(inner: object): Machine {
           const result = JSON.parse(await fn(phrase));
           if (result.restored) {
             const secret = (target as Record<string, () => string | undefined>).effectiveSecret.call(target);
-            if (secret) commitConfirmedIdentity(secret);
+            if (secret) commitConfirmedIdentity(target as never, secret);
           }
           return result;
         };

@@ -12,7 +12,7 @@ it — and no harness can mint a publicly-chained certificate for `localhost`, s
 the compiled app had no way to verify a harness-run source server. Every other
 layer of the wizard was built and green while this walk was simply unreachable.
 The source-IMAP trust seed closes exactly that
-(`e2e-automation-surface-gating.md` § The source-IMAP trust seed); the
+(`e2e-gated-seeds.md` § The source-IMAP trust seed); the
 `mail_import_source` marker on this module is what turns it on.
 
 **tier_3, and it earns the tier.** Real tui, real shared-Rust IMAP client, real
@@ -60,6 +60,8 @@ from helpers.mail_import_ui import (
     MAIL_PASSWORD,
     enable_mail_so_the_nest_can_seal,
     fill_generic_source,
+    save_microsoft_registration,
+    set_message_allowance,
     type_until_it_takes,
 )
 from helpers.relaunch import relaunch, require_relaunchable
@@ -68,10 +70,17 @@ from i18n.strings import S
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "fakes"))
 from fake_imap_source import (  # noqa: E402
+    OUTLOOK_IMAP_HOST,
     FakeImapSource,
     SourceMailbox,
     sample_message,
     session_cert,
+    session_cert_for,
+    session_preset_redirect,
+)
+from fake_microsoft_identity import (  # noqa: E402
+    FakeMicrosoftIdentity,
+    session_microsoft_identity,
 )
 
 pytestmark = [
@@ -246,20 +255,31 @@ def test_selecting_a_source_kind_seeds_the_host_and_port_drafts(logged_in_app):
     shape) — including the accepted quirk that Generic, which has no preset of
     its own (§ Wizard steps step 1), keeps whatever the previous kind painted
     rather than blanking the field.
+
+    Observed through Generic, the one kind that shows the host field: Outlook
+    shows the fixed triple and no host field (§ Microsoft sign-in — the
+    device-code grant), so the draft the Outlook pick seeded is read where the
+    next pick, Generic, keeps it. iCloud first, so a seed that never happened
+    leaves iCloud's host painted — never a value that passes by accident.
     """
     wizard = MailImportActions(logged_in_app.driver)
     wizard.navigate()
     assert wizard.is_page_visible()
 
-    wizard.select_source("Outlook / Hotmail / Office365")
+    # Each pick lands before the next is made — by what the pick paints, which
+    # every app shows, so the three dispatches cannot resolve out of order.
+    wizard.select_source(S.mail_import.source_icloud)
     assert wait_until(
-        lambda: wizard.host_value() == "outlook.office365.com",
+        lambda: logged_in_app.driver.is_visible("mail-import-source-app-password"),
         budgets.UI_SETTLE_S,
-        diagnose=lambda: f"host draft={wizard.host_value()!r} port draft={wizard.port_value()!r}",
-    ), "the host draft was not seeded from the Outlook preset"
-    assert wizard.port_value() == "993"
-
-    wizard.select_source("Generic IMAP")
+    ), "picking iCloud painted no app-password field"
+    wizard.select_source(S.mail_import.source_outlook)
+    assert wait_until(
+        lambda: logged_in_app.driver.is_visible("mail-import-source-oauth-button")
+        and not logged_in_app.driver.is_visible("mail-import-source-app-password"),
+        budgets.UI_SETTLE_S,
+    ), "picking Outlook painted no sign-in button"
+    wizard.select_source(S.mail_import.source_generic)
     assert wait_until(
         lambda: wizard.host_value() == "outlook.office365.com",
         budgets.UI_SETTLE_S,
@@ -654,6 +674,142 @@ def test_a_message_over_the_users_size_limit_is_skipped_as_too_large(
         )
 
 
+# ── a full mailbox (§ Failure handling → Nest-side errors) ─────────────────
+
+FULL_SUBJECTS = ("fits in the mailbox", "does not fit", "nor does this one")
+
+
+def _import_into_a_mailbox_with_room_for_one(app, handle, request, source) -> MailImportActions:
+    """The admin leaves room for exactly one more message, then the user
+    imports a three-message INBOX: the first lands, the second is turned away
+    and the import pauses on its full-mailbox notice."""
+    if not (app.driver.is_tui() or app.driver.is_linux() or app.driver.is_android()):
+        skip_unbuilt(
+            app.driver,
+            surface="mail-import full-mailbox notice (Skip the rest)",
+            detail="witnessed on tui, linux and android first; web never reaches a running import",
+            tracked="mailbox-migration.md § Implementation status today",
+        )
+    login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
+    enable_mail_so_the_nest_can_seal(app, handle)
+    set_message_allowance(app, handle.nest, stored_message_count(handle.nest) + 1)
+    wizard = MailImportActions(app.driver)
+    wizard.navigate()
+    fill_generic_source(wizard, source, password=source.password)
+    wizard.connect()
+    wait_until(
+        lambda: wizard.mailbox_names(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the Scope step never listed INBOX; error {wizard.error_text()!r}",
+    )
+    wizard.scope_next()
+    wait_until(
+        wizard.confirm_summary,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"no Confirm summary; error was {wizard.error_text()!r}",
+    )
+    wizard.start()
+    assert wait_until(
+        lambda: wizard.quota_notice() or None,
+        budgets.MAIL_AGENT_WRITEBACK_S,
+        diagnose=lambda: "the import never stopped on the full-mailbox notice; progress "
+        f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+        f"sessions {import_session_counts(handle.nest)}",
+    ) == S.mail_import.quota_notice
+    for choice in (
+        "mail-import-resume-button",
+        "mail-import-quota-skip-rest-button",
+        "mail-import-cancel-button",
+    ):
+        assert wizard.offers(choice), f"the full-mailbox notice does not offer {choice}"
+    assert import_session_counts(handle.nest) == [("paused", 3, 1, 2, 0)], (
+        "the nest's row should be paused with the first message imported and the "
+        f"two turned away counted skipped; it reads {import_session_counts(handle.nest)}"
+    )
+    return wizard
+
+
+@pytest.mark.feature("mailbox-import")
+def test_a_full_mailbox_pauses_and_skip_the_rest_finishes_without_reading_further(
+    app, dedicated_mail_nest, request
+):
+    """Outcome 55, "skip the rest": from the full-mailbox notice the import
+    records what is left as skipped — never as another full-mailbox refusal,
+    which would keep the nest's hold on the mailbox — reads no further body
+    from the source, and finishes (`mailbox-migration.md` § Failure handling →
+    *Nest-side errors*, § Progress lives nest-side → *The quota hold*).
+
+    Outside witnesses: the nest's own row (completed, each message counted
+    once), the nest's store (one message arrived), and the fake source's
+    record of which bodies were asked for.
+    """
+    handle = dedicated_mail_nest
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message(s) for s in FULL_SUBJECTS])
+    ]
+    with FakeImapSource(mailboxes, cert=session_cert()) as source:
+        before = stored_message_count(handle.nest)
+        wizard = _import_into_a_mailbox_with_room_for_one(app, handle, request, source)
+        fetched = list(source.fetched_uids)
+
+        wizard.skip_rest()
+
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: "Skip the rest never reached Done; progress "
+            f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+            f"sessions {import_session_counts(handle.nest)}",
+        )
+        assert "1 imported" in done and "2 skipped" in done and "0 errored" in done, done
+        assert import_session_counts(handle.nest) == [("completed", 3, 1, 2, 0)], (
+            "the nest's row should be completed, each message counted once; it reads "
+            f"{import_session_counts(handle.nest)}"
+        )
+        assert stored_message_count(handle.nest) == before + 1
+        assert source.fetched_uids == fetched, (
+            f"Skip the rest read bodies from the source: {source.fetched_uids[len(fetched):]}"
+        )
+
+
+@pytest.mark.feature("mailbox-import")
+def test_a_full_mailbox_pauses_and_resume_after_the_admin_makes_room_brings_the_rest(
+    app, dedicated_mail_nest, request
+):
+    """Outcome 55, "wait for more room": the admin raises the allowance and
+    the user presses Resume on the full-mailbox notice; the import takes up at
+    the first message that did not fit and brings in everything
+    (`mailbox-migration.md` § Failure handling → *Nest-side errors*)."""
+    handle = dedicated_mail_nest
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message(s) for s in FULL_SUBJECTS])
+    ]
+    with FakeImapSource(mailboxes, cert=session_cert()) as source:
+        before = stored_message_count(handle.nest)
+        wizard = _import_into_a_mailbox_with_room_for_one(app, handle, request, source)
+
+        set_message_allowance(app, handle.nest, before + 10)
+        wizard.navigate()
+        wait_until(
+            lambda: wizard.offers("mail-import-resume-button"),
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"the paused import's Progress step did not come back; "
+            f"error {wizard.error_text()!r}",
+        )
+        wizard.resume()
+
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: "the resumed import never reached Done; progress "
+            f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+            f"sessions {import_session_counts(handle.nest)}",
+        )
+        assert "3 imported" in done and "0 skipped" in done, done
+        assert import_session_counts(handle.nest) == [("completed", 3, 3, 0, 0)]
+        assert stored_message_count(handle.nest) == before + 3
+
+
 # ── the source connection (§ The two TLS modes) ───────────────────────────
 
 
@@ -944,6 +1100,94 @@ def test_an_import_that_keeps_failing_stops_itself_with_the_reason(
         assert len(source.refused_fetches) < total, (
             f"the import asked for all {total} messages before stopping"
         )
+
+
+@pytest.mark.feature("mailbox-import")
+def test_a_failed_import_shows_as_failed_after_a_restart_and_dismiss_clears_it(
+    app, dedicated_mail_nest, request
+):
+    """Outcome 56 (§ A failed import is a record the wizard shows until the
+    user moves on): a failed import is still there when you come back. Closing
+    the app and opening it again lands on that import's Progress step with its
+    reason as the error log's one line, offering none of Pause, Resume or
+    Cancel — only **Dismiss**, which removes the record from the nest and
+    returns the wizard to the Source step.
+
+    The failure is provoked as
+    `test_an_import_that_keeps_failing_stops_itself_with_the_reason` provokes
+    it: a source that cannot hand over a single message spends the error
+    budget. The relaunch is the export twin's
+    (`test_mail_export.py::_relaunch_onto_the_export`).
+    """
+    d = app.driver
+    if not (d.is_tui() or d.is_linux() or d.is_android()):
+        skip_unbuilt(
+            app.driver,
+            surface="a failed import's record and its Dismiss",
+            detail="witnessed on tui, linux and android; web adopts but cannot run",
+            tracked="mailbox-migration.md § Implementation status today",
+        )
+    require_relaunchable(app.driver)
+    total = 100
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message(f"broken {i}") for i in range(total)])
+    ]
+    with FakeImapSource(
+        mailboxes,
+        cert=session_cert(),
+        password=SOURCE_PASSWORD,
+        unreadable={("INBOX", uid) for uid in range(1, total + 1)},
+    ) as source:
+        wizard = _walk_to_a_started_import(app, dedicated_mail_nest, request, source)
+        assert wait_until(
+            lambda: wizard.error_text() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"the import never stopped; progress {wizard.progress_summary()!r}, "
+            f"refused {len(source.refused_fetches)}",
+        ) == S.mail_import.error_budget_exceeded
+        assert [s[0] for s in import_session_counts(dedicated_mail_nest.nest)] == ["errored"], (
+            "the nest does not hold the import failed"
+        )
+        progress = wizard.progress_summary()
+
+    # ── After a restart: the failure, on its Progress step, with its reason.
+    relaunch(app.driver)
+    wizard = MailImportActions(app.driver)
+    wizard.navigate()
+    log = wait_until(
+        lambda: wizard.error_log() or None,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "the reopened app does not show the failed import: "
+        f"source step showing {app.driver.is_visible('mail-import-source-picker')}, "
+        f"progress {wizard.progress_summary()!r}, error {wizard.error_text()!r}",
+    )
+    assert log == S.mail_import.error_budget_exceeded, (
+        f"the error log must be the failure's one reason, as recorded: {log!r}"
+    )
+    assert wizard.progress_summary().split(" · ")[:3] == progress.split(" · ")[:3], (
+        f"the counters must stay where the import failed: {wizard.progress_summary()!r} "
+        f"vs {progress!r}"
+    )
+    offered = [i for i in ("mail-import-pause-button", "mail-import-resume-button",
+                           "mail-import-cancel-button") if app.driver.is_visible(i)]
+    assert not offered, f"a failed import offers none of the three controls: {offered}"
+    assert app.driver.get_text("mail-import-dismiss-button") == (
+        S.mail_import.dismiss_failed_button
+    ), "a failed import's one control is Dismiss, labelled as such"
+
+    # ── Dismiss: the record goes, the wizard starts again.
+    wizard.dismiss()
+    assert wizard.is_page_visible(), (
+        f"Dismiss did not return the wizard to Source: {wizard.error_text()!r}"
+    )
+    assert wait_until(
+        lambda: not import_session_counts(dedicated_mail_nest.nest) or None,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"Dismiss left the failed import on the nest: "
+        f"{import_session_counts(dedicated_mail_nest.nest)!r}",
+    ), "Dismiss left the failed import on the nest"
+
+
 @pytest.mark.feature("mailbox-import")
 def test_a_source_that_drops_and_stays_down_pauses_the_import_and_resume_carries_on(
     app, dedicated_mail_nest, request
@@ -1213,6 +1457,109 @@ def test_a_paused_import_resumes_where_it_stopped_and_keeps_its_since_date(
 
 
 @pytest.mark.feature("mailbox-import")
+def test_a_mailbox_the_provider_rebuilt_is_warned_about_and_restarted_without_importing_twice(
+    app, dedicated_mail_nest, request
+):
+    """§ Resume protocol step 4 (outcome 49): the old provider rebuilds INBOX
+    — its UIDVALIDITY changes — while the import is paused. On Resume the
+    import does not carry on against the new numbering: INBOX is passed over
+    with a warning in the log, the other mailbox is taken, and the import
+    stays on the progress step offering the restart instead of finishing.
+    The restart walks INBOX again from its first message, and the nest's
+    dedup (§ Dedup vs. existing mail) skips every message that already
+    arrived — nothing is imported twice.
+    """
+    _tui_first(app, also_android=True)
+    mailboxes = [
+        SourceMailbox(
+            name="INBOX",
+            messages=[
+                sample_message("first inbox message"),
+                sample_message("second inbox message"),
+                sample_message("third inbox message"),
+            ],
+        ),
+        SourceMailbox(
+            name="Archive",
+            messages=[
+                sample_message("first archived message"),
+                sample_message("second archived message"),
+            ],
+        ),
+    ]
+    with FakeImapSource(mailboxes, cert=session_cert()) as source:
+        wizard = _connect_journey(app, dedicated_mail_nest, request, source)
+        wizard.scope_next()
+        wait_until(
+            wizard.confirm_summary,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"no Confirm summary; error was {wizard.error_text()!r}",
+        )
+
+        source.hold("INBOX", 3)
+        wizard.start()
+        _wait_at(source, "INBOX", 3, wizard)
+        wizard.pause()
+        source.release("INBOX", 3)
+        assert wait_until(
+            lambda: wizard.progress_summary().startswith(_progress(3, 5, 0)),
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"progress {wizard.progress_summary()!r}, "
+            f"error {wizard.error_text()!r}, log {wizard.error_log()!r}",
+        ), "the paused run did not settle on INBOX's three messages"
+        assert not [f for f in source.fetched_uids if f[0] == "Archive"], (
+            f"the import kept going after Pause: {source.fetched_uids}"
+        )
+
+        # The provider rebuilds INBOX: same messages, a new UID space.
+        source.mailboxes["INBOX"].uid_validity += 1
+        fetched_before_resume = len(source.fetched_uids)
+        wizard.resume()
+
+        warning = S.mail_import.mailbox_rebuilt_fmt(mailbox="INBOX")
+        assert wait_until(
+            wizard.restart_offered,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"no restart offer; progress {wizard.progress_summary()!r}, "
+            f"error {wizard.error_text()!r}, log {wizard.error_log()!r}",
+        ), "a rebuilt mailbox was not offered for restart"
+        assert warning in wizard.error_log(), (
+            f"the log does not warn about the rebuilt mailbox: {wizard.error_log()!r}"
+        )
+        assert wizard.error_text() == S.mail_import.paused_mailbox_rebuilt, (
+            f"the paused import does not say why: {wizard.error_text()!r}"
+        )
+        assert wizard.done_summary() == "", "the import finished past a rebuilt mailbox"
+        resumed = source.fetched_uids[fetched_before_resume:]
+        assert resumed and all(f[0] == "Archive" for f in resumed), (
+            f"Resume walked the rebuilt INBOX against its new numbering: {resumed}"
+        )
+        assert wizard.progress_summary().startswith(_progress(5, 5, 0)), (
+            f"the other mailbox was not taken: {wizard.progress_summary()!r}"
+        )
+
+        fetched_before_restart = len(source.fetched_uids)
+        wizard.restart()
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"the restarted import never reached Done; progress "
+            f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+            f"log {wizard.error_log()!r}",
+        )
+        restarted = source.fetched_uids[fetched_before_restart:]
+        assert ("INBOX", 1) in restarted, (
+            f"the restart did not walk INBOX again from its first message: {restarted}"
+        )
+        # Five imported, as before the restart; INBOX's three re-walked
+        # messages were already there and are skipped, never imported again.
+        expected = S.mail_import.done_summary_fmt(imported="5", skipped="3", errored="0")
+        assert done.startswith(expected), (
+            f"Done reads {done!r}; expected it to start {expected!r}"
+        )
+
+
+@pytest.mark.feature("mailbox-import")
 def test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carries_on(
     app, dedicated_mail_nest, request
 ):
@@ -1309,12 +1656,11 @@ def test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carri
         )
 
         # ── With the password: signed in again, and only what is left is read.
-        # A Generic source's port is not on the session row, so the person
-        # checks it beside the password (it starts at 993; this source listens
-        # elsewhere).
-        assert wizard.port_value() == "993", (
-            f"the port beside the password starts at {wizard.port_value()!r}"
-        )
+        # A Generic source's port is not on the session row: the field beside
+        # the password starts at the port the account remembers for this host
+        # and username, or 993 when no generation tip resolved in time for the
+        # connection to be remembered (§ Credential handling — the remembered
+        # source's own walk below waits for one). The person checks it.
         type_until_it_takes(wizard.set_port, wizard.port_value, str(source.port))
         wizard.set_password(SOURCE_PASSWORD)
         wizard.resume()
@@ -1341,6 +1687,90 @@ def test_an_import_reopened_after_the_app_closed_asks_for_the_password_and_carri
         # date, Archive's old message would make five.
         expected = S.mail_import.done_summary_fmt(imported="4", skipped="0", errored="0")
         assert done.startswith(expected), f"Done reads {done!r}; expected it to start {expected!r}"
+
+
+@pytest.mark.feature("mailbox-import")
+def test_the_old_providers_server_is_remembered_for_next_time_until_it_is_forgotten(
+    app, dedicated_mail_nest, request, imap_source
+):
+    """§ Credential handling (outcome 29): a successful connection remembers the
+    old provider's server, port, connection security and username — never the
+    password — and the app fills them in the next time, until the person
+    forgets them:
+
+    - **Remembered**: once the source answers, the Source step offers
+      `mail-import-source-forget-button`.
+    - **For next time**: the app is closed and opened again, and the wizard's
+      Source step opens on the Generic source with the host, the port and the
+      username filled in and the password field empty.
+    - **Until forgotten**: Forget empties the fields and withdraws itself, and
+      the next visit opens blank.
+    """
+    from helpers.trust_seed_witness import await_a_tip_sealed_row
+
+    _tui_first(app, also_android=True)
+    require_relaunchable(app.driver)
+    handle = dedicated_mail_nest
+    login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
+    enable_mail_so_the_nest_can_seal(app, handle)
+    # The record rests tip-sealed on the account plane, which seals nothing
+    # until the account's first generation resolves.
+    await_a_tip_sealed_row(app, handle.nest, handle.nest["admin"], where="the mail nest")
+
+    wizard = MailImportActions(app.driver)
+    wizard.navigate()
+    assert wizard.is_page_visible()
+    assert not wizard.forget_offered(), "a first visit offers to forget something"
+    fill_generic_source(wizard, imap_source, password=imap_source.password)
+    wizard.connect()
+    assert wait_until(
+        lambda: wizard.mailbox_names(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the Scope step never listed the source; error was {wizard.error_text()!r}",
+    ) == list(imap_source.mailboxes)
+    wizard.back()
+    assert wait_until(
+        wizard.forget_offered,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: "the connection was not remembered: no forget control on the "
+        f"Source step; error {wizard.error_text()!r}; log, tail:\n"
+        f"{app.driver.app_stderr_text()[-4000:]}",
+    )
+
+    # ── The next time: a fresh launch of the app fills the Source step in.
+    relaunch(app.driver)
+    wizard = MailImportActions(app.driver)
+
+    def prefilled():
+        wizard.navigate()
+        return wizard.username_value() == imap_source.username or None
+
+    assert wait_until(
+        prefilled,
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"the reopened wizard did not fill the source in: username "
+        f"{wizard.username_value()!r}, forget offered {wizard.forget_offered()}, "
+        f"error {wizard.error_text()!r}",
+    )
+    assert wizard.host_value() == "localhost"
+    assert wizard.port_value() == str(imap_source.port)
+    assert app.driver.get_text("mail-import-source-password") == "", (
+        "the password was remembered too"
+    )
+    assert wizard.forget_offered()
+
+    # ── Until forgotten.
+    wizard.forget_source()
+    assert wait_until(
+        lambda: (not wizard.forget_offered() and wizard.username_value() == "") or None,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"Forget left username {wizard.username_value()!r}, "
+        f"forget offered {wizard.forget_offered()}, error {wizard.error_text()!r}",
+    )
+    wizard.navigate()
+    assert wizard.is_page_visible()
+    assert wizard.username_value() == "", "the next visit after Forget is not blank"
+    assert not wizard.forget_offered()
 
 
 @pytest.mark.feature("mailbox-import")
@@ -1506,6 +1936,117 @@ def test_losing_the_nest_connection_mid_import_loses_nothing(
         "the nest does not hold all five source messages after the drop: "
         f"{stored_message_count(handle.nest) - stored_before} arrived"
     )
+
+
+_ALREADY_HELD = "a message the nest already holds"
+
+
+def _import_duplicates_apps(app) -> None:
+    """The "Import duplicates anyway" journeys run a real import, so they run
+    where the run journeys do — tui (the lead), linux and android; web paints
+    the toggle but never starts a run, and the rest follow in the trickle-down."""
+    d = app.driver
+    if not (d.is_tui() or d.is_linux() or d.is_android()):
+        skip_unbuilt(
+            app.driver,
+            surface="mail-import-scope-import-duplicates-toggle",
+            detail="witnessed on tui, linux and android",
+            tracked="mailbox-migration.md § Implementation status today",
+        )
+
+
+def _import_a_message_held_twice(app, handle, request, *, import_duplicates: bool):
+    """The same message twice over — once in INBOX, once in Archive, the shape
+    a Gmail label or a copied folder gives it — imported with "Import
+    duplicates anyway" set to `import_duplicates` on the Scope step.
+
+    INBOX is walked first, so by the time Archive's copy is sent the nest
+    already holds the message: that copy is the second import of mail the
+    person already has (§ Dedup scope: any of the actor's mailboxes). Returns
+    the Done summary and how many copies of the message each mailbox holds,
+    read the way a standard mail app reads them."""
+    mailboxes = [
+        SourceMailbox(name="INBOX", messages=[sample_message(_ALREADY_HELD)]),
+        SourceMailbox(name="Archive", messages=[sample_message(_ALREADY_HELD)]),
+    ]
+    with FakeImapSource(mailboxes, cert=session_cert()) as source:
+        wizard = _connect_journey(app, handle, request, source)
+        # The warning is the option's own label and is on Scope before Start,
+        # whichever way the option is set (§ Don't do these: never suppressed).
+        assert wizard.import_duplicates_label() == S.mail_import.scope_import_duplicates_label, (
+            f"the option's label reads {wizard.import_duplicates_label()!r}"
+        )
+        if wizard.import_duplicates_on() != import_duplicates:
+            wizard.toggle_import_duplicates()
+            assert wait_until(
+                lambda: wizard.import_duplicates_on() == import_duplicates,
+                budgets.UI_SETTLE_S,
+                diagnose=lambda: f"the option never turned {'on' if import_duplicates else 'off'}; "
+                f"error {wizard.error_text()!r}",
+            )
+        assert wizard.import_duplicates_label() == S.mail_import.scope_import_duplicates_label
+        wizard.scope_next()
+        wait_until(
+            wizard.confirm_summary,
+            budgets.UI_SETTLE_S,
+            diagnose=lambda: f"no Confirm summary; error was {wizard.error_text()!r}",
+        )
+        wizard.start()
+        done = wait_until(
+            lambda: wizard.done_summary() or None,
+            budgets.MAIL_AGENT_WRITEBACK_S,
+            diagnose=lambda: f"the import never reached Done; progress "
+            f"{wizard.progress_summary()!r}, error {wizard.error_text()!r}, "
+            f"log {wizard.error_log()!r}",
+        )
+    address = alias_admin_to_address(handle.nest, handle.domain)
+    landed = mailboxes_over_imap(handle, address, MAIL_PASSWORD)
+    copies = {
+        name: sum(1 for m in msgs if m.subject == _ALREADY_HELD) for name, msgs in landed.items()
+    }
+    return done, {name: n for name, n in copies.items() if n}
+
+
+@pytest.mark.feature("mailbox-import")
+def test_mail_already_in_the_mailbox_is_skipped_while_import_duplicates_is_off(
+    app, dedicated_mail_nest, request
+):
+    """§ Dedup vs. existing mail with § Opt-out per session left at its
+    default, off (outcome 41's other half): the second copy of a message the
+    nest already holds is skipped and counted, never stored again — the nest
+    holds it once, in the mailbox it arrived in first."""
+    _import_duplicates_apps(app)
+    done, copies = _import_a_message_held_twice(
+        app, dedicated_mail_nest, request, import_duplicates=False
+    )
+    assert done.startswith(
+        S.mail_import.done_summary_fmt(imported="1", skipped="1", errored="0")
+    ), f"Done reads {done!r}; the second copy should have been skipped as a duplicate"
+    assert copies == {"INBOX": 1}, f"a mail app sees the message in {copies}"
+    sessions = import_session_counts(dedicated_mail_nest.nest)
+    assert [s[2:] for s in sessions] == [(1, 1, 0)], f"the nest's record is {sessions}"
+
+
+@pytest.mark.feature("mailbox-import")
+def test_import_duplicates_anyway_stores_mail_already_in_the_mailbox_a_second_time(
+    app, dedicated_mail_nest, request
+):
+    """§ Opt-out per session (outcome 41): with "Import duplicates anyway"
+    turned on at the Scope step — its warning in its own label — the second
+    copy of a message the nest already holds is imported, not skipped, so a
+    mail app finds it in both mailboxes. The choice is recorded on the
+    session row at Start (§ Resume protocol step 3), which is what a resume
+    after a restart sends it from."""
+    _import_duplicates_apps(app)
+    done, copies = _import_a_message_held_twice(
+        app, dedicated_mail_nest, request, import_duplicates=True
+    )
+    assert done.startswith(
+        S.mail_import.done_summary_fmt(imported="2", skipped="0", errored="0")
+    ), f"Done reads {done!r}; with the option on, both copies should have been imported"
+    assert copies == {"INBOX": 1, "Archive": 1}, f"a mail app sees the message in {copies}"
+    sessions = import_session_counts(dedicated_mail_nest.nest)
+    assert [s[2:] for s in sessions] == [(2, 0, 0)], f"the nest's record is {sessions}"
 
 
 @pytest.mark.feature("mailbox-import")
@@ -1782,3 +2323,164 @@ def test_a_second_import_of_the_same_account_on_another_device_is_refused(
         assert ("Archive", 1) not in source.fetched_uids, (
             f"the paused import went on: {source.fetched_uids}"
         )
+
+
+# ── Outlook: the Microsoft sign-in (outcome 17) ─────────────────────────────
+#
+# `mailbox-migration.md` § Microsoft sign-in — the device-code grant, the
+# "Witnessing outcomes 17 and 18" paragraph. Two far ends are faked, never
+# Microsoft: the identity authority (`fake_microsoft_identity`, the session's
+# instance, seeded as `FAUNA_E2E_MICROSOFT_AUTHORITY` — `e2e-gated-seeds.md`
+# § The Microsoft authority seed) and the Outlook IMAP server, which the app
+# dials at the fixed preset `outlook.office365.com:993` and the harness maps
+# to the loopback port it leased at session start (`FAUNA_E2E_IMAP_HOST_MAP`,
+# § The preset-host redirect seed). The fake source listens on that port with
+# a leaf the session CA issued for the Outlook name, so the app verifies the
+# Outlook name unchanged — and it is the only server the fake's bearer can
+# reach. One source at a time holds the leased port: each walk opens its own
+# inside a `with` block, before the sign-in can connect. Outcome 18 — the token
+# never reaches the nest — is a `[nest]` claim of the client, witnessed with no
+# app (`tests/api/test_mail_import_client_api.py`).
+
+# The project's own client ID is still empty (`oauth_device.rs`'s `MICROSOFT`
+# constant), so each walk first saves a registration of the admin's own —
+# distinctive, so the fake's record of the request tells it from any other.
+OUTLOOK_CLIENT_ID = "6d1f4b2a-8c3e-4f5a-9b7d-0e1f2a3b4c5d"
+OUTLOOK_TENANT = "common"
+OUTLOOK_ADDRESS = "person@outlook.example"
+
+
+def _outlook_sign_in_witnessed(app) -> None:
+    """tui, linux and android render the Microsoft sign-in and the `admin-mail`
+    registration section the walk first saves through; the other apps have
+    neither (`mailbox-migration.md` § Implementation status today)."""
+    d = app.driver
+    if not (d.is_tui() or d.is_linux() or d.is_android()):
+        skip_unbuilt(
+            d,
+            surface="the admin-mail Microsoft registration section (the walk's precondition)",
+            detail="rendered on tui, linux and android; the other apps render neither it nor the sign-in",
+            tracked="mailbox-migration.md § Implementation status today",
+        )
+
+
+def _outlook_source() -> FakeImapSource:
+    """The Outlook IMAP server, as the preset-host redirect reaches it."""
+    return FakeImapSource(
+        _mailboxes(),
+        cert=session_cert_for(OUTLOOK_IMAP_HOST),
+        port=session_preset_redirect()[1],
+        username=OUTLOOK_ADDRESS,
+        xoauth2_token=session_microsoft_identity().access_token,
+    )
+
+
+def _press_sign_in(wizard: MailImportActions, fake: FakeMicrosoftIdentity) -> str:
+    """Outlook picked, the address typed, **Sign in with Microsoft** pressed —
+    returns the code the fake issued for that press (the fake's codes
+    accumulate across the session, so the count is taken before the press)."""
+    wizard.select_source(S.mail_import.source_outlook)
+    wizard.set_username(OUTLOOK_ADDRESS)
+    n = len(fake.issued_codes) + 1
+    wizard.driver.click("mail-import-source-oauth-button")
+    try:
+        return fake.wait_for_code(count=n, timeout=budgets.RPC_ROUNDTRIP_S)
+    except TimeoutError as e:
+        raise AssertionError(
+            f"pressing the sign-in asked Microsoft for no code: {e}; wizard error "
+            f"{wizard.error_text()!r}"
+        ) from e
+
+
+def _outlook_import_to_done(app, handle, request, source: FakeImapSource) -> tuple[str, dict]:
+    """Mail on, the admin's registration saved, then the user's Outlook import
+    from the sign-in to Done over every mailbox. Returns the code the screen
+    showed and the `/devicecode` request that issued it."""
+    fake = session_microsoft_identity()
+    login_as_nest_admin(app, handle.nest, dedicated_node_url(app, handle, request))
+    enable_mail_so_the_nest_can_seal(app, handle)
+    save_microsoft_registration(app, OUTLOOK_CLIENT_ID, OUTLOOK_TENANT)
+
+    wizard = MailImportActions(app.driver)
+    wizard.navigate()
+    assert wizard.is_page_visible()
+    code = _press_sign_in(wizard, fake)
+    asked = fake.device_code_requests[-1]
+
+    # The screen shows the code Microsoft issued — its `code` attribute carries
+    # it alone, beside the address the person signs in at.
+    assert wait_until(
+        lambda: wizard.driver.get_attr("mail-import-source-oauth-code", "code") == code,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: "the sign-in never showed the issued code "
+        f"{code!r}; the code element's attribute read "
+        f"{wizard.driver.get_attr('mail-import-source-oauth-code', 'code')!r}, "
+        f"error {wizard.error_text()!r}",
+    )
+
+    # The person signs in elsewhere; the grant connects by itself and the step
+    # moves on to Scope with nothing more pressed.
+    fake.approve(code)
+    assert wait_until(
+        lambda: wizard.mailbox_names(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: "the approved sign-in never reached the Scope step; "
+        f"error was {wizard.error_text()!r}, the source saw "
+        f"{source.xoauth2_auths!r} / {source.commands!r}",
+    ) == list(source.mailboxes)
+
+    wizard.scope_next()
+    wait_until(
+        wizard.confirm_summary,
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"no Confirm summary; error was {wizard.error_text()!r}",
+    )
+    wizard.start()
+    done = wait_until(
+        lambda: wizard.done_summary() or None,
+        budgets.MAIL_AGENT_WRITEBACK_S,
+        diagnose=lambda: "the Outlook import never reached Done; progress was "
+        f"{wizard.progress_summary()!r}, errors {wizard.error_log()!r}",
+    )
+    total = len(INBOX_SUBJECTS) + len(ARCHIVE_SUBJECTS)
+    assert f"{total} imported" in done, (
+        f"Done summary {done!r} does not report the {total} messages the source holds"
+    )
+    return code, asked
+
+
+@pytest.mark.feature("mailbox-import")
+def test_outlook_signs_in_with_microsoft_and_imports(app, dedicated_mail_nest, request):
+    """Outcome 17: an Outlook import signs in with Microsoft's device-code
+    grant, never a password, and imports over `AUTHENTICATE XOAUTH2`.
+
+    Three verdicts, each read where only a working sign-in could put it: the
+    code on screen is the one the fake authority issued, asked for with the
+    admin's client ID; the Outlook IMAP server saw exactly one XOAUTH2
+    authentication, for the typed address, carrying the token the authority
+    granted — and no `LOGIN`; and the import ran to Done, reading the source.
+    """
+    _outlook_sign_in_witnessed(app)
+    fake = session_microsoft_identity()
+    try:
+        with _outlook_source() as source:
+            _code, asked = _outlook_import_to_done(app, dedicated_mail_nest, request, source)
+
+            assert asked.get("client_id") == OUTLOOK_CLIENT_ID, (
+                f"the sign-in asked Microsoft with {asked!r}, not the admin's "
+                "registration"
+            )
+            assert source.xoauth2_auths == [(OUTLOOK_ADDRESS, fake.access_token)], (
+                "the Outlook server did not see one XOAUTH2 sign-in carrying the "
+                f"granted token: {source.xoauth2_auths!r}"
+            )
+            assert source.logins == [], f"a password sign-in reached Outlook: {source.logins!r}"
+            assert not [c for c in source.commands if c.split(" ", 1)[0] == "LOGIN"], (
+                f"the app sent LOGIN to Outlook: {source.commands!r}"
+            )
+            assert sorted(source.fetched_uids) == [
+                ("Archive", 1), ("INBOX", 1), ("INBOX", 2)
+            ], f"the import read {source.fetched_uids!r} off the source"
+            _assert_the_source_was_only_read(source)
+    finally:
+        save_microsoft_registration(app, "", "")

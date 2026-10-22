@@ -32,7 +32,22 @@ use dashmap::DashMap;
 use fauna_cbor::Cid;
 use tokio::sync::Mutex;
 
-use crate::{CompactionPlan, FramedSegmentStore, Manifest, ManifestError, compact};
+use crate::{CompactionPlan, FramedSegmentStore, Manifest, ManifestError, TailRecovery, compact};
+
+/// One crash tail a [`SegmentManager`] reconciled on a scope's first touch —
+/// handed to the observer set with
+/// [`SegmentManager::with_tail_reconcile_observer`] (this crate does not log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailReconcile {
+    pub scope_id: [u8; 32],
+    pub segment_id: u32,
+    /// [`TailRecovery::Rebuilt`] — the segment is a finalized pair again;
+    /// [`TailRecovery::NoJournal`] — it could not be rebuilt and its id was
+    /// tombstoned so the scope lists again.
+    pub recovery: TailRecovery,
+}
+
+type TailReconcileObserver = Arc<dyn Fn(&TailReconcile) + Send + Sync>;
 
 /// Result of `SegmentManager::append_record`.
 ///
@@ -117,14 +132,21 @@ pub struct SegmentBackupMeta {
     pub created_at_secs: u64,
 }
 
-/// Both files of one finalized segment, read together
-/// ([`SegmentManager::read_segment_pair`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SegmentPairBytes {
+/// Both files of one finalized segment, **opened** together
+/// ([`SegmentManager::open_segment_pair`]) — never read: a segment has no size
+/// ceiling (`message-segment-store.md` § Segment size), so a reader streams
+/// each half off its handle a buffer at a time.
+///
+/// The two handles are one observation: they were opened under the scope lock,
+/// and a finalized pair is never rewritten in place (compaction mints a new id
+/// and unlinks the inputs), so a handle keeps reading the exact bytes it opened
+/// even after the lock is gone or the file is unlinked.
+#[derive(Debug)]
+pub struct SegmentPairFiles {
     /// The `.dat` — standard CARv2.
-    pub dat: Vec<u8>,
+    pub dat: std::fs::File,
     /// The `.meta` sidecar — canonical dag-cbor `SegmentSidecar`.
-    pub meta: Vec<u8>,
+    pub meta: std::fs::File,
 }
 
 /// Per-scope in-memory state. Loaded from disk on first access.
@@ -138,6 +160,10 @@ pub struct SegmentManager {
     data_dir: PathBuf,
     kind: &'static str,
     state: DashMap<[u8; 32], Arc<Mutex<ScopeState>>>,
+    /// Serializes a scope's first-touch load, so two callers racing to load
+    /// one scope never both run its crash-tail reconcile over the same files.
+    first_touch: std::sync::Mutex<()>,
+    tail_reconcile_observer: Option<TailReconcileObserver>,
 }
 
 impl SegmentManager {
@@ -146,7 +172,18 @@ impl SegmentManager {
             data_dir,
             kind,
             state: DashMap::new(),
+            first_touch: std::sync::Mutex::new(()),
+            tail_reconcile_observer: None,
         }
+    }
+
+    /// Report every crash tail this manager reconciles (the nest logs them).
+    pub fn with_tail_reconcile_observer(
+        mut self,
+        observer: impl Fn(&TailReconcile) + Send + Sync + 'static,
+    ) -> Self {
+        self.tail_reconcile_observer = Some(Arc::new(observer));
+        self
     }
 
     pub fn data_dir(&self) -> &std::path::Path {
@@ -204,9 +241,9 @@ impl SegmentManager {
     }
 
     /// Get or create the per-scope lock + state. The DashMap entry is created
-    /// lazily on first access. Loading the manifest from disk happens before
-    /// the DashMap insert; if another caller raced us the placeholder we
-    /// constructed is dropped and the winning Arc is returned.
+    /// lazily on first access, under the first-touch lock: the manifest is
+    /// loaded and the crash tail reconciled ([`Self::reconcile_crash_tail`])
+    /// before the state is published, by one caller only.
     async fn scope_state(
         &self,
         scope_id: &[u8; 32],
@@ -214,19 +251,60 @@ impl SegmentManager {
         if let Some(existing) = self.state.get(scope_id) {
             return Ok(existing.clone());
         }
+        // No await while held: a std mutex, never across a suspension point.
+        let _first_touch = self
+            .first_touch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = self.state.get(scope_id) {
+            return Ok(existing.clone());
+        }
         let scope_dir = self.scope_dir(scope_id);
         let manifest_path = self.manifest_path(scope_id);
-        let manifest = Manifest::load_or_empty(&manifest_path, self.kind)?;
+        let mut manifest = Manifest::load_or_empty(&manifest_path, self.kind)?;
         let inner = FramedSegmentStore::new(scope_dir, self.kind, *scope_id)
             .map_err(ManagerError::Segment)?;
+        self.reconcile_crash_tail(scope_id, &inner, &mut manifest, &manifest_path)?;
         let state = Arc::new(Mutex::new(ScopeState {
             inner,
             manifest,
             manifest_path,
         }));
-        // Race-safe insert: if another caller raced us, return theirs.
         let entry = self.state.entry(*scope_id).or_insert_with(|| state.clone());
         Ok(entry.clone())
+    }
+
+    /// The scope's first touch in this process: a crash tail — a crash, a
+    /// SIGKILL or power loss with the segment open — is rebuilt from its
+    /// append journal, or retired when it has none, by
+    /// [`FramedSegmentStore::reconcile_crash_tail`], so every listing of the
+    /// scope reads again. A retirement is persisted here; either way the
+    /// observer hears of it.
+    fn reconcile_crash_tail(
+        &self,
+        scope_id: &[u8; 32],
+        inner: &FramedSegmentStore,
+        manifest: &mut Manifest,
+        manifest_path: &Path,
+    ) -> Result<(), ManagerError> {
+        let Some((segment_id, recovery)) =
+            inner.reconcile_crash_tail(&mut manifest.kind_manifest)?
+        else {
+            return Ok(());
+        };
+        if let TailRecovery::NoJournal { .. } = recovery {
+            manifest
+                .save_atomic(manifest_path)
+                .map_err(ManagerError::Manifest)?;
+        }
+        if let Some(observer) = &self.tail_reconcile_observer {
+            observer(&TailReconcile {
+                scope_id: *scope_id,
+                segment_id,
+                recovery,
+            });
+        }
+        Ok(())
     }
 
     /// Append one record with a bucket derived from the current UTC month
@@ -509,6 +587,32 @@ impl SegmentManager {
         self.flush(scope_id).await
     }
 
+    /// Finalize the open segment of **every** scope this manager has loaded —
+    /// the shutdown door. An open segment's `.meta` sidecar exists only in
+    /// memory until `finalize()`, so a process that exits with a segment open
+    /// leaves a manifest-live `.dat` that the next process cannot open (the
+    /// missing-sidecar shape, `SegmentStoreError::is_unfinalized_crash_tail`).
+    /// A crash still can; an orderly exit never should.
+    ///
+    /// Every scope is attempted, so one failing scope never strands the rest;
+    /// the failures come back with their scope ids, empty when all finalized.
+    /// Idempotent. A scope never loaded in this process has nothing open.
+    pub async fn finalize_all_open(&self) -> Vec<([u8; 32], ManagerError)> {
+        // Collect first: a DashMap guard must not be held across an await.
+        let scopes: Vec<([u8; 32], Arc<Mutex<ScopeState>>)> = self
+            .state
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        let mut failures = Vec::new();
+        for (scope_id, scope) in scopes {
+            if let Err(e) = scope.lock().await.inner.finalize_open() {
+                failures.push((scope_id, ManagerError::Segment(e)));
+            }
+        }
+        failures
+    }
+
     /// Read-only snapshot of a scope's `Manifest`. Returns `Manifest::empty`
     /// when no manifest file exists yet.
     pub async fn load_manifest(&self, scope_id: &[u8; 32]) -> Result<Manifest, ManagerError> {
@@ -700,29 +804,30 @@ impl SegmentManager {
         })
     }
 
-    /// Read a finalized segment's **pair** — the `.dat` and its `.meta`
+    /// Open a finalized segment's **pair** — the `.dat` and its `.meta`
     /// sidecar — as one observation.
     ///
     /// Finalize-on-read like [`Self::describe_segment_for_backup`], and both
-    /// files are read **under the scope lock**, so no append can rotate or
-    /// re-finalize the scope between the two reads: the bytes returned are the
-    /// exact pair that `open()` would accept. This is the backup arm's read
-    /// door (`bins/fauna-nest/src/segments/backup_source.rs`), which exists
-    /// because a segment shipped without its sidecar cannot be reopened —
+    /// files are opened **under the scope lock**, so no append can rotate or
+    /// re-finalize the scope between the two opens: the handles returned read
+    /// the exact pair that `open()` would accept ([`SegmentPairFiles`]). This
+    /// is the backup arm's read door
+    /// (`bins/fauna-nest/src/segments/backup_source.rs`), which exists because
+    /// a segment shipped without its sidecar cannot be reopened —
     /// `record_order` and the per-record floor metadata live only in the
     /// `.meta` (`message-segment-store.md` § Segment file format).
-    pub async fn read_segment_pair(
+    pub async fn open_segment_pair(
         &self,
         scope_id: &[u8; 32],
         segment_id: u32,
-    ) -> Result<SegmentPairBytes, ManagerError> {
+    ) -> Result<SegmentPairFiles, ManagerError> {
         let scope_arc = self.scope_state(scope_id).await?;
         let mut state = scope_arc.lock().await;
         state.inner.finalize_open()?;
         let segment = state.inner.open_segment(segment_id)?;
-        let dat = std::fs::read(segment.path())?;
-        let meta = std::fs::read(segment.meta_path())?;
-        Ok(SegmentPairBytes { dat, meta })
+        let dat = std::fs::File::open(segment.path())?;
+        let meta = std::fs::File::open(segment.meta_path())?;
+        Ok(SegmentPairFiles { dat, meta })
     }
 
     /// On-disk path to `seg-NNNNNNNN.dat` for a scope's segment.
@@ -1512,6 +1617,150 @@ mod tests {
         assert_eq!(mgr.flush(&SCOPE).await.expect("flush"), Some(1));
         // Idempotent.
         assert!(mgr.flush(&SCOPE).await.expect("flush again").is_none());
+    }
+
+    // --- finalize_all_open (the shutdown door) ---
+
+    /// The crash the shutdown door cannot cover: a process that drops a
+    /// manager with a segment open (a crash, a SIGKILL) leaves the next
+    /// process a manifest-live segment with no sidecar. The next process's
+    /// first touch of the scope rebuilds the pair from the append journal, so
+    /// the scope lists, every acknowledged record reads back with its floor
+    /// metadata, and the next append takes a fresh id.
+    #[tokio::test]
+    async fn an_unfinalized_scope_is_reconciled_by_the_next_process() {
+        let tmp = TempDir::new().expect("tmp");
+        let mgr = manager_in(&tmp);
+        let envs = [body(1), body(2)];
+        for (i, env) in envs.iter().enumerate() {
+            mgr.append_record_with_bucket(
+                &SCOPE,
+                Cid::of_dag_cbor(env),
+                env,
+                format!("floor-{i}").as_bytes(),
+                "2026-05",
+            )
+            .await
+            .expect("append");
+        }
+        drop(mgr);
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let next_process = manager_in(&tmp).with_tail_reconcile_observer({
+            let seen = seen.clone();
+            move |r| seen.lock().unwrap().push(r.clone())
+        });
+        let meta = next_process
+            .describe_segment_for_backup(&SCOPE, 1)
+            .await
+            .expect("the stranded tail must list after reconcile");
+        assert_eq!(meta.record_count, 2);
+        assert_eq!(meta.bucket, "2026-05");
+        for (i, env) in envs.iter().enumerate() {
+            assert_eq!(
+                next_process
+                    .read_record_with_floor_bytes(&SCOPE, 1, &Cid::of_dag_cbor(env))
+                    .await
+                    .expect("read"),
+                (env.clone(), format!("floor-{i}").into_bytes())
+            );
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![TailReconcile {
+                scope_id: SCOPE,
+                segment_id: 1,
+                recovery: TailRecovery::Rebuilt {
+                    records: 2,
+                    unjournaled_blocks_dropped: 0,
+                    journaled_blocks_missing: 0,
+                },
+            }]
+        );
+
+        let env = body(3);
+        let out = next_process
+            .append_record_with_bucket(&SCOPE, Cid::of_dag_cbor(&env), &env, b"", "2026-05")
+            .await
+            .expect("append after reconcile");
+        assert_eq!(
+            out.segment_id, 2,
+            "the stranded id is never reopened for append"
+        );
+    }
+
+    /// A stranded tail with no append journal beside it (written before the
+    /// journal existed) cannot be rebuilt — its floor metadata is gone. The
+    /// reconcile retires the id instead, so the scope's listing is green again,
+    /// and reports it; the `.dat` stays on disk until tombstone GC.
+    #[tokio::test]
+    async fn an_unjournaled_stranded_tail_is_retired_not_left_live() {
+        let tmp = TempDir::new().expect("tmp");
+        let mgr = manager_in(&tmp);
+        let env = body(1);
+        mgr.append_record_with_bucket(&SCOPE, Cid::of_dag_cbor(&env), &env, b"", "2026-05")
+            .await
+            .expect("append");
+        let dat = mgr.segment_file_path(&SCOPE, 1);
+        drop(mgr);
+        std::fs::remove_file(crate::segment::tail_path_for(&dat)).expect("drop the journal");
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let next_process = manager_in(&tmp).with_tail_reconcile_observer({
+            let seen = seen.clone();
+            move |r| seen.lock().unwrap().push(r.clone())
+        });
+        let manifest = next_process.load_manifest(&SCOPE).await.expect("manifest");
+        // load_manifest reads the file; the reconcile runs on first scope touch.
+        assert_eq!(manifest.kind_manifest.live_segments, vec![1]);
+        next_process.flush(&SCOPE).await.expect("touch the scope");
+        let manifest = next_process.load_manifest(&SCOPE).await.expect("manifest");
+        assert!(manifest.kind_manifest.live_segments.is_empty());
+        assert_eq!(manifest.kind_manifest.tombstoned_segments, vec![1]);
+        assert_eq!(
+            manifest.kind_manifest.next_seg_id, 2,
+            "the counter never rewinds"
+        );
+        assert_eq!(
+            seen.lock().unwrap()[0].recovery,
+            TailRecovery::NoJournal { blocks: 1 }
+        );
+        assert!(
+            dat.exists(),
+            "the bytes stay for GC, never deleted by the reconcile"
+        );
+    }
+
+    /// An open segment lives partly in memory — its `.meta` sidecar is written
+    /// only at `finalize()` — so a process that exits with a segment open
+    /// leaves a manifest-live `.dat` the next process cannot open. The
+    /// shutdown door finalizes every cached scope, so a fresh manager over the
+    /// same directory (the next process) reads every segment.
+    #[tokio::test]
+    async fn finalize_all_open_leaves_every_scope_readable_by_the_next_process() {
+        const OTHER: [u8; 32] = [0x22; 32];
+        let tmp = TempDir::new().expect("tmp");
+        let mgr = manager_in(&tmp);
+        for scope in [&SCOPE, &OTHER] {
+            let env = body(scope[0]);
+            mgr.append_record_with_bucket(scope, Cid::of_dag_cbor(&env), &env, b"", "2026-05")
+                .await
+                .expect("append");
+        }
+
+        let failures = mgr.finalize_all_open().await;
+        assert!(failures.is_empty(), "no scope may fail to finalize");
+        // Idempotent: nothing is open the second time.
+        assert!(mgr.finalize_all_open().await.is_empty());
+
+        let next_process = manager_in(&tmp);
+        for scope in [&SCOPE, &OTHER] {
+            let meta = next_process
+                .describe_segment_for_backup(scope, 1)
+                .await
+                .expect("the next process must open the segment the last one left open");
+            assert_eq!(meta.record_count, 1);
+        }
     }
 
     // --- describe_segment_for_backup ---

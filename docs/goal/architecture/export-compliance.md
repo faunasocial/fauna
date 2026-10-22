@@ -147,8 +147,9 @@ software is not subject to the EAR (15 CFR §§ 742.15(b)(1), 734.7(b)).*
 
 **Norway:** Norwegian export control mirrors the same Wassenaar dual-use lists with
 parallel public-domain and mass-market de-controls; no Norwegian licence is expected
-for a free public app with published source. Flagged for counsel review rather than
-relied on — nothing in the ratified posture depends on it.
+for a free public app with published source. Recorded as the organisation's own
+reading, not relied on — nothing in the ratified posture depends on it, and review
+by a lawyer is never a gate (`public-texts.md` § Rulings, 20).
 
 ## Decision record
 

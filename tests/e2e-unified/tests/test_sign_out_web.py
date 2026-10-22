@@ -43,6 +43,7 @@ import pytest
 
 from actions import ActionLayer
 from common.auth import create_actor_and_register
+from common.accounts import single_account_seed
 from drivers import create_driver
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
@@ -62,13 +63,6 @@ def _registry_keys(driver) -> list[str]:
             "Object.keys(localStorage).filter(k => k.startsWith('fauna/'))"
         )
     )
-
-
-def _seed_registry_identity(driver, *, secret_hex: str, node_url: str) -> str:
-    """Write one signed-in identity in the registry shape `identity.init()`
-    reads (`helpers/web_store.seed_identity`); the nest URL rides along so the
-    silent sign-in on boot has somewhere to go. Returns the actor id."""
-    return web_store.seed_identity(driver, secret_hex, nest_url=node_url)
 
 
 def _wait_registry_active(driver, timeout: float = 30.0) -> str:
@@ -108,14 +102,11 @@ def test_web_sign_out_erases_the_account_registry(nest_instance, spa_url):
     secret_a = bytes(actor_a["signing_key"]).hex()
 
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/"})
+    driver.launch({
+        "url": spa_url + "/app/",
+        "seed_credentials": single_account_seed(secret_a, nest_url=spa_url),
+    })
     try:
-        _seed_registry_identity(driver, secret_hex=secret_a, node_url=spa_url)
-        # A full document load is what boots the SPA over the seeded registry.
-        # `hard_reload()` is a plain `location.reload()`; `driver.reset()` would
-        # clear the very keys under test.
-        driver.hard_reload()
-
         active = _wait_registry_active(driver)
         assert active == actor_a["actor_id_hex"], (
             f"the registry should name the seeded identity as active; "

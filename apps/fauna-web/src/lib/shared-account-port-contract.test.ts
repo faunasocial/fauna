@@ -72,7 +72,7 @@ Deno.test("sharedAccountPort is the one implementation, over accountPortCall", (
     if (/\baccountPortCall\b/.test(text)) {
       throw new Error(
         `${name} calls accountPortCall directly — a second account port. Take ` +
-          `sharedAccountPort(secretHex) from $lib/account-runtime instead.`,
+          `sharedAccountPort(secretHex) from #lib/account-runtime instead.`,
       );
     }
   }

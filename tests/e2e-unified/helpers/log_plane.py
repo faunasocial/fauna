@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from helpers.bridge_enrollment import enroll_and_approve_bridge
+from helpers.bridge_enrollment import PlantedBridges
 
 #: The kind every enrolled bridge reports its events on (`fauna-protocol`
 #: `log_plane::KIND_BRIDGES_REPORT_LOG_EVENTS`).
@@ -58,33 +58,30 @@ def helper_event(level: str, *, message: str = "", at_ms: int | None = None) -> 
 
 
 class LogPlaneHelper:
-    """An approved `mta`-role helper on `nest`, ready to report events.
+    """An approved `mta`-role helper, planted through `planted` (the
+    `planted_bridges` fixture), ready to report events. The row is revoked at
+    the fixture's teardown: an approved `mta` that never connects would read as
+    a down mail helper to every later test's mail health.
 
     Enrolling writes the nest's own `bridge self-enrolled` line (target
     `bridge_rpc`, carrying `bridge_id=<id>`), which a test can use as a
     nest-own landmark at a known point in time — see :attr:`bridge_id`.
     """
 
-    def __init__(self, nest: dict):
+    def __init__(self, planted: PlantedBridges):
         from nacl.signing import SigningKey
 
-        self._nest = nest
+        self._nest_url = planted.nest_url
         self._key = SigningKey.generate()
         self.bridge_id = f"e2e-logplane-{uuid.uuid4().hex[:8]}"
-        enroll_and_approve_bridge(
-            nest["url"],
-            nest["admin"]["signing_key"],
-            bytes(self._key.verify_key),
-            HELPER_SOURCE,
-            self.bridge_id,
-        )
+        planted.plant(bytes(self._key.verify_key), HELPER_SOURCE, self.bridge_id)
 
     def plant_events(self, *events: HelperEvent, dropped: int = 0) -> None:
         """Report `events` in one batch. (Not named `report`: `kind_reach` merges
         by bare name, and every `.report(` in the tree would reach this kind.) The kind always answers success (the
         plane is best-effort), so a test reads the outcome off the Logs page."""
         ws = WsRpcAdminClient(
-            self._nest["url"],
+            self._nest_url,
             actor_id=bytes(self._key.verify_key),
             signing_key=bytes(self._key),
         )

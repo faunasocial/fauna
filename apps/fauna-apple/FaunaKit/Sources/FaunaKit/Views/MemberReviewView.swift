@@ -69,6 +69,7 @@ public struct MemberReviewView: View {
             })
             await vm.load()
         }
+        .onStoreChange { await vm.resync() }
     }
 
     /// One `member-review-row` per still-open PERSON, with that person's

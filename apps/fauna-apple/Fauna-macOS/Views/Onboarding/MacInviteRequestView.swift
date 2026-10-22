@@ -75,6 +75,8 @@ struct MacInviteRequestView: View {
                 ErrorBanner(message: error)
             }
 
+            TermsNotice()
+
             HStack {
                 Button(L.common.back) { vm.inviteBack() }
                 .accessibilityIdentifier(Ids.inviteRequestBackButton)

@@ -311,6 +311,158 @@ async fn keypackage_fetch_over_channel_replays_on_repeated_idempotency_key() {
     assert!(first.key_package.is_some(), "first fetch returns the KP");
 }
 
+/// Fetch `target`'s key package over `conn` once; `key` must be distinct per
+/// call so the request re-dispatches rather than replays.
+async fn fetch_kp(
+    conn: &fauna_nest::federation_channel::FederationConnection,
+    target: [u8; 32],
+    key: [u8; 16],
+) -> Option<Vec<u8>> {
+    let req = FedKeypackageFetchRequest {
+        target_actor_id: hex::encode(target),
+    };
+    let reply: FedKeypackageFetchReply = from_value(
+        &conn
+            .dispatcher
+            .request_raw(
+                "fauna.federation.keypackage.fetch",
+                key,
+                to_value(&req),
+                None,
+            )
+            .await
+            .unwrap()
+            .await_reply()
+            .await
+            .expect("ok reply"),
+    );
+    reply.key_package
+}
+
+/// **H1 (`deployment-threat-model.md` § Concern 1a):** any fresh keypair
+/// completes the hello, so neither the per-nest throttle (keyed on the id the
+/// peer chooses) nor pairing can bound how many one-time key packages
+/// strangers take from one user. The per-TARGET budget does: summed over
+/// every originating nest, at most `KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG`'s
+/// budget of one-time packages leave a user's pool per window, and every
+/// fetch past it is served the reusable last-resort package without
+/// consuming it — the target stays reachable, open federation stays open,
+/// and the pool is never drained (`federation.md` § Key packages).
+#[tokio::test]
+async fn keypackage_fetch_from_fresh_keypairs_cannot_drain_a_pool() {
+    let (f_url, f_state) = start_nest().await;
+    let f_nest_id = nest_id_hex(&f_state);
+    let budget = fauna_nest::bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG.max_events;
+
+    let bob = [0xB1u8; 32];
+    let pool = budget as usize * 2;
+    for i in 0..pool {
+        f_state
+            .db
+            .put_key_package(
+                &format!("bob-kp-{i}"),
+                &bob,
+                format!("one-time-{i}").as_bytes(),
+                i as u64,
+                9_000_000_000,
+            )
+            .await
+            .unwrap();
+    }
+    f_state
+        .db
+        .put_last_resort_key_package("bob-lr", &bob, b"last-resort", 1_000, 9_000_000_000)
+        .await
+        .unwrap();
+
+    // Three strangers, each a fresh nest identity, each fetching `budget`
+    // times — three times what the budget allows.
+    let mut served_last_resort = 0;
+    for stranger in 0u8..3 {
+        let (_h_url, h_state) = start_nest().await;
+        let conn = dial(&h_state, &f_url, &f_nest_id).await.unwrap();
+        for i in 0..budget {
+            let mut key = [0u8; 16];
+            key[0] = stranger;
+            key[1] = i as u8;
+            let kp = fetch_kp(&conn, bob, key)
+                .await
+                .expect("every fetch serves a package — the target stays reachable");
+            if kp == b"last-resort" {
+                served_last_resort += 1;
+            }
+        }
+    }
+
+    assert_eq!(
+        f_state.db.count_key_packages(&bob).await.unwrap(),
+        (pool - budget as usize) as u64,
+        "strangers together take at most the per-target budget of one-time packages"
+    );
+    assert_eq!(
+        served_last_resort,
+        2 * budget,
+        "every fetch past the budget is served the last-resort package"
+    );
+}
+
+/// The `fauna.federation.hello` costs the listener one Ed25519 verify and one
+/// sign, and any fresh keypair passes it, so it is throttled on the source IP
+/// the peer cannot choose (H1's second half). A burst past the budget from
+/// one address is refused before the verify — the dial fails its handshake.
+#[tokio::test]
+async fn federation_hello_is_throttled_per_source_ip() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let mut secret = [0u8; 32];
+    getrandom::fill(&mut secret).unwrap();
+    let signing_key = SigningKey::from_bytes(&secret);
+    let verifying_key = signing_key.verifying_key();
+    let f_state = Arc::new(AppState {
+        nest_identity: Arc::new(NestIdentity {
+            signing_key,
+            verifying_key,
+        }),
+        federation_router: Arc::new({
+            let mut b = fauna_nest::federation_router::FederationRouter::builder();
+            fauna_nest::federation_handlers::register_federation_handlers(&mut b);
+            b.build()
+        }),
+        ..AppState::for_test(db)
+    });
+    // Served with connect info, as the production listener is, so the
+    // federation route sees a source IP.
+    let app = fauna_nest::build_router(f_state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .ok();
+    });
+    let f_url = format!("http://{addr}");
+    let f_nest_id = nest_id_hex(&f_state);
+
+    let budget = fauna_nest::federation_channel::FEDERATION_HELLO_MAX_PER_IP;
+    let (_h_url, h_state) = start_nest().await;
+    let mut held = Vec::new();
+    for i in 0..budget {
+        match dial(&h_state, &f_url, &f_nest_id).await {
+            Ok(conn) => held.push(conn),
+            Err(e) => panic!("hello {i} within the budget must pass: {e}"),
+        }
+    }
+    match dial(&h_state, &f_url, &f_nest_id).await {
+        Err(DialError::Handshake(_)) => {}
+        other => panic!(
+            "the hello past the per-IP budget must be refused, got {:?}",
+            other.map(|_| "Ok(channel established)")
+        ),
+    }
+}
+
 /// The per-originating-nest throttle (keyed on the verified peer `nest_id`) trips
 /// after the default 30-event/60s budget for a given kind, returning
 /// `rate_limited` while the connection stays open (§4.C). Distinct
@@ -900,6 +1052,96 @@ async fn post_get_of_taken_down_post_discloses_over_channel() {
         .legal_takedown
         .expect("the legal_takedown marker must disclose the withholding");
     assert_eq!(marker.reference, "EU-DSA-2024/451");
+}
+
+/// **`post.get` of a post this nest's admin blocked after a report DISCLOSES
+/// over the channel** (`moderation.md` § Admin block of a reported item,
+/// decision 3: *Disclosed*). The peer gets an empty body and the additive
+/// `admin_block` marker naming the report's reason — never `not_found`, and
+/// never the takedown's marker: a peer is not the author, so it never gets the
+/// body the author keeps.
+#[tokio::test]
+async fn post_get_of_admin_blocked_post_discloses_over_channel() {
+    let (_h_url, h_state) = start_nest().await;
+    let (f_url, f_state) = start_nest().await;
+    let f_nest_id = nest_id_hex(&f_state);
+    let conn = dial(&h_state, &f_url, &f_nest_id).await.unwrap();
+
+    let author = [0x36u8; 32];
+    let post = fauna_core::data::Post {
+        author: ActorId(author),
+        created_at: fauna_core::data::Timestamp(1_000_000),
+        body: fauna_core::data::PostBody::Text {
+            content: "a reported post".to_string(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated: None,
+        content_warning: None,
+        origin: None,
+    };
+    let post_id = [0x37u8; 32];
+    f_state
+        .db
+        .put_post(
+            &post_id,
+            &fauna_core::encoding::canonical_encode(&post).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    let report = match f_state
+        .db
+        .insert_abuse_report(
+            fauna_nest::db::moderation::NewAbuseReport {
+                reporter_actor: [0x38u8; 32],
+                subject_kind: "post".into(),
+                subject_id: hex::encode(post_id),
+                subject_channel: None,
+                subject_actor: None,
+                reason: "hate".into(),
+                note: None,
+                excerpt: None,
+                block_author: false,
+            },
+            10,
+            1,
+        )
+        .await
+        .unwrap()
+    {
+        fauna_nest::db::moderation::AbuseReportInsert::Inserted(row) => row.id,
+        other => panic!("report not inserted: {other:?}"),
+    };
+    f_state
+        .db
+        .set_post_admin_block(&post_id, Some(&report))
+        .await
+        .unwrap();
+
+    let req = FedPostGetRequest {
+        post_id: hex::encode(post_id),
+    };
+    let reply: FedPostGetReply = from_value(
+        &conn
+            .dispatcher
+            .request_raw("fauna.federation.post.get", [5u8; 16], to_value(&req), None)
+            .await
+            .unwrap()
+            .await_reply()
+            .await
+            .expect("a blocked post DISCLOSES (not not_found)"),
+    );
+    assert!(reply.post.is_empty(), "the body is withheld from a peer");
+    assert!(reply.legal_takedown.is_none(), "a block is not a takedown");
+    assert_eq!(
+        reply
+            .admin_block
+            .expect("the admin_block marker discloses the withholding")
+            .reason,
+        fauna_protocol::moderation::AbuseReportReason::Hate
+    );
 }
 
 /// **Nest-sync authz (rows 3–4), the §4.C hardening.** An unpaired peer's
@@ -2635,7 +2877,7 @@ async fn inbox_send_cross_nest_originates_over_the_channel() {
 ///    which is what `ArrivalOrigin::Federation` exists to distinguish.
 #[tokio::test]
 async fn inbox_send_cross_nest_stores_a_knock_for_a_stranger() {
-    let (_h_url, h_state) = start_nest().await;
+    let (h_url, h_state) = start_nest().await;
     let (f_url, f_state) = start_nest().await;
 
     let router = {
@@ -2724,6 +2966,57 @@ async fn inbox_send_cross_nest_stores_a_knock_for_a_stranger() {
             .unwrap()
             .is_empty(),
         "and no knock is stored locally on the sender's nest either"
+    );
+
+    // The pending edge on F records H — the channel's VERIFIED origin, not
+    // the knock's own `sender_node` — and F's contact list resolves it to H's
+    // proven address (`docs/goal/ui/contacts.md` § State & data shape).
+    let h_nest_id = h_state.nest_identity.public_key_bytes();
+    assert_eq!(
+        f_state
+            .db
+            .contact_peer_nest_id(&recipient.0, &caller)
+            .await
+            .unwrap(),
+        Some(h_nest_id),
+        "the knock's edge records the verified origin nest"
+    );
+    f_state
+        .db
+        .record_nest_address(&h_nest_id, &h_url, true)
+        .await
+        .unwrap();
+    let contacts_router = {
+        let mut b = fauna_nest::rpc_router::RpcRouter::builder();
+        fauna_nest::contacts_handlers::register_contacts_handlers(&mut b);
+        b.build()
+    };
+    let meta = contacts_router
+        .kind_meta("fauna.contacts.list")
+        .expect("list registered");
+    let reply_bytes = (meta.handler)(
+        f_state.clone(),
+        recipient.0,
+        bytes::Bytes::from(
+            encode_canonical(&fauna_protocol::contacts::ContactListRequest {
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect("contacts.list ok");
+    let reply: fauna_protocol::contacts::ContactListReply = decode_strict(&reply_bytes).unwrap();
+    let edge = reply
+        .contacts
+        .iter()
+        .find(|c| c.peer_id == hex::encode(caller))
+        .expect("the knocker's pending edge is listed");
+    assert_eq!(
+        edge.home_nest_url.as_deref(),
+        Some(h_url.as_str()),
+        "the contact row carries the knocker's home"
     );
 }
 
@@ -3144,7 +3437,7 @@ async fn trends_fetch_never_aliases_another_planes_row() {
     );
 }
 
-// ── Phase 2: cross-nest shared folders + channel append (federation.md
+// ── Phase 2: cross-nest shared folders + channel append (federation-shared-folders.md
 // § Cross-nest shared folders + channel append, ratified 2026-07-18) ────────
 //
 // The four net-new kinds share ONE structural gate — serve iff
@@ -3631,7 +3924,7 @@ async fn folder_write_plane_gates_on_writer_and_is_content_idempotent() {
         rows_after_first,
         "the replay appended no second row"
     );
-    // Phase 4 refresh (`federation.md` § Cross-nest → Recipient-side access
+    // Phase 4 refresh (`federation-shared-folders.md` § Cross-nest → Recipient-side access
     // discovery): the read reply stamps the requester's LIVE grant, resolved
     // from the same `folder_member_access` row the write gate reads. This is
     // what lets a client notice a promotion/demotion on its ordinary poll with
@@ -3732,7 +4025,7 @@ async fn folder_write_plane_gates_on_writer_and_is_content_idempotent() {
     );
 }
 
-/// `fauna.federation.folder.read_token.mint` (`federation.md` § Cross-nest
+/// `fauna.federation.folder.read_token.mint` (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append → *Relay serving across nests*): the
 /// read-scoped twin of `write_token.mint`, behind the structural member gate
 /// ALONE. A rostered **reader** — the member `write_token.mint` refuses — is
@@ -3831,7 +4124,7 @@ async fn folder_read_token_mint_gates_on_membership_alone() {
 }
 
 /// `fauna.federation.folder.actors.fetch` — the cross-nest writer roster read
-/// (`federation.md` § Cross-nest…, *The cross-nest writer roster read*): a
+/// (`federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster read*): a
 /// foreign member bound to the requesting nest reads the set's actor roster —
 /// the same projection the same-nest `members.list_actors` serves (the owner as
 /// the `role == "owner"` row, each member with its grant) — with every `handle`
@@ -3993,7 +4286,7 @@ async fn folder_actors_fetch_serves_the_roster_ids_only_and_refuses_wrong_bindin
 /// The relayed door carries each writer's succession statements, because it
 /// serves the one projection the same-nest read serves
 /// (`mls-group-key-material.md` § M2 → *Writer-signed change records*, ruling
-/// (8)(b) source (i); `federation.md` § Cross-nest…, *The cross-nest writer
+/// (8)(b) source (i); `federation-shared-folders.md` § Cross-nest…, *The cross-nest writer
 /// roster read*): the owner row and a `writer` row each carry the landed chain
 /// that ends at them — a home-nest succession and a peer-learned one alike —
 /// a reader-access row carries none, and apart from the blanked handles the
@@ -4598,7 +4891,7 @@ async fn channel_leave_releases_a_confirmed_binding_and_reopens_the_grant() {
 /// Application envelope lands on the home nest's log (served back by
 /// `channel.fetch`); the structural gate refuses a requester with no/mismatched
 /// foreign row; and folder-channel Commit admission is **roster-membership**
-/// (re-ratified 2026-08-24, `federation.md` § Cross-nest shared folders +
+/// (re-ratified 2026-08-24, `federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append): a knock-only foreign member's Commit is refused by the
 /// roster check while an accepted (rostered) member's takeover Commit lands —
 /// and a conversation channel's member Commit lands as before.
@@ -4723,7 +5016,7 @@ async fn channel_append_over_channel_lands_and_gates() {
     assert_eq!(err.code, "fauna.federation.forbidden");
 
     // Federated plane, folder-channel Commit admission (re-ratified 2026-08-24,
-    // `federation.md` § Cross-nest shared folders + channel append — the
+    // `federation-shared-folders.md` § Cross-nest shared folders + channel append — the
     // same-nest half is pinned by
     // `channel_send_admits_rostered_member_commit_on_claimed_folder_channel`):
     // a KNOCK-ONLY foreign member — recorded in `channel_foreign_members` but
@@ -4823,7 +5116,7 @@ async fn channel_append_over_channel_lands_and_gates() {
     );
 }
 
-/// The `residency` stamp (`federation.md` § Cross-nest shared folders + channel
+/// The `residency` stamp (`federation-shared-folders.md` § Cross-nest shared folders + channel
 /// append → *Relay serving across nests*): every federated folder read reply —
 /// `changes.fetch`, `content_key.fetch`, `actors.fetch` — carries the folder's
 /// residency beside `caller_access`, read off the home nest's claimed row and

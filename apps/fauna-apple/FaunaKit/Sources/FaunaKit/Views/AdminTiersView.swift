@@ -67,6 +67,20 @@ public struct AdminTiersView: View {
                 .accessibilityIdentifier(Ids.adminSettingsTiersSection)
                 .automationValue(Ids.adminSettingsTiersSection, text: { String(vm.tiers.count) })
 
+                // The add-a-tier form (admin.md § 3 → *Defining a new tier*), a sibling
+                // of the tier rows so it shows on a fresh box with no tiers.
+                TierAddForm(isBusy: vm.isBusy) { name, inbox, storage, devices, blobSize, feeds in
+                    await vm.addTier(name: name, inbox: inbox, storage: storage, devices: devices,
+                                     blobSize: blobSize, feeds: feeds)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier(Ids.adminSettingsTierAddSection)
+                .automationValue(Ids.adminSettingsTierAddSection)
+                // Scoped container: the five cap inputs are queried via
+                // `scope="admin-settings-tier-add-section/..."`, as under a row.
+                .automationScope(Ids.adminSettingsTierAddSection)
+
                 VStack(alignment: .leading, spacing: 12) {
                     Text(L.admin.settingsPage.membershipSection)
                         .font(.headline)
@@ -193,6 +207,66 @@ private struct TierDefinitionRow: View {
             maxBlobSize: parseCap(input: blobSize) ?? tier.maxBlobSize,
             maxFeeds: parseCap(input: feeds) ?? tier.maxFeeds
         )
+    }
+}
+
+// MARK: - Add-a-tier form (`admin-settings-tier-add-section`)
+
+/// The add-a-tier form: name input + the five raw-i64 cap inputs (blank until the
+/// admin types) + `admin-settings-tier-add-button`. Validation and the nest call
+/// live in `AdminTiersVM.addTier`; the buffers clear only when it reports success.
+private struct TierAddForm: View {
+    let isBusy: Bool
+    let onAdd: (_ name: String, _ inbox: String, _ storage: String, _ devices: String,
+                _ blobSize: String, _ feeds: String) async -> Bool
+
+    @State private var name = ""
+    @State private var inbox = ""
+    @State private var storage = ""
+    @State private var devices = ""
+    @State private var blobSize = ""
+    @State private var feeds = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L.admin.settingsPage.addTierSection)
+                .font(.headline)
+
+            EditableFieldRow(L.admin.settingsPage.addTierName, "admin-settings-tier-add-name-input", $name,
+                             labelColor: .secondary, maxWidth: 200)
+            EditableFieldRow(L.admin.settingsPage.capInboxBytes, "admin-settings-tier-cap-inbox", $inbox,
+                             labelColor: .secondary, maxWidth: 200)
+            EditableFieldRow(L.admin.settingsPage.capStorageBytes, "admin-settings-tier-cap-storage", $storage,
+                             labelColor: .secondary, maxWidth: 200)
+            EditableFieldRow(L.admin.settingsPage.capDevices, "admin-settings-tier-cap-devices", $devices,
+                             labelColor: .secondary, maxWidth: 200)
+            EditableFieldRow(L.admin.settingsPage.capBlobSize, "admin-settings-tier-cap-blob-size", $blobSize,
+                             labelColor: .secondary, maxWidth: 200)
+            EditableFieldRow(L.admin.settingsPage.capFeeds, "admin-settings-tier-cap-feeds", $feeds,
+                             labelColor: .secondary, maxWidth: 200)
+
+            Button(L.admin.settingsPage.addTier) {
+                add()
+            }
+            .disabled(isBusy)
+            .accessibilityIdentifier(Ids.adminSettingsTierAddButton)
+            .automationActivate(Ids.adminSettingsTierAddButton,
+                                isEnabled: { !isBusy }) {
+                add()
+            }
+            .faunaGate("fauna.admin.tiers.create")
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// The Add action — shared by the `Button` and `automationActivate`. Clears
+    /// the buffers only once the nest accepted the create.
+    private func add() {
+        Task {
+            if await onAdd(name, inbox, storage, devices, blobSize, feeds) {
+                name = ""; inbox = ""; storage = ""; devices = ""; blobSize = ""; feeds = ""
+            }
+        }
     }
 }
 

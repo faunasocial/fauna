@@ -304,6 +304,41 @@ func TestVideoMissingSegmentSkipsThePostRatherThanPublishingAGap(t *testing.T) {
 	}
 }
 
+// A remux failure skips the post AND tells the binary's hook — once per failed
+// video — which is how the bridge counts it on the admin log plane. A drop for
+// any other cause (here, a missing segment) is not a remux failure and must not
+// be counted as one.
+func TestRemuxFailureSkipsThePostAndCallsTheHook(t *testing.T) {
+	ctx := context.Background()
+	_, p, key, did, tr, src := newTestProjectorWithBlobs(t)
+	var calls int
+	p.SetOnRemuxFailed(func() { calls++ })
+
+	// Bytes that are not MPEG-TS at all: every segment fetches, the remux fails.
+	garbage := loadSegments(src, "junk", 360, [][]byte{[]byte("not a transport stream")})
+	tr.videos["junk"] = videoItem("manifest-junk", garbage)
+	tr.textless["junk"] = true
+	gappy := loadSegments(src, "gap", 360, makeTSSegments(t, 2, 360))
+	delete(src.blobs, gappy.SegmentCIDs[1])
+	tr.videos["gappy"] = videoItem("manifest-gappy", gappy)
+	tr.textless["gappy"] = true
+
+	items := []ProjectionItem{
+		{PostID: hexID(0x31), CreatedAtMicros: 1_000_000, Kind: KindPost, Payload: []byte("junk")},
+		{PostID: hexID(0x32), CreatedAtMicros: 2_000_000, Kind: KindPost, Payload: []byte("gappy")},
+	}
+	applied, err := p.ProjectItems(ctx, did, key, items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatalf("applied %d commits, want 0 — neither video could be published", applied)
+	}
+	if calls != 1 {
+		t.Fatalf("remux hook called %d times, want exactly 1 (the junk video, not the gap)", calls)
+	}
+}
+
 // A re-projection neither re-fetches nor re-assembles: the blob row remembers
 // the video's MANIFEST cid, which is the only stable per-video identity (the
 // assembled mp4 has no Fauna CID of its own).

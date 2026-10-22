@@ -81,6 +81,7 @@ fn inbound_from(sender: &str) -> RailInboundMessage {
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -559,6 +560,7 @@ fn inbound_record(uid: u32, id: &[u8], from: &str, subject: &str, body: &str) ->
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     }
 }
 
@@ -948,6 +950,7 @@ async fn poll_skips_unaddressable_message_without_stalling() {
                 mailbox: MailFeed::Inbox,
                 suppress_from_view: false,
                 has_seen_flag: false,
+                warmup_hold: None,
             },
             inbound_record(4, b"seg-good", "alice@external.test", "Hi", "ok"),
         ],
@@ -1089,6 +1092,7 @@ fn ingest_inbound_record_derives_is_own_true_for_a_sent_mailbox_self_authored_me
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
 
     let ingested = ingest_inbound_record(&m, &rec).expect("ingest ok");
@@ -1129,6 +1133,7 @@ fn ingest_inbound_record_upgrades_a_self_addressed_message_to_own_on_the_later_s
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &inbox_copy).expect("ingest inbox copy");
     let snap = m.snapshot();
@@ -1146,6 +1151,7 @@ fn ingest_inbound_record_upgrades_a_self_addressed_message_to_own_on_the_later_s
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &sent_copy).expect("ingest sent copy");
 
@@ -1189,6 +1195,7 @@ fn ingest_inbound_record_dedup_duplicate_from_inbox_never_grants_ownership() {
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &original).expect("ingest original");
 
@@ -1204,6 +1211,7 @@ fn ingest_inbound_record_dedup_duplicate_from_inbox_never_grants_ownership() {
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &forged_dup).expect("ingest forged dup");
 
@@ -1245,6 +1253,7 @@ fn ingest_inbound_record_message_id_collision_with_different_content_shows_the_s
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &forged).expect("ingest forged inbox copy");
     let squat_thread = m.snapshot().threads[0].thread_id.clone();
@@ -1264,6 +1273,7 @@ fn ingest_inbound_record_message_id_collision_with_different_content_shows_the_s
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &genuine_sent).expect("ingest genuine sent copy");
 
@@ -1347,6 +1357,7 @@ fn ingest_inbound_record_upgrades_self_send_despite_bridge_added_received_header
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &inbox_copy).expect("ingest inbox copy");
     let snap = m.snapshot();
@@ -1361,6 +1372,7 @@ fn ingest_inbound_record_upgrades_self_send_despite_bridge_added_received_header
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &sent_copy).expect("ingest sent copy");
 
@@ -1416,6 +1428,7 @@ fn ingest_inbound_record_upgrades_a_self_send_carrying_an_attachment() {
             mailbox,
             suppress_from_view: false,
             has_seen_flag: false,
+            warmup_hold: None,
         };
         assert!(ingest_inbound_record(&m, &rec).expect("ingest ok"));
     }
@@ -1500,6 +1513,7 @@ fn own_compare_record(
         mailbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     }
 }
 
@@ -1871,6 +1885,7 @@ fn ingest_inbound_record_skips_a_record_with_no_from() {
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
 
     let ingested = ingest_inbound_record(&m, &rec).expect("ingest ok");
@@ -1907,6 +1922,7 @@ fn record_with_msgid(
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     }
 }
 
@@ -1997,6 +2013,7 @@ async fn real_send_then_server_sent_copy_shows_one_bubble() {
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &sent_copy).expect("ingest sent copy");
 
@@ -2007,6 +2024,74 @@ async fn real_send_then_server_sent_copy_shows_one_bubble() {
         "the user's sent message must show exactly once, not twice (dedup must \
          catch the server Sent-copy against the local echo)"
     );
+}
+
+/// A send the fresh-IP warm-up holds back says so on the user's own bubble
+/// (`mail-deliverability.md` § Enforcement at submission time): the `Sent`
+/// read's hold lands on the message this device echoed at send — the copy the
+/// dedup drops — and a later read that no longer carries it lifts it.
+#[tokio::test]
+async fn a_sent_copy_the_warm_up_holds_marks_the_echoed_message_until_a_read_lifts_it() {
+    use fauna_conversations::backend::MailWarmupHold;
+    let sink = Arc::new(CapturingSink::default());
+    let m = ConversationsManager::new();
+    m.register_backend(Arc::new(SmtpBackend::new(sink.clone(), "alice@host.test")));
+    m.start_new_conversation();
+    m.set_new_thread_recipient_input("bob@external.test".into());
+    m.resolve_recipient().await;
+    assert!(m.accept_current_recipient_chip());
+    m.set_new_thread_subject(Some("Held".into()));
+    m.set_new_thread_body("past the ramp".into());
+    let tid = m
+        .send_new_thread()
+        .await
+        .expect("send ok")
+        .expect("thread id");
+    assert_eq!(
+        m.thread_detail(tid.clone()).unwrap().messages[0].warmup_hold,
+        None
+    );
+
+    let hold = MailWarmupHold {
+        release_at_secs: 1_700_006_400,
+        messages_ahead: 3,
+    };
+    let sent_copy = |warmup_hold| InboundMailRecord {
+        uid: 9,
+        message_id: b"seg-server-sent-copy".to_vec(),
+        internal_date_ms: 1_700_000_000_000,
+        rfc5322: sink.calls.lock().unwrap()[0].1.clone(),
+        mailbox: MailFeed::Sent,
+        suppress_from_view: false,
+        has_seen_flag: false,
+        warmup_hold,
+    };
+    ingest_inbound_record(&m, &sent_copy(Some(hold))).expect("ingest held copy");
+    let detail = m.thread_detail(tid.clone()).unwrap();
+    assert_eq!(detail.messages.len(), 1, "still one bubble");
+    assert_eq!(detail.messages[0].warmup_hold, Some(hold));
+
+    ingest_inbound_record(&m, &sent_copy(None)).expect("ingest released copy");
+    assert_eq!(
+        m.thread_detail(tid).unwrap().messages[0].warmup_hold,
+        None,
+        "a read without the hold lifts it"
+    );
+}
+
+/// Only a `Sent` read speaks for the warm-up: a hold on an `INBOX` record —
+/// which the nest never sends — marks nothing.
+#[test]
+fn an_inbox_record_never_marks_a_message_held() {
+    let m = smtp_manager();
+    let mut rec = inbound_record(1, b"seg-in", "bob@external.test", "Hi", "hello");
+    rec.warmup_hold = Some(fauna_conversations::backend::MailWarmupHold {
+        release_at_secs: 1_700_006_400,
+        messages_ahead: 0,
+    });
+    ingest_inbound_record(&m, &rec).expect("ingest");
+    let tid = m.snapshot().threads[0].thread_id.clone();
+    assert_eq!(m.thread_detail(tid).unwrap().messages[0].warmup_hold, None);
 }
 
 /// A sent MAIL reaches the content index in the same session — through its
@@ -2069,6 +2154,7 @@ async fn a_sent_mail_reaches_the_index_through_its_sent_copy_in_the_same_session
         mailbox: MailFeed::Sent,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     ingest_inbound_record(&m, &sent_copy).expect("ingest sent copy");
 
@@ -2184,6 +2270,7 @@ async fn attachment_round_trips_outbound_to_inbound() {
         mailbox: MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     };
     assert!(ingest_inbound_record(&recipient, &delivered).expect("ingest ok"));
 
@@ -2268,6 +2355,7 @@ fn record_with_attachments(
         rfc5322,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     }
 }
 

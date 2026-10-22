@@ -925,6 +925,57 @@ mod tests {
         );
     }
 
+    /// Each half of the account key binds on its own: a switch to another actor
+    /// on the same nest (the bearer would authenticate as A to B's own nest), or
+    /// to the same actor on another nest (the new nest could replay A's bearer),
+    /// drops A's minted bearer exactly as a switch of both does. The test above
+    /// changes both halves at once, so it stays green with either compare
+    /// removed; this one goes red with either.
+    #[tokio::test]
+    async fn a_minted_bearer_is_dropped_when_either_half_of_the_account_changed() {
+        // A is `provisioned_capability()`: actor `[7; 32]` on `https://nest.example`.
+        let switches: [(&str, Vec<u8>, String); 2] = [
+            (
+                "same nest, another actor",
+                vec![8u8; 32],
+                "https://nest.example".into(),
+            ),
+            (
+                "same actor, another nest",
+                vec![7u8; 32],
+                "https://nest-b.example".into(),
+            ),
+        ];
+        for (case, actor_id, nest_url) in switches {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let store = agent_store(dir.path());
+            let state = state_over(dir.path(), Some(store.clone()));
+            *state.capability.write().await = Some(provisioned_capability());
+            let snapshot = slot_key(&state).await;
+
+            let b = fauna_ipc::sync::SyncCapability::new(
+                vec![2u8; 32],
+                actor_id,
+                nest_url,
+                "dev".into(),
+                fauna_ipc::sync::BearerToken::new("b-tok".into(), u64::MAX),
+            );
+            crate::credentials::persist_capability(&store, &b);
+            *state.capability.write().await = Some(b);
+
+            adopt_minted(&state, &snapshot, "a-minted".into(), 4_000_000_000).await;
+
+            let cap = state.capability.read().await;
+            let cap = cap.as_ref().expect("B's capability");
+            assert_eq!(cap.bearer.token, "b-tok", "{case}: B's bearer is untouched");
+            assert_eq!(
+                crate::credentials::load_capability(&store).map(|c| c.bearer.token.clone()),
+                Some("b-tok".into()),
+                "{case}: nothing of A's lands in the store"
+            );
+        }
+    }
+
     /// The same switch in a refusal's round trip: A's `not_registered` must not
     /// empty B's bearer or stand as B's refusal record.
     #[tokio::test]

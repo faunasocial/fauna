@@ -637,6 +637,58 @@ mod tests {
         }
     }
 
+    /// **The sealed arm's second running total** — a compressible chunk seals to far fewer bytes than it
+    /// opens to, so a sealed manifest repeating it passes the ciphertext total
+    /// and is caught only after decrypt, at the chunk whose plaintext passes the
+    /// declared size. A walk without that check reassembles every repeat and
+    /// answers `Integrity` instead.
+    #[tokio::test]
+    async fn a_sealed_compressible_repeat_past_its_size_is_refused_after_decrypt() {
+        let (store, _dir) = store();
+        let key = [0xC6u8; 32];
+        let content = vec![0u8; 7000];
+        let honest_hash = seed_synced_file(&store, None, &content, Some(&key)).await;
+        let mut manifest: fauna_core::chunk::ChunkManifest =
+            fauna_core::encoding::canonical_decode(
+                &fetch_decoded(
+                    &db(),
+                    &store,
+                    None,
+                    &ContentHash::from_digest_raw(honest_hash),
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(manifest.chunk_hashes.len(), 1, "fixture is one chunk");
+        let sealed_len = fetch_decoded(&db(), &store, None, &manifest.store_keys()[0])
+            .await
+            .unwrap()
+            .unwrap()
+            .len() as u64;
+
+        manifest.chunk_hashes = vec![manifest.chunk_hashes[0]; 2];
+        manifest.chunk_sizes = vec![content.len() as u64; 2];
+        let stored = manifest.stored_hashes.as_mut().expect("a sealed set");
+        *stored = vec![stored[0]; 2];
+        manifest.total_size = content.len() as u64 + 1;
+        assert!(
+            2 * sealed_len <= manifest.total_size,
+            "fixture must pass the ciphertext total: two repeats seal to {} bytes",
+            2 * sealed_len
+        );
+        let crafted = put_manifest(&store, &manifest).await;
+
+        let err = read_file_by_manifest(&db(), &store, None, &crafted, &[&key[..]])
+            .await
+            .expect_err("a compressible repeat past the declared size must be refused");
+        assert!(
+            matches!(err, FileOpenError::Oversized),
+            "refused at the decrypted chunk that passed the declared size, got {err:?}"
+        );
+    }
+
     /// The count bound: a manifest listing more chunks than its declared size
     /// has bytes (every chunk carries at least one) is refused before any
     /// chunk is read — here every entry names a chunk that is not stored.
@@ -690,6 +742,16 @@ mod tests {
                 stored.is_some()
             );
         }
+    }
+
+    /// **The preallocation clamp** — the size cap above refuses
+    /// a 1 TiB manifest before either arm runs, so it never reaches the buffer;
+    /// a manifest under the cap still must not size the buffer from the field.
+    #[test]
+    fn the_buffer_is_sized_from_at_most_the_prealloc_ceiling() {
+        assert_eq!(prealloc(4096), 4096);
+        assert_eq!(prealloc(MAX_SERVED_FILE_BYTES), MAX_PREALLOC_BYTES as usize);
+        assert_eq!(prealloc(u64::MAX), MAX_PREALLOC_BYTES as usize);
     }
 
     /// A raw pre-seed does not darken a public file. A public

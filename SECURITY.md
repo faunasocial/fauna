@@ -22,9 +22,12 @@ reports within a few days and will keep you informed as we investigate and fix.
 
 In scope: the Fauna server (Nest), the shared Rust core and protocol crates, the
 clients, and the mail/bridge components in this repository. Out of scope: issues
-that require a compromised device or operator, and findings in third-party
-dependencies (please report those upstream, and let us know if Fauna's use of
-them is affected).
+that require a compromised device, and findings in third-party dependencies
+(please report those upstream, and let us know if Fauna's use of them is
+affected). A compromised nest or hosting provider, and a nest's own user acting
+against others, are in scope: the design's promise is that a nest cannot read
+what you did not share with it, beyond the mail and the messages it passes to
+and from email and other networks.
 
 ## Disclosure
 

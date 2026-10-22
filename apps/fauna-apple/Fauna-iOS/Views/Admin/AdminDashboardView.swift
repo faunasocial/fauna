@@ -2,8 +2,8 @@ import SwiftUI
 import FaunaKit
 
 /// iOS admin Dashboard page — the root of the `AdminShellView` `NavigationStack`.
-/// It is both the headline-metrics page (`fauna.admin.stats` + `fauna.nest.info`,
-/// admin.md § 1 Dashboard) and the mobile **page switcher**: the page list pushes
+/// It is both the headline-metrics page (the shared card set,
+/// `admin_dashboard_snapshot()`, admin.md § 1. Dashboard → *The card set*) and the mobile **page switcher**: the page list pushes
 /// each shared FaunaKit admin page via `NavigationLink(value: AdminPage)`, which
 /// the shell's `navigationDestination(for:)` renders (admin.md:29 — mobile keeps
 /// idiomatic nav; the page set + IDs are uniform, only the switcher widget
@@ -45,17 +45,14 @@ struct AdminDashboardView: View {
                     }
                 }
 
-                if let stats = vm.stats {
-                    // Stat *definitions* (set, order, labels, formatting, colors)
-                    // are shared with macOS via `dashboardStatItems` so a change
-                    // lands once (admin.md § 1); iOS keeps its own stat-row list
-                    // layout shell. The per-tier breakdown is folded into the same
-                    // list (each tier is a stat card, matching the macOS grid)
-                    // instead of a separate "Users by Tier" section.
+                if let snapshot = vm.dashboard {
+                    // The cards are the shared fold's (admin.md § 1. Dashboard →
+                    // *The card set*); iOS keeps only its own stat-row list
+                    // layout shell.
                     VStack(alignment: .leading, spacing: 0) {
                         Text(L.admin.dashboard.title)
                             .font(.headline)
-                        ForEach(dashboardStatItems(stats: stats, version: vm.version)) { item in
+                        ForEach(dashboardStatItems(snapshot)) { item in
                             statRow(item)
                             Divider()
                         }
@@ -86,8 +83,8 @@ struct AdminDashboardView: View {
 
     private func statRow(_ item: DashboardStatItem) -> some View {
         HStack {
-            Label(item.label, systemImage: item.systemImage)
-                .foregroundStyle(item.color)
+            Text(item.label)
+                .foregroundStyle(.secondary)
                 .accessibilityIdentifier(Ids.adminStatCardLabel)
                 // Per-row read of the stat label (the e2e dashboard_card_value
                 // counts admin-stat-card-label); mirrors macOS's automationText.

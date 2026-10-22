@@ -5,7 +5,7 @@
 // backstop ticker against a push arm, so no two receive passes ever overlap on
 // the one MLS engine. That loop is `cfg(not(target_arch = "wasm32"))` — the
 // `Rc`-based wasm RPC client is `!Send`, so web cannot run it and mirrors its
-// arms in `$lib/conversations`, which owns the rails and the arms. This module
+// arms in `#lib/conversations`, which owns the rails and the arms. This module
 // owns the part those arms share: serialization, cycle counting, and the pass
 // ceiling. It holds no wasm, so all three are pinned by a plain `deno test`
 // (`receive-pump.test.ts`).

@@ -68,7 +68,7 @@ class SyncLocationsActions:
     # always-resident, whichever app binds, since the default is the agent's.
     # Apple's set-level `folder-on-demand-toggle` is the sanctioned deviation
     # (actions/backups.py); tui renders the switch only where its own predicate
-    # says its agent has a placeholder surface (windows today).
+    # says its agent has a placeholder surface (a windows or linux host).
 
     def mode_toggle_visible(self, *, scope: str | None = None) -> bool:
         """Whether the bound row renders ``folder-location-mode-toggle``.
@@ -128,3 +128,63 @@ class SyncLocationsActions:
             # instant the flip is visible (convention 14's deadline-poll shape).
             time.sleep(0.2)
         return self.mode_toggle_state(scope=scope)
+
+    # --- Per-binding *Free up space* (`folder-location-free-space-*`) ---------
+    #
+    # ui.yaml § folders: linux, windows and tui, on every bound row whose
+    # switch above is rendered and on, while its placeholder surface stands
+    # (`LocationBindingsModel::free_space_verb`; on-demand-files.md § The
+    # free-up-space gesture where the OS offers none). The button carries a
+    # `state` attr (`idle|running`); the two lines beside it are the agent's
+    # reading, re-read off `ListLocations` — never the app's guess.
+
+    def free_space_visible(self, *, scope: str | None = None) -> bool:
+        """Whether the bound row renders ``folder-location-free-space-button``."""
+        return self.driver.is_visible_scrolled("folder-location-free-space-button", scope=scope)
+
+    def free_space_state(self, *, scope: str | None = None) -> str | None:
+        """``"idle"`` / ``"running"`` — whether a sweep is walking the location
+        now, as the agent reports it. ``None`` when the button is absent."""
+        return self.driver.get_attr("folder-location-free-space-button", "state", scope=scope)
+
+    def on_device_text(self, *, scope: str | None = None) -> str | None:
+        """The standing ``folder-location-on-device`` line (how much of the
+        location is on this device), or ``None`` when it is not rendered."""
+        if not self.driver.is_visible_scrolled("folder-location-on-device", scope=scope):
+            return None
+        return self.driver.get_text("folder-location-on-device", scope=scope)
+
+    def free_space_result_text(self, *, scope: str | None = None) -> str | None:
+        """The latest sweep's ``folder-location-free-space-result`` line, or
+        ``None`` before any sweep has run (the line is absent until then)."""
+        if not self.driver.is_visible_scrolled("folder-location-free-space-result", scope=scope):
+            return None
+        return self.driver.get_text("folder-location-free-space-result", scope=scope)
+
+    def free_space(
+        self, expected_result: str, *, scope: str | None = None, timeout: float = 90.0
+    ) -> str | None:
+        """Press *Free up space* and wait for the sweep to report ``expected_result``.
+
+        The press reaches the agent's ``FreeLocationSpace`` (tui: the agent
+        surface's ``free_location_space``), which answers once the sweep is
+        accepted; the root's own loop does the work, and the row learns the
+        outcome from the agent's next ``ListLocations`` (the reconcile after the
+        press, then the status-tick watch). Convention 14: a deadline poll on
+        the row's own reading — the result line equal to what the caller
+        expects with the button back to ``idle`` — never a settle-sleep, and a
+        previous sweep's line cannot satisfy it unless it already said the same.
+        Returns the last line read, so the caller's assertion names what the
+        row actually said.
+        """
+        self.driver.is_visible_scrolled("folder-location-free-space-button", scope=scope)
+        self.driver.click("folder-location-free-space-button", scope=scope)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            line = self.free_space_result_text(scope=scope)
+            if line == expected_result and self.free_space_state(scope=scope) == "idle":
+                return line
+            # sleep-ok: poll interval inside the deadline loop above, not a
+            # settle-sleep — each tick re-reads the agent-mirrored row.
+            time.sleep(0.5)
+        return self.free_space_result_text(scope=scope)

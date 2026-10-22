@@ -644,9 +644,9 @@ pub const KIND_ATPROTO_IDENTITY: &str = "fauna.state.atproto-identity";
 /// so each is its own row — and `generation/<fingerprint>` → one retired MSEK
 /// generation (`PriorMsekRetirement`), uncapped, one per rotation ceremony
 /// (`owner-key-material.md` § Path B-sibling-2 → *Pre-rotation mail at
-/// rest*). Per-field CRDT: the state row's arm is the MSEK present-wins /
-/// rotation-LWW and the burn min-union shared with `MailConfig::merge`, then
-/// the recreatable four latest-wins on the row's own stamp; a credential
+/// rest*). Per-field CRDT: the state row's arm is the burn min-union shared
+/// with `MailConfig::merge`, then the MSEK (present-wins / rotation-LWW), the
+/// sentinel and the flags, each joined on its own stamp; a credential
 /// row's arm ORs the two monotone markers (burned, revoked — a marked join
 /// carries an empty secret) and takes the remainder on its own stamp; a
 /// generation row is immutable, two records of it joining on the later
@@ -967,6 +967,26 @@ pub use fauna_core::nostr_confirmation::NOSTR_CONFIRMATION_ROW_KEY;
 /// revoked principal's row stays: the user's rows under its kinds stay
 /// readable. **Frozen** (see the module header).
 pub const KIND_KIND_MANIFEST: &str = "fauna.state.kind-manifest";
+
+/// **The mail import's remembered source** — the old provider's server, port,
+/// connection security and username the import wizard prefills on the next
+/// visit (`mailbox-migration.md` § Credential handling, the "Source server
+/// hostname / port / TLS mode" row; never the password).
+/// **One item per account, at logical key `self`**
+/// ([`MAIL_IMPORT_SOURCE_ROW_KEY`]); value =
+/// [`fauna_core::mail_import_source::RememberedImportSource`]. Whole-record
+/// LWW: the latest successful connection replaces it, and the user's "Forget"
+/// is a stamped tombstone, so a forget on one device is not undone by a stale
+/// copy on another. Fleet-only by the default-narrow rule: no grantee needs
+/// it, and which provider the user is leaving is the user's alone.
+/// Tip-sealed by the reach argument: a stolen device must lose the account's
+/// old-provider address at the next fleet mint. An ACCOUNT row on departure —
+/// a resume on any device re-uses it (§ Resume protocol step 2). Recreatable:
+/// the user types the server again. **Frozen** (see the module header).
+pub const KIND_MAIL_IMPORT_SOURCE: &str = "fauna.state.mail-import-source";
+
+/// The one logical key a [`KIND_MAIL_IMPORT_SOURCE`] row lives at.
+pub use fauna_core::mail_import_source::MAIL_IMPORT_SOURCE_ROW_KEY;
 
 /// The registered class-2 kinds: **three frozen columns** per kind — how it
 /// merges, who can open it (R13, charter § The audience ladder), and which key
@@ -1434,6 +1454,14 @@ const POLICIES: &[(&str, MergePolicy, AudienceRung, SealingEpoch)] = &[
         AudienceRung::FleetOnly,
         SealingEpoch::GenerationTip,
     ),
+    (
+        KIND_MAIL_IMPORT_SOURCE,
+        // Whole-record: the latest connection's details, or the forget.
+        MergePolicy::LatestWins,
+        // Fleet-only + tip-sealed (the kind const's doc).
+        AudienceRung::FleetOnly,
+        SealingEpoch::GenerationTip,
+    ),
 ];
 
 /// The policy for `kind`, or `None` when this build does not know the kind.
@@ -1577,13 +1605,15 @@ pub enum TipSealedKind {
     NostrConfirmation,
     /// [`KIND_KIND_MANIFEST`].
     KindManifest,
+    /// [`KIND_MAIL_IMPORT_SOURCE`].
+    MailImportSource,
 }
 
 impl TipSealedKind {
     /// Every registered `GenerationTip` kind, in registry order —
     /// `the_tip_sealed_kinds_are_exactly_the_registry_set` holds the list to
     /// the registry, so a consumer that walks it meets every tip-sealed kind.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::DeviceEndpoints,
         Self::CustodiesHeld,
         Self::CustodianEndpoints,
@@ -1608,6 +1638,7 @@ impl TipSealedKind {
         Self::NostrConfirmation,
         Self::RefusedSchedulingChanges,
         Self::KindManifest,
+        Self::MailImportSource,
     ];
 
     /// The variant for a kind string, or `None` for any kind that is not a
@@ -1640,6 +1671,7 @@ impl TipSealedKind {
             KIND_CUSTODY_CEREMONY => Self::CustodyCeremony,
             KIND_NOSTR_CONFIRMATION => Self::NostrConfirmation,
             KIND_KIND_MANIFEST => Self::KindManifest,
+            KIND_MAIL_IMPORT_SOURCE => Self::MailImportSource,
             _ => return None,
         })
     }
@@ -1672,6 +1704,7 @@ impl TipSealedKind {
             Self::CustodyCeremony => KIND_CUSTODY_CEREMONY,
             Self::NostrConfirmation => KIND_NOSTR_CONFIRMATION,
             Self::KindManifest => KIND_KIND_MANIFEST,
+            Self::MailImportSource => KIND_MAIL_IMPORT_SOURCE,
         }
     }
 
@@ -1753,6 +1786,9 @@ impl TipSealedKind {
             // The admitted-kinds overlay: a consent made on any device admits
             // the kinds every device converges.
             Self::KindManifest => TipRowScope::Account,
+            // The remembered import source: connected on any device, it
+            // prefills the wizard and seeds a resume on every device.
+            Self::MailImportSource => TipRowScope::Account,
         }
     }
 }
@@ -2827,8 +2863,8 @@ fn merge_atproto_identity_entry(
 /// (`fauna_core::mail_rows::decode_mail_row`): both sides decode as the
 /// key's family exactly, a credential must name its key's id and a marked
 /// one carry no secret, a generation's MSEK must fingerprint to its key; the
-/// join is `MailStateRow::merge` (the MSEK and burn halves
-/// `MailConfig::merge` runs, the recreatable four on the row's stamp),
+/// join is `MailStateRow::merge` (the burns unioned; the MSEK, the sentinel
+/// and the flags each joined on its own stamp),
 /// `MailCredential::merge` (the markers ORed, the remainder on the row's
 /// stamp) or `merge_generation` (the later instant), with the byte-equality
 /// echo-stop.
@@ -3856,7 +3892,9 @@ mod tests {
     /// inbound scheduling changes (2026-09-30, relationship reach: a notice
     /// names who tried to change the user's calendar, and on which event) —
     /// and the admitted kind manifests (2026-10-02, relationship reach: the
-    /// roster of third-party apps the user connected).
+    /// roster of third-party apps the user connected) — and the mail import's
+    /// remembered source (2026-10-17, relationship reach: the old provider's
+    /// address and the user's account there).
     /// A new `GenerationTip` kind extends this list in the same commit, with
     /// its own argued reason.
     #[test]
@@ -3892,7 +3930,8 @@ mod tests {
                 KIND_CUSTODY_CEREMONY,
                 KIND_NOSTR_CONFIRMATION,
                 KIND_REFUSED_SCHEDULING_CHANGES,
-                KIND_KIND_MANIFEST
+                KIND_KIND_MANIFEST,
+                KIND_MAIL_IMPORT_SOURCE
             ]
         );
     }
@@ -5974,6 +6013,70 @@ mod tests {
         );
     }
 
+    /// The remembered import source, held whole (`mailbox-migration.md`
+    /// § Credential handling): the frozen string and row key, whole-record
+    /// LWW, fleet-only, tip-sealed, an ACCOUNT row on departure.
+    #[test]
+    fn the_mail_import_source_registers_as_a_fleet_only_tip_sealed_latest_wins() {
+        assert_eq!(KIND_MAIL_IMPORT_SOURCE, "fauna.state.mail-import-source");
+        assert_eq!(MAIL_IMPORT_SOURCE_ROW_KEY, "self");
+        assert_eq!(
+            merge_policy(KIND_MAIL_IMPORT_SOURCE),
+            Some(MergePolicy::LatestWins)
+        );
+        assert_eq!(
+            audience_rung(KIND_MAIL_IMPORT_SOURCE),
+            Some(AudienceRung::FleetOnly)
+        );
+        assert_eq!(
+            sealing_epoch(KIND_MAIL_IMPORT_SOURCE),
+            Some(SealingEpoch::GenerationTip)
+        );
+        assert_eq!(
+            TipSealedKind::of(KIND_MAIL_IMPORT_SOURCE).map(TipSealedKind::scope),
+            Some(TipRowScope::Account)
+        );
+        assert!(!retired_with_its_writer(KIND_MAIL_IMPORT_SOURCE));
+        assert!(!delegable_kinds().any(|k| k == KIND_MAIL_IMPORT_SOURCE));
+        assert_eq!(
+            home_scope_for_kind(KIND_MAIL_IMPORT_SOURCE).as_deref(),
+            Some(crate::account_state::ACCOUNT_STATE_FLEET_SCOPE)
+        );
+    }
+
+    /// **The size pin:** the door refuses a host or username past its bound
+    /// (`fauna_core::mail_import_source::RememberedImportSource::is_bounded`),
+    /// and a record at both bounds seals under HALF the per-entry cap.
+    #[test]
+    fn a_widest_mail_import_source_row_seals_under_half_the_entry_cap() {
+        use crate::account_state::MAX_STATE_ENTRY_BYTES;
+        use fauna_core::account_entry_crypto::sealed_envelope_len;
+        use fauna_core::mail_import_source::{
+            MAX_REMEMBERED_HOST_BYTES, MAX_REMEMBERED_USERNAME_BYTES, RememberedImportSource,
+        };
+        let value = fauna_core::encoding::canonical_encode(&RememberedImportSource {
+            provider: "imap".into(),
+            host: "h".repeat(MAX_REMEMBERED_HOST_BYTES),
+            port: u16::MAX,
+            tls_mode: "starttls".into(),
+            username: "u".repeat(MAX_REMEMBERED_USERNAME_BYTES),
+        })
+        .unwrap();
+        let entry = stamped(
+            KIND_MAIL_IMPORT_SOURCE,
+            MAIL_IMPORT_SOURCE_ROW_KEY,
+            &value,
+            i64::MAX,
+            0xff,
+        );
+        let len = sealed_envelope_len(&entry, true).unwrap();
+        assert!(
+            len <= MAX_STATE_ENTRY_BYTES / 2,
+            "a widest remembered import source seals to {len} bytes, over half \
+             the {MAX_STATE_ENTRY_BYTES}-byte cap"
+        );
+    }
+
     /// The tolerant posture, pinned: the LWW path adopts a newer writer's
     /// bytes VERBATIM — a field this build's `DnsConfig` does not know
     /// survives the adoption (and so an older replica's re-seal) — while
@@ -6688,6 +6791,8 @@ mod tests {
     ) -> fauna_core::mail_rows::MailStateRow {
         let mut s = fauna_core::mail_rows::MailStateRow {
             msek: msek.map(mail_key),
+            msek_at: fauna_core::data::Timestamp(at),
+            pending_rotation_at: fauna_core::data::Timestamp(at),
             mail_enabled: Some(true),
             updated_at: fauna_core::data::Timestamp(at),
             ..Default::default()
@@ -6708,6 +6813,7 @@ mod tests {
             created_at: 1_800_000_000,
             updated_at: fauna_core::data::Timestamp(at),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         };
@@ -6887,12 +6993,13 @@ mod tests {
         }
     }
 
-    /// The state row's rule, pinned by value: a rotation's newer stamp takes
-    /// the MSEK and the recreatable four together, `mail_enabled` stays
-    /// present-wins beside the MSEK, the burns min-union, and the joined
-    /// stamp is the later one.
+    /// The state row's rule, pinned by value: the MSEK, the sentinel and the
+    /// three flags each latest-wins on their OWN stamp, `mail_enabled` stays
+    /// present-wins, the burns min-union, and each joined stamp is the later
+    /// one — so a row whose flags are newer than its key takes the flags and
+    /// leaves the key.
     #[test]
-    fn the_mail_state_row_joins_the_msek_halves_and_the_recreatable_four() {
+    fn the_mail_state_row_joins_each_half_on_its_own_stamp() {
         use fauna_core::mail_rows::{MailRecord as R, MailRotationSentinel, MailStateRow};
         let rotated = mail_state(Some(2), 20, |s| {
             s.mail_enabled = None;
@@ -6912,8 +7019,8 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(joined.msek, Some(mail_key(2)));
-        assert_eq!(joined.pending_rotation, None, "the newer four win whole");
-        assert!(!joined.caldav_enabled);
+        assert_eq!(joined.pending_rotation, None, "the newer sentinel wins");
+        assert!(!joined.caldav_enabled, "the newer flags win");
         assert_eq!(
             joined.mail_enabled,
             Some(true),
@@ -6921,6 +7028,37 @@ mod tests {
         );
         assert_eq!(joined.succession_burns, vec![a_mail_burn(7, 40)]);
         assert_eq!(joined.updated_at, fauna_core::data::Timestamp(20));
+        assert_eq!(joined.msek_at, fauna_core::data::Timestamp(20));
+
+        // Newer flags over an older key: the flags move, the key and the
+        // sentinel stay with their own later stamps.
+        let flags_only = mail_state(Some(1), 30, |s| {
+            s.msek_at = fauna_core::data::Timestamp(10);
+            s.pending_rotation_at = fauna_core::data::Timestamp(10);
+            s.caldav_enabled = true;
+        });
+        let swapped = mail_state(Some(2), 20, |s| {
+            s.pending_rotation = Some(MailRotationSentinel {
+                new_msek: mail_key(2),
+            });
+        });
+        let joined: MailStateRow = fauna_core::encoding::canonical_decode(&merged_mail_row(
+            "self",
+            &R::State(swapped).encode().unwrap(),
+            &R::State(flags_only).encode().unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            joined.msek,
+            Some(mail_key(2)),
+            "the key's own stamp decides"
+        );
+        assert_eq!(
+            joined.pending_rotation.map(|p| p.new_msek),
+            Some(mail_key(2)),
+            "the sentinel's own stamp decides"
+        );
+        assert!(joined.caldav_enabled, "the flags' own stamp decides");
     }
 
     /// The monotone markers: a revoke and a burn each survive a concurrent

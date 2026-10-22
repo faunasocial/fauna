@@ -301,15 +301,32 @@ async fn vultr_delete_server_401_maps_to_provider_error() {
 // OVH — signed DELETE /1.0/cloud/project/{pid}/instance/{id}
 // --------------------------------------------------------------------------
 
-fn ovh_with_project(uri: String) -> Ovh {
-    let mut ovh = Ovh::with_base_url(
+/// Every OVH server id is `<project>/<instance>`, so the adapter holds
+/// credentials alone.
+fn ovh_adapter(uri: String) -> Ovh {
+    Ovh::with_base_url(
         "app-key".into(),
         "app-secret".into(),
         "consumer-key".into(),
         uri,
-    );
-    ovh.project_id = "proj-1".into();
-    ovh
+    )
+}
+
+#[tokio::test]
+async fn ovh_delete_of_a_bare_instance_id_is_an_error_and_sends_nothing() {
+    let mock = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(0)
+        .mount(&mock)
+        .await;
+
+    let ovh = ovh_adapter(mock.uri());
+    let client = reqwest::Client::new();
+    let result = ovh
+        .delete_server(&client, &instance("ovh-instance-1", "198.51.100.9"))
+        .await;
+    assert!(result.is_err(), "a bare id names no project: {result:?}");
 }
 
 #[tokio::test]
@@ -331,10 +348,10 @@ async fn ovh_delete_server_happy_path() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_adapter(mock.uri());
     let client = reqwest::Client::new();
     let result = ovh
-        .delete_server(&client, &instance("ovh-instance-1", "198.51.100.9"))
+        .delete_server(&client, &instance("proj-1/ovh-instance-1", "198.51.100.9"))
         .await;
     assert!(result.is_ok(), "expected delete_server OK, got {result:?}");
 }
@@ -354,10 +371,10 @@ async fn ovh_delete_server_404_is_idempotent_ok() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_adapter(mock.uri());
     let client = reqwest::Client::new();
     let result = ovh
-        .delete_server(&client, &instance("ovh-instance-1", "198.51.100.9"))
+        .delete_server(&client, &instance("proj-1/ovh-instance-1", "198.51.100.9"))
         .await;
     assert!(
         result.is_ok(),
@@ -367,8 +384,8 @@ async fn ovh_delete_server_404_is_idempotent_ok() {
 
 #[tokio::test]
 async fn ovh_delete_of_an_account_wide_row_reaches_its_own_project() {
-    // A row listed with no project chosen carries `<project>/<instance>`
-    // (the retire view's account-wide list); its delete goes to that project.
+    // A row of the account-wide list carries `<project>/<instance>`; its
+    // delete goes to that project.
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/1.0/auth/time"))
@@ -413,10 +430,10 @@ async fn ovh_delete_server_401_maps_to_provider_error() {
         .mount(&mock)
         .await;
 
-    let ovh = ovh_with_project(mock.uri());
+    let ovh = ovh_adapter(mock.uri());
     let client = reqwest::Client::new();
     match ovh
-        .delete_server(&client, &instance("ovh-instance-1", "198.51.100.9"))
+        .delete_server(&client, &instance("proj-1/ovh-instance-1", "198.51.100.9"))
         .await
     {
         Err(ProvisionError::Provider { status, .. }) => assert_eq!(status, 401),

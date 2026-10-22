@@ -4,6 +4,8 @@ title: Connected apps
 section: your data and devices
 goal: docs/goal/ui/connected-apps.md § Goal
 guide: docs/guides/app-tour.md § Settings
+absences:
+  web (outcomes 17, 18): "docs/goal/architecture/apps/web.md § Implementation status today"
 ---
 
 ## What a user gets
@@ -49,6 +51,7 @@ Stamped 2026-10-02 at df61f1d791.
    - `tests/e2e-unified/tests/test_connected_apps.py::test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card`
 14. [app] Declining a request tells the app no, and nothing is connected — `docs/goal/ui/connected-apps.md` § User actions
    - `tests/e2e-unified/tests/test_connected_apps.py::test_a_declined_handoff_tells_the_app_no`
+   - `tests/e2e-unified/tests/test_connected_apps.py::test_declining_a_quiet_push_tells_the_app_no`
 15. [app] You can see the apps you chose never to hear from, and let one ask again — `docs/goal/ui/connected-apps.md` § Layout & flow
    - `tests/e2e-unified/tests/test_connected_apps.py::test_a_blocked_app_is_listed_and_unblock_lifts_the_block`
 16. [nest] An app you allowed to read your nest's public timelines can read them over its own connection and nothing beyond what you allowed, narrowing what it may do takes effect on that connection at once, and disconnecting the app cuts the connection — `docs/goal/architecture/transport-connection.md` § Connection lifecycle
@@ -105,17 +108,23 @@ Stamped 2026-10-02 at df61f1d791.
 39. [nest] Only an app running on your own device can ask to read a folder, and only one you already serve over WebDAV: approving a read of a folder you do not serve is turned down with the reason, grants nothing and leaves the request waiting — `docs/goal/behavior/webdav-server.md` § Key model
    - `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_confidential_client_is_refused_the_folder_read_scope_at_the_push`
    - `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_the_approve_refuses_a_folder_the_owner_does_not_serve`
+40. [nest] An app you allowed to read one person's posts reads the public posts of any one author on your nest, newest first — a post for paying subscribers or a closed audience never reaches it, and an app allowed only your public timelines cannot read one author's posts; allowed your feeds too, it sees which of those posts you liked — `docs/goal/behavior/authorization-server.md` § Scope grammar
+   - `tests/e2e-unified/tests/api/test_third_party_session.py::test_the_author_arm_reads_one_authors_public_posts`
+41. [nest] An app you allowed to edit your profile changes your display name, bio and links as you, signed with a key your nest keeps for posting that your approval set up, never your own; it changes nothing else on your profile, cannot set your picture or banner, and the moment you revoke that posting key its next edit is refused — `docs/goal/architecture/key-material-hierarchy.md` § Audience: deployment infrastructure
+   - `tests/e2e-unified/tests/api/test_profile_author_principal.py::test_a_principal_edits_the_profile_until_the_delegation_is_revoked`
+42. [app] An app you allowed to read or send in your conversations reaches them only through your Fauna app open on the same device: it lists your rooms, reads their messages and sends a message as you into one, yet it never holds a key to any room, every room stays the kind of room it was, and the moment you revoke it its next read is refused — `docs/goal/behavior/conversations-oracle.md` § The custodian and the door
+   - `tests/e2e-unified/tests/test_cli_conversations.py::test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+60e6f5d5 standalone |
-| linux | ⚠ partial | 0.1.4-dev+60e6f5d5 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+be5542fa.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+e17a00b6.dirty standalone |
-| ios |  no run recorded | |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+46de983d.dirty standalone |
 
@@ -136,11 +145,14 @@ Stamped 2026-10-02 at df61f1d791.
 | 12 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_each_row_says_when_the_app_was_last_used_and_how_long_it_lasts` | tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_code_nobody_issued_gets_one_plain_message_and_opens_no_card` | tui (linux): passed |
 | 14 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_declined_handoff_tells_the_app_no` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed |
+| 14 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_declining_a_quiet_push_tells_the_app_no` | web (linux): passed, tui (linux): passed |
 | 15 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_blocked_app_is_listed_and_unblock_lifts_the_block` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_third_party_session.py::test_a_principal_session_is_gated_by_ceiling_scope_and_revoke` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/api/test_third_party_session.py::test_revoking_one_grant_closes_only_that_familys_session` | nest (linux): passed |
 | 17 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_handoff_link_opens_the_card_and_approving_connects_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed |
+| 17 | app | absent by design on web | — |
 | 18 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_a_handoff_link_opens_the_card_and_approving_connects_the_app` | web (linux): skipped, linux (linux): passed, windows (windows): passed, macos (macos): passed |
+| 18 | app | absent by design on web | — |
 | 19 | nest | `tests/e2e-unified/tests/api/test_oauth_consent_starts.py::test_a_same_device_handoff_opens_alices_row_and_its_poll_turns_into_tokens` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_oauth_consent_starts.py::test_a_declined_handoff_answers_access_denied` | nest (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_ext_kinds.py::test_a_connected_app_writes_and_reads_exactly_its_own_kinds` | nest (linux): passed |
@@ -153,7 +165,7 @@ Stamped 2026-10-02 at df61f1d791.
 | 26 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption.py::test_an_owner_seat_adopts_a_deposit_larger_than_one_message` | tui (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_folder_deposit_adoption_on_demand_linux.py::test_an_on_demand_seat_adopts_a_parked_deposit` | linux (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_third_party_events.py::test_a_connected_app_hears_only_its_own_scopes_change` | nest (linux): passed |
-| 28 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/test_connected_apps.py::test_the_external_apps_switch_pauses_a_connected_app_and_on_restores_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 29 | nest | `tests/e2e-unified/tests/api/test_third_party_session.py::test_the_personalization_arm_reads_and_trains_the_accounts_models` | nest (linux): passed |
 | 30 | nest | `tests/e2e-unified/tests/api/test_ext_kinds.py::test_a_remote_principal_cannot_ask_for_the_accounts_personalization` | nest (linux): passed |
 | 31 | nest | `tests/e2e-unified/tests/api/test_third_party_session.py::test_the_account_arm_reads_the_accounts_feeds_over_public_posts` | nest (linux): passed |
@@ -167,4 +179,7 @@ Stamped 2026-10-02 at df61f1d791.
 | 38 | nest | `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_qualified_request_against_the_bare_declaration_reads_without_a_choice` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_a_confidential_client_is_refused_the_folder_read_scope_at_the_push` | nest (linux): passed |
 | 39 | nest | `tests/e2e-unified/tests/api/test_folder_read_principal.py::test_the_approve_refuses_a_folder_the_owner_does_not_serve` | nest (linux): passed |
+| 40 | nest | `tests/e2e-unified/tests/api/test_third_party_session.py::test_the_author_arm_reads_one_authors_public_posts` | nest (linux): passed |
+| 41 | nest | `tests/e2e-unified/tests/api/test_profile_author_principal.py::test_a_principal_edits_the_profile_until_the_delegation_is_revoked` | nest (linux): passed |
+| 42 | app | `tests/e2e-unified/tests/test_cli_conversations.py::test_the_cli_reads_and_sends_through_tui_as_custodian_until_revoked` | — |
 <!-- features-render:end -->

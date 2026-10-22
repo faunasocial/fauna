@@ -14,11 +14,15 @@ import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.ImportMailboxProgress
+import uniffi.fauna_client_mail_settings.ImportPauseReason
+import uniffi.fauna_client_mail_settings.ImportSessionState
 import uniffi.fauna_client_mail_settings.ImportSourceKind
 import uniffi.fauna_client_mail_settings.ImportStatus
 import uniffi.fauna_client_mail_settings.ImportStep
 import uniffi.fauna_client_mail_settings.ImportTlsMode
 import uniffi.fauna_client_mail_settings.MailImportSnapshot
+import uniffi.fauna_client_mail_settings.MicrosoftSignInState
+import uniffi.fauna_client_mail_settings.MicrosoftSignInView
 import uniffi.fauna_client_mail_settings.SourceMailboxOption
 
 /**
@@ -52,18 +56,27 @@ class MailImportContentTest {
         mailboxProgress: List<ImportMailboxProgress> = emptyList(),
         errorLog: List<String> = emptyList(),
         resumeNeedsCredentials: Boolean = false,
+        microsoftSigninAvailable: Boolean = false,
+        microsoftSignin: MicrosoftSignInView? = null,
+        sessionState: ImportSessionState? = null,
+        pauseReason: ImportPauseReason? = null,
+        rebuiltMailboxes: List<String> = emptyList(),
+        sourceRemembered: Boolean = false,
+        importDuplicates: Boolean = false,
+        username: String = "",
     ) = MailImportSnapshot(
         step = step,
         sourceKind = sourceKind,
         host = host,
         port = 993u,
         tlsMode = ImportTlsMode.IMPLICIT,
-        username = "",
+        username = username,
         password = "",
         mailboxes = mailboxes,
         dateFrom = "",
         maxSizeBytes = 52428800uL,
-        sessionState = null,
+        sessionState = sessionState,
+        pauseReason = pauseReason,
         importedCount = importedCount,
         skippedCount = 0u,
         erroredCount = 0u,
@@ -75,6 +88,11 @@ class MailImportContentTest {
         status = ImportStatus.IDLE,
         error = null,
         resumeNeedsCredentials = resumeNeedsCredentials,
+        microsoftSigninAvailable = microsoftSigninAvailable,
+        microsoftSignin = microsoftSignin,
+        rebuiltMailboxes = rebuiltMailboxes,
+        sourceRemembered = sourceRemembered,
+        importDuplicates = importDuplicates,
     )
 
     private fun render(
@@ -83,6 +101,11 @@ class MailImportContentTest {
         onScopeNext: (String, String) -> Unit = { _, _ -> },
         onStart: () -> Unit = {},
         onResume: (String, String) -> Unit = { _, _ -> },
+        onSignInWithMicrosoft: (String) -> Unit = {},
+        onRestart: () -> Unit = {},
+        onDismiss: () -> Unit = {},
+        onForgetSource: () -> Unit = {},
+        onSetImportDuplicates: (Boolean) -> Unit = {},
     ) {
         composeTestRule.setContent {
             MailImportContent(
@@ -101,7 +124,13 @@ class MailImportContentTest {
                 onPause = {},
                 onResume = onResume,
                 onCancel = {},
+                onSkipRest = {},
+                onRestart = onRestart,
+                onDismiss = onDismiss,
+                onForgetSource = onForgetSource,
+                onSetImportDuplicates = onSetImportDuplicates,
                 onViewImported = {},
+                onSignInWithMicrosoft = onSignInWithMicrosoft,
             )
         }
     }
@@ -193,13 +222,66 @@ class MailImportContentTest {
         assertSourceTable(ImportSourceKind.I_CLOUD, setOf("mail-import-source-app-password"))
     }
 
-    /** Outlook is the one kind with BOTH: the OAuth button and the IMAP fallback. */
+    /**
+     * Outlook shows the address and Sign in with Microsoft — no password, no
+     * host, no Connect: the IMAP fallback is withdrawn (§ Microsoft sign-in).
+     */
     @Test
-    fun outlookShowsTheOauthButtonAndTheImapFallback() {
-        assertSourceTable(
-            ImportSourceKind.OUTLOOK,
-            imapFallback + "mail-import-source-oauth-button",
+    fun outlookShowsTheAddressAndSignInWithMicrosoftAlone() {
+        assertSourceTable(ImportSourceKind.OUTLOOK, setOf("mail-import-source-oauth-button"))
+        composeTestRule.onNodeWithTag("mail-import-connect-button").assertDoesNotExist()
+    }
+
+    /** No registration: the button is inert beside the unavailable sentence. */
+    @Test
+    fun signInWithMicrosoftIsInertWhereTheRegistrationIsMissing() {
+        render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.OUTLOOK))
+        composeTestRule.onNodeWithTag("mail-import-source-oauth-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("Microsoft sign-in is not available yet.").assertExists()
+    }
+
+    /** While Microsoft's code is out it paints with its attributes and the button waits. */
+    @Test
+    fun theMicrosoftCodePaintsWithItsAttributesWhileTheButtonWaits() {
+        render(
+            snap(
+                ImportStep.SOURCE,
+                sourceKind = ImportSourceKind.OUTLOOK,
+                microsoftSigninAvailable = true,
+                microsoftSignin = MicrosoftSignInView(
+                    userCode = "FAUNA-42",
+                    verificationUri = "https://microsoft.example/devicelogin",
+                    expiresAtMs = 0uL,
+                    state = MicrosoftSignInState.WAITING,
+                ),
+            ),
         )
+        // In flight (the code is out): the button waits.
+        composeTestRule.onNodeWithTag("mail-import-source-oauth-button").assertIsNotEnabled()
+        val code = composeTestRule.onNodeWithTag("mail-import-source-oauth-code")
+        code.assertExists()
+        assertEquals(
+            "code=FAUNA-42;url=https://microsoft.example/devicelogin",
+            code.fetchSemanticsNode().config.getOrNull(SemanticsProperties.StateDescription),
+        )
+        composeTestRule.onNodeWithText("Open in browser").assertExists()
+    }
+
+    @Test
+    fun signInWithMicrosoftPressCarriesTheTypedAddressOut() {
+        var seen: String? = null
+        render(
+            snap(
+                ImportStep.SOURCE,
+                sourceKind = ImportSourceKind.OUTLOOK,
+                microsoftSigninAvailable = true,
+            ),
+            onSignInWithMicrosoft = { seen = it },
+        )
+        composeTestRule.onNodeWithTag("mail-import-source-username").performScrollTo()
+            .performTextInput("person@outlook.example")
+        composeTestRule.onNodeWithTag("mail-import-source-oauth-button").performScrollTo().performClick()
+        assert(seen == "person@outlook.example") { "the press must carry the address; got $seen" }
     }
 
     @Test
@@ -402,8 +484,9 @@ class MailImportContentTest {
 
     /**
      * Nothing re-seeded the Source-step host/port drafts from the snapshot a
-     * `SelectSourceKind` dispatch just wrote, so picking Outlook left the host
-     * field blank and Connect dialed nothing.
+     * `SelectSourceKind` dispatch just wrote, so picking a kind left the host
+     * field blank and Connect dialed nothing. Generic is the one
+     * kind that shows the host field now.
      *
      * `setContent` runs once per test (this file's own rule), so the picked
      * kind's re-published snapshot is faked here exactly the way
@@ -424,8 +507,8 @@ class MailImportContentTest {
                 onSelectSourceKind = {
                     snapshot = snap(
                         ImportStep.SOURCE,
-                        sourceKind = ImportSourceKind.OUTLOOK,
-                        host = "outlook.office365.com",
+                        sourceKind = ImportSourceKind.GENERIC,
+                        host = "imap.example.org",
                     )
                 },
                 onSetTlsMode = {},
@@ -437,7 +520,13 @@ class MailImportContentTest {
                 onPause = {},
                 onResume = { _, _ -> },
                 onCancel = {},
+                onSkipRest = {},
+                onRestart = {},
+                onDismiss = {},
+                onForgetSource = {},
+                onSetImportDuplicates = {},
                 onViewImported = {},
+                onSignInWithMicrosoft = {},
             )
         }
 
@@ -446,13 +535,178 @@ class MailImportContentTest {
         // its own semantics node, so the four (RadioButton, Text) pairs flatten into
         // one sibling list — `onNodeWithText("OUTLOOK")`'s nearest semantics parent is
         // ambiguous over all four RadioButtons, not just its own row's. Select by
-        // position instead: Outlook is the second declared option (index 1, the same
+        // position instead: Generic is the fourth declared option (index 3, the same
         // order `SourceOption` is called in above).
-        composeTestRule.onAllNodes(isSelectable())[1].performClick()
+        composeTestRule.onAllNodes(isSelectable())[3].performClick()
 
         composeTestRule.onNodeWithTag("mail-import-source-host")
-            .assertTextContains("outlook.office365.com", substring = true)
+            .assertTextContains("imap.example.org", substring = true)
         composeTestRule.onNodeWithTag("mail-import-source-port")
             .assertTextContains("993", substring = true)
+    }
+    /**
+     * A failed import is a record, not a run (§ A failed import is a record the
+     * wizard shows until the user moves on): Dismiss alone, none of Pause /
+     * Resume / Restart / Cancel; a live import keeps them.
+     */
+    @Test
+    fun aFailedImportOffersDismissAndNoneOfTheControls() {
+        var dismissed = 0
+        render(
+            snap(
+                ImportStep.PROGRESS,
+                sessionState = ImportSessionState.ERRORED,
+                rebuiltMailboxes = listOf("INBOX"),
+            ),
+            onDismiss = { dismissed++ },
+        )
+        composeTestRule.onNodeWithTag("mail-import-dismiss-button").assertExists().performClick()
+        assertEquals(1, dismissed)
+        for (id in listOf(
+            "mail-import-pause-button",
+            "mail-import-resume-button",
+            "mail-import-restart-button",
+            "mail-import-cancel-button",
+        )) {
+            composeTestRule.onNodeWithTag(id).assertDoesNotExist()
+        }
+    }
+
+    /** A live import keeps its controls and no Dismiss. */
+    @Test
+    fun aLiveImportKeepsItsControlsAndNoDismiss() {
+        render(snap(ImportStep.PROGRESS, sessionState = ImportSessionState.RUNNING))
+        composeTestRule.onNodeWithTag("mail-import-dismiss-button").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("mail-import-pause-button").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-restart-button").assertDoesNotExist()
+    }
+
+    /** The restart is offered only while a rebuilt source mailbox is pending. */
+    @Test
+    fun theRestartIsOfferedWhileARebuiltMailboxIsPending() {
+        var restarted = 0
+        render(
+            snap(
+                ImportStep.PROGRESS,
+                sessionState = ImportSessionState.PAUSED,
+                rebuiltMailboxes = listOf("INBOX"),
+            ),
+            onRestart = { restarted++ },
+        )
+        composeTestRule.onNodeWithTag("mail-import-restart-button").assertExists().performClick()
+        assertEquals(1, restarted)
+    }
+
+    /** The forget control paints for every provider while a source is remembered. */
+    @Test
+    fun theForgetButtonPaintsOnlyWhileASourceIsRemembered() {
+        var forgotten = 0
+        render(
+            snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.GMAIL, sourceRemembered = true),
+            onForgetSource = { forgotten++ },
+        )
+        composeTestRule.onNodeWithTag("mail-import-source-forget-button").assertExists().performScrollTo().performClick()
+        assertEquals(1, forgotten)
+    }
+
+    @Test
+    fun theForgetButtonIsAbsentWhenNothingIsRemembered() {
+        render(snap(ImportStep.SOURCE, sourceKind = ImportSourceKind.GMAIL))
+        composeTestRule.onNodeWithTag("mail-import-source-forget-button").assertDoesNotExist()
+    }
+
+    /** The remembered source fills the Source drafts once the snapshot says so. */
+    @Test
+    fun theRememberedSourceFillsTheUsernameDraft() {
+        render(
+            snap(
+                ImportStep.SOURCE,
+                sourceKind = ImportSourceKind.GENERIC,
+                host = "imap.old.example",
+                sourceRemembered = true,
+                username = "me@old.example",
+            ),
+        )
+        composeTestRule.onNodeWithTag("mail-import-source-username").assertTextContains("me@old.example")
+        composeTestRule.onNodeWithTag("mail-import-source-host").assertTextContains("imap.old.example")
+    }
+
+    /** The import-duplicates toggle reads the snapshot (off by default) and carries its warning. */
+    @Test
+    fun theImportDuplicatesToggleIsOffByDefaultAndCarriesItsWarning() {
+        val seen = mutableListOf<Boolean>()
+        render(snap(ImportStep.SCOPE), onSetImportDuplicates = { seen += it })
+        val toggle = composeTestRule.onNodeWithTag("mail-import-scope-import-duplicates-toggle")
+        toggle.assertExists()
+        assertEquals(
+            "off",
+            toggle.fetchSemanticsNode().config.getOrNull(SemanticsProperties.StateDescription),
+        )
+        toggle.performClick()
+        assertEquals(listOf(true), seen)
+    }
+
+    @Test
+    fun theImportDuplicatesToggleReadsOnWhenTheSnapshotSaysSo() {
+        render(snap(ImportStep.SCOPE, importDuplicates = true))
+        assertEquals(
+            "on",
+            composeTestRule.onNodeWithTag("mail-import-scope-import-duplicates-toggle")
+                .fetchSemanticsNode().config.getOrNull(SemanticsProperties.StateDescription),
+        )
+    }
+
+    /**
+     * The full-mailbox notice (`mailbox-migration.md` § Failure handling →
+     * *Nest-side errors*): a session paused on `MailboxFull` paints the notice
+     * and Skip the rest beside Resume and Cancel; any other pause reason, or a
+     * running session, paints neither.
+     */
+    @Test
+    fun aMailboxFullPauseOffersTheNoticeAndSkipTheRest() {
+        var snapshot by mutableStateOf(
+            snap(
+                ImportStep.PROGRESS,
+                sessionState = ImportSessionState.PAUSED,
+                pauseReason = ImportPauseReason.CONNECTION_LOST,
+            ),
+        )
+        composeTestRule.setContent {
+            MailImportContent(
+                snapshot = snapshot,
+                sourceKindLabel = { it.name },
+                tlsModeLabel = { it.name },
+                onBack = {},
+                onSelectSourceKind = {},
+                onSetTlsMode = {},
+                onConnect = { _, _, _, _, _ -> },
+                onToggleMailbox = {},
+                onScopeNext = { _, _ -> },
+                onPrev = {},
+                onStart = {},
+                onPause = {},
+                onResume = { _, _ -> },
+                onCancel = {},
+                onSkipRest = {},
+                onRestart = {},
+                onDismiss = {},
+                onForgetSource = {},
+                onSetImportDuplicates = {},
+                onViewImported = {},
+                onSignInWithMicrosoft = {},
+            )
+        }
+        composeTestRule.onNodeWithTag("mail-import-quota-notice").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("mail-import-quota-skip-rest-button").assertDoesNotExist()
+
+        snapshot = snap(
+            ImportStep.PROGRESS,
+            sessionState = ImportSessionState.PAUSED,
+            pauseReason = ImportPauseReason.MAILBOX_FULL,
+        )
+        composeTestRule.onNodeWithTag("mail-import-quota-notice").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-quota-skip-rest-button").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-resume-button").assertExists()
+        composeTestRule.onNodeWithTag("mail-import-cancel-button").assertExists()
     }
 }

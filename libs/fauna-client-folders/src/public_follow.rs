@@ -1,6 +1,6 @@
 //! The **publicly-synced follow**'s read op — `fauna.folders.public.fetch`
 //! from the follower's side (`docs/goal/behavior/folders.md` § Publicly-synced
-//! follow; the kinds and gates: `docs/goal/architecture/federation.md` § The
+//! follow; the kinds and gates: `docs/goal/architecture/federation-shared-folders.md` § The
 //! public folder read plane). Folders re-model phase 4 slice 4f-ii.
 //!
 //! The follower's read mechanisms live here — and only the pure/portable ones,
@@ -250,7 +250,7 @@ pub const AVAILABILITY_TTL_MS: u64 = 60_000;
 /// **Bounded, not `join_all`.** Each probe is relayed by the follower's OWN
 /// nest out to a home nest, so N concurrent probes become N concurrent relays
 /// into the per-source-IP and per-nest throttles the public read plane rides by
-/// design (`federation.md` § The public folder read plane, *Zero state, zero
+/// design (`federation-shared-folders.md` § The public folder read plane, *Zero state, zero
 /// metering*). Serial was safe from that and unusably slow; an unbounded fan-out
 /// is fast and trips the very throttles that keep the plane cheap to serve.
 /// Four keeps a cold first render to `ceil(N/4)` round trips while staying far

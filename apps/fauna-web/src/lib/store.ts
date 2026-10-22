@@ -25,7 +25,7 @@ import { resetActorScopedState } from './actorScope';
 
 // --- Identity ---
 //
-// The identity lives in the shared account registry (`$lib/accounts`, over
+// The identity lives in the shared account registry (`#lib/accounts`, over
 // `fauna_client_accounts`) and NOWHERE else — this store is its in-memory view.
 // Two concerns share the registry's per-actor rows:
 //
@@ -395,7 +395,7 @@ function createIdentityStore() {
      *  4. **Erase.** `signOutFinish()` erases each recorded account's store,
      *     bounded, and each leaves the record as its store goes. A store that
      *     would not go stays recorded, and the onboarding page this lands on
-     *     tells the user (`$lib/accounts`'s `signOutResidue`). */
+     *     tells the user (`#lib/accounts`'s `signOutResidue`). */
     async logout() {
       // The leave-gesture push drop (`common.md` § Registration — "the
       // subscription follows the signed-in identity"): capture the secret
@@ -593,7 +593,7 @@ export const contacts = writable<Contact[]>([]);
 // --- Feed ---
 //
 // The Feed page's post-list / selector / cursor / loading state moved onto the
-// shared `fauna_feed::FeedManager` snapshot (`$lib/feed.ts` `feedSnapshot`;
+// shared `fauna_feed::FeedManager` snapshot (`#lib/feed.ts` `feedSnapshot`;
 // feed.md § State & data shape, ratified 2026-06-14) — no client-side post-list
 // stores here anymore (the priority-#1 divergence the lift retired).
 

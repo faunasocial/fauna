@@ -100,7 +100,6 @@ async fn harness_with_seed_and_identity(seed: NodeMode, identity_seed: [u8; 32])
         submission: None,
         acme: None,
         email: None,
-        update: Default::default(),
     });
 
     let nest_identity = Arc::new(fauna_nest::nest_identity::NestIdentity::from_seed(
@@ -245,7 +244,11 @@ async fn flip_re_evaluates_mta_should_run() {
     commit_as(&h, &admin, "private").await.expect("set private");
     let mode = *h.state.node_mode.read().await;
     assert!(
-        !fauna_nest::mail_enable::mta_should_run(mode, true),
+        !fauna_nest::mail_enable::mta_should_run(
+            mode,
+            fauna_core::mail_availability::ContentScanners::Wired,
+            true
+        ),
         "private nest never runs the MTA, even with mail enabled"
     );
 
@@ -254,7 +257,11 @@ async fn flip_re_evaluates_mta_should_run() {
         .expect("flip to public");
     let mode = *h.state.node_mode.read().await;
     assert!(
-        fauna_nest::mail_enable::mta_should_run(mode, true),
+        fauna_nest::mail_enable::mta_should_run(
+            mode,
+            fauna_core::mail_availability::ContentScanners::Wired,
+            true
+        ),
         "public nest with mail enabled runs the MTA"
     );
 }
@@ -457,7 +464,11 @@ async fn a_consumed_nat_mode_signature_cannot_move_the_posture_again() {
     );
     assert_eq!(h.db.get_nat_mode().await.unwrap(), Some(NodeMode::Private));
     assert!(
-        !fauna_nest::mail_enable::mta_should_run(*h.state.node_mode.read().await, true),
+        !fauna_nest::mail_enable::mta_should_run(
+            *h.state.node_mode.read().await,
+            fauna_core::mail_availability::ContentScanners::Wired,
+            true,
+        ),
         "the replay must not bring the perimeter SMTP parser back up"
     );
 }

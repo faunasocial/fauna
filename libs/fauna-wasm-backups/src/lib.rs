@@ -97,7 +97,7 @@ fn owner_secret_bytes(owner_secret_hex: &str) -> Option<[u8; 32]> {
 #[wasm_bindgen]
 impl BackupsMachine {
     /// Build the page machine over the SPA core chunk's socket, lent as
-    /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's
+    /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's
     /// `requestRaw` runs every request this machine makes, so web keeps one
     /// WebSocket per actor). Throws on an object that is not a port. State
     /// starts empty; call `refresh()` to populate it.

@@ -214,24 +214,24 @@ def test_the_bindgen_reads_the_private_slot_not_the_shared_one():
 def assert_sync_agent_builds_implicit_host(text: str) -> None:
     # 2026-08-25: the build itself moved from an inline subprocess.run
     # in conftest.py's sync_agent_binary fixture into
-    # common.nest.build_sync_service_win (gate-then-slot composition, mirroring
+    # common.nest.build_sync_agent (gate-then-slot composition, mirroring
     # build_node()) — this asserts against THAT function's text now, not the
     # fixture, which just delegates to it via _ensure_sync_agent_built.
     # The package is `fauna-sync-agent`, named ALONE: the windows-only wrapper
     # crate that used to produce this exe is retired, and a second `-p` in the
     # same cargo invocation would unify its features into the agent's.
     assert '["build", "-p", "fauna-sync-agent"]' in text, (
-        "common.nest.build_sync_service_win is expected to build the "
+        "common.nest.build_sync_agent is expected to build the "
         "fauna-sync-agent package, and that package alone"
     )
     assert '"--target"' not in text, (
-        "build_sync_service_win must build IMPLICIT-host — measured at "
+        "build_sync_agent must build IMPLICIT-host — measured at "
         "0/66 workspace-local units shared with the dev inner loop, 61/66 after "
         "the drop. Its macOS twin `macos_sync_agent_binary` had always built this "
-        "way; the two fixtures are now the same shape."
+        "way; since 2026-10-21 both fixtures share this one builder."
     )
-    assert 'debug_dir / "fauna-sync-agent.exe"' in text, (
-        "_sync_service_win_build_paths must point at the shared host tree's output"
+    assert 'debug_dir / f"fauna-sync-agent{suffix}"' in text, (
+        "_sync_agent_build_paths must point at the shared host tree's output"
     )
 
 

@@ -2,6 +2,7 @@ package mailfauna
 
 import (
 	"crypto/rand"
+	"errors"
 	"sync"
 
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
@@ -66,24 +67,32 @@ func PrewarmDummyKDF() {
 // DummyCredentialKDF runs the same credential KDF a real AUTH attempt runs, for
 // a user/credential that does not exist, so an unknown-user AUTH-fail costs the
 // same as an existing-user wrong-password AUTH-fail (network-exposure.md § F3).
-// The result is discarded — this exists solely to consume the KDF time.
+// The result is discarded — this exists solely to consume the KDF time — except
+// ErrKDFBusy: when the gate had no slot for source, the caller answers the same
+// temporary failure a real user's busy unwrap gets, so a saturated gate is no
+// account-existence oracle either.
 //
 // Only the Argon2id (AUTH=PLAIN) arm has a meaningful timing gap; HKDF
 // (OAUTHBEARER) is microsecond-cheap, so this is a no-op for it.
-func DummyCredentialKDF(secret []byte, kind KdfKind) {
+func DummyCredentialKDF(secret []byte, kind KdfKind, source string) error {
 	if kind != KdfKindArgon2id {
-		return
+		return nil
 	}
 	dummyKDFOnce.Do(mintDummyBlob)
 	if dummyArgon2idBlob == nil {
-		return
+		return nil
 	}
 	// Runs the real Argon2id over `secret`, then fails AEAD (random MSEK). The
 	// success/failure is irrelevant — zeroize a capability on the (near-
 	// impossible) success path and discard.
-	if capability, err := UnwrapMLSBlob(
-		dummyArgon2idBlob, secret, dummyActorID, dummyCredentialID, kind,
-	); err == nil && capability != nil {
+	capability, err := UnwrapMLSBlob(
+		dummyArgon2idBlob, secret, dummyActorID, dummyCredentialID, kind, source,
+	)
+	if errors.Is(err, ErrKDFBusy) {
+		return err
+	}
+	if err == nil && capability != nil {
 		capability.Zeroize()
 	}
+	return nil
 }

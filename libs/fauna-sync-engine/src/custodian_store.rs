@@ -461,12 +461,23 @@ impl StagedSeal {
         bodies: &Path,
         seal_root: Option<([u8; 32], Option<u64>)>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(bodies)
-            .with_context(|| format!("create seal staging {}", bodies.display()))?;
         let file = std::fs::File::open(plain)
             .with_context(|| format!("open {} to seal", plain.display()))?;
+        Self::seal_reader(file, bodies, seal_root)
+    }
+
+    /// [`Self::seal_file`] over a reader already open — a source nest seals
+    /// a segment half off the handle it opened under its scope lock
+    /// (`SyncEngine::seal_staged`).
+    pub fn seal_reader(
+        plain: impl std::io::Read,
+        bodies: &Path,
+        seal_root: Option<([u8; 32], Option<u64>)>,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(bodies)
+            .with_context(|| format!("create seal staging {}", bodies.display()))?;
         let sealed = fauna_core::blob_seal::seal_reader(
-            std::io::BufReader::new(file),
+            std::io::BufReader::new(plain),
             seal_root,
             |key, body| {
                 let target = bodies.join(hex::encode(key.digest()));
@@ -492,6 +503,27 @@ impl StagedSeal {
     /// As [`SealedBlob::stored_bytes`].
     pub fn stored_bytes(&self) -> u64 {
         self.sealed.stored_bytes
+    }
+
+    /// The plaintext's length — what the sealed reader yielded.
+    pub fn plain_len(&self) -> u64 {
+        self.sealed.manifest.total_size
+    }
+
+    /// BLAKE3 of the plaintext, hex — taken as it was sealed, so a caller
+    /// checks what it sealed against an advertised hash without a second read.
+    pub fn plain_blake3_hex(&self) -> String {
+        hex::encode(self.sealed.manifest.file_hash.digest())
+    }
+
+    /// As [`SealedBlob::content_key_version`].
+    pub(crate) fn content_key_version(&self) -> Option<u64> {
+        self.sealed.content_key_version
+    }
+
+    /// The chunk manifest (the plaintext view), as [`SealedBlob::manifest`].
+    pub(crate) fn manifest(&self) -> &ChunkManifest {
+        &self.sealed.manifest
     }
 }
 
@@ -528,7 +560,7 @@ impl Sealed<'_> {
         hex::encode(hash.digest())
     }
 
-    fn manifest_bytes(&self) -> &[u8] {
+    pub(crate) fn manifest_bytes(&self) -> &[u8] {
         match self {
             Self::Whole(s) => &s.manifest_bytes,
             Self::Staged(s) => &s.sealed.manifest_bytes,
@@ -543,7 +575,7 @@ impl Sealed<'_> {
     }
 
     /// Every chunk's store key, in manifest order.
-    fn store_keys(&self) -> Vec<ContentHash> {
+    pub(crate) fn store_keys(&self) -> Vec<ContentHash> {
         match self {
             Self::Whole(s) => s.chunks.iter().map(|(key, _)| *key).collect(),
             Self::Staged(s) => s.sealed.manifest.store_keys(),
@@ -552,7 +584,11 @@ impl Sealed<'_> {
 
     /// The body of the `index`-th chunk, whose store key is `key` — borrowed
     /// when whole, read back (one chunk) when staged.
-    async fn body(&self, index: usize, key: &ContentHash) -> Result<std::borrow::Cow<'_, [u8]>> {
+    pub(crate) async fn body(
+        &self,
+        index: usize,
+        key: &ContentHash,
+    ) -> Result<std::borrow::Cow<'_, [u8]>> {
         match self {
             Self::Whole(s) => Ok(std::borrow::Cow::Borrowed(&s.chunks[index].1)),
             Self::Staged(s) => {

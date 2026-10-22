@@ -67,6 +67,7 @@ pub use fauna_account_plane::deployment_seed_rows;
 pub use fauna_account_plane::dns_rows;
 pub use fauna_account_plane::folder_key_rows;
 pub use fauna_account_plane::follows_rows;
+pub use fauna_account_plane::mail_import_source_rows;
 pub use fauna_account_plane::mail_rows;
 pub use fauna_account_plane::nostr_confirmation_rows;
 pub use fauna_account_plane::peer_anchor_rows;
@@ -226,9 +227,13 @@ pub mod share_serve_tally;
 /// The peer leg's admitted-sibling registry — the one sibling chunk source.
 #[cfg(feature = "account-runtime")]
 pub mod sibling_chunks;
+#[cfg(all(test, feature = "account-runtime"))]
+mod sibling_pull_test;
 /// Where a download looks for chunk bodies before the nest (the same-account
 /// peer data plane's pull seam, `p2p.md` § Goal).
 pub mod sibling_source;
+#[cfg(test)]
+mod spool_fetcher_test;
 /// Path-traversal guard — moved to `fauna-core` 2026-07-16 so the shared
 /// client-side file-download walk (`fauna_core::file_download`, which wasm
 /// compiles and this crate cannot) guards its own paths. Re-exported so this
@@ -266,6 +271,8 @@ mod access_revoked_test;
 #[cfg(test)]
 mod anchor_accounting_test;
 #[cfg(test)]
+mod authenticated_mismatch_test;
+#[cfg(test)]
 mod backfill_thumbnail_test;
 #[cfg(all(test, feature = "engine-lifecycle"))]
 mod build_engine_retired_custody_test;
@@ -289,6 +296,8 @@ mod enumerate_test;
 mod head_rejudge_test;
 #[cfg(test)]
 mod keep_local_resolution_test;
+#[cfg(test)]
+mod key_pending_test;
 #[cfg(test)]
 mod log_redaction_test;
 #[cfg(test)]

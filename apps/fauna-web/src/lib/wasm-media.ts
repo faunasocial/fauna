@@ -1,11 +1,12 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_media.js';
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
+import { registerIdentityStoreChunk } from './identity-store';
 import { sharedAccountPort } from './account-runtime';
 import { conversationsManagerIfReady } from './conversations';
 import type { MediaMachine } from '../../static/fauna_wasm_media.js';
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
-// Re-export so route files consume the machine type via `$lib/wasm-media` rather
+// Re-export so route files consume the machine type via `#lib/wasm-media` rather
 // than a fragile relative path into `static/` (mirrors how pages reach the machine).
 export type { MediaMachine };
 
@@ -19,7 +20,7 @@ export type { MediaMachine };
 //
 // The Media page builds one `MediaMachine` over its own short-lived WS-RPC
 // connection (the standalone constructor), exactly as the Devices page builds a
-// `DevicesMachine` via `$lib/wasm-folders` — one shared surface, all 7 apps
+// `DevicesMachine` via `#lib/wasm-folders` — one shared surface, all 7 apps
 // (priority #1/#2; docs/goal/ui/media.md rule 2).
 
 let wasmModule: typeof import('../../static/fauna_wasm_media.js') | null = null;
@@ -36,7 +37,10 @@ export function ensureMediaWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_media.js');
-      await mod.default(`${base}/fauna_wasm_media_bg.wasm`);
+      await mod.default(asset('fauna_wasm_media_bg.wasm'));
+      // The identity store's key, if this page holds it, goes in before
+      // anything reads the registry through this chunk (identity-store.ts).
+      registerIdentityStoreChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -59,7 +63,7 @@ export interface MediaMachineObserver {
 
 /**
  * Build the page-level `MediaMachine` over the SPA singleton's socket —
- * `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`. State starts empty
+ * `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`. State starts empty
  * (all-media view, name sort ascending, list mode) — the caller drives
  * `refresh()`.
  *
@@ -107,6 +111,10 @@ export async function createMediaMachine(
   machine.setMlsQuery({
     isJoinedSharedSet: (groupIdHex: string) =>
       conversationsManagerIfReady()?.foldersIsJoined(groupIdHex) ?? false,
+    // The member-row declassification anchor: the channel's MLS-recorded
+    // owner. Unready → none, and the member row seals.
+    folderChannelOwner: (channelId: Uint8Array) =>
+      conversationsManagerIfReady()?.foldersChannelOwner(channelId),
   });
   // READ-side custody for a successor, and deliberately a SECOND call rather
   // than a second key on the line above: that one is the delete/restore seal

@@ -1,34 +1,23 @@
 # Your identity, devices, and account recovery
 
-> **Status — this guide describes Fauna as it is taking shape.** Most of it is
-> built and tested; the [table at the end](#where-this-stands-today) says
-> exactly what is available now, what is landing, and what is planned.
+> **Status — this guide describes Fauna as it is taking shape.** Most of it is built and tested; the [table at the end](#where-this-stands-today) says exactly what is available now and what is planned.
 
 ---
 
-> **What this is.** How Fauna accounts actually work — one key, no passwords —
-> and what that means in practice: keeping the key safe, adding and removing
-> devices, and what happens (honestly) in every loss scenario from "dropped my
-> phone in a lake" to "someone stole my laptop."
+> **What this is.** How Fauna accounts actually work — one key, no account password — and what that means in practice: keeping the key safe, adding and removing devices, and what happens (honestly) in every loss scenario from "dropped my phone in a lake" to "someone stole my laptop."
 >
 > **Who it's for.** Everyone. This is the one guide worth reading *before*
 > you need it.
 
 ---
 
-## One key, no password
+## One key, no account password
 
-Your Fauna identity is a cryptographic key pair, created on your device the
-first time you sign up. The **secret** — shown to you once at creation as a
-long hex string — is the private half; it never leaves your devices, and the
-nest only ever sees the public half. There is no password, which means:
+Your Fauna identity is a cryptographic key pair, created on your device the first time you sign up — a key on your devices, not an account with anyone. The **secret** — shown to you at creation as a long hex string — is the private half. It leaves a device only when you move it yourself: by adding a device or exporting your identity, by turning on the iCloud Keychain backup on iPhone or Mac, or by making a recovery kit, which keeps a copy on your nest (and on a friend's nest, if one holds copies for you) encrypted so that only the kit can open it. Your device's own backup may also carry it, still locked — see [Where the key lives](#where-the-key-lives--and-where-you-should-put-a-copy). Your nest never holds the secret in a form it can use; it works with the public half. There is no account password, which means:
 
-- **Nothing to phish or breach.** No password database exists anywhere.
-- **Nothing to reset.** No "forgot password" flow, no support desk that can
-  be talked into handing over your account — because nobody, including the
-  nest admin and the Fauna project, *can*.
-- **The flip side, stated plainly: the secret is the account.** Everything in
-  this guide follows from that.
+- **No sign-in password to phish or leak.** Signing in proves you hold the key; no server stores a password that would let someone sign in as you.
+- **Nothing to reset.** No "forgot password" flow, no support desk that can be talked into handing over your account: nobody — not your nest's admin, not the people who make Fauna — can sign in as you or hand your identity to someone else. (An admin can still suspend or remove an account on their nest — see [What the nest admin can and can't do](#what-the-nest-admin-can-and-cant-do).)
+- **The flip side, stated plainly: whoever holds your secret can act as you.** Everything in this guide follows from that.
 
 Your **handle** (`you@yourdomain.com`) is your name on the network; it's
 attached to your account on the nest, not baked into the key, and it can be
@@ -36,12 +25,7 @@ changed in settings without touching your identity.
 
 ## Where the key lives — and where you should put a copy
 
-On each device the app stores the secret in the platform's secure storage:
-the keychain on iPhone/Mac, the equivalent stores on Windows, Linux, and
-Android. **One caveat worth knowing: in the web app it lives in the browser's
-local storage** — clearing site data signs you out irrevocably unless you
-have the secret elsewhere. Treat the web app as a window, not as the home of
-your only copy.
+On each device the app stores the secret in the platform's secure storage: the keychain on iPhone/Mac, the equivalent stores on Windows, Linux, and Android. **The web app has no such store, and neither does the terminal app on a server or over SSH, so there the secret is kept encrypted with a passphrase you choose** (in a browser, in the browser's site storage) — the app asks you to choose it the first time it opens, and asks for it again at each launch (in a browser, once per session, as long as one Fauna tab stays open). Clearing the browser's site data still removes the secret from that browser, so you need the secret or your recovery kit somewhere else to sign back in; and a forgotten passphrase cannot be recovered: **Forgot the passphrase? Start over** on the unlock screen erases this browser's copy of your sign-in keys and nothing else, and you sign in again from another device where you're signed in, an exported copy of your key, or your recovery kit. Treat the web app as a window, not as the home of your only copy.
 
 On iPhone and Mac you can optionally turn on **Settings → Account → Back up
 identity to iCloud Keychain**. By default the app keeps your identity out of
@@ -66,19 +50,13 @@ the place the secret is kept depends on the device:
   your sign-in.
 - **Terminal app with a passphrase:** the encrypted file goes with any backup
   of the folder it is in, and opens only with your passphrase.
-- **Web app:** the secret goes wherever a copy of your browser's data goes,
-  with no lock of its own.
+- **Web app:** the secret goes wherever a copy of your browser's data goes, still locked — encrypted with your passphrase.
 
 Using the terminal app on a server or over SSH — anywhere without an OS
 secure store — it asks you to choose a **passphrase** on first run and keeps
 the secret in a file encrypted with it. You'll enter that passphrase at each
 launch; there is no reset if you forget it (that's the point), so keep the
-secret backed up per the rules below and you can always start fresh. You can
-change the passphrase later under **Settings → Account → Credential store →
-Change passphrase**: enter the current one, choose the new one, and the store
-is re-sealed on the spot — back up your identity secret first (the dialog
-reminds you), because a forgotten new passphrase is just as unrecoverable as
-a forgotten old one.
+secret backed up per the rules below and you can always start fresh. You can change the passphrase later — in the terminal app and the web app alike — under **Settings → Account → Credential store → Change passphrase**: enter the current one, choose the new one, and from then on the old one no longer opens the store — back up your identity secret first (the dialog reminds you), because a forgotten new passphrase is just as unrecoverable as a forgotten old one.
 
 The house rules, in order of importance:
 
@@ -90,7 +68,7 @@ The house rules, in order of importance:
 
 ## Adding a device
 
-Install the app, choose **Import** (not Create), and give it your secret —
+Install the app, choose **Import from Another Device** (not **Create New Identity**), and give it your secret —
 paste the hex string, or scan your identity as a QR code shown by a device you
 are already signed in on (**Settings → Account → Export Identity**, then *Show
 QR Code*). The QR carries your handle too, so the rest pre-fills. Same
@@ -105,34 +83,16 @@ Your **Devices** page in settings lists every device: name, online dot, a
 device fetches shared files straight from other devices (see the sharing
 guide); on the device you are holding it is yours to flip either way, and on
 any other device you can only turn it off — that device turns itself back on,
-never anyone else. Your account's plan allows a certain number of devices; if you
-sign in on one more than that, the new device is not added and the Devices
-page tells you so, with the way out: remove a device you no longer use from
-that page, or ask your admin for a bigger tier. Two details show the design's
-care for your data:
+never anyone else. Your account's tier allows a certain number of devices; if you sign in on one more than that, the new device is not added and the Devices page tells you so, with the way out: remove a device you no longer use from that page, or ask your admin for a bigger tier. A few details show the design's care for your data:
 
-- Removing a device that is the *only* holder of some synced folder is
-  refused until you designate another source — Fauna won't let you orphan
-  your own files.
+- Removing a device never loses what your nest holds: your nest keeps every synced folder's files, except a folder whose **Content kept on the nest** is set to **Metadata only — content stays on my devices**, whose files live only on your devices.
 - The device you're holding can't be removed from this page — sign out on it
   instead. And before removing any other device, the app checks for itself
   which of your devices the row stands for rather than taking the server's
   word; if it can't confirm, nothing is removed and the page says so.
-- Below the list, **Signed-in devices without a matching entry** appears only
-  when a device still holds your account's keys but no entry above stands for
-  it — a device you removed from the web app, one that has signed in but not
-  yet registered, or one whose own record disagrees with its entry. Such a
-  device has no name to show, so its card carries its key fingerprint and the
-  sign-in time it claims. Each of your devices shows its own fingerprint on
-  its own entry (**Key …**); the one to remove is the card that matches none
-  of them. Removing it there is permanent, so it asks you to confirm — and if
-  two cards appear where you expected one, one of them is a device you hold.
-- Your end-to-end-encrypted conversations re-key when a device is removed: a
-  removed device cannot read anything sent after its removal. That's
-  enforced by the cryptography, not by asking the server nicely.
-- A newly added device sometimes says it is waiting for another of your
-  devices before it shows settings such as your mail or backups: what it needs
-  to read them is still on that other device. Opening the app there ends the
+- Below the list, **Signed-in devices without a matching entry** appears only when a device still holds your account's keys but no entry above stands for it — for example one that has signed in but not yet registered, or one whose own record disagrees with its entry. Such a device has no name to show, so its card carries its key fingerprint and the sign-in time it claims. Each of your devices shows its own fingerprint on its own entry (**Key …**); the one to remove is the card that matches none of them. Removing it there can't be undone — that device would have to sign in again from scratch — so it asks you to confirm — and if two cards appear where you expected one, one of them is a device you hold.
+- Removing a device shuts it out of your nest: its connection is refused, and new account data is no longer encrypted to it. It does not erase what is already on that device — your conversations are not re-keyed away from it — and a removed device that still holds your identity secret could sign back in. If you think someone copied your secret from a device that was taken, take your account back with your [recovery kit](#your-recovery-kit) — see [If a device is lost or stolen](#if-a-device-is-lost-or-stolen).
+- A newly added device sometimes says it is waiting for another of your devices before it shows settings such as your mail, backups or folders: what it needs to read them is still on that other device. Opening the app there ends the
   wait; if that device is gone for good, removing it here ends it too.
 - On a computer, the sync-agent line at the top of the sidebar reads **Not
   enrolled** when that computer is no longer one of your account's devices —
@@ -140,14 +100,9 @@ care for your data:
   While Fauna is open there your files keep syncing; once you close it,
   nothing on that computer syncs in the background any more. Sign in again on
   that computer to put it back among your devices; the line then returns to
-  **Running** by itself. If your plan's device limit is what is in the way,
-  remove a device you no longer use first.
+  **Running** by itself. If your tier's device limit is what is in the way, remove a device you no longer use first.
 
-New conversations appear on all your devices: one you join or start on one
-device shows up on your other open devices within about half a minute, with
-no restart, and a new device brings your existing conversation history with
-it — live on every app except Android, which is still landing (until then a
-fresh Android device may see new messages but not all old ones).
+New conversations appear on all your devices: one you join or start on one device shows up on your other open devices within about half a minute, with no restart, and a new device brings your existing conversation history with it.
 
 ## Several identities on one device
 
@@ -174,10 +129,7 @@ identity, or import one you already have — except it runs *over* your live
 session, and when it finishes you are on the new identity. Nothing about the
 first one is disturbed: they are genuinely separate accounts on the nest, with
 separate logins and nothing shared between them, so the switch is complete
-rather than a change of view. If the new identity is setting up a nest of its
-own and you stop partway — or close the app — you are still on the identity
-you had; the unfinished one is listed among your identities, and selecting it
-picks the setup up where it left off (or lets you remove it).
+rather than a change of view. If the new identity is setting up a nest of its own and you stop once its nest has started being built — or close the app — you are still on the identity you had; the unfinished one is listed among your identities, and selecting it picks the setup up where it left off (or lets you remove it). Stop before that, and nothing of the new identity is kept.
 
 A device holds about a dozen identities. The exact number depends on how much
 each one keeps here — fewer if they are signed in, and fewer still if they
@@ -189,22 +141,16 @@ device no longer needs (see **Remove** below), then add the new one again.
 **Require confirmation to switch** is a per-identity toggle on every row,
 including the one you're currently on — which is the point, because the
 identity worth protecting is usually the one you're already using. Turning it
-on never prompts you; only *switching to* a protected identity does. Where
-your device has a screen unlock, that's the prompt you already know — Face ID,
-Touch ID, Windows Hello, your passcode. Where the system offers no such
-prompt, Fauna asks you to confirm in the app instead; that one is a
-deliberate second act rather than a password check, which is the honest
-description of what it can be there. Either way, declining just leaves you on
+on never prompts you; only *switching to* a protected identity does. On iPhone, iPad, Mac, Windows and Android the prompt is your device's own screen unlock — Face ID, Touch ID, Windows Hello, your passcode — and if that device has no screen lock set up (on Windows, no Windows Hello), a protected identity can't be switched to there: set one up, or turn the toggle off first. On Linux, in the terminal app and in the browser, Fauna asks you to confirm in the app instead; that one is a deliberate second act rather than a password check, which is the honest description of what it can be there. Either way, declining just leaves you on
 the identity you were using — no error, nothing changed, because nothing had
 changed yet.
 
 If an identity is a nest administrator, the app turns this on for it the first
-time it notices. **Your own choice always wins**: turn it off and it stays
-off, permanently.
+time it notices. **Your own choice always wins**: turn it off and it stays off on this device for as long as the identity is listed here.
 
 **Remove** appears on the identities you are not currently using. Read it as
 *remove from this device* — it deletes that identity's stored keys **here**.
-It does not delete the account, and it does not touch your other devices.
+It does not delete the account, and it does not touch your other devices. Removing it also signs this device out of that account.
 
 > ⚠️ **Before removing an identity, make sure its key survives somewhere
 > else** — another signed-in device, an exported copy, or its recovery kit. A
@@ -217,8 +163,7 @@ it — switching to that identity is refused, the app says so, and you stay on
 the identity you were using. To use it on this device again, add it back with
 its secret key or its recovery kit.
 
-On desktop each row also offers **Open in new window**, so two identities can
-run side by side instead of taking turns — each window stays signed in as its
+On a computer each row also offers **Open in new window** (in the terminal app it copies the command that opens the second window), so two identities can run side by side instead of taking turns — each window stays signed in as its
 own identity, and the confirmation above applies to those windows too. The
 full walkthrough of that, including what happens when you start Fauna again
 while an identity is already open, is in the
@@ -233,18 +178,13 @@ used last.
 
 ## Signing out takes your data off the device
 
-Signing out is not just forgetting your key. It also removes what that identity
-left on the machine — the local copies of your conversations, your synced
-folders and the account's own records — so a device you are handing on, or a
-computer you share, does not keep them readable.
+Signing out is not just forgetting your key. It also removes what that identity left on the machine — the local copies of your conversations, the account's sync data and its own records — so a device you are handing on, or a computer you share, does not keep them readable.
 
 In a browser, a sign-out you have confirmed is finished even if you close the
 tab straight away: the next time Fauna opens in that browser, it completes the
 sign-out before it shows anything.
 
-Occasionally one of those items will not go. Almost always this is another
-program holding the file open at that moment: a backup tool, a virus scanner or
-a search indexer. When that happens the
+Occasionally one of those items will not go. Almost always this is another program holding the file open at that moment — on a computer, often a virus scanner or a search indexer. When that happens the
 sign-out still finishes — you are signed out, and everything that *could* be
 removed was — and Fauna tells you, on the screen it returns you to, how many
 items are still on the device. It says so precisely because the alternative is
@@ -256,16 +196,14 @@ If you see that message, the fix is usually to close the other program and press
 left, and the message goes away once nothing is. The message doesn't disappear
 when you close Fauna, either: the next time you open it while signed out, Fauna
 quietly tries again first, and only shows the message if something is still
-there. If you are giving the machine away and want certainty rather than a
-retry, remove Fauna's data folder yourself, or wipe the disk.
+there. If you are giving the machine away and want certainty rather than a retry, on a computer remove Fauna's data folder yourself, or wipe the disk.
 
 In the web app the leftover is the copy of your account your browser keeps, and
 what usually holds it is another Fauna tab in the same browser. Close that tab
 and press **Remove Again**; the next time Fauna loads in that browser it tries
 again on its own as well.
 
-If Remove Again says another Fauna window is using some of this data, close that
-window and press it again. Fauna never removes data another window is using.
+If Remove Again says another Fauna window is using some of this data, close that window and press it again. Fauna checks first, and won't remove data it finds another window using.
 Anything you have used again since — say you signed back in to the same
 identity — no longer counts as a leftover, and Fauna leaves it alone.
 
@@ -283,12 +221,7 @@ account switcher marks the account this window is using, and never offers to
 remove it. To remove it, close this window and remove the account from another
 one.
 
-Leftovers can include your sign-in credentials too — the key that lets this device act
-as you. Fauna keeps them in your system's secure storage, and signing out
-removes them too. If that storage is locked or unavailable at the moment you
-sign out, the credentials can stay behind, and Fauna tells you so on the same
-screen rather than reporting a clean sign-out. Unlock your system's keychain or
-password manager, then press **Remove Again**.
+Leftovers can include your sign-in credentials too — the key that lets this device act as you. Fauna keeps them in your system's secure storage — or, in the web app and in the terminal app without one, encrypted with your passphrase — and signing out removes them too. If that storage is locked or unavailable at the moment you sign out, the credentials can stay behind, and Fauna tells you so on the same screen rather than reporting a clean sign-out. Unlock your system's keychain or password manager, then press **Remove Again**.
 
 ## If the app can't read your saved identities
 
@@ -297,8 +230,7 @@ this device. When that happens it says so, rather than offering to set you up
 from scratch — because your identities are almost certainly still there. There
 are two versions of that screen, and they ask different things of you.
 
-**"Your accounts were saved by a newer version of this app."** You used a newer
-copy of Fauna on this device and have gone back to an older one. Nothing has
+**Update needed** — *"Your accounts were saved by a newer version of this app, so this version can't read them."* You used a newer copy of Fauna on this device and have gone back to an older one. Nothing has
 been lost: update the app and every identity will be where you left it. The
 screen deliberately offers no other button, because nothing else helps — and
 anything that cleared the device here would destroy exactly what the update
@@ -316,13 +248,9 @@ nothing yet: first it tells you what starting over will and won't do, and only
 > list pointed to can't be found to clear it, for the same reason the list
 > couldn't be read.
 
-Starting over removes the same things signing out does, so it stops for the same
-reason: if Fauna is still open somewhere else on this device — another window,
-or another Fauna app — it removes nothing and tells you so. Close the other one,
-then press **Remove everything and start over** again.
+Starting over removes the same things signing out does, so it stops for the same reason: if Fauna is still open somewhere else on this device — another window, or another Fauna app — it removes nothing and tells you so. Close the other one, then press **Remove everything and start over** again. In the browser there is no such check, so close any other Fauna tabs before you start over.
 
-If this device might hold the **only** copy of an identity, don't start over
-yet. Copy Fauna's data folder somewhere safe first: the list may be unreadable
+If this device might hold the **only** copy of an identity, don't start over yet. On a computer, copy Fauna's data folder somewhere safe first: the list may be unreadable
 to this version and perfectly readable to another, and a copy keeps that chance
 open.
 
@@ -334,19 +262,9 @@ meantime.
 
 ## If a device is lost or stolen
 
-Act in this order, from any signed-in device (settings → devices/sessions):
+Act in this order, from **Settings → Devices** and **Settings → Sessions** on any signed-in device:
 
-1. **Emergency lockout** — the fastest lever, usable even in degraded
-   situations: it revokes every active session, blocks new sign-ins for 24
-   hours, and kicks any live connection off the nest immediately. It buys you
-   calm time; it is deliberately temporary.
-2. **Revoke sessions** and **remove the device** — the durable follow-up.
-   Removal disconnects it on the spot (revocation severs live connections
-   immediately, not at next sign-in) and re-keys your encrypted
-   conversations away from it. If your account lives on more than one
-   nest, the removed device loses access at every one of them: your other
-   devices pass the removal on to each nest as they sync, so you never
-   have to repeat it nest by nest.
+1. **Revoke** its sessions and remove the device — the first fix. Removal disconnects it on the spot (revocation severs live connections immediately, not at next sign-in), refuses that device's connection from then on, and stops new account data being encrypted to it — though a device that still holds your secret could sign in again from scratch, which only your recovery kit settles (see below). If your account lives on more than one nest, the removed device loses access at every one of them: your other devices pass the removal on to each nest as they sync, so you never have to repeat it nest by nest. 2. **Emergency lockout**, if you cannot reach a signed-in device, or think the secret itself was copied. On a signed-in device it is on **Settings → Sessions** (**Lock for 24 Hours**); on any other device you can pull it with nothing but your identity secret and handle (**Lock my account for 24 hours**, on the screen where you create or import an identity), and nothing is saved on that device. It signs out every device, this one too, blocks every sign-in for 24 hours, yours included, and kicks any live connection off the nest immediately — so while it holds, no device of yours can sign in to remove anything, which is why it comes second. (On an account that is an admin of its nest, the lockout signs every device out but does not stop anyone signing in again.) It buys you calm time, but it does not remove someone who holds your secret: they come back when the lock ends. It is deliberately temporary, and it cannot be lifted early.
 
 Then think about what the thief actually has. A phone with a lock screen
 keeps the secret in hardware-backed storage — realistically fine after the
@@ -362,62 +280,37 @@ A recovery kit is a second key, kept only by you and only offline, that
 **outranks your identity secret**. It is what turns the two worst days —
 losing your secret, or someone stealing it — from permanent into fixable.
 
-You are offered a kit right after creating a new identity — a screen shows
-the code and encourages saving it before you go on (skipping costs one click,
-and Settings will keep reminding you). A kit saved there finishes activating
-when your account comes online at the end of setup; the screen says so, and
-until that happens the phrase is not yet protection. You can also create one
-any time under **Settings → Account → Recovery Kit**. Either way you are
-shown a 64-character code and a QR, **once**. Write it down or print it; put
+You are offered a kit right after creating a new identity — a screen shows the code and encourages saving it before you go on (skipping costs one click, and the Recovery Kit section in Settings shows a standing warning until you make one). A kit saved there finishes activating when your account comes online at the end of setup; the screen says so, and until that happens the kit is not yet protection. You can also create one any time under **Settings → Account → Recovery Kit**. Either way you are shown a 64-character code and a QR, **once** — the app also calls the code your *recovery phrase*. Write it down or print it; put
 it somewhere a burglar and a house fire won't reach the same day. Nothing on
 your devices keeps a copy, deliberately — a recovery key your stolen laptop
 also holds would protect you from nothing. There is no "show it to me again"
 button, and there never will be.
 
-**Copy** puts the full `fauna://recovery` link on your clipboard — the same
-thing the QR encodes, which is a little more than the 64 characters on screen:
-it also names your account, so restoring from it later asks you for nothing.
+**Copy** puts the full `fauna://recovery` link on your clipboard — the same thing the QR encodes, which is a little more than the 64 characters on screen: it also names your account, so restoring from it later asks you for nothing else. (The kit offered during sign-up is made before your handle is settled, so restoring from that one also asks for your handle.)
 If you write the code down by hand instead, the 64 characters are all you
 need; the app will simply ask which account it belongs to.
 
-The status line under that heading tells you where you stand: whether a kit
-is active, whether a sealed copy of your identity secret is stored for it,
-or whether someone has asked to replace your kit (see below). It reads your
+The status line under that heading tells you where you stand: whether a kit is active, whether a copy of your identity secret that only your kit can open is stored for it, or whether someone has asked to replace your kit (see below). It reads your
 account rather than this device, so a kit you created on your phone shows up
 on your laptop too.
 
 Three things a kit lets you do:
 
-- **Get your identity back after losing every device.** Creating the kit also
-  stores a sealed copy of your identity secret on your nest — sealed *to the
-  kit*, so your nest cannot read it and neither can anyone without the code.
-- **Take your account back if your secret is stolen.** The kit can move your
-  account to a fresh identity, which the thief cannot follow. Your handle
-  moves with you and the old key stops working.
+- **Get your identity back after losing every device.** Creating the kit also stores a copy of your identity secret on your nest, encrypted *to the kit*, so your nest cannot read it and neither can anyone without the code.
+- **Take your account back if your secret is stolen.** The kit can move your account to a fresh identity, which the thief cannot follow. Your handle moves with you, and the old key stops working — at your nest at once, and at each other nest your account is linked to once one of your devices next syncs with it.
 - **Replace the kit itself**, either instantly with the kit in hand, or — if
   you lost it — using your identity secret alone. That second path waits
-  **30 days** before taking effect, and every device you own says so loudly
-  the whole time: a red banner across the top of *every* screen, which you
-  cannot dismiss and which appears from the moment you open the app — you do
-  not have to go looking in Settings to find out. It shows how many days are
+  **30 days** before taking effect, and every device you own says so loudly the whole time: a warning banner that stands out, across the top of *every* page once you are signed in, which you cannot dismiss and which appears as soon as the app has opened and signed you in — you do not have to go looking in Settings to find out. It shows how many days are
   left and the start of the new key's fingerprint, so if it *was* you, you can
   check it against the kit in your hand. That delay is the point: it is what
   stops a thief who has your identity secret from quietly issuing themselves a
-  new recovery kit. If you ever see that warning and it wasn't you, cancel it
-  (Settings → Recovery kit), and treat your identity secret as compromised.
+  new recovery kit. If you ever see that warning and it wasn't you, cancel it (**Settings → Account → Recovery Kit**), and treat your identity secret as compromised.
   If your account is linked to more than one nest, the replacement and the
   cancel each reach all of them: one cancel stops the wait on every nest,
   including a replacement someone asked for at another of your nests.
 
-One more step belongs to that 30-day path, and it needs you: when the wait ends
-and the new kit takes effect, the sealed copy of your secret that your old kit
-could open is removed — so for the moment, your phrase alone cannot recover the
-account. The Recovery Kit section will say so, and your nest sends you a note
-about it. Go there, enter the new kit you wrote down when you asked for the
-replacement, and press **Restore Phrase Recovery**. That stores a fresh sealed
-copy under your new kit — the kit itself stays exactly the one on your paper.
-(The same button appears in the rare case an interrupted ceremony left the
-sealed copy missing; the fix is always the kit in your hand.)
+One more step belongs to that 30-day path, and it needs you: when the wait ends and the new kit takes effect, the copy of your secret that your old kit could open is removed — so for the moment, your phrase alone cannot recover the account. The Recovery Kit section will say so, and your nest sends you a note
+about it. Go there, enter the new kit you wrote down when you asked for the replacement, and press **Restore Phrase Recovery**. That stores a fresh copy, encrypted to your new kit — the kit itself stays exactly the one on your paper. (The same button appears in the rare case an interrupted kit setup left that copy missing; the fix is always the kit in your hand.)
 
 Rarely, some of your account data can end up locked away for good: it was
 saved under a key that none of your signed-in devices holds, and no copy of
@@ -436,16 +329,10 @@ same Settings section, then press the button. It is the same box the restore
 screen uses, and it accepts either form: the 64-character code or the
 `fauna://recovery` link.
 
-One thing worth knowing about replacing a kit: making a new one **retires the
-old one**, and the sealed copy of your secret has to be re-sealed to the new
-code in the same breath. If your app cannot read the sealed copy it is about to
-replace — you are offline, or something about it does not open — it will say so
+One thing worth knowing about replacing a kit: making a new one **retires the old one**, and the copy of your secret has to be re-encrypted to the new code in the same breath. If your app cannot read the copy it is about to replace — you are offline, or something about it does not open — it will say so
 and **decline to go ahead** rather than replace it with a partial one. Nothing
 changes when that happens: your current kit still works, and you can simply try
-again on a connection that reaches your nest. This matters most if you have
-taken your account back from a thief at some point, because the sealed copy is
-then carrying the *old* identity's secret too, which is the only thing that can
-still open files sealed before the takeback.
+again on a connection that reaches your nest. This matters most if you have taken your account back from a thief at some point, because that copy then carries the *old* identity's secret too, which is the only thing that can still open files encrypted before the takeback.
 
 If your account lives on more than one nest, your kit has to be known at each of
 them — a nest that has never heard of your kit could not help you take the
@@ -465,9 +352,7 @@ see the next section.
 
 ### Taking your account back from a stolen secret
 
-Someone has your identity secret. They can post as you, read what arrives for
-you, and lock you out of your own sessions — and no password change exists to
-stop them, because there is no password. What stops them is the kit, which they
+Someone has your identity secret. They can post as you, read what arrives for you, and lock you out of your own sessions — and no password change exists to stop them, because there is no account password. What stops them is the kit, which they
 do not have.
 
 In **Settings → Account → Recovery Kit**, paste your recovery code, type
@@ -475,21 +360,14 @@ In **Settings → Account → Recovery Kit**, paste your recovery code, type
 confirm box is there for the same reason deleting an account has one: this
 cannot be undone.
 
-What happens next, in one step: your account is moved to a brand-new identity
-that only you hold, the old key stops working everywhere — the thief's sessions
-included — and **your handle comes with you**. The app signs itself back in as
+What happens next, in one step: your account is moved to a brand-new identity that only you hold, the old key stops working — at your nest at once, the thief's sessions included, and at each other linked nest once one of your devices next syncs with it — and **your handle comes with you**. The app signs itself back in as
 the new identity on its own; you don't have to paste anything.
 
 Your group conversations move with you, in the same step. Your new identity
 joins each one and the old key is removed from it, so the thief loses the
 ability to read those conversations going forward. The Recovery Kit section
 tells you how it went as soon as it is done — and if some group could not be
-updated, it says so plainly rather than quietly counting it as finished. When
-that happens — usually because your conversations were not running at the
-moment you did this — the way through is another member of that group: ask one
-of them to remove the old identity and add your new one. There is deliberately
-no "try again" button for it, because the step that adds your new identity can
-only be signed by the old one, which no longer exists.
+updated, it says so plainly rather than quietly counting it as finished. That usually happens because your conversations were not running at the moment you did this, and you can finish it yourself — see **If your groups did not all move**, below.
 
 **If your account is supervised, it stays supervised.** Taking your account
 back moves your guardianship link along with everything else, so a child who
@@ -513,15 +391,12 @@ place, and the wait starts fresh.
 
 **What the other people in those groups see.** From their side, a stranger has
 just joined and you have just left — which is exactly what a thief taking over
-would look like, so their app does not take anyone's word for it. It checks the
-move against the record kept by the nest that hosts *your* handle, which it
-already knew from the moment you first spoke, and never against anything the
-message itself claims. When that checks out, the conversation simply carries on
+would look like, so their app does not take anyone's word for it. It checks the move against the record kept by the nest that hosts *your* handle — one it already holds, or fetches from that nest — and never against anything the message itself claims. When that checks out, the conversation simply carries on
 with you still in it, under your handle, in the same place in the member list;
 your older messages stay attributed to the identity that actually wrote them.
 When it cannot be checked — their app is offline, your nest is unreachable, or
 the claim does not hold up — they see the plain "someone joined, someone left"
-version instead. Nobody is ever shown a continuity that was not proven.
+version instead. Their app only shows you as the same person once it has proven the move.
 
 **Community rooms move with you at once.** A community room keeps its member
 list on the nest that hosts it, so taking your account back puts you in your
@@ -540,11 +415,7 @@ through. The Recovery Kit section says so plainly when it happens — how many o
 and how many did not — and offers **Finish Moving Your Groups**. Press it and the app picks up where
 it left off. It is safe to press more than once: groups that already moved are left alone.
 
-Do this from the device you used to take your account back. That device is the only one holding the
-conversation history from your previous identity, which is what the move is made from. Press it
-somewhere else and the app will tell you so and point you at the right device — nothing breaks, and
-nothing is lost by trying. If that device is gone for good, the fallback is the one below: ask
-another member of each group to remove your old identity and add your new one.
+Do this from a device that still has the conversation history from your previous identity, which is what the move is made from. Press it on a device that doesn't, and the app tells you so — nothing breaks, and nothing is lost by trying: if another of your devices still has those conversations, press **Finish Moving Your Groups** there; otherwise ask another member of each group to remove your old identity and add your new one.
 
 Until your groups have moved, your previous identity can still read new messages in the ones that
 have not — which is why this is worth finishing rather than leaving.
@@ -564,23 +435,14 @@ not recognise, use the ordinary remove you would use for any member — the same
 tap, in the same place. Contacts you happen to have saved carry a matching
 reminder on their row, so you can spot them there too.
 
-Right after a recovery, the Recovery Kit section also gathers everyone still
-waiting into one list, so you can work through them in one sitting — **Keep**
-and **Remove** beside each name, and a *Review The Rest Later* that puts the
-rest off without deciding anything (their marks stay in the places above).
-That list is only shown once, in the recovery itself. Whoever you did not get
-to is waiting for you afterwards under **Settings → Members To Review**, with
-the same **Keep** and **Remove** beside each name. That page is empty until a
+Right after a recovery, the Recovery Kit section also gathers everyone still waiting into one list, so you can work through them in one sitting — **Keep** and **Remove From My Groups** beside each name, and **Review The Rest Later**, which puts the rest off without deciding anything (their marks stay in the places above). That list is only shown once, in the recovery itself. Whoever you did not get to is waiting for you afterwards under **Settings → Members To Review**, with the same **Keep** and **Remove From My Groups** beside each name. That page is empty until a
 recovery leaves something on it, and empty again once you have worked through
 what it holds — so most of the time, opening it just tells you there is nobody
 waiting.
-**Remove** there means *remove this person from every group of mine*: the app
+**Remove From My Groups** means what it says — *remove this person from every group of mine*: the app
 takes them out of each of your group conversations it can reach. If it cannot
 reach every seat they hold, it says so and the row stays until each one is dealt
-with, so nothing is quietly left behind — someone also in a shared folder is
-removed in that folder's own sharing settings (or leave the set, if it is not
-yours), and a group chat that has not synced to this device yet can be finished
-after it syncs, or from a device that has it.
+with, so nothing is quietly left behind — someone also in a shared folder is removed in that folder's own sharing settings (or leave the folder, if it is not yours), and a group chat that has not synced to this device yet can be finished after it syncs, or from a device that has it.
 
 Two things worth knowing. Most of the people marked this way are your own
 friends: the move can only vouch for the one member it added itself, so everyone
@@ -645,9 +507,7 @@ A few more things to expect afterwards:
   deleted. Your sending allowance for the day comes across too, so a recovery
   does not hand you a fresh one.
 
-- **Nothing about your account becomes more public than it was.** In particular,
-  if you had turned off showing your Bluesky or Nostr content in search, it stays
-  off. Taking your account back never re-opens a choice you had already made.
+- **What you had hidden from search stays hidden.** If you had turned off showing a bridge's content in search, it stays off after you take your account back.
 
 - **If you sell subscriptions, your payment setup needs redoing — your record of
   sales does not.** The connection to your payment provider was tied to the
@@ -680,9 +540,7 @@ A few more things to expect afterwards:
   before. The weightings you set for what you want to see more and less of come
   across with them, so your feeds read the way they did yesterday rather than
   quietly re-sorting themselves. Community labellers you subscribed to stay
-  subscribed, and keep filtering your incoming mail. As with your mailing lists,
-  the limit on how many feeds your plan allows counts the feeds you already have
-  — taking your account back does not hand you a fresh set of slots.
+  subscribed, and keep filtering your incoming mail. As with your mailing lists, the limit on how many feeds your tier allows counts the feeds you already have — taking your account back does not hand you a fresh set of slots.
 - **Your Fediverse name comes with you; your Bluesky connection is dropped on
   purpose.** These two look alike and are treated differently, for one reason.
   Your Mastodon-style address is *made from your handle* — it is yours because
@@ -730,29 +588,8 @@ A few more things to expect afterwards:
 - **Your profile comes with you, re-published under the new identity.** Your
   name, bio, links and pictures carry over. The device you took the account
   back on re-publishes them under the new identity when it makes your new kit.
-  Until that has happened, a profile edit from a device that never held your
-  previous identity is refused with a message. It is not saved over details
-  the device cannot confirm are yours. Once the profile has been re-published,
-  every device edits it normally. The previous identity's recovery details and
-  nest address are not copied over. The new kit publishes fresh ones.
-- **You are asked to look over the people in your group chats.** Taking your
-  account back removes the stolen identity from your groups, but it cannot tell
-  you who the *other* members are — it can only vouch for people it added
-  itself, and it added nobody. So the Recovery Kit section lists everyone who
-  was in your groups beforehand and asks you, one person at a time, to **Keep**
-  them or **Remove them from my groups**.
-
-  **Expect this list to be long, and expect nearly everyone on it to be someone
-  you know.** It is not a list of suspects — it is simply everyone your app
-  cannot personally vouch for, which after a recovery is almost all of your
-  friends. Keep the ones you recognise. If somebody was seated in your groups
-  under a name you do not recognise, that is the one to remove.
-
-  You do not have to finish in one sitting: **Review the rest later** puts the
-  list away and keeps everyone still unanswered, so you can come back to them.
-  If a removal only partly works — some groups let go and others could not be
-  reached — the person stays on the list and the app tells you how far it got,
-  so pressing Remove again picks up exactly where it left off.
+  The previous identity's recovery details and nest address are not copied over. The new kit publishes fresh ones.
+- **You are asked to look over the people in your group chats** — the members your app could not vouch for, described under **Read the part about members it could not vouch for**, above.
 
 - **You are asked to look over your email filter rules.** Your filter rules move
   across with the rest of your account — a rule that files mail into a folder or
@@ -776,25 +613,16 @@ A few more things to expect afterwards:
   had. That is on purpose: a registration is just an address your nest sends
   alerts to, anyone holding your stolen secret could have added one pointing at
   their own device, and nothing about a registration says who added it — so the
-  only safe answer is to drop them all rather than guess. Nothing is lost, and
-  on a device that already had notifications on, they turn back on by
-  themselves the next time you open the app there — no need to re-visit
-  **Settings → Notifications**. If a device stays quiet, opening
-  **Settings → Notifications** and switching notifications off and on once
-  always re-arms it.
+  only safe answer is to drop them all rather than guess. Nothing is lost, and on a device that already had notifications on, they turn back on by themselves the next time you open the app there. If a device stays quiet, switching **Notify me on this device** off and on once re-arms it ([where the switch is](app-tour.md#notifications)).
 
-One thing this does *not* yet do: it does not re-issue the access you had
-granted to other people or apps.
+Other access you had granted comes across too: the app re-issues each grant under your new identity on its own, with the same expiry — a grant that had already expired stays expired. The mail app passwords, the Nostr connected apps and any unredeemed claim codes above are the exceptions, cut on purpose. And a folder you sell to subscribers on the web shows its visitors only the teaser until you set its paywall again.
 
 ### Getting your account back after losing every device
 
 This is the day the kit exists for: no phone, no laptop, nothing signed in
 anywhere — just the code you wrote down.
 
-Install the app on a new device. On the first screen, choose **Restore my
-account from a recovery phrase** (careful: the entry right above it, *Recover
-a lost box*, is a different repair — that one is for when your *nest* is gone,
-not your identity). Paste the code, press **Restore**, and you are signed back
+Install the app on a new device. On the screen where you choose **Create New Identity**, choose **Restore my account from a recovery phrase** (careful: the entry right above it, **Recover a lost box**, is a different repair — that one is for when your *nest* is gone, not your identity). Paste the code, press **Restore**, and you are signed back
 in with the same identity you had before. Everything under it comes back with
 it: your handle, your encrypted conversations, your files.
 
@@ -808,9 +636,7 @@ how your nest gets found in the first place.
 
 **If the domain itself is gone** — it lapsed, or someone took it — put your
 nest's own address after the `@` instead: `alice@192.0.2.10`,
-`alice@nest.local`, or an address with a port on the end. Your nest, your
-account and your sealed backup are all still there; only the name that pointed
-at them stopped working, and this is the way in that doesn't need it. The part
+`alice@nest.local`, or an address with a port on the end. Your nest, your account and the copy of your secret that your kit opens are all still there; only the name that pointed at them stopped working, and this is the way in that doesn't need it. The part
 before the `@` is still your handle, exactly as before.
 
 **If your nest itself is gone** — not just its name, but the nest and
@@ -819,38 +645,38 @@ keeping a copy of it for you (you ask a friend to hold copies on the Devices
 page, and they choose to keep them on their nest). Paste the copied kit — the
 `fauna://recovery` link, because it names your account; the bare code alone
 does not work here — and in the account field enter your handle with your
-friend's nest address after the `@`, like `alice@friends-nest.example`. Their
-nest checks the kit and hands back your sealed secret, just as your own nest
-would have, and you carry on from there as on any new device. If you replaced
-your kit after your friend started holding the copy, use the newest one: their
-nest stops accepting the old one once it has caught up with the replacement.
+friend's nest address after the `@`, like `alice@friends-nest.example`. Their nest checks the kit and hands back the copy of your secret that only your kit opens, just as your own nest would have, and you carry on from there as on any new device. If you replaced your kit after your friend started holding the copy, use the newest one: their nest stops accepting the old one once it has caught up with the replacement. That gets your *secret* back and leaves you at the handle screen. Your account's records — what their nest was holding for you — come back in a second step once you are signed in to a new nest: carry on from step 3 of [If you lose every device and your nest](#if-you-lose-every-device-and-your-nest) below.
 
 Two answers you may get instead, both plain-spoken rather than a generic
 failure:
 
-- **"This account has no sealed backup to restore from."** The kit is real but
-  no sealed copy of your secret is waiting for it — usually because the kit was
-  made on a device that never finished coming online. Nothing here can fix it;
+- **"This account has no sealed backup to restore from."** The kit is real but no copy of your secret, encrypted to it, is waiting for it — usually because the kit was made on a device that never finished coming online. Nothing here can fix it;
   it takes a device that is still signed in, making a new kit.
 - **"This identity was replaced after it was compromised."** Someone already
   used a recovery kit to move this account to a fresh identity. The app sends
   you to the import screen — you continue with the new identity, not this one.
 
-**Being straight about what's ready:** every one of the kit's jobs works today —
-creating it (the sealed copy of your secret is stored the moment you do),
-restoring from the code after losing every device, replacing the kit, cancelling
-a replacement you did not ask for, and taking your account back from a thief.
-Each is in the terminal app first and lands app by app. What is still being
-built is the clean-up *after* a takeback: re-joining your group conversations
-and re-issuing the access you had granted are still manual.
+**Being straight about what's ready:** every one of the kit's jobs works today — creating it (the copy of your secret that only the kit opens is stored as soon as your account is online — for the kit offered at sign-up, at the end of setup), restoring from the code after losing every device, replacing the kit, cancelling a replacement you did not ask for, taking your account back from a thief, moving your groups across with a way to finish if some did not move, and re-issuing the other access you had granted.
+
+## If you lose every device and your nest
+
+If someone you trust holds copies of your account on their nest — they chose **My nest** when they agreed to hold for you, under [Sealed copies on a friend's device](#sealed-copies-on-a-friends-device) — you can bring your account's records back even after every device and your own nest are gone. This route needs your identity secret. If what you have is your recovery kit instead, start with the **If your nest itself is gone** paragraph under [Your recovery kit](#your-recovery-kit), which gets the secret back from their nest first, and then carry on from step 3 here.
+
+1. Ask them for the restore address. Their app shows it on the card for the copies they hold for you, under **Settings → Devices**. Nothing sends it to you; they read it out or write it down for you. (Copies held on one of their *devices* rather than their nest have no address — this route is for a nest.)
+2. On a new device, choose **Import from Another Device** and give it your secret.
+3. Claim a new nest or join one with an invite, and finish signing in.
+4. Open **Settings → Nests**, choose **Restore from a custodian nest…**, enter the address, and choose **Restore**.
+
+The app tells you how many records came back, and normally every one of them is readable. If any came back sealed, it says how many: they stay unreadable until this device has their key. If that nest doesn't let you in, the address may be wrong, the nest may be down, or it may hold nothing for your account — the app can't tell which, and says so.
+
+Afterwards your list of nests shows their nest again, and **Restore from this nest now** on its row runs the same restore at any time.
 
 ## If you lose everything
 
 You're signed in nowhere and have no saved copy of the secret. **Without a
 recovery kit**, the identity — and any end-to-end-encrypted data under it —
 is **unrecoverable. Full stop.** Not by you, not by the nest admin, not by
-Fauna. You create a new identity and start again; the nest admin can free up
-your old handle for the new account, but can't hand you its contents.
+Fauna. You create a new identity and start again; the nest admin can remove the old account, which frees its handle for your new one, but can't hand you its contents.
 
 This is not a missing feature. Every "we can recover your account" promise a
 big provider makes is another door into your data, for them and for anyone
@@ -860,19 +686,13 @@ makes it comfortable to live with.
 
 ## What the nest admin can and can't do
 
-Can: approve your account, set your storage tier, suspend or evict your
-account from the nest, free a handle. Can't: read your encrypted content,
-reset your key, recover your data, or sign in as you. If you run your own
+Can: approve your account, set your tier (how much storage and inbox space, how many devices and feeds, and how large a single message delivered to you can be), suspend your account, or remove it from the nest after a warning period — which also frees its handle. On their nest they can also publish rules your app applies, with a notice naming the nest and the rule's reason, and by hand remove content under a legal obligation or block a single reported item, each with a visible notice, a permanent record and, for a post, an appeal. Can't: read content you have not shared with their nest or published to everyone — beyond the mail and the messages the nest passes to and from email and other networks, a community room whose members chose to let its home nest read it, what you have given the nest permission to read, the address of a link standing on a line of its own in a post or a message, which the nest of each person who reads it fetches for its preview, and the text of a message or a post only some people can open that someone attaches to a report — nor reset your key, recover your data, or sign in as you. Their nest does see what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send. If you run your own
 nest, the same applies to you with your family's accounts — see
 [Running a nest for friends and family](nest-for-friends-and-family.md).
 
 ## Sealed copies on a friend's device
 
-A friend can agree to keep **sealed copies** of your data on one of their
-devices — extra redundancy for the day your own hardware fails. Their device
-stores your data in its encrypted form and cannot read any of it: what they
-see is only the shape (that data exists, roughly how much, and when it
-changes), never the content.
+A friend can agree to keep **sealed copies** of your data on one of their devices — extra redundancy for the day your own hardware fails. Their device stores your data in its encrypted form and cannot read it, apart from what you have published to everyone, which is public by design; of the rest they see only the shape (that data exists, roughly how much, and when it changes), never the content.
 
 Both sides manage this from **Settings → Devices**:
 
@@ -891,9 +711,7 @@ Both sides manage this from **Settings → Devices**:
   they would have to ask again.
 - **You can hold on your nest instead of a device.** When the request
   offers it, a *Where to hold* choice appears on the card: *This device*
-  (the default) or *My nest*. Choosing your nest means the sealed copies
-  live on your always-on box rather than the device you happen to be
-  using — your nest quietly keeps them current and confirms to your friend
+  (the default) or *My nest*. Choosing your nest means the copies live on your always-on box rather than the device you happen to be using — your nest quietly keeps them current and confirms to your friend
   on its own, with none of your devices needing to be awake. The same
   budget, **Stop holding** and **Remove and free the space** controls apply.
   One thing to know if you hold on your nest: whoever administers that nest
@@ -909,9 +727,7 @@ Both sides manage this from **Settings → Devices**:
   **Stale — last confirmed ‹time›. Treat this copy as degraded.** — rather
   than pretending all is well. Three different states, three different
   lines, never silently merged. A holding **device** appears under
-  Devices; a holding **nest** appears under Nests. You can stop trusting a
-  holder at any time: that ends future copies and serving on honest
-  holders, but copies already held stay held — and stay sealed forever.
+  Devices; a holding **nest** appears under Nests. You can stop trusting a holder at any time: that ends future copies and serving on honest holders, but copies already held stay where they are, no more readable to the holder than before.
 - **If a holder's device ran short of space**, its row says some copies
   were dropped under the budget — you always see reduced coverage, never
   discover it later.
@@ -920,31 +736,32 @@ Both sides manage this from **Settings → Devices**:
 
 | Feature | Status |
 |---|---|
-| Key-based sign-up, sign-in, import — no passwords anywhere | **Available** on all seven apps |
-| Secret stored in platform secure storage | **Available** (web uses browser local storage — keep a copy elsewhere) |
+| Key-based sign-up, sign-in, import — no account password | **Available** on all seven apps |
+| Secret stored in platform secure storage | **Available** — where a device has none (the web app; the terminal app on a server or over SSH) the secret is encrypted with a passphrase you choose |
 | Re-display your secret from a signed-in device | **Available** |
 | QR identity export (scan to sign in a new device) | **Available** — hidden behind *Show QR Code*, with a warning while it is on screen |
-| Back up identity to iCloud Keychain (iPhone/Mac) | **Available** — off by default (identity stays on the one device); opt in under Settings → Account |
+| Back up identity to iCloud Keychain (iPhone/Mac) | **Available** — off by default (your identity stays out of iCloud); opt in under Settings → Account |
 | QR/URI import (paste or scan) | **Available** on all seven apps |
-| Create a recovery kit (Settings → Account) | **Available** in the terminal app; landing app by app. Creating it also stores the sealed copy of your secret |
-| Replace a lost kit using your identity secret (30-day wait, loud warning) | **Available** in the terminal app; landing app by app |
-| Replace your kit with the one in your hand (takes effect at once) | **Available** in the terminal app; landing app by app |
-| Cancel a replacement you did not ask for | **Available** in the terminal app; landing app by app |
-| Recover your identity from the kit's code after losing every device | **Available** in the terminal app; landing app by app |
-| Take an account back from a stolen secret (handle and all) | **Available** in the terminal app; landing app by app |
-| Re-join group conversations after taking an account back, with a retry if some groups didn't move | **Available** in the terminal app; landing app by app |
+| Create a recovery kit (Settings → Account) | **Available** on all seven apps. Creating it also stores the copy of your secret that only the kit opens |
+| Replace a lost kit using your identity secret (30-day wait, loud warning) | **Available** on all seven apps |
+| Replace your kit with the one in your hand (takes effect at once) | **Available** on all seven apps |
+| Cancel a replacement you did not ask for | **Available** on all seven apps |
+| Recover your identity from the kit's code after losing every device | **Available** on all seven apps |
+| Take an account back from a stolen secret (handle and all) | **Available** on all seven apps |
+| Restore your account's records from a friend's nest after losing every device and your own nest | **Available** |
+| Re-join group conversations after taking an account back, with a retry if some groups didn't move | **Available** on all seven apps |
 | Several identities on one device (add, switch, remove) | **Available** on all seven apps |
-| Require confirmation before switching to an identity | **Available** — your device's own unlock where it has one, an in-app confirmation elsewhere |
-| Two identities open side by side in separate windows | **Available** on Linux, macOS, and Windows — and in the browser, where separate tabs each keep their own identity |
+| Require confirmation before switching to an identity | **Available** — your device's own screen unlock on iPhone, iPad, Mac, Windows and Android (with no screen lock set up — on Windows, no Windows Hello — a protected identity can't be switched to there); an in-app confirmation on Linux, in the terminal app and in the browser |
+| Two identities open side by side in separate windows | **Available** on Linux, macOS, Windows and in the terminal app — and in the browser, where separate tabs each keep their own identity |
 | Devices list with online status and removal | **Available** |
-| "This device" tag on your own device's row, reliable even on a computer where a different app already set up your account | **Available** on Linux and the terminal app; other apps still compare their own local id, which can miss the row on a shared computer |
+| "This device" tag on your own device's row, reliable even on a computer where a different app already set up your account | **Available** |
 | Sole-source guard on device removal | **Available** |
-| Session list, revoke, revoke-all | **Available** |
+| Session list, revoke, revoke-all (Settings → Sessions) | **Available** |
 | Emergency lockout (no sign-in needed, locks for 24 hours) | **Available** |
 | Revocation kicks live connections immediately | **Available** |
-| Conversation re-keying away from removed devices | **Available** |
-| Full conversation history on a newly-added device | **Available** on Linux, web, macOS, iOS, Windows, and the terminal app; Android is still landing |
+| A removed device refused by your nest and left out of new account data (conversations are not re-keyed) | **Available** |
+| Full conversation history on a newly-added device | **Available** |
 | Restricted-capability secondary devices (e.g. a posting-only device) | **Planned** |
-| Sealed copies held on a friend's device (ask, consent, budget, stop, revoke) | **Available** on the terminal app; other apps are still landing |
-| "Relay only — holds no keys" marker on your own devices that hold no keys | **Available** on the terminal app; other apps are still landing |
-| Sealed copies held on a friend's nest (their always-on box holds for you; shown under Settings → Nests) | **Being built** — the row is ready, the accepting side lands next |
+| Sealed copies held on a friend's device (ask, consent, budget, stop, revoke) | **Available** |
+| "Relay only — holds no keys" marker on your own devices that hold no keys | **Available** |
+| Sealed copies held on a friend's nest (their always-on box holds for you; shown under Settings → Nests) | **Available** — shown under Settings → Nests |

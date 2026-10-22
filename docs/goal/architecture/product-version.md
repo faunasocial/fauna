@@ -91,7 +91,7 @@ fix that store demanded: it ships **one** app at the next patch, every other
 store keeps the upload it already holds, and the feature catalog's release
 table records the per-app shipped version so that gap is visible rather than
 inferred
-([`feature-catalog.md`](feature-catalog.md) § Tag gate and release table).
+([`release-table.md`](release-table.md) § Tag gate and release table).
 Pre-1.0, "every app's channel that exists" is the operative phrase — a channel
 that has never shipped (§ Current values) is not held back by the rule and does
 not hold the train back; the catalog is the honest label on what shipped, not
@@ -99,6 +99,8 @@ a green-everywhere precondition. *This replaces the 2026-08-23 "a bump does
 not oblige any app to ship it" rule: sparse per-store histories are no longer
 expected — a store skipping a number now means a reship carve-out, and the
 table says so.*
+
+**The public website is a surface of the train: fauna.social deploys at every version's sync, and the version's public tag refuses without it (ruled by the owner 2026-10-16).** The deploy builds the private commit the sync's `Sync-Point:` names — the commit the public tree was made from — so the site's "what works where" page and the public repository's catalog are one commit's rendering, and it runs once that sync's squash-merge lands on public `main`, before the tag and the promote (which follow hours or days later and would leave the site behind the repository it describes). It stays an act of the version's attempt, taken by the release session after the version's one go, never a push trigger: a merge to private `main` never publishes the site by itself. The tag gate reads a green deploy at the internal tag's commit live, as it reads the release Environments ([`release-table.md`](release-table.md) § Tag gate and release table); a deploy that would publish a site text still in draft is refused ([`public-texts.md`](public-texts.md) § Classes).
 
 ### Reships: a store re-upload mints a NEW product patch
 
@@ -165,9 +167,12 @@ considered:
 
 ## Current values
 
-All lockstep surfaces: **`0.1.4`** (bumped 2026-10-11: the parity train,
+All lockstep surfaces: **`0.1.5`** (bumped 2026-10-18: the first tagged
+train, cut from a `main` tip on the release-attempt shape and carrying
+everything landed since `0.1.4`; Android push is deferred to `0.1.6`; no store has accepted an upload of it
+yet). Before that, **`0.1.4`** (bumped 2026-10-11: the parity train,
 which catches the apps up on most of what `0.1.3` shipped on only some; no store has accepted an upload of it
-yet, and its public commit is the next public sync). Before that, **`0.1.3`** (bumped 2026-10-07 under § Version
+yet. **Its public commit is the 2026-10-17 squash-merge of its sync, and the public image `:test` + `:0.1.4` is staged and signed, not promoted. Owner-ruled 2026-10-17, taking the recommendation: 0.1.4 takes NO `v0.1.4` tag and no installer release — it stays published-and-staged, because its source is not on `main` (the retired base-pin-plus-cherry-picks shape, [`release-attempt.md`](release-attempt.md) § The release attempt), it carries RUSTSEC-2026-0367..0369 against `zip`, and nothing can promote it while the organisation's nests are firewalled; `0.1.5` is the first tagged train, cut from `main` on the attempt shape.**) Before that, **`0.1.3`** (bumped 2026-10-07 under § Version
 strings are never reused or re-meant → *An upload spends the string*: the
 ratifying commit's `0.1.2` was uploaded to a Play draft from the public
 first-push commit on 2026-10-07 and refused rollout under Play's API-36
@@ -176,8 +181,12 @@ target floor, so it is spent unshipped). Why `0.1.2` and not
 store-mechanical reship of the snapshot, pre-model), so `0.1.1` is burned —
 reusing it would give one string two meanings, and moving windows back down
 to `0.1.0` would break MSI upgrade monotonicity. `0.1.3` is the first string
-no store had accepted an upload of. Shipped state per store: Microsoft
-Store `0.1.1`; Play serves **`0.1.3`/`103` on internal testing since
+no store had accepted an upload of. Shipped state per store (the live record is
+[`installers/store-review.md`](installers/store-review.md) § The record): the
+Microsoft Store has no submission — the `0.1.1` above was spent by the
+2026-07-17 Windows build and reached no store
+([`installers/windows.md`](installers/windows.md) § Implementation status
+(Store channel)); Play serves **`0.1.3`/`103` on internal testing since
 2026-10-09**, built from the public commit that published `0.1.3` — the `0.1.3` train's commit — while the earlier draft upload `0.1.2`/`102` stays in the Console
 as the record (see [`installers/android.md`](installers/android.md)
 § Implementation status today; an earlier revision of this section claimed a
@@ -187,7 +196,7 @@ linux channels have shipped nothing.
 ## Implementation status today
 
 - **Fully implemented as of the ratifying commit**: source and every lockstep
-  surface agree at `0.1.4`; `version-lockstep-check` (+ its `-test` companion)
+  surface agree at `0.1.5`; `version-lockstep-check` (+ its `-test` companion)
   runs in the cheap tier on both merge scripts.
 - The metainfo's `<releases>` list is empty — nothing has shipped; the first
   entry is appended when the linux channels first ship (an empty history
@@ -198,17 +207,41 @@ linux channels have shipped nothing.
   ([`feature-catalog.md`](feature-catalog.md) § Implementation status today,
   step 4). Until then the rule binds the maintainer cutting a release, not a
   gate.
+- **The site surface of the train (2026-10-17) is built:** `fauna-publish
+  deploy-site <version>` dispatches `deploy-site.yml` at the sync point (the
+  workflow's `commit` input, named in the run's title) and `fauna-publish tag`
+  refuses without a green run there. The live site was last deployed 2026-09-26; the 0.1.4 sync's
+  deploy is refused by its draft check — its tree wraps the code-signing policy
+  page while that text was still a draft. The page and `/terms` were approved in
+  public-texts round 1 (landed 2026-10-19, after 0.1.4's sync point), and the
+  draft check counts a round's approval as ending a draft even while the
+  inventory still says `drafted` (a first-time page's status moves to `live`
+  only on its first readback), so the first sync cut after round 1 deploys
+  both pages.
 - **The About-row surface is not on all 7 apps yet (checked 2026-09-23)**:
   only tui (`apps/fauna-tui/src/settings/about.rs`, the Settings root's
   `settings-app-version` — painted 2026-09-26; the 2026-09-23 check had named
   a tui `general.rs` that never existed) and linux
   (`apps/fauna-linux/src/settings/general.rs`) render the product version,
   from `env!("CARGO_PKG_VERSION")`, and macOS and windows (Settings → General's
-  About block, both 2026-10-08) from `fauna_ffi_build_version()`. Web's Settings "Build" section shows a
-  git SHA (`VITE_GIT_SHA`), not the product version, and nothing displays its
-  lockstep `package.json` copy. iOS and android show no app version
+  About block, both 2026-10-08) from `fauna_ffi_build_version()`, and web
+  (Settings → General's About block, 2026-10-19) from `fauna-wasm`'s
+  `buildVersion` export — its Status "Build" section's git SHA
+  (`VITE_GIT_SHA`) stays a separate row, and nothing displays its lockstep
+  `package.json` copy. iOS and android show no app version
   anywhere, although each could read `fauna_ffi_build_version()` or its own
-  lockstep copy. The dashboard "Version" stat on web and Apple is the nest's
+  lockstep copy (iOS has shown it since 2026-10-22 — the Settings root's About
+  section, from `fauna_ffi_build_version()`, painted with the terms link; android
+  since 2026-10-20). The dashboard "Version" stat on web and Apple is the nest's
   version, not the app's. The row's ui.yaml id is `settings-app-version`,
-  painted on tui, on linux's General page (2026-10-05) and on macOS's and
-  windows' (2026-10-08).
+  painted on tui, on linux's General page (2026-10-05), on macOS's and
+  windows' (2026-10-08) and on web's (2026-10-19). The organisation's terms link, `settings-terms-link`, joins this About
+  row on every app beside the version — owner
+  [`../behavior/terms-and-content-guidelines.md`](../behavior/terms-and-content-guidelines.md)
+  § The decisions, item 4 (ratified 2026-10-20; painted on tui 2026-10-20 as a
+  show-and-copy button, on web, linux and android 2026-10-20 as a
+  browser-opening link — android's Settings root gained an About section for
+  it, carrying `settings-app-version` from `fauna_ffi_build_version()` — and on
+  macOS (Settings → General's About block) and iOS (a new Settings-root About
+  section, like android's) 2026-10-22 as a browser-opening link; windows to
+  follow).

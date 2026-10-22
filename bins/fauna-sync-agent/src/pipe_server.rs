@@ -38,6 +38,7 @@ pub async fn handle_request(req: &Request, state: &Arc<SyncServiceState>) -> Res
         RequestMethod::PinFile { path } => handle_pin_file(state, path).await,
         RequestMethod::UnpinFile { path } => handle_unpin_file(state, path).await,
         RequestMethod::FreeSpace { path } => handle_free_space(state, path).await,
+        RequestMethod::FreeLocationSpace { path } => handle_free_location_space(state, path).await,
         RequestMethod::SetLocationSyncMode { path, mode } => {
             handle_set_location_sync_mode(state, path, mode).await
         }
@@ -152,7 +153,7 @@ fn open_set_db_readonly(
     match fauna_sync_engine::db::SyncDb::open(&db_path) {
         Ok(db) => Some(db),
         Err(e) => {
-            tracing::warn!(folder, error = %e, "status projection: open set db failed");
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), error = %e, "status projection: open set db failed");
             None
         }
     }
@@ -186,7 +187,7 @@ async fn aggregate_backlog(state: &Arc<SyncServiceState>) -> (u64, u64, Option<u
                 last_sync = last_sync.max(b.last_sync_at());
             }
             Err(e) => {
-                tracing::warn!(folder = %m.folder, error = %e, "status projection: backlog read failed")
+                tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&m.folder), error = %e, "status projection: backlog read failed")
             }
         }
     }
@@ -399,6 +400,28 @@ async fn handle_list_locations(state: &Arc<SyncServiceState>) -> Result<Response
         .lock()
         .map(|errors| errors.clone())
         .unwrap_or_default();
+    // The latest sweep per location, as its loop last left the tally.
+    let free_space_runs: std::collections::HashMap<String, fauna_ipc::sync::FreeSpaceRun> = state
+        .free_space_runs
+        .lock()
+        .map(|runs| {
+            runs.iter()
+                .filter_map(|(path, tally)| {
+                    let t = *tally.lock().ok()?;
+                    Some((
+                        path.clone(),
+                        fauna_ipc::sync::FreeSpaceRun {
+                            running: t.running,
+                            freed_files: t.freed_files,
+                            freed_bytes: t.freed_bytes,
+                            kept_unsynced: t.kept_unsynced,
+                            kept_pinned: t.kept_pinned,
+                        },
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let folders = config
         .locations
@@ -407,19 +430,33 @@ async fn handle_list_locations(state: &Arc<SyncServiceState>) -> Result<Response
             // The binding as every consumer reads it: label AND ref, or unbound.
             let binding = f.binding();
             // What the folder holds (`SyncDb::tracked_totals` — every tracked
-            // non-deleted row), not the backlog. Unbound or never-served
-            // folders report honest zeros.
-            let (file_count, total_bytes) = binding
-                .and_then(|b| open_set_db_readonly(&state.paths, b.folder, b.folder_ref))
+            // non-deleted row, placeholders included), not the backlog. Unbound
+            // or never-served folders report honest zeros.
+            let db =
+                binding.and_then(|b| open_set_db_readonly(&state.paths, b.folder, b.folder_ref));
+            let (file_count, total_bytes) = db
+                .as_ref()
                 .and_then(|db| match db.tracked_totals() {
                     Ok(t) => Some(t),
                     Err(e) => {
-                        tracing::warn!(folder = %f.path, error = %e,
+                        tracing::warn!(folder = %fauna_core::log_redact::log_path(&f.path), error = %e,
                             "status projection: tracked totals read failed");
                         None
                     }
                 })
                 .unwrap_or((0, 0));
+            // Of those bytes, the ones on this device — an on-demand binding's
+            // alone: an always-resident one keeps every file here.
+            let on_device_bytes = (f.mode == crate::config::LocationMode::OnDemand)
+                .then_some(())
+                .and_then(|()| match db.as_ref()?.on_device_bytes() {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        tracing::warn!(folder = %fauna_core::log_redact::log_path(&f.path), error = %e,
+                            "status projection: on-device bytes read failed");
+                        None
+                    }
+                });
             LocationInfo {
                 path: f.path.clone(),
                 file_count,
@@ -432,6 +469,8 @@ async fn handle_list_locations(state: &Arc<SyncServiceState>) -> Result<Response
                 on_demand_mount_error: mount_errors
                     .get(std::path::Path::new(&f.path))
                     .map(|code| code.to_string()),
+                on_device_bytes,
+                free_space: free_space_runs.get(&f.path).copied(),
             }
         })
         .collect();
@@ -517,7 +556,7 @@ async fn handle_list_engines(state: &Arc<SyncServiceState>) -> Result<ResponsePa
                         let backlog = match db.transfer_backlog() {
                             Ok(b) => Some((b.files_pending, b.bytes_pending)),
                             Err(e) => {
-                                tracing::warn!(folder = %m.folder, error = %e,
+                                tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&m.folder), error = %e,
                                     "status projection: backlog read failed");
                                 None
                             }
@@ -525,7 +564,7 @@ async fn handle_list_engines(state: &Arc<SyncServiceState>) -> Result<ResponsePa
                         let reseal = match db.corpus_reseal_pass() {
                             Ok(pass) => pass,
                             Err(e) => {
-                                tracing::warn!(folder = %m.folder, error = %e,
+                                tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&m.folder), error = %e,
                                     "status projection: corpus re-seal progress read failed");
                                 None
                             }
@@ -534,7 +573,7 @@ async fn handle_list_engines(state: &Arc<SyncServiceState>) -> Result<ResponsePa
                             match db.reseal_drain(actor) {
                                 Ok(d) => Some(reseal_drain_info(d)),
                                 Err(e) => {
-                                    tracing::warn!(folder = %m.folder, error = %e,
+                                    tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(&m.folder), error = %e,
                                         "status projection: re-seal drain read failed");
                                     None
                                 }
@@ -671,8 +710,9 @@ async fn resolve_engine_key_at(
     };
     if keys.next().is_some() {
         return Err(format!(
-            "folder name '{folder}' is ambiguous on this device (several sync locations \
-             wear it); address the set by its folder id"
+            "folder name '{}' is ambiguous on this device (several sync locations \
+             wear it); address the set by its folder id",
+            fauna_core::log_redact::log_folder_name(folder)
         ));
     }
     Ok(Some(first))
@@ -1083,11 +1123,11 @@ async fn handle_pull_folder_now(
     let key = match resolve_engine_key_at(state, folder, folder_hash).await {
         Ok(Some(k)) => k,
         Ok(None) => {
-            tracing::debug!(folder, "pull-now nudge dropped: no binding wears this name");
+            tracing::debug!(folder = %fauna_core::log_redact::log_folder_name(folder), "pull-now nudge dropped: no binding wears this name");
             return Ok(ResponsePayload::Empty);
         }
         Err(e) => {
-            tracing::warn!(folder, error = %e, "pull-now nudge dropped: ambiguous name");
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), error = %e, "pull-now nudge dropped: ambiguous name");
             return Ok(ResponsePayload::Empty);
         }
     };
@@ -1100,7 +1140,7 @@ async fn handle_pull_folder_now(
             None => false,
         }
     };
-    tracing::debug!(folder, nudged, "remote-change pull-now nudge");
+    tracing::debug!(folder = %fauna_core::log_redact::log_folder_name(folder), nudged, "remote-change pull-now nudge");
     Ok(ResponsePayload::Empty)
 }
 
@@ -1119,7 +1159,8 @@ async fn handle_apply_held_deletes(
 ) -> Result<ResponsePayload, String> {
     let Some(key) = resolve_engine_key(state, folder).await? else {
         return Err(format!(
-            "folder '{folder}' is not being served by a resident engine"
+            "folder '{}' is not being served by a resident engine",
+            fauna_core::log_redact::log_folder_name(folder)
         ));
     };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -1127,7 +1168,8 @@ async fn handle_apply_held_deletes(
         let senders = state.engine_cmd_senders.lock().await;
         let Some(tx) = senders.get(&key) else {
             return Err(format!(
-                "folder '{folder}' is not being served by a resident engine"
+                "folder '{}' is not being served by a resident engine",
+                fauna_core::log_redact::log_folder_name(folder)
             ));
         };
         // try_send: capacity 2 queues the command behind whatever the loop is
@@ -1138,10 +1180,16 @@ async fn handle_apply_held_deletes(
         )
         .map_err(|e| match e {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                format!("an apply is already pending for '{folder}'")
+                format!(
+                    "an apply is already pending for '{}'",
+                    fauna_core::log_redact::log_folder_name(folder)
+                )
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                format!("the engine serving '{folder}' is shutting down")
+                format!(
+                    "the engine serving '{}' is shutting down",
+                    fauna_core::log_redact::log_folder_name(folder)
+                )
             }
         })?;
     }
@@ -1150,7 +1198,12 @@ async fn handle_apply_held_deletes(
     // resolves the oneshot with RecvError — an error, never a hang.
     let outcome = reply_rx
         .await
-        .map_err(|_| format!("the engine serving '{folder}' stopped before the apply ran"))?
+        .map_err(|_| {
+            format!(
+                "the engine serving '{}' stopped before the apply ran",
+                fauna_core::log_redact::log_folder_name(folder)
+            )
+        })?
         .map_err(|e| format!("apply held deletes failed: {e}"))?;
     Ok(ResponsePayload::HeldDeletesApplied(
         fauna_ipc::sync::HeldDeletesAppliedInfo {
@@ -1306,14 +1359,20 @@ async fn handle_share_ingest(
     // Canonicalised through the parse, so the key is byte-identical to the
     // one the engine registered under (`EngineMapping::engine_key`).
     let key = FolderRef::parse(folder_id)
-        .ok_or_else(|| format!("'{folder_id}' is not a folder id (folder '{folder}')"))?
+        .ok_or_else(|| {
+            format!(
+                "'{folder_id}' is not a folder id (folder '{}')",
+                fauna_core::log_redact::log_folder_name(folder)
+            )
+        })?
         .to_wire();
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     {
         let senders = state.engine_cmd_senders.lock().await;
         let Some(tx) = senders.get(&key) else {
             return Err(format!(
-                "folder '{folder}' is not being served by a resident engine"
+                "folder '{}' is not being served by a resident engine",
+                fauna_core::log_redact::log_folder_name(folder)
             ));
         };
         tx.try_send(
@@ -1326,16 +1385,27 @@ async fn handle_share_ingest(
         )
         .map_err(|e| match e {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                format!("an ingest is already pending for '{folder}'")
+                format!(
+                    "an ingest is already pending for '{}'",
+                    fauna_core::log_redact::log_folder_name(folder)
+                )
             }
             tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                format!("the engine serving '{folder}' is shutting down")
+                format!(
+                    "the engine serving '{}' is shutting down",
+                    fauna_core::log_redact::log_folder_name(folder)
+                )
             }
         })?;
     }
     let (report, cursor) = reply_rx
         .await
-        .map_err(|_| format!("the engine serving '{folder}' stopped before the ingest ran"))?
+        .map_err(|_| {
+            format!(
+                "the engine serving '{}' stopped before the ingest ran",
+                fauna_core::log_redact::log_folder_name(folder)
+            )
+        })?
         .map_err(|e| format!("share ingest failed: {e}"))?;
     Ok(ResponsePayload::ShareIngested(
         fauna_ipc::sync::ShareIngestOutcome {
@@ -1462,7 +1532,7 @@ async fn handle_pin_file(
     _state: &Arc<SyncServiceState>,
     path: &str,
 ) -> Result<ResponsePayload, String> {
-    tracing::info!(path, "pin file requested");
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), "pin file requested");
     #[cfg(windows)]
     {
         fauna_cfapi::set_pin_state(std::path::Path::new(path), true)
@@ -1491,7 +1561,7 @@ async fn handle_unpin_file(
     _state: &Arc<SyncServiceState>,
     path: &str,
 ) -> Result<ResponsePayload, String> {
-    tracing::info!(path, "unpin file requested");
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), "unpin file requested");
     #[cfg(windows)]
     {
         fauna_cfapi::set_pin_state(std::path::Path::new(path), false)
@@ -1630,7 +1700,7 @@ async fn handle_free_space(
     state: &Arc<SyncServiceState>,
     path: &str,
 ) -> Result<ResponsePayload, String> {
-    tracing::info!(path, "free space requested");
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), "free space requested");
     #[cfg(windows)]
     {
         // Gate on the engine's record before the platform's own refusal: cfapi's not-in-sync bit is the first-line guard, but it is only as
@@ -1658,7 +1728,7 @@ async fn handle_free_space(
         // Placeholder → CloudOnly — no badge flicker).
         if let Err(e) = mark_placeholder(state, path).await {
             // Best-effort, like `mark_hydrated`: the cfapi dehydrate already succeeded.
-            tracing::warn!(path, error = %e, "recording dehydrated file as Placeholder failed");
+            tracing::warn!(path = %fauna_core::log_redact::log_path(path), error = %e, "recording dehydrated file as Placeholder failed");
         }
         let event = {
             let config = state.config.read().await;
@@ -1684,6 +1754,101 @@ async fn handle_free_space(
     }
 }
 
+/// [`RequestMethod::FreeLocationSpace`] — *Free up space* for a whole bound
+/// on-demand location (`on-demand-files.md` § The free-up-space gesture where the
+/// OS offers none). Refuses a path that is not a bound location's root, an
+/// always-resident binding, and a root whose placeholder surface does not stand;
+/// otherwise hands the sweep to the root's own loop and answers once it is
+/// accepted. The outcome is read back off `ListLocations`' `free_space`.
+async fn handle_free_location_space(
+    state: &Arc<SyncServiceState>,
+    path: &str,
+) -> Result<ResponsePayload, String> {
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), "free space requested for a location");
+    #[cfg(target_os = "linux")]
+    {
+        let key = {
+            let config = state.config.read().await;
+            let location = config.find_location(path).ok_or_else(|| {
+                format!(
+                    "{} is not a bound location's root",
+                    fauna_core::log_redact::log_path(path)
+                )
+            })?;
+            if location.mode != crate::config::LocationMode::OnDemand {
+                return Err(format!(
+                    "{} keeps every file on this device (always-resident): there is \
+                     nothing to free",
+                    fauna_core::log_redact::log_path(path)
+                ));
+            }
+            let binding = location.binding().ok_or_else(|| {
+                format!(
+                    "{} is not bound to a folder",
+                    fauna_core::log_redact::log_path(path)
+                )
+            })?;
+            binding.folder_ref.to_wire()
+        };
+        if state
+            .on_demand_mount_errors
+            .lock()
+            .is_ok_and(|errors| errors.contains_key(std::path::Path::new(path)))
+        {
+            return Err(format!(
+                "{} is running without its placeholder surface: nothing can be freed \
+                 until it mounts",
+                fauna_core::log_redact::log_path(path)
+            ));
+        }
+        let tx = state.engine_cmd_senders.lock().await.get(&key).cloned();
+        let Some(tx) = tx else {
+            return Err(format!(
+                "the folder serving {} is not running",
+                fauna_core::log_redact::log_path(path)
+            ));
+        };
+        let tally = {
+            let mut runs = state
+                .free_space_runs
+                .lock()
+                .map_err(|_| "free-up-space tally poisoned".to_string())?;
+            Arc::clone(runs.entry(path.to_string()).or_default())
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(
+            fauna_sync_engine::always_resident::EngineCommand::FreeLocationSpace {
+                tally,
+                reply: reply_tx,
+            },
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "the folder serving {} is shutting down",
+                fauna_core::log_redact::log_path(path)
+            )
+        })?;
+        reply_rx
+            .await
+            .map_err(|_| {
+                format!(
+                    "the folder serving {} stopped before answering",
+                    fauna_core::log_redact::log_path(path)
+                )
+            })?
+            .map_err(|e| e.to_string())?;
+        Ok(ResponsePayload::Empty)
+    }
+    // windows: the real sweep walks the rows through `handle_free_space`'s per-file
+    // body — the windows row's to build; every other platform has no on-demand root.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, path);
+        Err("freeing a location's space is unsupported on this platform".to_string())
+    }
+}
+
 async fn handle_set_location_sync_mode(
     state: &Arc<SyncServiceState>,
     path: &str,
@@ -1699,16 +1864,19 @@ async fn handle_set_location_sync_mode(
     // (which read-locks config — holding the write guard across it would deadlock).
     {
         let mut config = state.config.write().await;
-        let folder = config
-            .find_location_mut(path)
-            .ok_or_else(|| format!("folder not found: {path}"))?;
+        let folder = config.find_location_mut(path).ok_or_else(|| {
+            format!(
+                "folder not found: {}",
+                fauna_core::log_redact::log_path(path)
+            )
+        })?;
         folder.mode = new_mode;
         if let Err(e) = state.paths.save_config(&config) {
             tracing::warn!("config save failed: {e}");
         }
     }
 
-    tracing::info!(path, mode, "folder sync mode changed");
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), mode, "folder sync mode changed");
 
     // Reconcile: switching to on-demand serves the root (if bound to a folder);
     // switching back to always stops it. Best-effort.
@@ -1737,13 +1905,20 @@ async fn handle_set_location_folder(
     folder_id: &str,
 ) -> Result<ResponsePayload, String> {
     let folder_ref = FolderRef::parse(folder_id).ok_or_else(|| {
-        format!("'{folder_id}' is not a folder id (binding {path} to '{folder}')")
+        format!(
+            "'{folder_id}' is not a folder id (binding {} to '{}')",
+            fauna_core::log_redact::log_path(path),
+            fauna_core::log_redact::log_folder_name(folder),
+        )
     })?;
     {
         let mut config = state.config.write().await;
-        let location = config
-            .find_location_mut(path)
-            .ok_or_else(|| format!("folder not found: {path}"))?;
+        let location = config.find_location_mut(path).ok_or_else(|| {
+            format!(
+                "folder not found: {}",
+                fauna_core::log_redact::log_path(path)
+            )
+        })?;
         // Label and ref are written together — `LocationConfig::binding` reads
         // them as one — and the ref in its canonical wire form, so the stored
         // key is byte-identical to the one the engine registers under.
@@ -1761,7 +1936,7 @@ async fn handle_set_location_folder(
         }
     }
 
-    tracing::info!(path, folder, folder_id, "folder bound to folder");
+    tracing::info!(path = %fauna_core::log_redact::log_path(path), folder = %fauna_core::log_redact::log_folder_name(folder), folder_id, "folder bound to folder");
 
     // Before the reconcile, so the engine's first seat read already sees the
     // place it just gained.
@@ -1811,25 +1986,34 @@ async fn enrol_bound_place(state: &Arc<SyncServiceState>, folder: &str, folder_r
         )
     };
     match tokio::time::timeout(NEST_VERB_TIMEOUT, call).await {
-        Ok(Ok(Ok(outcome))) => tracing::info!(folder, ?outcome, "bound folder's place ensured"),
+        Ok(Ok(Ok(outcome))) => {
+            tracing::info!(folder = %fauna_core::log_redact::log_folder_name(folder), ?outcome, "bound folder's place ensured")
+        }
         Ok(Ok(Err(fauna_client::NestClientError::Rpc(rpc))))
             if rpc.code == "fauna.folders.not_found" =>
         {
             tracing::debug!(
-                folder,
+                folder = %fauna_core::log_redact::log_folder_name(folder),
                 "bound folder has no own roster here; no place to enrol"
             )
         }
-        Ok(Ok(Err(e))) => tracing::warn!(folder, error = %e, "place enrol on bind failed"),
-        Ok(Err(e)) => tracing::warn!(folder, error = %e, "place enrol on bind: no nest"),
-        Err(_) => tracing::warn!(folder, "place enrol on bind timed out"),
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), error = %e, "place enrol on bind failed")
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), error = %e, "place enrol on bind: no nest")
+        }
+        Err(_) => {
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), "place enrol on bind timed out")
+        }
     }
 }
 
 // ── Context menu / sharing ──
 
-/// `ShareFile`: resolve an Explorer path to where the app should open to share
-/// it — never a link. The agent is seedless and a share token must be signed by
+/// `ShareFile`: resolve a file manager's path — Explorer's, or GNOME Files'
+/// through the agent's `--share-target` mode — to where the app should open to
+/// share it, never a link. Every bound location answers, whatever its mode. The agent is seedless and a share token must be signed by
 /// the account key, so the leaf hands off to the app
 /// (`docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf); the
 /// mechanism is `apps/windows.md` § Shell Extension → *The Share hand-off*.
@@ -1840,13 +2024,13 @@ async fn handle_share_file(
 ) -> Result<ResponsePayload, String> {
     let resolved = {
         let config = state.config.read().await;
-        crate::path_map::resolve_to_folder_rel(&config, path)
+        crate::path_map::resolve_bound_location(&config, path)
     };
     let Some(crate::path_map::ResolvedFolder {
         folder_ref, rel, ..
     }) = resolved
     else {
-        return Err("not in a bound on-demand folder".to_string());
+        return Err("not in a bound folder".to_string());
     };
     let public_audience = state
         .public_audience
@@ -2227,7 +2411,7 @@ async fn handle_restore_file_version(
     };
 
     tracing::info!(
-        path,
+        path = %fauna_core::log_redact::log_path(path),
         version_num,
         recorded_seq = restored.recorded_seq,
         "restore recorded on nest"
@@ -2386,14 +2570,14 @@ pub(crate) async fn apply_restore_locally(
     match repoint_entry(state, folder_ref, rel, restored, recorded_as, now).await {
         Ok(true) => {}
         Ok(false) => {
-            tracing::debug!(path = abs_path, "no local copy to re-point after restore");
+            tracing::debug!(path = %fauna_core::log_redact::log_path(abs_path), "no local copy to re-point after restore");
             return;
         }
         Err(e) => {
             // The nest record has landed and is authoritative; this device now shows
             // stale content until the user restores again (append-only history makes
             // that safe and idempotent).
-            tracing::warn!(path = abs_path, error = %e, "re-pointing local row after restore failed");
+            tracing::warn!(path = %fauna_core::log_redact::log_path(abs_path), error = %e, "re-pointing local row after restore failed");
             return;
         }
     }
@@ -2403,7 +2587,7 @@ pub(crate) async fn apply_restore_locally(
         u64::try_from(restored.size_bytes).unwrap_or(0),
         now,
     ) {
-        tracing::warn!(path = abs_path, error = %e, "freeing the pre-restore bytes failed");
+        tracing::warn!(path = %fauna_core::log_redact::log_path(abs_path), error = %e, "freeing the pre-restore bytes failed");
         return;
     }
 
@@ -2448,11 +2632,11 @@ async fn restore_kept_copy(
     let row = match restored_head(state, folder_ref, rel, restored, recorded_as, remote_mtime) {
         Ok(Some(row)) => row,
         Ok(None) => {
-            tracing::debug!(path = abs_path, "no local copy to replace after restore");
+            tracing::debug!(path = %fauna_core::log_redact::log_path(abs_path), "no local copy to replace after restore");
             return;
         }
         Err(e) => {
-            tracing::warn!(path = abs_path, error = %e, "reading the kept copy's row after restore failed");
+            tracing::warn!(path = %fauna_core::log_redact::log_path(abs_path), error = %e, "reading the kept copy's row after restore failed");
             return;
         }
     };
@@ -2464,7 +2648,7 @@ async fn restore_kept_copy(
         .cloned();
     let Some(tx) = tx else {
         tracing::info!(
-            path = abs_path,
+            path = %fauna_core::log_redact::log_path(abs_path),
             "the folder's root is not running: the kept copy is left at the replaced version"
         );
         return;
@@ -2478,7 +2662,7 @@ async fn restore_kept_copy(
         .is_err()
     {
         tracing::warn!(
-            path = abs_path,
+            path = %fauna_core::log_redact::log_path(abs_path),
             "the folder's sync engine is shutting down: the kept copy is left at the replaced \
              version"
         );
@@ -2487,15 +2671,15 @@ async fn restore_kept_copy(
     match answer.await {
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => tracing::info!(
-            path = abs_path,
+            path = %fauna_core::log_redact::log_path(abs_path),
             "the kept copy was left as it is (its log names why); a local edit uploads as a \
              conflict with the restore"
         ),
         Ok(Err(e)) => {
-            tracing::warn!(path = abs_path, error = %e, "replacing the kept copy after restore failed")
+            tracing::warn!(path = %fauna_core::log_redact::log_path(abs_path), error = %e, "replacing the kept copy after restore failed")
         }
         Err(_) => tracing::warn!(
-            path = abs_path,
+            path = %fauna_core::log_redact::log_path(abs_path),
             "the folder's sync engine stopped before answering: the kept copy may be left at \
              the replaced version"
         ),
@@ -2612,14 +2796,37 @@ async fn handle_provision_capability(
     // scope-aware `EngineStamp` forces that rebuild even for a same-named
     // owner-only set (else the outgoing engine's open DB handle would leak across
     // accounts).
+    //
+    // On an actor change the outgoing scope's engines are stopped FIRST — the
+    // reconcile-under-no-capability `unprovision_now` runs — and waited out, so
+    // no engine holds a DB the succession carry renames (`sync-agent.md` § The
+    // per-actor scope follows the account across a succession). The carry
+    // re-runs on every provision while the successor holds no config, which
+    // also completes one a crash or a failed rename left half done.
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-    if crate::service::apply_actor_scope(&state.paths, &actor_id) {
-        let config = state.paths.load_config().unwrap_or_else(|e| {
-            tracing::warn!("scoped config load failed, using defaults: {e}");
-            crate::config::SyncConfig::default()
-        });
-        *state.config.write().await = config;
-        state.invalidate_nest_rpc().await;
+    {
+        let rescoping = state.paths.actor_scope() != Some(hex::encode(actor_id));
+        let quiet = !rescoping || stop_engines_for_rescope(state).await;
+        let rescoped = crate::service::apply_actor_scope(&state.paths, &actor_id);
+        let carried = quiet
+            && matches!(
+                crate::service::carry_predecessor_scope(
+                    &state.paths,
+                    &actor_id,
+                    &owned.predecessor_actor_ids(),
+                ),
+                crate::service::ScopeCarry::Carried { .. }
+            );
+        if rescoped || carried {
+            let config = state.paths.load_config().unwrap_or_else(|e| {
+                tracing::warn!("scoped config load failed, using defaults: {e}");
+                crate::config::SyncConfig::default()
+            });
+            *state.config.write().await = config;
+        }
+        if rescoped {
+            state.invalidate_nest_rpc().await;
+        }
     }
 
     // Persist BEFORE publishing to the slot (sync-agent.md § Credential model):
@@ -2711,6 +2918,36 @@ async fn handle_unprovision_capability(
             crate::account_host::UNMOUNT_BUDGET
         ))
     }
+}
+
+/// How long a re-scoping provision waits for the outgoing scope's engines to
+/// end before it gives the succession carry up for this provision.
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+const ENGINE_STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Stop every engine of the outgoing scope before a provision re-scopes — the
+/// reconcile-under-no-capability [`unprovision_now`] runs — and wait until the
+/// host reports none running (each engine's DB closed with its future). Returns
+/// whether they all ended within [`ENGINE_STOP_BUDGET`]; `false` means the
+/// carry must not run now (the next start or provision retries it).
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+async fn stop_engines_for_rescope(state: &Arc<SyncServiceState>) -> bool {
+    *state.capability.write().await = None;
+    if let Err(e) = crate::engine_driver::reconcile_engines(state).await {
+        tracing::warn!(error = %e, "engine stop before a re-scope failed");
+    }
+    let mut running = state.engines_running.subscribe();
+    let quiet = tokio::time::timeout(ENGINE_STOP_BUDGET, running.wait_for(|n| *n == 0))
+        .await
+        .is_ok_and(|r| r.is_ok());
+    if !quiet {
+        tracing::warn!(
+            budget = ?ENGINE_STOP_BUDGET,
+            "the outgoing scope's engines had not all ended; the succession carry waits \
+             for the next start or provision"
+        );
+    }
+    quiet
 }
 
 /// The teardown body itself, shared by the IPC handler above and the renewal
@@ -3045,6 +3282,47 @@ mod tests {
             .lock()
             .await
             .insert(key.to_wire(), true);
+        match handle_share_file(&state, file.to_str().unwrap()).await {
+            Ok(ResponsePayload::ShareTarget(t)) => assert_eq!(t.path.as_deref(), Some("index.jpg")),
+            other => panic!("expected a file target, got {other:?}"),
+        }
+    }
+
+    /// A bound always-resident root — linux's common presence — is a share
+    /// target like an on-demand one (`apps/linux.md` § The file manager's Share
+    /// entry, link 1): its file once the engine reports the arm, its root
+    /// always.
+    #[tokio::test]
+    async fn share_file_answers_for_an_always_resident_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("site");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("index.jpg");
+        std::fs::write(&file, b"x").unwrap();
+        let state = test_state_with_config(crate::config::SyncConfig {
+            locations: vec![crate::config::LocationConfig {
+                path: root.to_str().unwrap().into(),
+                mode: crate::config::LocationMode::Always,
+                folder: Some("site".into()),
+                folder_id: Some(tref("site").to_wire()),
+                ..Default::default()
+            }],
+            ..crate::config::SyncConfig::default()
+        });
+        let FolderRef::Local(id) = tref("site") else {
+            unreachable!()
+        };
+        match handle_share_file(&state, root.to_str().unwrap()).await {
+            Ok(ResponsePayload::ShareTarget(t)) => {
+                assert_eq!((t.folder_id, t.path), (id, None))
+            }
+            other => panic!("expected the set root's target, got {other:?}"),
+        }
+        state
+            .public_audience
+            .lock()
+            .await
+            .insert(tref("site").to_wire(), true);
         match handle_share_file(&state, file.to_str().unwrap()).await {
             Ok(ResponsePayload::ShareTarget(t)) => assert_eq!(t.path.as_deref(), Some("index.jpg")),
             other => panic!("expected a file target, got {other:?}"),

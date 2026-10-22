@@ -90,6 +90,12 @@ type Projector struct {
 	translator Translator
 	blobs      BlobSource
 	logger     *slog.Logger
+
+	// onRemuxFailed, when set, is told of each video the projection skipped
+	// because its remux failed — the binary's hook onto its admin-facing
+	// signal (the log plane's coalesced count), kept a func so this package
+	// stays free of the bridge's transport. Nil is a no-op.
+	onRemuxFailed func()
 }
 
 // NewProjector builds a projector over the given store, funnel, and translator.
@@ -103,6 +109,10 @@ func NewProjector(store *Store, funnel *Funnel, translator Translator, blobs Blo
 	}
 	return &Projector{store: store, funnel: funnel, translator: translator, blobs: blobs, logger: logger}
 }
+
+// SetOnRemuxFailed installs the remux-failure hook (see Projector.onRemuxFailed).
+// Call it once at wiring time, before any projection pass.
+func (p *Projector) SetOnRemuxFailed(fn func()) { p.onRemuxFailed = fn }
 
 // ProjectItems applies a batch of fetched items to did's repo, one commit per
 // effective item, and returns how many commits it produced. Items already
@@ -250,7 +260,7 @@ func (p *Projector) resolveVideo(ctx context.Context, did string, item Projectio
 	if video == nil {
 		return nil, nil
 	}
-	return ResolveVideo(ctx, p.store, p.blobs, did, video, p.logger)
+	return ResolveVideo(ctx, p.store, p.blobs, did, video, p.logger, p.onRemuxFailed)
 }
 
 // resolveProfileMedia fetches, re-hashes and stores the profile's avatar and

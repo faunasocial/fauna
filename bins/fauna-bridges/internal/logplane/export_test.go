@@ -14,6 +14,9 @@ func Reset() {
 	dropped = 0
 	mu.Unlock()
 	disabled.Store(false)
+	for _, t := range tallies {
+		t.n.Store(0)
+	}
 	// Drain a pending size-trigger nudge so it cannot leak into the next test.
 	select {
 	case <-nudge:
@@ -46,4 +49,10 @@ func emitEveryCatalogueEventWorstCase() {
 	NestReconnected(math.MaxInt64)
 	ShutdownForced()
 	ConfinementDegraded(hostile, hostile)
+	ScannerUnavailable(ScannerName(hostile))
+	ScannerRecovered(ScannerName(hostile))
+	PDSListenerFailed()
+	// A tally renders its count; drive each to the largest it can report.
+	repoSelfCheckFailures.n.Store(math.MaxUint64)
+	videoRemuxFailures.n.Store(math.MaxUint64)
 }

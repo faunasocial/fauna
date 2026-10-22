@@ -63,7 +63,7 @@ Deno.test("no wasm loader takes a tokenProvider — chunks never dial their own 
       throw new Error(
         `${entry.name} takes a tokenProvider — the tell-tale of a chunk-private ` +
           `WsRpcClient dial. A page-machine chunk builds over the SPA singleton's ` +
-          `socket: take a SharedRpcPort from $lib/rpc's sharedRpcPort(secretHex) ` +
+          `socket: take a SharedRpcPort from #lib/rpc's sharedRpcPort(secretHex) ` +
           `instead (transport.md § Goal: one WebSocket per actor).`,
       );
     }
@@ -119,10 +119,50 @@ Deno.test("sharedRpcPort resolves the live singleton on every request", () => {
         "client and dials the old one.",
     );
   }
-  if (!/clientActorId\s*!==\s*mine/.test(req) || !/get\(identity\)/.test(req)) {
+  // The clauses themselves are pinned behaviourally (`portIsStale`, in
+  // shared-port-and-poll-behaviour.test.ts); here only that the refusal is that
+  // predicate, fed the port's actor, the singleton's and the CURRENT identity's.
+  if (!/portIsStale\(\s*mine,\s*clientActorId,\s*currentActorId\(\)\s*\)/.test(req)) {
     throw new Error(
-      "the stale-port refusal must compare the port's actor against BOTH the " +
-        "singleton's actor (`clientActorId`) and the current `get(identity)`.",
+      "the stale-port refusal must be `portIsStale(mine, clientActorId, " +
+        "currentActorId())` — fed BOTH the singleton's actor and the current " +
+        "identity's, the identity clause being the only guard in the " +
+        "post-`retireRpcClient` window.",
+    );
+  }
+  // The call text alone left the operand's SOURCE free: a mutant that
+  // kept the call but fed it from anything but the identity store stayed green.
+  // `currentActorId` is that source, so pin its body to `get(identity)`.
+  if (
+    !/export function currentActorId\(\)[^{]*\{\s*const current = get\(identity\);\s*return current \? actorIdFromSecret\(current\.secretHex\) : null;\s*\}/
+      .test(src)
+  ) {
+    throw new Error(
+      "rpc.ts's `currentActorId()` must read `get(identity)` and map it to " +
+        "`actorIdFromSecret(current.secretHex)` or null — it is the stale-port " +
+        "refusal's identity operand, and the only guard in the " +
+        "post-`retireRpcClient` window; a neutered source would let a stale " +
+        "port re-key the singleton back to the retired actor.",
+    );
+  }
+  // Both pins above are source TEXT, so a local rebinding inside `request`
+  // (`const currentActorId = () => null;`) leaves them green while the call
+  // site's identity operand goes vacuous. The exported function must be the
+  // ONLY binding of the name in rpc.ts: no other declaration, assignment,
+  // parameter or destructuring (object `{ currentActorId }` and array
+  // `[currentActorId]` forms alike).
+  const bindings = [
+    ...src.matchAll(/\b(?:const|let|var|function|class)\s+currentActorId\b/g),
+    ...src.matchAll(/\bcurrentActorId\s*(?:=(?!=)|[,)}\]:])/g),
+    ...src.matchAll(/\bcurrentActorId\s*\)\s*(?:=>|\{)/g),
+  ];
+  if (bindings.length !== 1) {
+    throw new Error(
+      "rpc.ts must bind `currentActorId` exactly once — the exported function. " +
+        `Found ${bindings.length} binding-shaped occurrences: a local shadow ` +
+        "(const/let/function/parameter/destructuring) inside `request` would " +
+        "leave the call text and the function body pins green while the stale-port " +
+        "refusal's identity operand is neutered.",
     );
   }
   if (!body.includes(".requestRaw(")) {
@@ -135,17 +175,29 @@ Deno.test("sharedRpcPort resolves the live singleton on every request", () => {
 });
 
 // The 15 s page-machine polls write the current actor's state, so
-// the canonical drop must retire them: each registers with the actor-scoped
-// reset and refuses to start if a drop landed during its mount awaits.
-Deno.test("the Folders and Bluesky settings polls register with the actor-scoped reset", () => {
+// the canonical drop must retire them. Both build the poll with
+// `createActorScopedPoll` (behaviour pinned in
+// shared-port-and-poll-behaviour.test.ts: it registers with the actor-scoped
+// reset, refuses to start after a drop, stops on one); here the adoption — no
+// component hand-rolls a `setInterval` again, and each starts the poll under a
+// `sameActorSince()` captured for its mount and disposes it on destroy.
+Deno.test("the Folders and Bluesky settings polls are the actor-scoped poll", () => {
   for (const name of ["components/FoldersSection.svelte", "components/AtprotoSettingsSection.svelte"]) {
     const src = Deno.readTextFileSync(new URL(name, HERE));
-    if (!/registerActorScopedReset\(stopTimer\)/.test(src) || !/sameActorSince\(\)/.test(src)) {
+    if (
+      !/createActorScopedPoll\(/.test(src) ||
+      !/const sameActor = sameActorSince\(\)/.test(src) ||
+      !/poll\.start\(sameActor,/.test(src) ||
+      !/poll\.dispose\(\)/.test(src) ||
+      /\bsetInterval\(/.test(stripComments(src))
+    ) {
       throw new Error(
-        `${name} runs a setInterval poll but does not register it with ` +
-          `registerActorScopedReset / guard the start with sameActorSince — a ` +
-          `poll that outlives an in-place identity change pings the old actor's ` +
-          `machine (account-scoping.md § The scoping taxonomy).`,
+        `${name} must run its poll through createActorScopedPoll — ` +
+          `\`poll.start(sameActor, …)\` with \`sameActor = sameActorSince()\` captured ` +
+          `before the mount's first await, \`poll.dispose()\` on destroy, and no ` +
+          `hand-rolled setInterval: a poll that outlives an in-place identity ` +
+          `change pings the old actor's machine (account-scoping.md § The ` +
+          `scoping taxonomy).`,
       );
     }
   }

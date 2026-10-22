@@ -49,6 +49,103 @@ use crate::i18n::strings;
 use crate::i18n::strings::media as media_strings;
 use crate::testid::set_test_id;
 
+thread_local! {
+    /// The page the signed-in window built — the one a `share-link` route lands
+    /// on. Each authenticated window's build replaces it.
+    static CURRENT: RefCell<Option<(std::rc::Weak<RenderCtx>, std::sync::Weak<MediaMachine>)>> =
+        const { RefCell::new(None) };
+    /// A `share-link` route waiting for its fresh read of the aggregate, with
+    /// the window its detail opens over and the route's caller.
+    static PENDING_SHARE: RefCell<Option<PendingShare>> = const { RefCell::new(None) };
+}
+
+struct PendingShare {
+    folder_id: i64,
+    path: String,
+    parent: glib::WeakRef<gtk::Window>,
+    then: crate::routes::Then,
+}
+
+/// The `share-link` route's landing (`apps/linux.md` § The file manager's Share
+/// entry (GNOME Files), link 4): stage the file for the page, `navigate` there,
+/// and re-read the aggregate; once that read is in, locate the file through the
+/// shared `MediaMachine::locate_path`, open its `media-item-detail` and the
+/// machine's create surface over it, and run `then` once both have painted. The
+/// read is the route's own, never the one the page already holds: a file the
+/// file manager can see has typically just synced, and the sign-in read
+/// predates it. A file this account cannot see (deleted, renamed, another set)
+/// leaves the page with nothing open — never an error. Navigation only: nothing
+/// is minted.
+pub fn open_share_route(
+    window: &gtk::Window,
+    folder_id: i64,
+    path: String,
+    then: crate::routes::Then,
+    navigate: impl FnOnce(),
+) {
+    let current = CURRENT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|(ctx, machine)| Some((ctx.upgrade()?, machine.upgrade()?)))
+    });
+    let Some((ctx, machine)) = current else {
+        tracing::warn!(target: "fauna_linux::routes", "share-link route: no media page in this session");
+        then();
+        return;
+    };
+    // A later route replaces an earlier one still waiting: release its caller.
+    let superseded = PENDING_SHARE.with(|p| {
+        p.borrow_mut().replace(PendingShare {
+            folder_id,
+            path,
+            parent: window.downgrade(),
+            then,
+        })
+    });
+    if let Some(older) = superseded {
+        (older.then)();
+    }
+    navigate();
+    let backup_key = ctx.backup_key.clone();
+    let reader = Arc::clone(&machine);
+    let runtime = ctx.runtime.clone();
+    async_helper::spawn_with_snapshot(
+        &runtime,
+        move || async move { reader.refresh(Some(backup_key)).await },
+        move |()| apply_pending_share(&machine, &ctx),
+    );
+}
+
+/// Apply a staged `share-link` route against the freshly read aggregate (the
+/// Windows Media page's `PendingShareLink` consumption, the same shape).
+fn apply_pending_share(machine: &Arc<MediaMachine>, ctx: &Rc<RenderCtx>) {
+    let Some(pending) = PENDING_SHARE.with(|p| p.borrow_mut().take()) else {
+        return;
+    };
+    if let Some(item) = machine.locate_path(pending.folder_id, pending.path) {
+        let parent = pending.parent.upgrade();
+        let detail = detail::open_item_detail(
+            parent.as_ref(),
+            &item,
+            machine,
+            &ctx.backup_key,
+            &ctx.runtime,
+        );
+        // The machine refuses an ineligible file itself (no create surface).
+        share::open_create(
+            Some(detail.upcast_ref()),
+            machine,
+            item.folder.clone(),
+            item.path.clone(),
+        );
+        ctx.share.render(&machine.snapshot());
+        tracing::info!(target: "fauna_linux::routes", "share-link route: opened the file's detail");
+    } else {
+        tracing::info!(target: "fauna_linux::routes", "share-link route: no such file in this account's media; nothing opened");
+    }
+    (pending.then)();
+}
+
 /// Handles the Media page hands back to `app.rs`.
 pub struct MediaHandles {
     /// The shared-Rust `MediaMachine`. `app.rs` refreshes it on auth; the page
@@ -556,6 +653,7 @@ pub fn build_media_view(fauna_client: &Rc<FaunaClient>) -> (gtk::Box, MediaHandl
             .to_vec(),
         runtime: fauna_client.runtime_handle(),
     });
+    CURRENT.with(|c| *c.borrow_mut() = Some((Rc::downgrade(&ctx), Arc::downgrade(&machine))));
     {
         let machine = Arc::clone(&machine);
         let ctx = Rc::clone(&ctx);
@@ -741,6 +839,31 @@ mod tests {
     use super::*;
 
     use crate::testid::widget_names;
+
+    /// A `share-link` route with no media page in this session degrades to
+    /// nothing open and releases its caller at once — never a stall, never an
+    /// error surface (`apps/linux.md` § The file manager's Share entry, link 4).
+    #[test]
+    fn a_share_link_route_without_a_media_page_releases_its_caller() {
+        crate::testid::run_on_gtk_thread(|| {
+            CURRENT.with(|c| *c.borrow_mut() = None);
+            let window = gtk::Window::new();
+            let released = Rc::new(Cell::new(false));
+            let r = Rc::clone(&released);
+            open_share_route(
+                &window,
+                42,
+                "photos/a.jpg".into(),
+                Box::new(move || r.set(true)),
+                || {},
+            );
+            assert!(released.get());
+            assert!(
+                PENDING_SHARE.with(|p| p.borrow().is_none()),
+                "nothing is staged"
+            );
+        });
+    }
 
     /// Pressing Upload with an empty path box must SAY so, not no-op.
     ///

@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import social.fauna.generated.Ids
 
@@ -67,13 +68,17 @@ fun LaunchRetryScreen(
                     .testTag(Ids.LAUNCH_RECOVER_BUTTON),
             ) { Text(stringResource(R.string.onboarding_launch_recover_lost_box)) }
         }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(
-            onClick = onRetire,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(Ids.LAUNCH_RETIRE_BUTTON),
-        ) { Text(stringResource(R.string.onboarding_launch_retire_server)) }
+        // The kids build never routes into nest retirement (a child joins a
+        // guardian's nest by invite; dynamic-features.md, the kids spine).
+        if (!BuildConfig.KIDS) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRetire,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(Ids.LAUNCH_RETIRE_BUTTON),
+            ) { Text(stringResource(R.string.onboarding_launch_retire_server)) }
+        }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = onUseDifferentNest,

@@ -26,7 +26,7 @@ use std::sync::Arc;
 use adw::prelude::*;
 use gtk::glib;
 
-use fauna_devices_machine::{DevicesMachine, DevicesObserver, MlsQuery, build_devices_machine};
+use fauna_devices_machine::{DevicesMachine, DevicesObserver, MlsQuery};
 use fauna_folders_machine::FolderWizardStep;
 
 use crate::async_helper;
@@ -44,7 +44,11 @@ pub mod folders;
 pub mod location_binding;
 pub mod members;
 pub mod roster;
+mod wired;
 pub mod wizard;
+
+pub(crate) use wired::WiredDevicesMachine;
+use wired::build_wired_devices_machine;
 
 #[cfg(any(debug_assertions, feature = "e2e-agent"))]
 pub use location_binding::inject_locations_for_test;
@@ -102,7 +106,7 @@ pub struct DevicesFoldersHandles {
     pub repaint_group_scopes: RepaintGroupScopes,
     /// The shared-Rust `DevicesMachine`. app.rs refreshes it on auth + when either
     /// sub-page becomes visible (replacing the old per-nav HTTP fetch).
-    pub devices_machine: Arc<DevicesMachine>,
+    pub devices_machine: WiredDevicesMachine,
 }
 
 /// Bridges `DevicesMachine` notifications to the GTK main loop: each `on_changed`
@@ -131,8 +135,18 @@ impl DevicesObserver for GtkDevicesObserver {
 /// engine racing the SQLite file. Derives the set's `ChannelId` the SAME way the nest
 /// does (`ChannelId::from_group_id` over a plain-`hex` decode — openMLS group ids are
 /// variable length, so NOT `hex32`). Pre-login (no session) → `false` (withheld); the
-/// list re-filters on the next `refresh()` once the session is live.
+/// list re-filters on the next `refresh()` once the session is live. The same
+/// object is the member-row declassification anchor ([`FolderChannelOwners`]:
+/// the channel's MLS-recorded owner; pre-login, none — the row seals).
 pub(crate) struct LinuxMlsQuery;
+
+impl fauna_devices_machine::FolderChannelOwners for LinuxMlsQuery {
+    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        crate::conversations::conv_backend::active_session()?
+            .engine()
+            .folder_channel_owner(&fauna_mls::types::ChannelId(*channel_id))
+    }
+}
 
 impl MlsQuery for LinuxMlsQuery {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
@@ -436,7 +450,7 @@ fn set_custody_error(ctx: &RenderCtx, machine: &DevicesMachine, error: Option<St
 fn run_custody_gesture(
     fauna_client: &Rc<FaunaClient>,
     ctx: &Rc<RenderCtx>,
-    machine: &Arc<DevicesMachine>,
+    machine: &WiredDevicesMachine,
     view: &Rc<custody::CustodyView>,
     gesture: custody::CustodyGesture,
 ) {
@@ -511,7 +525,7 @@ fn run_custody_gesture(
         session,
     };
     let ctx = Rc::clone(ctx);
-    let machine = Arc::clone(machine);
+    let machine = machine.clone();
     let view = Rc::clone(view);
     let client = Rc::clone(fauna_client);
     async_helper::spawn_with_snapshot(
@@ -551,49 +565,41 @@ pub fn current_refresh_counts() -> Option<(u64, u64, u64)> {
         .map(|m| m.refresh_counts())
 }
 
-/// Wire the fleet-scope removal door (`devices.md` § Removing a Device) — the
-/// shared adapter, unconditional: it reads this process's handle fresh per
-/// call, and refuses the removal while there is none. Called by
-/// [`build_wired_devices_machine`], the one place the seat's machine is wired.
-fn wire_fleet_removal(machine: &DevicesMachine) {
-    machine.set_fleet_removal(Arc::new(
-        fauna_client_account_runtime::fleet_removal::RuntimeFleetRemoval::new(
-            crate::account_runtime::handle,
+/// The page machine's GTK-free sources that need the `FaunaClient`. Takes the
+/// [`WiredDevicesMachine`], so a builder that swapped in a plain machine does
+/// not compile.
+fn wire_page_sources(machine: &WiredDevicesMachine, fauna_client: &Rc<FaunaClient>) {
+    // Wire label custody (path-sealing S3) so the conflict list renders sealed
+    // paths (`file-sync.md` § Sealed names & paths) — the same resolver +
+    // owner key the Media page's byte download already uses (`client.rs`'s
+    // own `label_custody` doc comment: a second resolver here could drift).
+    machine.set_label_custody(fauna_client.label_custody());
+    // Wire the foreign-set (cross-nest) list source (Phase 2 client read-side):
+    // sets shared from ANOTHER nest have no row in the own nest's list, so the
+    // machine unions in the member's own `fauna.state.folder-keys` records (written at
+    // share-accept). Best-effort — an unparsable secret just leaves foreign
+    // rows unlisted (same fail-safe posture as the join-filter above).
+    // Both sources take an owned `ActorKeypair`, which is deliberately NOT
+    // `Clone` (it holds secret material), so each is derived from the secret hex
+    // in its own arm rather than one derivation being handed round.
+    match fauna_core::identity::ActorKeypair::from_secret_hex(fauna_client.secret_hex()) {
+        Ok(_) => machine.set_foreign_sets_source(Arc::new(
+            fauna_devices_machine::CustodyForeignSetsSource::new(
+                crate::account_runtime::folder_key_store(),
+            ),
+        )),
+        Err(e) => tracing::warn!("foreign-set list source not wired (bad secret): {e}"),
+    }
+    // Followed public folders (`ui/folders.md` § Following a public folder): a
+    // follow lives entirely in the account's own `fauna.state.follows` rows
+    // (the home nest keeps zero follower state), read through the account
+    // store; while the store is not up the section keeps its last rows.
+    machine.set_followed_folders_source(Arc::new(
+        fauna_devices_machine::StoreFollowedFoldersSource::new(
+            Arc::clone(fauna_client.nest_rpc()),
+            crate::account_runtime::follows_seam(),
         ),
     ));
-    // This device's own peer-participation door (`p2p.md` § Per-device
-    // participation), the same shared impl over the same handle read; when
-    // the co-located agent holds the engine, the switch asks it for its pass
-    // through the seat's holder nudge (`crate::sync_agent` publishes it).
-    machine.set_p2p_participation_door(Arc::new(
-        fauna_client_account_runtime::p2p_participation::RuntimeP2pParticipation::new(
-            crate::account_runtime::handle,
-        )
-        .with_holder_nudge(
-            fauna_client_account_runtime::p2p_participation::EngineHolderNudgeSlot::seat(),
-        ),
-    ));
-}
-
-/// Build the page machine and wire everything that needs no GTK context or
-/// `FaunaClient`: the member-row join-filter and the fleet-scope doors.
-/// [`build_devices_and_folders_pages`] calls this and a test calls it too, so a
-/// pin on the result reds when the builder stops wiring (the `fauna-ffi`
-/// `build_devices_machine` shape).
-fn build_wired_devices_machine(
-    nest: Arc<fauna_client::NestClient>,
-    custody: Option<Arc<dyn fauna_client_folders::FolderKeyStore>>,
-    observer: Arc<dyn DevicesObserver>,
-) -> Arc<DevicesMachine> {
-    let machine = build_devices_machine(nest, custody, observer);
-    // Wire the B3 member-row join-filter: the centralized
-    // `DevicesMachine` filter delegates to this per-app `MlsQuery` to drop
-    // shared-with-me rows this client has not MLS-joined. Until wired the machine is
-    // fail-safe (drops all member rows), so this MUST precede the first refresh for a
-    // joined shared set to render.
-    machine.set_mls_query(Arc::new(LinuxMlsQuery));
-    wire_fleet_removal(&machine);
-    machine
 }
 
 /// Build the **Devices** + **Folders** sub-pages over one shared
@@ -631,37 +637,7 @@ pub fn build_devices_and_folders_pages(
         observer,
     );
     *current_machine_slot().lock().unwrap() = Arc::downgrade(&machine);
-    // Wire label custody (path-sealing S3) so the conflict list renders sealed
-    // paths (`file-sync.md` § Sealed names & paths) — the same resolver +
-    // owner key the Media page's byte download already uses (`client.rs`'s
-    // own `label_custody` doc comment: a second resolver here could drift).
-    machine.set_label_custody(fauna_client.label_custody());
-    // Wire the foreign-set (cross-nest) list source (Phase 2 client read-side):
-    // sets shared from ANOTHER nest have no row in the own nest's list, so the
-    // machine unions in the member's own `fauna.state.folder-keys` records (written at
-    // share-accept). Best-effort — an unparsable secret just leaves foreign
-    // rows unlisted (same fail-safe posture as the join-filter above).
-    // Both sources take an owned `ActorKeypair`, which is deliberately NOT
-    // `Clone` (it holds secret material), so each is derived from the secret hex
-    // in its own arm rather than one derivation being handed round.
-    match fauna_core::identity::ActorKeypair::from_secret_hex(fauna_client.secret_hex()) {
-        Ok(_) => machine.set_foreign_sets_source(Arc::new(
-            fauna_devices_machine::CustodyForeignSetsSource::new(
-                crate::account_runtime::folder_key_store(),
-            ),
-        )),
-        Err(e) => tracing::warn!("foreign-set list source not wired (bad secret): {e}"),
-    }
-    // Followed public folders (`ui/folders.md` § Following a public folder): a
-    // follow lives entirely in the account's own `fauna.state.follows` rows
-    // (the home nest keeps zero follower state), read through the account
-    // store; while the store is not up the section keeps its last rows.
-    machine.set_followed_folders_source(Arc::new(
-        fauna_devices_machine::StoreFollowedFoldersSource::new(
-            Arc::clone(fauna_client.nest_rpc()),
-            crate::account_runtime::follows_seam(),
-        ),
-    ));
+    wire_page_sources(&machine, fauna_client);
 
     // `folder-add-button` → open the embedded wizard. `open_wizard` seeds the
     // wizard's enrollable devices from the machine's own snapshot. Right after
@@ -671,7 +647,7 @@ pub fn build_devices_and_folders_pages(
     // Conflicts, policy). Best-effort: an unreadable record just leaves the
     // wizard un-injected (new set lands on the column default, auto).
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let rt = fauna_client.runtime_handle();
         fshell.folder_add_button.connect_clicked(move |_| {
             machine.open_wizard();
@@ -732,7 +708,7 @@ pub fn build_devices_and_folders_pages(
         custody_error: RefCell::new(None),
     });
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         crate::async_helper::spawn_wake_loop(rx, move || {
@@ -745,7 +721,7 @@ pub fn build_devices_and_folders_pages(
     // device-local map and re-render the folder list so each set's nested binding
     // rows repaint without the native folder picker.
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         location_binding::register_rerender(Rc::new(move |injected: Vec<LocationBinding>| {
@@ -776,10 +752,10 @@ pub fn build_devices_and_folders_pages(
     // settings stack's initial visible child (Status is), so this never fires
     // spuriously at construction — only on a real nav to Devices / Folders.
     for page in [&devices_page, &folders_page] {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let handle = fauna_client.runtime_handle();
         page.connect_map(move |_| {
-            let machine = Arc::clone(&machine);
+            let machine = machine.clone();
             handle.spawn(async move { machine.refresh().await });
         });
     }
@@ -810,7 +786,7 @@ pub fn build_devices_and_folders_pages(
             // cycle outliving the page.
             let weak = Rc::downgrade(&view);
             let ctx = Rc::clone(&ctx);
-            let machine = Arc::clone(&machine);
+            let machine = machine.clone();
             let fauna_client = Rc::clone(fauna_client);
             view.set_sink(Rc::new(move |gesture| {
                 if let Some(view) = weak.upgrade() {
@@ -878,12 +854,12 @@ pub fn build_devices_and_folders_pages(
     // row) for nothing — which is also what makes it safe for the store-change
     // notice to re-drive while the page is open (a level, not an event).
     let folders_serve_refresh: NavHook = {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         Rc::new(move || {
             let ctx = Rc::clone(&ctx);
-            let machine = Arc::clone(&machine);
+            let machine = machine.clone();
             let fauna_client = Rc::clone(&fauna_client);
             let query = fauna_client.can_serve_webdav();
             async_helper::spawn_with_snapshot(
@@ -930,12 +906,12 @@ pub fn build_devices_and_folders_pages(
     // exactly the box the badge is wrong on. Re-renders only when the answer
     // changed, so a nav doesn't rebuild the list for nothing.
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         devices_nav_hooks.borrow_mut().push(Rc::new(move || {
             let ctx = Rc::clone(&ctx);
-            let machine = Arc::clone(&machine);
+            let machine = machine.clone();
             let store = crate::account_runtime::handle();
             async_helper::spawn_with_snapshot(
                 &fauna_client.runtime_handle(),
@@ -992,7 +968,7 @@ pub fn build_devices_and_folders_pages(
     }
     // A fresh visit never opens on a pending member-removal confirm.
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         devices_nav_hooks.borrow_mut().push(Rc::new(move || {
             member_view.disarm(&machine);
         }));
@@ -1018,12 +994,12 @@ pub fn build_devices_and_folders_pages(
     // actually changed so a nav doesn't rebuild the list (collapsing any expanded
     // row) for nothing (`folders.md` § Web paywall).
     {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         folders_page.connect_map(move |_| {
             let ctx = Rc::clone(&ctx);
-            let machine = Arc::clone(&machine);
+            let machine = machine.clone();
             let fauna_client = Rc::clone(&fauna_client);
             let query = fauna_client.fetch_own_tier_names();
             async_helper::spawn_with_snapshot(
@@ -1066,7 +1042,7 @@ pub fn build_devices_and_folders_pages(
     // nothing.
     #[cfg(feature = "p2p-share")]
     let repaint_group_scopes: RepaintGroupScopes = {
-        let machine = Arc::clone(&machine);
+        let machine = machine.clone();
         let ctx = Rc::clone(&ctx);
         let fauna_client = Rc::clone(fauna_client);
         Rc::new(move |scopes: &[crate::offline_share::GroupScopeView]| {
@@ -1145,7 +1121,7 @@ pub fn build_devices_and_folders_pages(
         offline_share_state,
         #[cfg(feature = "p2p-share")]
         repaint_group_scopes,
-        devices_machine: Arc::clone(&machine),
+        devices_machine: machine,
         devices_nav_refresh,
         folders_serve_refresh,
     };
@@ -1182,7 +1158,7 @@ fn lease_this_row(ctx: &RenderCtx) -> Option<String> {
 /// Re-render both sub-pages off a fresh `DevicesSnapshot`, and drive the wizard
 /// dialog lifecycle (the wizard lives on the Folders sub-page).
 fn render_pages(
-    machine: &Arc<DevicesMachine>,
+    machine: &WiredDevicesMachine,
     ctx: &Rc<RenderCtx>,
     fauna_client: &Rc<FaunaClient>,
 ) {
@@ -1242,7 +1218,7 @@ fn render_pages(
                 view.dismiss();
             }
             machine.close_wizard();
-            let machine = Arc::clone(machine);
+            let machine = machine.clone();
             async_helper::run_on_tokio(async move { machine.refresh().await }, |_| {});
         }
         Some(_) => {
@@ -1290,7 +1266,9 @@ mod tests {
     /// Mutation: drop the `wire_fleet_removal(&machine)` call in
     /// `build_wired_devices_machine` → `fleet_removal()` answers `None` → this
     /// pin reds (`cargo test -p fauna-linux --bins`). The page builder has no
-    /// wiring call of its own to drop: it takes its machine from that fn.
+    /// wiring call of its own to drop: its wiring and render loop take the
+    /// `WiredDevicesMachine` only that fn mints (`wired.rs`), so a builder that
+    /// swaps in a plain machine does not compile.
     #[tokio::test]
     async fn the_page_machine_carries_the_fleet_removal_door() {
         let machine = build_wired_devices_machine(
@@ -1506,6 +1484,54 @@ mod tests {
         });
     }
 
+    /// A NEST-form hold carries the owner's restore address on its card — the
+    /// accept's URL verbatim; a device-form hold carries none (`devices.md`
+    /// § Custody facet, `custody-held-restore-address`; tui's twin asserts
+    /// the same in `succession_custody_tests`).
+    #[test]
+    fn a_nest_form_hold_shows_the_owners_restore_address() {
+        use fauna_client_capabilities::view_model::{CustodyFacetSnapshot, HeldCustodyView};
+        use fauna_core::custody_grant::CustodyScopeSet;
+
+        let held = |url: Option<&str>| HeldCustodyView {
+            grant_id: vec![0x11; 16],
+            owner: [0xA0; 32],
+            scopes: Some(CustodyScopeSet::Account),
+            retained_bytes_cap: 4_096,
+            receipt: None,
+            stopped: false,
+            custodian_nest_url: url.map(str::to_string),
+        };
+        crate::testid::run_on_gtk_thread(move || {
+            let shell = build_devices_shell(None);
+            let facet = CustodyFacetSnapshot {
+                rows: Vec::new(),
+                held: vec![held(Some("https://my-nest.example")), held(None)],
+                offers: Vec::new(),
+            };
+            shell.custody.paint(&facet, false);
+            let names = widget_names(&shell.content);
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|n| *n == "custody-held-restore-address")
+                    .count(),
+                1,
+                "only the NEST-form hold renders it"
+            );
+            let text =
+                crate::testid::find_by_test_id(&shell.content, "custody-held-restore-address")
+                    .unwrap()
+                    .downcast::<gtk::Label>()
+                    .unwrap()
+                    .label();
+            assert_eq!(
+                text,
+                strings::devices::custody_held_restore_address("https://my-nest.example")
+            );
+        });
+    }
+
     /// Pieces 3 and the mint flow render every control LIVE (`devices.md`
     /// § Custody facet — never a card with dead controls) and each control
     /// raises its gesture carrying the row's GRANT ID: the budget input commits
@@ -1541,6 +1567,7 @@ mod tests {
                 retained_bytes_cap: 8 * 1024 * 1024 * 1024,
                 receipt: None,
                 stopped,
+                custodian_nest_url: None,
             }],
             offers: vec![CustodyOfferView {
                 grant_id: vec![0x22; 16],

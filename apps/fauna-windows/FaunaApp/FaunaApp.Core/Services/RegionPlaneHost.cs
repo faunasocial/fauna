@@ -14,7 +14,7 @@ namespace FaunaApp.Core.Services;
 /// the transparency surface</i>) — a paint of the shared <c>FfiRegionPlane</c>
 /// (<c>libs/fauna-ffi/src/region.rs</c>), the one face the four UniFFI apps drive.
 /// apple's <c>FaunaKit/Core/RegionStore.swift</c>, linux's
-/// <c>apps/fauna-linux/src/region.rs</c> and web's <c>$lib/region.svelte.ts</c> are
+/// <c>apps/fauna-linux/src/region.rs</c> and web's <c>#lib/region.svelte.ts</c> are
 /// the sibling legs.
 ///
 /// <para>Everything that decides — verify, fold, persist, the refresh cadence, the

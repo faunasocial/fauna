@@ -41,6 +41,15 @@ pub fn fauna_ffi_build_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// The organisation's terms URL ([`fauna_core::TERMS_URL`]) — the target of
+/// Settings' `settings-terms-link` and the onboarding notice's
+/// `onboarding-terms-link` on the apps that open it in the browser, so no app
+/// spells the URL (`terms-and-content-guidelines.md` § The decisions, item 4 (d)).
+#[uniffi::export]
+pub fn fauna_ffi_terms_url() -> String {
+    fauna_core::TERMS_URL.to_string()
+}
+
 /// The release feed's production origin
 /// ([`fauna_core::version::GITHUB_API_ORIGIN`]) — what [`check_for_newer_release`]
 /// and [`look_at_sign_in`] are called with outside e2e automation, so no app
@@ -142,7 +151,7 @@ pub async fn look_at_sign_in(feed_origin: String, user_agent: String) -> Option<
 mod tests {
     use super::{
         NewerRelease, NewerReleaseCheck, check_for_newer_release, fauna_ffi_build_version,
-        is_newer, look_at_sign_in, release_feed_origin,
+        fauna_ffi_terms_url, is_newer, look_at_sign_in, release_feed_origin,
     };
 
     #[test]
@@ -235,6 +244,11 @@ mod tests {
     #[test]
     fn build_version_matches_the_workspace_version() {
         assert_eq!(fauna_ffi_build_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn terms_url_is_the_shared_constant() {
+        assert_eq!(fauna_ffi_terms_url(), fauna_core::TERMS_URL);
     }
 
     #[test]

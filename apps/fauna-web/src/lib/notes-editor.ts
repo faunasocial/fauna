@@ -12,7 +12,7 @@
 // editor already uses, plus the Notes block model:
 //
 //   - **Structural chrome** (block-level) is drawn from the shared `parseNote` block model
-//     (`$lib/notes`) — each buffer line's `kind`/`depth`/`checked`/`level` decides a line class
+//     (`#lib/notes`) — each buffer line's `kind`/`depth`/`checked`/`level` decides a line class
 //     (heading size / quote bar / list / code) + a replace-widget over the structural prefix
 //     (bullet glyph / number / checkbox). The prefix (`- `, `# `, `> `, `1. `, `- [ ] `,
 //     indentation) is HIDDEN — it is never editable source, it is chrome (spec § linchpin).

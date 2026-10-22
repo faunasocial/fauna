@@ -56,6 +56,10 @@ env:
   VERIFY_HOST: ${{ github.repository == 'faunasocial/fauna' && 'test.fauna.build' || 'dev.fauna.build' }}
   # The front door: a cloud token that can list it must never be used here.
   REFUSE: fauna.social
+  # The acceptance box: CI holds no token that reaches it, and a cloud token
+  # that can list it would lift its firewall (deployment-threat-model.md
+  # § Concern 2, path 5).
+  REFUSE_ACCEPTANCE: fauna.build
   # The leg this run's jobs are on — the same condition every `runs-on` below
   # spells out (runs-on cannot read env), as in build-nest-image.yml.
   RUNNER_LEG: ${{ (github.repository_owner == 'faunasocial' && github.event.repository.private && inputs.runner != 'hosted') && 'self-hosted' || 'hosted' }}
@@ -105,7 +109,9 @@ jobs:
       - name: Read the artifact's build id
         id: build_id
         run: |
-          docker pull "$IMAGE:$SHA_TAG"
+          # The build id is the same on every arch, and the private repository
+          # builds amd64 alone while its self-hosted runner is arm64.
+          docker pull --platform linux/amd64 "$IMAGE:$SHA_TAG"
           build_id=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
             "$IMAGE:$SHA_TAG" | sed -n 's/^FAUNA_BUILD_ID=//p' | head -1)
           if [ -z "$build_id" ] || [ "$build_id" = "dev" ]; then
@@ -207,11 +213,11 @@ jobs:
       # ports.
       - name: Sweep admissions left by earlier runs
         if: env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py sweep "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py sweep "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       - name: Admit this run
         if: env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py admit "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py admit "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       # --expect-build-id binds the gate to the artifact being re-staged rather
       # than to its commit string; empty (a pre-stamp artifact) degrades to
@@ -228,11 +234,11 @@ jobs:
 
       - name: Revoke this run
         if: always() && env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py revoke "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py revoke "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
       - name: Nothing of this run is left open
         if: always() && env.RUNNER_LEG == 'hosted'
-        run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --run-id "$GITHUB_RUN_ID"
+        run: uv run --no-project python scripts/box-firewall-admit.py held "$VERIFY_HOST" --refuse-if-lists "$REFUSE" --refuse-if-lists "$REFUSE_ACCEPTANCE" --run-id "$GITHUB_RUN_ID"
 
   # The release, exactly as in build-nest-image.yml: the verified digest copied
   # to :latest, the mirrors with it, each one's stage-time signature verified

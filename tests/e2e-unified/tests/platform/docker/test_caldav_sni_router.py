@@ -79,6 +79,7 @@ from .helpers import (
     get_repo_root,
     register_primary_domain,
     remove_container,
+    scanner_wired_network,
     sni_https_request,
     start_container_with_ports,
     wait_for_health,
@@ -120,32 +121,34 @@ def serving_nest(docker_image):
     bring-up. They don't interfere: the SNI-split + enrollment-refusal tests
     never authenticate against CalDAV, and the real-IP lockout test keys its
     per-IP lockout on a throwaway username (`probe@…`) none of the others use."""
-    http_port, router_port, *mail = find_free_ports(6)
+    http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
     name = f"fauna-caldav-router-{http_port}"
-    start_container_with_ports(
-        name,
-        {3000: http_port, 443: router_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
-    )
-    try:
-        wait_for_health(http_port, name)
-        admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
-        # CalDAV + cert provisioning need a committed storage mode; plaintext is
-        # the "I trust the box" deploy default.
-        nest = {
-            "name": name,
-            "port": http_port,
-            "router_port": router_port,
-            "url": f"https://127.0.0.1:{http_port}",
-            "admin": admin,
-            "mail_ports": mail_ports,
-        }
-        register_primary_domain(nest, DOMAIN)
-        bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
-        yield nest
-    finally:
-        remove_container(name)
+    with scanner_wired_network("fauna-caldav-router") as (network, scan_env):
+        start_container_with_ports(
+            name,
+            {443: http_port, **mail_ports},
+            env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000", **scan_env},
+            network=network,
+        )
+        try:
+            wait_for_health(http_port, name)
+            admin = claim_admin_api(http_port, CLAIM_CODE, handle="admin")
+            # CalDAV + cert provisioning need a committed storage mode; plaintext is
+            # the "I trust the box" deploy default.
+            nest = {
+                "name": name,
+                "port": http_port,
+                "router_port": http_port,
+                "url": f"https://127.0.0.1:{http_port}",
+                "admin": admin,
+                "mail_ports": mail_ports,
+            }
+            register_primary_domain(nest, DOMAIN)
+            bring_bridges_to_serving(name, nest, mail_ports, DOMAIN)
+            yield nest
+        finally:
+            remove_container(name)
 
 
 # ── Test ──────────────────────────────────────────────────────────────

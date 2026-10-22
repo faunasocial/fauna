@@ -4,9 +4,9 @@
 //! The agent persists its provisioned [`SyncCapability`] (BackupKey +
 //! actor_id + bearer + the renewal device signing key) in the per-user
 //! platform secure store via `fauna-credential-store`, namespace
-//! **`fauna-sync-agent`**: macOS login Keychain, linux Secret Service (with
-//! the `0600`-file backend for e2e / the sanctioned headless case), windows
-//! Credential Manager. This is what lets the agent run **app-dead**: at boot
+//! **`fauna-sync-agent`** ([`fauna_ipc::sync::CRED_NAMESPACE`]): macOS login Keychain, linux Secret Service, windows
+//! Credential Manager — or, where no usable OS store answers (a headless box),
+//! a `0600` file under the agent's state base ([`production_store`]). This is what lets the agent run **app-dead**: at boot
 //! it reloads the capability with no login-time push, and the renewal loop
 //! (`crate::renewal`) keeps the bearer fresh from the persisted renewal key.
 //!
@@ -25,27 +25,38 @@ use zeroize::{Zeroize, Zeroizing};
 
 use fauna_ipc::sync::{SignedOutMarker, SyncCapability, capability_is_signed_out};
 
-/// The credential-store namespace (`application` attribute / Keychain service).
-/// Also the namespace `tui.md` § Credential storage documents for this agent.
-///
-/// Re-exported from [`fauna_ipc::sync`], which owns it: the app writes this
-/// namespace too (the sign-out marker), so it is app↔agent contract, not an
-/// agent-private detail.
-pub use fauna_ipc::sync::CRED_NAMESPACE;
-
 /// Account key of the persisted capability record.
 pub use fauna_ipc::sync::CAPABILITY_KEY;
 
-/// The production per-user store, honoring the shared env contract
-/// (`FAUNA_KEYRING_APP` namespace override, `FAUNA_E2E_CREDENTIAL_DIR` file
-/// backend) so e2e runs never touch a developer's real keyring. Built **once**
-/// by `run_agent` and injected into `SyncServiceState.credentials` — unit
-/// tests construct state with `None` and never reach the OS store (the
+/// The production per-user store over `state_base` (the agent's unscoped
+/// `SyncPaths::flat_base_dir`), resolved by the shared
+/// [`fauna_client_sync::agent::agent_credential_store`] the app's sign-out
+/// marker uses too: the `FAUNA_E2E_CREDENTIAL_DIR` file when e2e sets it, else
+/// a `0600` file already holding the namespace, else a usable OS store, else
+/// that `0600` file (`sync-agent-credentials.md` § Credential model — the
+/// headless arm: an agent under a lingering systemd unit on an SSH-only box
+/// has no keyring and no one to unlock one, and `SecretStore::set` reports
+/// nothing, so a keyring-only store lost the capability silently).
+///
+/// The file arm is declared once, in the agent's log
+/// ([`UNATTENDED_CUSTODY_LOG`]). Built **once** by `run_agent` and injected
+/// into `SyncServiceState.credentials` — unit tests construct state with
+/// `None` or an explicit file store and never reach the OS store (the
 /// launch-isolation rule of testing.md § point 10, applied to the agent's own
 /// tests).
-pub fn production_store() -> fauna_credential_store::CredentialStore {
-    fauna_credential_store::CredentialStore::new(CRED_NAMESPACE)
+pub fn production_store(state_base: std::path::PathBuf) -> fauna_credential_store::CredentialStore {
+    let store = fauna_client_sync::agent::agent_credential_store(state_base);
+    if let Some(cause) = store.unattended_arm_cause() {
+        tracing::warn!(?cause, "{UNATTENDED_CUSTODY_LOG}");
+    }
+    store
 }
+
+/// The agent's declaration of the headless arm — its log is the agent's one
+/// surface for it (`sync-agent-credentials.md` § Credential model).
+pub const UNATTENDED_CUSTODY_LOG: &str = "no usable OS credential store: the sync capability \
+     (BackupKey, bearer, renewal key) rests in a 0600 file under the agent's state dir, \
+     protected by this account's file permissions alone";
 
 /// Persist the capability (called on provision and on every bearer refresh —
 /// the persisted record must carry the *current* bearer, or a reboot resumes
@@ -226,6 +237,54 @@ mod tests {
             "fauna-sync-agent-test",
             dir.to_path_buf(),
         )
+    }
+
+    /// **The headless arm keeps the capability across a re-open.** No
+    /// `FAUNA_E2E_CREDENTIAL_DIR` is set, and a test build's keyring probe never
+    /// answers usable, so [`production_store`] resolves exactly as on a box
+    /// with no Secret Service: the `0600` file under the state base. Before
+    /// the shared unattended arm the same box resolved a keyring that was not
+    /// there and the write vanished — the readback after a fresh resolution
+    /// is the assertion, since `SecretStore::set` reports nothing.
+    #[test]
+    fn a_headless_box_keeps_the_capability_across_a_reopen() {
+        use fauna_credential_store::HeadlessArmCause;
+        assert!(
+            std::env::var_os("FAUNA_E2E_CREDENTIAL_DIR").is_none(),
+            "this test pins the production resolution: the e2e dir must be unset"
+        );
+        let base = tempfile::tempdir().expect("tempdir");
+
+        let store = production_store(base.path().to_path_buf());
+        assert!(
+            store.unattended_arm_cause().is_some(),
+            "no usable OS store → the unattended file arm"
+        );
+        persist_capability(&store, &cap());
+        drop(store);
+
+        let reopened = production_store(base.path().to_path_buf());
+        assert_eq!(
+            reopened.unattended_arm_cause(),
+            Some(HeadlessArmCause::ExistingFile),
+            "the restart finds the file and keeps it, without probing again"
+        );
+        let loaded = load_capability(&reopened).expect("the capability survives the re-open");
+        assert_eq!(loaded.bearer.token, "tok-1");
+        assert_eq!(loaded.backup_key_array(), Some([1u8; 32]));
+
+        // The namespace is [`fauna_ipc::sync::CRED_NAMESPACE`], app↔agent
+        // contract (the app writes its sign-out marker there too).
+        let file =
+            fauna_credential_store::cred_file_path(base.path(), fauna_ipc::sync::CRED_NAMESPACE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the file is this account's alone");
+        }
+        #[cfg(not(unix))]
+        assert!(file.exists());
     }
 
     fn cap() -> SyncCapability {

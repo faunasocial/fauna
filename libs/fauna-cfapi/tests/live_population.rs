@@ -195,8 +195,8 @@ fn an_empty_placeholder_set_still_completes_the_operation() {
 
 /// **Registration alone makes the root on-demand-populatable** — the fact that resolves the
 /// contradiction which stalled this track: the running product's root carried placeholder
-/// attributes even though the service calls neither `convert_to_placeholder` nor
-/// `create_placeholder` anywhere. `CfRegisterSyncRoot` is what does it, via
+/// attributes even though the service neither converted the root nor called
+/// `create_placeholder` on it. `CfRegisterSyncRoot` is what does it, via
 /// `CF_POPULATION_POLICY_FULL` (the opt-*out* being
 /// `CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT`, which we don't pass).
 ///

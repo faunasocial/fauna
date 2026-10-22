@@ -67,7 +67,7 @@ pytestmark = pytest.mark.tier_3
 #: it, and a nest apex on the scrub target would collapse against the custom
 #: domain below in the public tree only (`web_content::domain::tests`' ⚠ note).
 NEST_DOMAIN = "sub.example"
-INFO_PAGE_MARKER = "Fauna Nest API"
+INFO_PAGE_MARKER = "<h1>Fauna nest</h1>"
 CUSTOM_DOMAIN = "carol-writes.example.net"
 
 

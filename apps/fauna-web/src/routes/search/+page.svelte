@@ -16,14 +16,14 @@
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { goto } from '$app/navigation';
-  import { identity } from '$lib/store';
-  import { getSearchManager, searchSnapshot, refreshSearch, setPendingSearchNav, type PendingSearchNav } from '$lib/search';
-  import { ensureWasm, searchTypeFilterOptions, searchTypeFilterLabel } from '$lib/wasm';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { relativeTime } from '$lib/value-format';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  import { identity } from '#lib/store';
+  import { getSearchManager, searchSnapshot, refreshSearch, setPendingSearchNav, type PendingSearchNav } from '#lib/search';
+  import { ensureWasm, searchTypeFilterOptions, searchTypeFilterLabel } from '#lib/wasm';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { relativeTime } from '#lib/value-format';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   const TYPE_FILTER_ALL = 'all';
   // Read after `ensureWasm()`: the shell renders this page before the core
@@ -122,7 +122,7 @@
    *  destination"). Maps a row's raw wasm-serialized `SearchNav` (externally
    *  tagged JSON: `{"Post": {"post_id": "..."}}` etc. — `serde`'s default enum
    *  representation, `libs/fauna-wasm/src/search.rs`'s `json_compatible`
-   *  serializer) onto the target shape web can act on (`$lib/search`'s
+   *  serializer) onto the target shape web can act on (`#lib/search`'s
    *  `PendingSearchNav`). `Contact`/`File` carry the row's RAW id — the
    *  id-space resolve (`uid_hash` → `card_id`; `(folder_id, path_hash)` →
    *  the Media row) happens on the destination page, not here (same split
@@ -157,7 +157,7 @@
   }
 
   /** Stash the target and navigate — the destination page's own `onMount`
-   *  consumes it (`$lib/search`'s `consumePendingSearchNav`). */
+   *  consumes it (`#lib/search`'s `consumePendingSearchNav`). */
   function openResult(target: PendingSearchNav): void {
     setPendingSearchNav(target);
     switch (target.kind) {

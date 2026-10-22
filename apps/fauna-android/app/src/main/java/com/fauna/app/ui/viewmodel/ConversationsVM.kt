@@ -58,15 +58,6 @@ class ConversationsVM @Inject constructor(
             val newest = snapshot?.threads?.maxOfOrNull { it.lastActivityMs } ?: return@onEach
             runCatching { api.backupAuditObserve(newest) }
         }.launchIn(viewModelScope)
-        // The store-change notice ([ApiClient.storeChangedTick]): an open
-        // conversation's muted-word list is a store read, so a word added on
-        // another device collapses its bubbles with no re-open. Only once a
-        // detail has mounted the list — nothing else here reads it.
-        viewModelScope.launch {
-            api.storeChangedTick.collect {
-                if (mutedKeywordsMounted) readMutedKeywords()
-            }
-        }
         // The aftermath's raises have settled: re-read the review roster the
         // chip pair reads (`succession-aftermath.md` § Propagation), but only
         // once a detail has mounted it — the same gate as the muted words.
@@ -157,31 +148,19 @@ class ConversationsVM @Inject constructor(
 
     /** The user's muted-word list (moderation.md § Muted keywords), for the
      *  conversation-detail collapse render. The at-render match is the shared
-     *  `matchesMutedKeywords`; this is the client-held list it matches against, refreshed on
-     *  detail mount so Settings edits reflect on the next open. A *hide/collapse* control —
-     *  never routed through the LocalDetectionStore / moderation queue. */
-    val mutedKeywords =
-        kotlinx.coroutines.flow.MutableStateFlow<List<uniffi.fauna_core.MutedKeyword>>(emptyList())
+     *  `matchesMutedKeywords`; this is the process-held list it matches against
+     *  ([ApiClient.mutedWords] — the one copy the notifications page and the knock
+     *  toast read too), re-read on every store-change notice. A *hide/collapse*
+     *  control — never routed through the LocalDetectionStore / moderation queue. */
+    val mutedKeywords: StateFlow<List<uniffi.fauna_core.MutedKeyword>>
+        get() = api.mutedWords.words
 
-    /** Load the muted-word list (best-effort; empty on failure — the collapse just no-ops).
-     *  Also re-pulls the content-policy inputs (guardian floor + own spam thresholds) so a
+    /** Refresh the muted-word list (best-effort; a failed read keeps it). Also
+     *  re-pulls the content-policy inputs (guardian floor + own spam thresholds) so a
      *  guardian's policy change reaches the conversation render on the next detail open. */
     fun loadMutedKeywords() {
         contentPolicyStore.refresh()
-        mutedKeywordsMounted = true
-        readMutedKeywords()
-    }
-
-    /** Whether a conversation detail has loaded [mutedKeywords] — the gate on the
-     *  store-change notice's re-read. */
-    private var mutedKeywordsMounted = false
-
-    /** The muted-word read alone. A failed read keeps the list; an equal answer
-     *  publishes nothing ([mutedKeywords] is a StateFlow). */
-    private fun readMutedKeywords() {
-        viewModelScope.launch {
-            runCatching { api.mutedKeywordsList().keywords }.getOrNull()?.let { mutedKeywords.value = it }
-        }
+        api.mutedWords.refresh()
     }
 
     /** "Mark as spam" on a received conversation message — the live `Insert` consumer

@@ -47,6 +47,16 @@ public struct BackupDestinationsView: View {
             if vm.reclaiming {
                 reclaimConfirm
             }
+            if vm.recoverConfirmingId != nil {
+                recoverConfirm
+            }
+            // `backup-audit-recover-result` — the running line, then the shared
+            // result lines; absent until a first recovery runs.
+            if let result = vm.recoverResultText {
+                automationText(Ids.backupAuditRecoverResult, result)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if vm.reseedConfirming {
                 reseedConfirm
             }
@@ -66,6 +76,7 @@ public struct BackupDestinationsView: View {
             vm.configure(api: client.api, deviceId: client.deviceId, custodianStore: client)
             await vm.hydrate()
         }
+        .onStoreChange { await vm.resyncStore() }
     }
 
     // MARK: - Header (title + description + always-present add button)
@@ -103,19 +114,83 @@ public struct BackupDestinationsView: View {
     /// can carry several owner-side reasons (`alertReasons`, the fifth
     /// reason beside a standing verdict) and a self-reported one, and
     /// `ForEach`s over the same id would collide.
+    ///
+    /// A fifth-reason banner whose destination is a **nest** that the shared
+    /// `recover_offered` answer names carries `backup-audit-recover-button`
+    /// inside itself (`backup-audit-alert[i]` scope). This device's own
+    /// custodian row gets none yet — its confirm would run the recovery from
+    /// this device's own store, which apple does not run until
+    /// its store leg lands.
     @ViewBuilder
     private var auditAlerts: some View {
-        let ownerSide = vm.destinations.flatMap { vm.alertTexts(for: $0) }
-        let texts = ownerSide + vm.selfReportedAlertTexts()
-        if !texts.isEmpty {
+        let banners = vm.auditBanners()
+        if !banners.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(texts.enumerated()), id: \.offset) { _, text in
-                    automationText(Ids.backupAuditAlert, text)
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                ForEach(Array(banners.enumerated()), id: \.offset) { index, banner in
+                    auditBanner(banner, index: index)
                 }
             }
         }
+    }
+
+    /// One banner: the container IS `backup-audit-alert` (its text is the
+    /// container's automation value), so the recover button can sit inside it
+    /// for the scoped read. `.automationScope` is outermost so the container's
+    /// own registration records `(backup-audit-alert, index)` as its path.
+    private func auditBanner(_ banner: BackupDestinationsVM.AuditBanner, index: Int) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(banner.text)
+                .font(.caption)
+                .foregroundStyle(.red)
+            if let destinationId = banner.recoverDestinationId {
+                Button(L.backups.backupAuditRecoverButton) {
+                    vm.armRecover(destinationId: destinationId)
+                }
+                .font(.caption)
+                .disabled(vm.recoverRunning)
+                .accessibilityIdentifier(Ids.backupAuditRecoverButton)
+                .automationActivate(
+                    Ids.backupAuditRecoverButton, isEnabled: { !vm.recoverRunning }
+                ) {
+                    vm.armRecover(destinationId: destinationId)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.backupAuditAlert)
+        .automationValue(Ids.backupAuditAlert, text: { banner.text })
+        .automationScope(Ids.backupAuditAlert, index: index)
+    }
+
+    /// `backup-audit-recover-confirm-modal` — a plain confirm in the re-seed
+    /// gesture's shape: nothing is deleted on either side, and a re-run
+    /// recovers nothing twice.
+    private var recoverConfirm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L.backups.backupRecoverConfirmTitle)
+                .font(.headline)
+            Text(L.backups.backupRecoverConfirmBody)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(L.backups.backupRecoverCancelButton) { vm.cancelRecover() }
+                    .accessibilityIdentifier(Ids.backupAuditRecoverCancelButton)
+                    .automationActivate(Ids.backupAuditRecoverCancelButton) { vm.cancelRecover() }
+                Button(L.backups.backupRecoverConfirmButton) {
+                    Task { await vm.confirmRecover() }
+                }
+                .accessibilityIdentifier(Ids.backupAuditRecoverConfirmButton)
+                .automationActivate(Ids.backupAuditRecoverConfirmButton) {
+                    Task { await vm.confirmRecover() }
+                }
+            }
+        }
+        .padding(8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.backupAuditRecoverConfirmModal)
+        .automationValue(Ids.backupAuditRecoverConfirmModal,
+                         text: { L.backups.backupRecoverConfirmTitle })
     }
 
     // MARK: - Status-row list

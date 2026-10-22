@@ -778,6 +778,13 @@ pub struct SnapshotPruneSetPolicyRequest {
     /// preview (`ui/backups.md` § Snapshot-list shape, *Prune* ruling).
     #[serde(default)]
     pub dry_run: bool,
+    /// Address the bearer's reserved message-kind row instead of a folder
+    /// (`"mail"` | `"post"` | `"calendar"` | `"card"` | `"conv"`; conv: every
+    /// channel the bearer belongs to, one reply over the set) —
+    /// `ui/backups.md` § Snapshot-list shape → *Kind entries*. When present
+    /// the folder address fields are not read. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_kind: Option<String>,
     /// Hash-first addressing (S5b) — see
     /// [`SnapshotCreateFolderRequest::name_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -828,6 +835,14 @@ pub struct SnapshotCheckRequest {
     pub folder: String,
     #[serde(default)]
     pub verify_content: bool,
+    /// Address the bearer's reserved message-kind row instead of a folder
+    /// (conv: every channel the bearer belongs to). A kind row has no
+    /// `snapshot_files`; the check verifies each active row's pinned content
+    /// segments are on disk — the step a restore runs first
+    /// (`ui/backups.md` § Snapshot-list shape → *Kind entries*). When present
+    /// the folder address fields are not read. Wire-additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_kind: Option<String>,
     /// Hash-first addressing (S5b) — see
     /// `SnapshotCreateFolderRequest::name_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

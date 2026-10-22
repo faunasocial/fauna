@@ -7,26 +7,28 @@
   // (`docs/goal/ui/conversations.md` § Architectural rules).
   //
   // The manager singleton + reactive stores + the SMTP receive poll live in
-  // `$lib/conversations`; this file is pure rendering + event→mutator glue.
+  // `#lib/conversations`; this file is pure rendering + event→mutator glue.
 
   import { onMount, onDestroy } from 'svelte';
-  import { connectionStatus, identity, onActorChange } from '$lib/store';
-  import { registerActorScopedReset } from '$lib/actorScope';
+  import { connectionStatus, identity, onActorChange } from '#lib/store';
+  import { registerActorScopedReset } from '#lib/actorScope';
   import {
     ensureWasm,
     legalTakedownTombstone,
+    adminBlockNotice,
     matchesMutedKeywords,
     backupAuditObserve,
-  } from '$lib/wasm';
-  import { mutedKeywordsList, type MutedKeyword } from '$lib/rpc';
-  import { contentRender, hydrateContentPolicy } from '$lib/contentPolicy.svelte';
-  import { registerRegionBlockCounter } from '$lib/region.svelte';
-  import RegionPlaceholder from '$lib/components/RegionPlaceholder.svelte';
-  import ReportHost from '$lib/components/ReportHost.svelte';
-  import { reportMessageTarget, type ReportTarget } from '$lib/wasm';
-  import { actorHex } from '$lib/hex';
-  import type { ContentRender, RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
-  import { notifyBuffer } from '$lib/familyNotify';
+  } from '#lib/wasm';
+  import { mutedKeywordsList, type MutedKeyword } from '#lib/rpc';
+  import { contentRender, guardianReasonOf, hydrateContentPolicy } from '#lib/contentPolicy.svelte';
+  import { registerRegionBlockCounter } from '#lib/region.svelte';
+  import { registerNestBlockCounter } from '#lib/nestRules.svelte';
+  import RegionPlaceholder from '#lib/components/RegionPlaceholder.svelte';
+  import ReportHost from '#lib/components/ReportHost.svelte';
+  import { reportMessageTarget, type ReportTarget } from '#lib/wasm';
+  import { actorHex } from '#lib/hex';
+  import type { ContentRender, ItemPlaceholder as RegionPlaceholderValue } from '#lib/wasm';
+  import { notifyBuffer } from '#lib/familyNotify';
   import {
     getConversationsManager,
     refreshConversations,
@@ -37,16 +39,19 @@
     engineRoleDenied,
     receiveRailStalled,
     unopenableMailCount,
-  } from '$lib/conversations';
-  import { conversationsDisplayError } from '$lib/conversations-display-error';
-  import { memberReviewRoster, refreshMemberReviewRoster } from '$lib/member-reviews';
-  import { consumePendingSearchNav } from '$lib/search';
-  import { t } from '$lib/i18n/strings';
-  import { documentToHtml, documentHasBlockedRemoteImages, attachmentBlocks, quotedMessageBlock, resolvingLinkPreviewUrls, resolvedLinkPreviews } from '$lib/document';
-  import { nodeUrl } from '$lib/api';
-  import LinkPreviewCard from '$lib/components/LinkPreviewCard.svelte';
-  import ContentLabelBadge from '$lib/components/ContentLabelBadge.svelte';
-  import { typedAddressDisplay, threadLabelDisplay, recipientResolveStatus, nextSortOrder, quicksetEmojis, moreGridEmojis, contentLabelBadgeFor } from '$lib/wasm';
+  } from '#lib/conversations';
+  import { conversationsDisplayError } from '#lib/conversations-display-error';
+  import { memberReviewRoster, refreshMemberReviewRoster } from '#lib/member-reviews';
+  import { consumePendingSearchNav, setPendingSearchNav } from '#lib/search';
+  import { t } from '#lib/i18n/strings';
+  import { adminBlockPaint, withheldCarriesBlockNotice } from '#lib/admin-block-paint';
+  import { setPendingAppeal } from '#lib/pending-appeal';
+  import { goto } from '$app/navigation';
+  import { documentToHtml, documentHasBlockedRemoteImages, attachmentBlocks, quotedMessageBlock, resolvingLinkPreviewUrls, resolvedLinkPreviews } from '#lib/document';
+  import { nodeUrl } from '#lib/api';
+  import LinkPreviewCard from '#lib/components/LinkPreviewCard.svelte';
+  import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
+  import { typedAddressDisplay, warmupDeferredText, threadLabelDisplay, recipientResolveStatus, nextSortOrder, quicksetEmojis, moreGridEmojis, contentLabelBadgeFor } from '#lib/wasm';
   // The room model's render mappings — the wasm twins of the same
   // `fauna_conversations::room` helpers tui and linux call directly and the
   // UniFFI apps reach through their own twins, so this page hand-types no
@@ -69,17 +74,17 @@
     roomInvitationText,
     roomPendingInviteText,
     offlineAffordance,
-  } from '$lib/wasm';
-  import { makeOfflineGate } from '$lib/offline-gate';
-  import RoomLabelerRows from '$lib/components/RoomLabelerRows.svelte';
-  import { resolveLocalized, type LocalizedText } from '$lib/i18n/localized';
-  import { conversationTimestamp, byteSize } from '$lib/value-format';
-  import { sourceGlyphEmoji } from '$lib/source-glyph';
-  import { toArrayBufferView } from '$lib/bytes';
-  import MarkdownToolbar from '$lib/components/MarkdownToolbar.svelte';
-  import MarkdownEditor from '$lib/components/MarkdownEditor.svelte';
+  } from '#lib/wasm';
+  import { makeOfflineGate } from '#lib/offline-gate';
+  import RoomLabelerRows from '#lib/components/RoomLabelerRows.svelte';
+  import { resolveLocalized, resolveLocalizedNested, type LocalizedText } from '#lib/i18n/localized';
+  import { conversationTimestamp, byteSize } from '#lib/value-format';
+  import { sourceGlyphEmoji } from '#lib/source-glyph';
+  import { toArrayBufferView } from '#lib/bytes';
+  import MarkdownToolbar from '#lib/components/MarkdownToolbar.svelte';
+  import MarkdownEditor from '#lib/components/MarkdownEditor.svelte';
   import type { WasmConversationsManager } from '../../../static/fauna_wasm.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   let manager: WasmConversationsManager | null = $state(null);
   let ready = $state(false);
@@ -154,7 +159,7 @@
   // `fauna_conversations::member_review_flags` → `fauna_core::data::is_under_review`,
   // the same projection tui asks per row). Re-derives on a roster change or a
   // snapshot tick (via `detail`), and the roster itself is a cache refreshed at
-  // exactly the two ratified points — see `$lib/member-reviews`.
+  // exactly the two ratified points — see `#lib/member-reviews`.
   let memberMarks = $derived.by<(string | null)[]>(() => {
     const roster = $memberReviewRoster;
     if (!manager || !selectedId || roster.length === 0) return []; // manager-gate-ok: $derived.by read, not a user action
@@ -375,12 +380,12 @@
   // the honest standing "served elsewhere" must never be masked by an unrelated
   // gesture's outcome. Web reaches the same truth by a different route — a
   // refused Web Locks acquire rather than a manager field — because web's losing
-  // tab builds no manager to ask (`$lib/conversations`'s `engineRoleDenied`,
+  // tab builds no manager to ask (`#lib/conversations`'s `engineRoleDenied`,
   // `account-scoping.md` § Concurrent instances → *Web*). Same string as every
   // other app: `t.conversations.errors.served_elsewhere`, which reads correctly
   // for a tab as it does for a native instance.
   let roleRefusal = $derived($engineRoleDenied ? t.conversations.errors.served_elsewhere : null);
-  // A stalled receive pump (`$lib/receive-pump`) — a pass that never finished,
+  // A stalled receive pump (`#lib/receive-pump`) — a pass that never finished,
   // web's shape of a receive loop that died — is the second standing truth, and
   // ranks directly under the role refusal for the same reason: an unrelated
   // gesture's outcome must never mask it (`ui/conversations.md` § Errors & edge
@@ -413,7 +418,7 @@
     }),
   );
 
-  /** Drop this page's actor-scoped caches (`$lib/actorScope`).
+  /** Drop this page's actor-scoped caches (`#lib/actorScope`).
    *
    *  Registered rather than tied to the component lifecycle because an in-app
    *  actor switch is a same-route `goto`, which does NOT remount this component —
@@ -445,7 +450,7 @@
     // construction outcome `account-scoping.md` § The scoping taxonomy bans.
     // `media/+page.svelte` and `+layout.svelte` already register this early;
     // this page is held to the same shape by
-    // `$lib/actor-scope-registration-contract.test.ts`. Nothing below needs
+    // `#lib/actor-scope-registration-contract.test.ts`. Nothing below needs
     // wasm to REGISTER — the handlers await it themselves where they need it.
     identity.init();
 
@@ -472,7 +477,7 @@
         manager = await getConversationsManager();
         refreshConversations();
         // A `SearchNav::Draft`/`SearchNav::Mail` deep-link left by the Search
-        // page (`$lib/search`'s `consumePendingSearchNav`,
+        // page (`#lib/search`'s `consumePendingSearchNav`,
         // `../search/+page.svelte`'s `openResult`) — routed through the SAME
         // local gestures a direct `conversation-item` click / "new
         // conversation" button use, so this is not a second mutation path
@@ -618,7 +623,22 @@
     registerRegionBlockCounter('conversations', () =>
       (detail?.messages ?? []).filter(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (m: any) => !m.deleted && !m.legal_takedown_ref && msgRender(m).placeholder?.verb === 'block',
+        (m: any) => {
+          const p = msgRender(m).placeholder;
+          return !m.deleted && !m.legal_takedown_ref && !!p && 'region' in p && p.verb === 'block';
+        },
+      ).length,
+    ),
+  );
+  // The nest's twin (`nest-block-never-silent`).
+  onMount(() =>
+    registerNestBlockCounter('conversations', () =>
+      (detail?.messages ?? []).filter(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (m: any) => {
+          const p = msgRender(m).placeholder;
+          return !m.deleted && !m.legal_takedown_ref && !!p && 'domain' in p && p.verb === 'block';
+        },
       ).length,
     ),
   );
@@ -776,7 +796,22 @@
     run(async () => {
       manager?.selectThread(id);
       await manager?.refreshListSend(id);
+      // Read each received mail message's scan verdict
+      // (`dm-message-scan-result`; the snapshot notify repaints).
+      await manager?.refreshMessageScanResults(id);
+      // Read the alias rows behind each received mail message's
+      // "Delivered to" tag (`dm-message-delivered-to-alias`).
+      await manager?.refreshDeliveredAliases(id);
+      // Read the account's queue rows each own withheld message's badge
+      // (`dm-message-withheld-badge`) matches.
+      await manager?.refreshWithheldMessages(id);
     });
+  }
+  // The badge's tap: the queue's own appeal on the matched row. The Privacy sub-page
+  // reads the queue and opens the draft once it is loaded (`lib/pending-appeal.ts`).
+  function appealWithheld(contentId: string) {
+    setPendingAppeal(contentId);
+    void goto('/app/settings/privacy');
   }
   function cycleSort() {
     run(() => manager?.setSort(nextSortOrder(snap?.sort)));
@@ -965,6 +1000,77 @@
   // status today): the seed, which rows either control may act on, the
   // at-most-one-staged hand-over rule, the diff and the commit order all live
   // in `fauna_conversations::RoomSettingsDraft` +
+  // ── The community room's search strip (`room-search.md` § The surface) ──
+  //
+  // The strip is VIEW STATE on the detail (`ThreadDetail.room.search`), owned
+  // by the shared manager; this page paints it and runs the three verbs.
+  // Only the field's draft is local, and it goes with the strip. The page
+  // never names a kind, re-sorts a row or branches on the room's class
+  // (`can_search_room` is the manager's derived capability).
+  let roomSearchDraft = $state('');
+  let roomSearch = $derived<any>(detail?.room?.search ?? null); // eslint-disable-line @typescript-eslint/no-explicit-any
+  $effect(() => {
+    void selectedId;
+    roomSearchDraft = '';
+  });
+
+  function toggleRoomSearch() {
+    const id = selectedId;
+    if (!id) return;
+    roomSearchDraft = '';
+    run(() => (roomSearch ? manager?.closeRoomSearch(id) : manager?.openRoomSearch(id)));
+  }
+  function closeRoomSearch() {
+    const id = selectedId;
+    if (!id || !roomSearch) return;
+    roomSearchDraft = '';
+    run(() => manager?.closeRoomSearch(id));
+  }
+  // Enter and the submit button run this one verb. A blank query is dropped by
+  // the manager without a round trip; a refusal lands on `error-message`.
+  function submitRoomSearch() {
+    const id = selectedId;
+    if (!id) return;
+    const query = roomSearchDraft;
+    run(async () => {
+      try {
+        await manager?.roomSearch(id, query);
+      } catch (e) {
+        pageError = t.conversations.unified.error_room_search({
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    });
+  }
+  // A hit opens through its typed `navigation` target: a message hit selects
+  // the message in its stream; a post hit goes through the feed's deep-link
+  // door with the room's recorded home (`resolve_post_from` on the feed page).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function openRoomSearchHit(hit: any) {
+    const nav = hit?.navigation;
+    if (nav?.Message) {
+      const { thread_id, message_id } = nav.Message;
+      run(() => manager?.selectThreadAndMessage(thread_id, message_id));
+    } else if (nav?.Post) {
+      setPendingSearchNav({
+        kind: 'post',
+        postId: nav.Post.post_id,
+        home: nav.Post.home_nest_url ?? null,
+      });
+      void goto('/app/feed');
+    }
+  }
+  // The selected message (`ThreadDetail.selected_message_id`) comes into view
+  // once its bubble paints — a late arrival lights up by itself.
+  $effect(() => {
+    const sel = detail?.selected_message_id;
+    if (!sel || typeof document === 'undefined') return;
+    void detail?.messages;
+    queueMicrotask(() => {
+      document.querySelector('.bubble.selected')?.scrollIntoView?.({ block: 'center' });
+    });
+  });
+
   // `ConversationsManager::apply_room_settings`, reached over the wasm twins.
   // Nothing below re-derives a role rule.
   function openRoomSettings() {
@@ -1069,12 +1175,16 @@
     run(() => manager?.setNewThreadHomeNest(next));
   }
 
-  // The room's standing notice on the thread header, off the two projected
-  // facts (`awaiting_key` wins — decided in shared Rust).
+  // The room's standing notice on the thread header, off the three projected
+  // facts (which one speaks is decided in shared Rust).
   let roomNotice = $derived.by(() => {
     const room = detail?.room;
     if (!room) return null;
-    return roomNoticeFor(!!room.awaiting_key, !!room.moderation_unverified);
+    return roomNoticeFor(
+      !!room.awaiting_key,
+      !!room.moderation_unverified,
+      !!room.bridge_disconnected,
+    );
   });
 
   // The editor's home-nest read, pending invitations and labeler set — each
@@ -1509,6 +1619,14 @@
             {t.conversations.unified.thread_room_settings}
           </button>
         {/if}
+        <!-- Painted AND LIVE iff the manager's derived `can_search_room` (a
+             community-class room whose floor seats this account) — no class
+             branch here (`room-search.md` § The surface). -->
+        {#if detail.capabilities?.can_search_room}
+          <button data-testid={IDS.ROOM_SEARCH_BUTTON} class="hdr-btn" onclick={toggleRoomSearch}>
+            {t.conversations.unified.room_search}
+          </button>
+        {/if}
         {#if detail.capabilities?.supports_rename}
           <button data-testid={IDS.THREAD_RENAME_BUTTON} class="hdr-btn" onclick={openRename}>
             {t.conversations.unified.thread_rename}
@@ -1516,7 +1634,51 @@
         {/if}
       </div>
 
-      <!-- messages stream -->
+      <!-- The room's search strip, between the header and the stream — present
+           only while open (`room-search.md` § The surface). Esc closes it. -->
+      {#if roomSearch}
+        <div class="room-search-strip">
+          <input
+            data-testid={IDS.ROOM_SEARCH_FIELD}
+            type="text"
+            placeholder={t.conversations.unified.room_search_placeholder}
+            bind:value={roomSearchDraft}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') submitRoomSearch();
+              else if (e.key === 'Escape') closeRoomSearch();
+            }}
+          />
+          <button data-testid={IDS.ROOM_SEARCH_SUBMIT_BUTTON} class="hdr-btn" onclick={submitRoomSearch}>
+            {t.conversations.unified.room_search}
+          </button>
+        </div>
+      {/if}
+
+      <!-- messages stream — replaced by the result list while a submitted
+           query stands (Idle = strip open, nothing submitted). Between submit
+           and reply, and after a failure, the result region is blank: no
+           "searching" element, no empty state (convention 14). -->
+      {#if roomSearch && roomSearch.status !== 'Idle'}
+        <div class="messages room-search-results">
+          {#if roomSearch.status === 'Done'}
+            {#if roomSearch.results.length === 0}
+              <p data-testid={IDS.ROOM_SEARCH_NO_RESULTS} class="muted">{t.conversations.unified.room_search_no_results}</p>
+            {/if}
+            {#each roomSearch.results as hit, hi (hi)}
+              <button
+                data-testid={IDS.ROOM_SEARCH_RESULT_ITEM}
+                data-kind={hit.kind === 'Post' ? 'post' : 'message'}
+                class="bubble room-search-hit"
+                onclick={() => openRoomSearchHit(hit)}
+              >
+                <span class="sender">{hit.pending ? t.conversations.unified.room_search_hit_pending : (hit.sender_display ?? '')}</span>
+                {#if hit.sent_at_ms != null}<span class="bubble-time">{conversationTimestamp(hit.sent_at_ms)}</span>{/if}
+                {#if !hit.pending}<span class="bubble-body">{hit.text}</span>{/if}
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {:else}
       <div class="messages">
         <!-- eslint-disable-next-line -->
         {#each detail.messages ?? [] as msg, i (msg.message_id)}
@@ -1529,7 +1691,11 @@
           {#if msg.subject_line}
             <div data-testid={IDS.SUBJECT_DIVIDER} class="subject-divider">{msg.subject_line}</div>
           {/if}
-          <div data-testid={IDS.DM_MESSAGE_BUBBLE} class="bubble">
+          <div
+            data-testid={IDS.DM_MESSAGE_BUBBLE}
+            class="bubble"
+            class:selected={detail.selected_message_id === msg.message_id}
+          >
             {#if msg.deleted}
               <!-- Tombstone (conversations.md § Reactions & message delete): a deleted
                    message collapses to a localized placeholder — body/attachments/quote/
@@ -1540,11 +1706,18 @@
               <!-- Legal-takedown tombstone (moderation.md § Categories & enforcement item 1):
                    the nest withheld the sealed envelope under a legal obligation, so the bubble
                    collapses (like `deleted`) to the shared localized tombstone rendered in place
-                   of the (empty) body — never a blank/failed-decrypt bubble. Presentation only,
-                   no dedicated e2e id (like the post quoted-post tombstone / ContentLabelBadge;
-                   a new id would need ui.yaml approval first, § UI Consistency A). Twin of
+                   of the (empty) body — never a blank/failed-decrypt bubble. ui.yaml
+                   `dm-message-legal-takedown`, the twin of `dm-message-deleted`. Twin of
                    linux `message_bubble.rs`'s early-return + the post `QuotedPost.svelte` paint. -->
-              <div class="message-deleted message-legal-takedown">{resolveLocalized(legalTakedownTombstone(msg.legal_takedown_ref))}</div>
+              <div data-testid={IDS.DM_MESSAGE_LEGAL_TAKEDOWN} class="message-deleted message-legal-takedown">{resolveLocalized(legalTakedownTombstone(msg.legal_takedown_ref))}</div>
+            {:else if adminBlockPaint(msg.admin_block_reason, msg.document) === 'in-place'}
+              <!-- Admin-block notice (moderation.md § Admin block of a reported item):
+                   the relay withheld the envelope after the admin blocked the record
+                   (an empty document), so the bubble collapses (like the legal-takedown
+                   tombstone above) to the shared notice. The author's own blocked message
+                   keeps its body and paints the notice beside it, below the body.
+                   Presentation only, no dedicated e2e id. -->
+              <div class="message-deleted message-legal-takedown">{resolveLocalizedNested(adminBlockNotice(msg.admin_block_reason))}</div>
             {:else if regionPlaceholderMsg(msg)}
               <!-- A REGION verdict (`region-blocking.md` § The blocked render): the
                    placeholder in place of the body, ahead of the family arm (tui's
@@ -1562,9 +1735,16 @@
                    ui.yaml ID this pillar surfaces on the bubble. -->
               <div
                 data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+                data-state="blocked"
                 data-source={msgRender(msg).reported ? 'reported' : undefined}
                 class="message-deleted message-content-blocked"
               >{msgRender(msg).reported ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</div>
+              {#if guardianReasonOf(msgRender(msg))}
+                <!-- The guardian rule's reason, verbatim beside the frame
+                     (`nest-rules.md` § The shared rule editor → *The reason is
+                     the member's to read*). -->
+                <div data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON} class="message-deleted message-content-blocked">{guardianReasonOf(msgRender(msg))}</div>
+              {/if}
             {:else if isMuted(msg) && !revealedMuted.has(msg.message_id)}
               <!-- Muted-keyword collapse (moderation.md § Muted keywords;
                    content-moderation-and-ranking.md § Q3 — Option A, per-app,
@@ -1574,19 +1754,28 @@
                    (does not touch LocalDetectionStore / merge_queue). Mirrors the
                    deleted/legal-takedown tombstone early-returns above and the
                    `load-remote-content-button` reveal gesture below. -->
-              <div data-testid={IDS.DM_MESSAGE_MUTED} class="message-deleted message-muted">{t.conversations.detail.muted_word}</div>
+              <div data-testid={IDS.DM_MESSAGE_MUTED} class="message-deleted message-muted">{t.muted_words.collapsed}</div>
               <button
                 data-testid={IDS.DM_MESSAGE_MUTED_REVEAL_BUTTON}
                 class="reply-btn load-remote-btn"
                 onclick={() => revealMuted(msg.message_id)}
-              >{t.conversations.detail.muted_reveal}</button>
+              >{t.muted_words.reveal}</button>
             {:else if isContentCollapsedMsg(msg)}
               <!-- Content-policy COLLAPSE (a viewer's own threshold, or a guardian
                    `collapse` floor) — a one-tap reveal, session-local; the floor
-                   persists. Presentation only, no test id (v1 e2e drives the block
-                   case; linux `build_content_collapse` precedent). -->
-              <div class="message-deleted message-content-collapsed">{t.family.content_collapsed_notice}</div>
+                   persists. The block arm's notice in `state="collapsed"` beside
+                   `content-policy-collapsed-reveal-button` (ids user-approved
+                   2026-10-16), the feed's twin. -->
+              <div
+                data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+                data-state="collapsed"
+                class="message-deleted message-content-collapsed"
+              >{t.family.content_collapsed_notice}</div>
+              {#if guardianReasonOf(msgRender(msg))}
+                <div data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON} class="message-deleted message-content-collapsed">{guardianReasonOf(msgRender(msg))}</div>
+              {/if}
               <button
+                data-testid={IDS.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON}
                 class="reply-btn load-remote-btn"
                 onclick={() => revealContent(msg.message_id)}
               >{t.family.content_reveal_button}</button>
@@ -1601,7 +1790,7 @@
                    value-formatting.md § Conversation timestamp). Unifies with linux/apple's
                    bubble timestamp and adds it where web/windows/android showed none
                    (render-model.md § D5-adjacent; priorities #1/#4). -->
-              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
+              <span data-testid={IDS.DM_MESSAGE_TIMESTAMP} data-selected={detail.selected_message_id === msg.message_id ? 'true' : undefined} class="bubble-time">{conversationTimestamp(msg.timestamp_ms)}</span>
               <button data-testid={IDS.DM_REPLY_BUTTON} class="reply-btn" onclick={() => replyTo(msg.message_id)}>{t.common.reply}</button>
               {#if caps?.supports_recipient_selection}
                 <button data-testid={IDS.DM_REPLY_ALL_BUTTON} class="reply-btn" onclick={() => replyAll(msg.message_id)}>{t.conversations.unified.reply_all}</button>
@@ -1706,6 +1895,21 @@
             <div data-testid={IDS.DM_MESSAGE_TEXT} class="bubble-body">
               {@html documentToHtml(msg.document)}
             </div>
+            {#if adminBlockPaint(msg.admin_block_reason, msg.document) === 'beside' && msg.admin_block_reason && !withheldCarriesBlockNotice(msg.withheld)}
+              <div class="message-deleted message-legal-takedown">{resolveLocalizedNested(adminBlockNotice(msg.admin_block_reason))}</div>
+            {/if}
+            <!-- The author's own message the nest withholds, matched to their queue row
+                 (`MessageSnapshot.withheld`, the shared projection; moderation.md § Legal
+                 takedown → App render, the fourth surface): the shared lines side by side,
+                 resolved nested, and the tap opens that row's appeal in the queue. A badge
+                 carrying the block notice replaces the beside-body line above. -->
+            {#if msg.withheld}
+              <button
+                data-testid={IDS.DM_MESSAGE_WITHHELD_BADGE}
+                class="reply-btn withheld-badge"
+                onclick={() => appealWithheld(msg.withheld.content_id)}
+              >{msg.withheld.lines.map((l: LocalizedText) => resolveLocalizedNested(l)).join(' · ')}</button>
+            {/if}
             {#if documentHasBlockedRemoteImages(msg.document)}
               <button
                 data-testid={IDS.LOAD_REMOTE_CONTENT_BUTTON}
@@ -1757,6 +1961,39 @@
                 {/if}
               {/if}
             {/each}
+            <!-- An own message its bridge never took (`MessageSnapshot.undelivered`, the
+                 shared answer; apps/bridges.md § Phase G → When the bridge stops
+                 serving): said in words under the body, which stays in view. Twin of
+                 tui's `dm-message-undelivered` label (conversations.md § Element IDs). -->
+            {#if msg.undelivered}
+              <div data-testid={IDS.DM_MESSAGE_UNDELIVERED} class="message-undelivered">{t.conversations.unified.dm_message_undelivered}</div>
+            {/if}
+            <!-- An own sent mail the fresh-IP warm-up is holding back
+                 (`MessageSnapshot.warmup_hold`; mail-deliverability.md § Enforcement at
+                 submission time): when it goes out and how many are ahead, in the shared
+                 wording, which falls silent once the release has come. Twin of tui's
+                 `dm-message-warmup-deferred` label. -->
+            {#if msg.warmup_hold}
+              {@const warmupLine = warmupDeferredText(msg.warmup_hold)}
+              {#if warmupLine}
+                <div data-testid={IDS.DM_MESSAGE_WARMUP_DEFERRED} class="message-undelivered">{warmupLine}</div>
+              {/if}
+            {/if}
+            <!-- The alias a received mail message arrived on, and its label
+                 (`MessageSnapshot.delivered_to`, the shared wording resolved when the
+                 thread opened; mail-aliases.md § Label). Twin of tui's
+                 `dm-message-delivered-to-alias` label. -->
+            {#if msg.delivered_to}
+              <div data-testid={IDS.DM_MESSAGE_DELIVERED_TO_ALIAS} class="message-scan-result">{msg.delivered_to}</div>
+            {/if}
+            <!-- A received mail message's own perimeter scan verdict
+                 (`MessageSnapshot.scan_result_lines`, read when the thread opened):
+                 one element, the shared lines in order. Twin of tui's
+                 `dm-message-scan-result` label (mail-content-scanning.md § User
+                 sees their own message's row). -->
+            {#if (msg.scan_result_lines?.length ?? 0) > 0}
+              <div data-testid={IDS.DM_MESSAGE_SCAN_RESULT} class="message-scan-result">{msg.scan_result_lines.map((l: LocalizedText) => resolveLocalized(l)).join(' · ')}</div>
+            {/if}
             <!-- Aggregated reactions under the bubble (manager-folded
                  MessageSnapshot.reactions): emoji + count, own highlighted, tap-to-toggle
                  the same shared path. dm-reaction-pill is indexed (conversations.md
@@ -1774,6 +2011,7 @@
           </div>
         {/each}
       </div>
+      {/if}
     {/if}
 
     {#if mode === 'new'}
@@ -2275,6 +2513,10 @@
   .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
   .subject-divider { text-align: center; font-size: 0.75rem; color: var(--text-muted); border-top: 1px solid var(--border); padding-top: 0.4rem; }
   .bubble { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.6rem; }
+  .bubble.selected { outline: 2px solid #f59e0b; }
+  .room-search-strip { display: flex; gap: 0.4rem; padding: 0.4rem 0; }
+  .room-search-strip input { flex: 1; }
+  .room-search-hit { display: block; width: 100%; text-align: left; cursor: pointer; color: inherit; }
   .bubble-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.25rem; }
   .sender { font-family: monospace; font-size: 0.75rem; color: var(--text-muted); }
   .bubble-time { font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; margin-left: auto; }
@@ -2283,6 +2525,8 @@
   .bubble-body { font-size: 0.875rem; white-space: pre-wrap; }
   /* Reactions & message delete (conversations.md § Reactions & message delete). */
   .message-deleted { font-size: 0.85rem; font-style: italic; color: var(--text-muted); }
+  .message-undelivered { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+  .message-scan-result { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
   .actions-btn {
     border: none; background: none; color: var(--text-muted); cursor: pointer;
     font-size: 1rem; line-height: 1; padding: 0 0.25rem;

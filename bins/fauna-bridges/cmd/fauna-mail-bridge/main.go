@@ -700,6 +700,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 				NestEndpoint: *nestEndpoint,
 				AuthClient:   authClient,
 				Logger:       logger,
+				HTTPClient:   nestHTTP,
 			})
 		},
 		// A revoked bridge's reconnect never reaches whoami: nest's bearer

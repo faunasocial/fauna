@@ -47,6 +47,7 @@ import uuid
 import pytest
 
 from helpers.app_surface import app_name, skip_unbuilt
+from i18n.strings import S
 
 pytestmark = [
     pytest.mark.tier_3,
@@ -64,7 +65,7 @@ _BUILT_APPS = ("tui", "linux", "android", "web", "windows", "macos", "ios")
 # The console's own wording (i18n `admin.nest_page.takedown_*`, en.yaml) — the
 # shared verdict every app renders (`fauna_client_moderation::takedown`).
 WORKING = "Submitting…"
-DONE_TAKEDOWN = "Taken down. A tombstone is served in its place and the author can appeal."
+DONE_TAKEDOWN = S.admin.nest_page.takedown_done
 DONE_RESTORE = "Restored. The content is served again; the takedown stays on record."
 
 REFERENCE = "Court order 42/2026"

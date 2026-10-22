@@ -366,13 +366,23 @@ def launches_in(source: str, path: str) -> list[Launch]:
     seeding = _seeding_names(tree)
     found: list[Launch] = []
 
-    def visit(node: ast.AST, qualname: list[str], enclosing: list[ast.AST]) -> None:
+    def visit(
+        node: ast.AST, qualname: list[str], enclosing: list[ast.AST], ctors: list[ast.AST]
+    ) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                visit(child, [*qualname, child.name], [*enclosing, child])
+                visit(child, [*qualname, child.name], [*enclosing, child], ctors)
                 continue
             if isinstance(child, ast.ClassDef):
-                visit(child, [*qualname, child.name], enclosing)
+                # A method launching from state its class's constructor built
+                # (`self._environment = _seeded_environment(…)` in `__init__`)
+                # is seeded by that constructor.
+                init = [
+                    c for c in child.body
+                    if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and c.name == "__init__"
+                ]
+                visit(child, [*qualname, child.name], enclosing, [*ctors, *init])
                 continue
             if _is_driver_launch(child):
                 found.append(
@@ -380,14 +390,14 @@ def launches_in(source: str, path: str) -> list[Launch]:
                         path=path,
                         function=".".join(qualname) or "<module>",
                         line=child.lineno,
-                        seeded=any(_called_names(f) & seeding for f in enclosing),
+                        seeded=any(_called_names(f) & seeding for f in [*enclosing, *ctors]),
                         web_shaped=_is_web_shaped(child),
                         relaunch=_is_relaunch(child, enclosing[-1] if enclosing else None),
                     )
                 )
-            visit(child, qualname, enclosing)
+            visit(child, qualname, enclosing, ctors)
 
-    visit(tree, [], [])
+    visit(tree, [], [], [])
     return found
 
 
@@ -497,6 +507,15 @@ def test_second_seat(nest_instance, tui_app_path, request):
     )
 """
 
+_SEEDED_IN_THE_CONSTRUCTOR = """
+class Seats:
+    def __init__(self, request, nest):
+        self.environment = _seeded_environment(request, nest)
+
+    def launch_with_seed(self, app_path):
+        create_driver("tui").launch({"app_path": app_path, "environment": self.environment})
+"""
+
 _SEEDED_THROUGH_A_HELPER = """
 def _world(nest, request):
     environment = {}
@@ -533,6 +552,7 @@ def _relaunch(app, extra):
         pytest.param(_NO_ENVIRONMENT_KEY, [True], id="a config with no environment"),
         pytest.param(_SEEDED, [False], id="a seeded launch"),
         pytest.param(_SEEDED_THROUGH_A_HELPER, [False], id="seeded through a helper"),
+        pytest.param(_SEEDED_IN_THE_CONSTRUCTOR, [False], id="seeded in the constructor"),
         pytest.param(_WEB, [False], id="a browser launch"),
         pytest.param(_RELAUNCH, [False], id="a relaunch of the launched config"),
         pytest.param(_WRAPPER, [], id="a wrapper with its own signature"),

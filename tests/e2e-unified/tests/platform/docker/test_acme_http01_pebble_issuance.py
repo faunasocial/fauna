@@ -220,7 +220,7 @@ def pebble_nest_stack(
         # comes up on the `localhost` identity fallback, then acquires `nest.test` as
         # its primary identity from `register_primary_domain(nest, DOMAIN)` below,
         # which flips the always-spawned ACME task's apex to `nest.test` and issues.
-        ports = {3000: api_port, **(extra_ports or {})}
+        ports = {443: api_port, **(extra_ports or {})}
         start_container_with_ports(
             nest_name,
             ports,

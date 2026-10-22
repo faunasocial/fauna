@@ -569,11 +569,16 @@ impl VerifiedArtifact {
         if self.artifact.payload_kind != PAYLOAD_KIND_CONTENT_POLICY {
             return Err(PayloadError::WrongKind(self.artifact.payload_kind.clone()));
         }
-        if self.artifact.payload.len() > crate::region_policy::MAX_CONTENT_POLICY_PAYLOAD_BYTES {
-            return Err(PayloadError::TooLarge(self.artifact.payload.len()));
-        }
-        fauna_cbor::decode_strict(&self.artifact.payload)
-            .map_err(|e| PayloadError::Decode(format!("{e:?}")))
+        // Version first: a newer grammar decodes as an inert document rather
+        // than an error (`crate::content_policy::decode_document`).
+        crate::content_policy::decode_document(&self.artifact.payload).map_err(|e| match e {
+            crate::content_policy::DocumentDecodeError::TooLarge(len) => {
+                PayloadError::TooLarge(len)
+            }
+            crate::content_policy::DocumentDecodeError::Decode(detail) => {
+                PayloadError::Decode(detail)
+            }
+        })
     }
 }
 
@@ -1119,7 +1124,10 @@ mod tests {
         let verified = verify_artifact(a, &registry_with(&signing, None), NOW, None).unwrap();
         let decoded = verified.content_policy().expect("this plane's document");
         assert_eq!(decoded, document);
-        assert_eq!(decoded.status(&region()), PolicyStatus::Applied);
+        assert_eq!(
+            decoded.status(&crate::content_policy::Publisher::Region(region())),
+            PolicyStatus::Applied
+        );
 
         // …and the sibling plane's accessor still says "not mine", never faults.
         assert!(matches!(

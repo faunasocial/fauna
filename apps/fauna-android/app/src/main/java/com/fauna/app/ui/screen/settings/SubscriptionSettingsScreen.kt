@@ -85,7 +85,7 @@ fun SubscriptionSettingsContent(
     claimRedeemed: Boolean = false,
     onClaimRedeemedConsumed: () -> Unit = {},
     onBack: () -> Unit,
-    onUnsubscribe: (ByteArray) -> Unit,
+    onUnsubscribe: (FfiMineSubscription) -> Unit,
     onRedeemClaim: (String) -> Unit = {},
     // The `subscription-mine-author` text; the stateful caller resolves it
     // through the overlay projection, so this Content stays FFI-free.
@@ -205,7 +205,7 @@ private fun MineRow(
     sub: FfiMineSubscription,
     authorText: String,
     working: Boolean,
-    onUnsubscribe: (ByteArray) -> Unit,
+    onUnsubscribe: (FfiMineSubscription) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_MINE_ROW)) {
         Row(
@@ -241,7 +241,7 @@ private fun MineRow(
             )
             Column {
                 OutlinedButton(
-                    onClick = { onUnsubscribe(sub.authorId) },
+                    onClick = { onUnsubscribe(sub) },
                     enabled = unsubscribeGate.enabled,
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_MINE_UNSUBSCRIBE_BUTTON),
                 ) { Text(stringResource(R.string.subscriptions_unsubscribe)) }

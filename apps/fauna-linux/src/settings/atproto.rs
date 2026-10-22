@@ -21,8 +21,8 @@
 //!   always land together; its behavior stays owned by behavior/bridges.md.
 //! - **hosted panel** — pre-mint: the DID-method radio + the either-way handle
 //!   line; post-mint: the identity summary (`atproto-hosted-handle`).
-//! - **full-PDS panel** — the F1 login-plane surface (app credentials, the
-//!   connected-apps list, the external-apps kill-switch), gated on level =
+//! - **full-PDS panel** — the F1 login-plane surface (app credentials; the
+//!   external-apps switch lives on Connected apps), gated on level =
 //!   `hosted_full`.
 //! - **delete presence** (`atproto-delete-presence`) — visible whenever a
 //!   hosted identity exists; the destructive flow itself is S5-scoped.
@@ -38,8 +38,9 @@
 //! `confirm_transition` (via `fauna-client-atproto::mint_rotation_key`);
 //! this leg never touches key material.
 //!
-//! F1 collects no label/dm_allowed input at mint time — the client auto-labels
-//! ("App credential N") and defaults `dm_allowed` to `false` (least privilege).
+//! Mint collects no label input — the client auto-labels ("App credential N");
+//! `dm_allowed` is the page-local `atproto-app-credential-dm-access` check,
+//! off by default (least privilege) and read when the mint button is pressed.
 
 use fauna_ui_ids as ids;
 use std::cell::{Cell, RefCell};
@@ -166,7 +167,6 @@ struct AtprotoPageWidgets {
 
     // ── Full-PDS panel (gated on level = hosted_full) ───────────────────
     fullpds_group: adw::PreferencesGroup,
-    external_apps_toggle: adw::SwitchRow,
     credentials_group: adw::PreferencesGroup,
     credential_rows: RefCell<Vec<adw::ActionRow>>,
 
@@ -460,19 +460,8 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     delete_group.add(&delete_confirm_card);
     page.add(&delete_group);
 
-    // --- Full-PDS panel: kill-switch + mint (gated on level = hosted_full) ---
+    // --- Full-PDS panel: mint (gated on level = hosted_full) ---
     let fullpds_group = adw::PreferencesGroup::builder().visible(false).build();
-    let external_apps_toggle = adw::SwitchRow::builder()
-        .title(BS::EXTERNAL_APPS_TOGGLE)
-        .subtitle(BS::EXTERNAL_APPS_HINT)
-        .active(true)
-        .build();
-    set_test_id(&external_apps_toggle, ids::ATPROTO_EXTERNAL_APPS_ENABLE);
-    crate::offline_gate::declare_wire_kind(
-        &external_apps_toggle,
-        "fauna.bridges.atproto.set_external_apps_enabled",
-    );
-    fullpds_group.add(&external_apps_toggle);
     let mint_btn = gtk::Button::builder()
         .label(BS::MINT_BUTTON)
         .valign(gtk::Align::Center)
@@ -490,6 +479,14 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
     let mint_row = adw::ActionRow::builder().activatable(false).build();
     mint_row.add_suffix(&mint_btn);
     fullpds_group.add(&mint_row);
+    // Mint-time direct-message choice (`atproto-app-credential-dm-access`):
+    // page-local, off by default (least privilege), read when the mint button
+    // is pressed — nothing is sent until then.
+    let mint_dm_access = gtk::CheckButton::with_label(BS::MINT_DM_ACCESS_LABEL);
+    set_test_id(&mint_dm_access, ids::ATPROTO_APP_CREDENTIAL_DM_ACCESS);
+    let mint_dm_row = adw::ActionRow::builder().activatable(false).build();
+    mint_dm_row.add_prefix(&mint_dm_access);
+    fullpds_group.add(&mint_dm_row);
     page.add(&fullpds_group);
 
     let credentials_group = adw::PreferencesGroup::builder()
@@ -549,14 +546,13 @@ pub fn build_atproto_settings_page() -> adw::PreferencesPage {
         delete_confirm_btn,
         delete_cancel_btn,
         fullpds_group,
-        external_apps_toggle,
         credentials_group,
         credential_rows: RefCell::new(Vec::new()),
         delegation_group,
         delegation_rows: RefCell::new(Vec::new()),
     };
 
-    wire_machine(&page, mint_btn, widgets);
+    wire_machine(&page, mint_btn, mint_dm_access, widgets);
 
     page
 }
@@ -593,7 +589,12 @@ fn build_radio_rung(
 /// Connect the page to the shared `AtprotoSettingsMachine`, hydrate on mount,
 /// and wire every gesture. No-op (page stays at static placeholders) when no
 /// client is registered.
-fn wire_machine(page: &adw::PreferencesPage, mint_btn: gtk::Button, widgets: AtprotoPageWidgets) {
+fn wire_machine(
+    page: &adw::PreferencesPage,
+    mint_btn: gtk::Button,
+    mint_dm_access: gtk::CheckButton,
+    widgets: AtprotoPageWidgets,
+) {
     let client = match crate::settings::get_client() {
         Some(c) => c,
         None => return,
@@ -863,33 +864,14 @@ fn wire_machine(page: &adw::PreferencesPage, mint_btn: gtk::Button, widgets: Atp
         });
     }
 
-    // --- Full-PDS panel: kill-switch + mint ---
-    {
-        let external_apps_toggle = ctx.w.external_apps_toggle.clone();
-        let ctx = Rc::clone(&ctx);
-        external_apps_toggle.connect_active_notify(move |sw| {
-            if ctx.guard.get() {
-                return;
-            }
-            let enabled = sw.is_active();
-            let machine = Arc::clone(&ctx.machine);
-            let rt = ctx.rt.clone();
-            let ctx = Rc::clone(&ctx);
-            spawn_with_snapshot(
-                &rt,
-                move || async move {
-                    machine.set_external_apps_enabled(enabled).await;
-                },
-                move |()| render(&ctx),
-            );
-        });
-    }
+    // --- Full-PDS panel: mint ---
     {
         let ctx = Rc::clone(&ctx);
         mint_btn.connect_clicked(move |_| {
             let machine = Arc::clone(&ctx.machine);
             let rt = ctx.rt.clone();
             let ctx = Rc::clone(&ctx);
+            let dm_allowed = mint_dm_access.is_active();
             spawn_with_snapshot(
                 &rt,
                 move || {
@@ -902,7 +884,7 @@ fn wire_machine(page: &adw::PreferencesPage, mint_btn: gtk::Button, widgets: Atp
                             .map(|c| c.credential_id)
                             .collect();
                         let label = BS::default_credential_label(&(before.len() + 1).to_string());
-                        let result = machine.mint(label, false).await;
+                        let result = machine.mint(label, dm_allowed).await;
                         result.ok().map(|secret| {
                             let new_id = machine
                                 .snapshot()
@@ -1152,17 +1134,6 @@ fn render(ctx: &Rc<AtprotoPageCtx>) {
     let at_full = snap.level == "hosted_full";
     w.fullpds_group.set_visible(at_full);
     w.credentials_group.set_visible(at_full);
-    w.external_apps_toggle
-        .set_active(snap.external_apps_enabled);
-    set_test_attr(
-        &w.external_apps_toggle,
-        "state",
-        if snap.external_apps_enabled {
-            "on"
-        } else {
-            "off"
-        },
-    );
 
     ctx.guard.set(false);
 
@@ -1417,13 +1388,14 @@ fn sync_linked_panel(ctx: &Rc<AtprotoPageCtx>) {
         w.linked_group.remove(&old);
     }
 
-    let (link_modes, linked, error, settings) = status
+    let (link_modes, linked, error, identity, settings) = status
         .as_ref()
         .map(|b| {
             (
                 b.link_modes.clone().unwrap_or_default(),
                 b.linked,
                 b.error.clone(),
+                b.identity.clone(),
                 b.settings.clone(),
             )
         })
@@ -1433,6 +1405,7 @@ fn sync_linked_panel(ctx: &Rc<AtprotoPageCtx>) {
         link_modes,
         linked,
         error,
+        identity,
         settings,
         Rc::clone(&client),
     );
@@ -1453,7 +1426,7 @@ fn sync_linked_panel(ctx: &Rc<AtprotoPageCtx>) {
 /// shown even when not gated if this session already revealed it.
 fn build_credential_row(ctx: &Rc<AtprotoPageCtx>, cred: &AppCredentialRow) -> adw::ActionRow {
     let created = fauna_core::format::format_unix_local(cred.created_at_millis / 1000);
-    let subtitle = match cred.last_used_at_millis {
+    let mut subtitle = match cred.last_used_at_millis {
         Some(millis) => format!(
             "{} · {}",
             BS::credential_created_prefix(&created),
@@ -1466,14 +1439,25 @@ fn build_credential_row(ctx: &Rc<AtprotoPageCtx>, cred: &AppCredentialRow) -> ad
         ),
     };
 
+    if cred.dm_allowed {
+        subtitle = format!("{subtitle} · {}", BS::CREDENTIAL_DM_ACCESS);
+    }
+
     let row = adw::ActionRow::builder()
         .title(&cred.label)
         .subtitle(&subtitle)
         .build();
     set_test_id(&row, ids::ATPROTO_APP_CREDENTIAL_ITEM);
-    // The row's identity is the credential label; the subtitle is
-    // created/last-used detail. Declare it — see `testid::set_test_text`.
-    crate::testid::set_test_text(&row, &cred.label);
+    // The row's identity is the credential label, ending with the
+    // direct-message line on a credential that carries the access; the
+    // subtitle is created/last-used detail. Declare it — see
+    // `testid::set_test_text`.
+    let identity = if cred.dm_allowed {
+        format!("{} · {}", cred.label, BS::CREDENTIAL_DM_ACCESS)
+    } else {
+        cred.label.clone()
+    };
+    crate::testid::set_test_text(&row, &identity);
 
     let already_revealed = ctx.revealed.borrow().get(&cred.credential_id).cloned();
     if cred.revealable || already_revealed.is_some() {

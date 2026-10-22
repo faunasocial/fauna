@@ -1,28 +1,43 @@
-"""Which cloud project a box lives in, and that project's API token — one map, one place.
+"""Which cloud project a host's token comes from, per purpose — one map, one place.
 
 WHY THIS EXISTS: the cloud provider scopes an API token to a whole project —
 every server, firewall and DNS zone in it, nothing finer — so the
-organisation's boxes are split across projects by what a token reaches
-(docs/goal/architecture/deployment-threat-model.md § Concern 2, path 5;
+organisation's boxes and zones are cut into four projects by who holds each
+token (docs/goal/architecture/deployment-threat-model.md § Concern 2, path 5;
 docs/goal/architecture/org-nests.md § One zone, one project):
 
-  * the **uat** project holds the organisation's own zone `fauna.build` (a
-    registered domain: the provider's zones are registrable domains only) and
-    the three nests in it (dev., test. and the acceptance nest at the apex), with
-    their firewalls; the live suite's throwaway boxes are made there too;
-  * the **production** project holds the fauna.social apex zone and the
-    front-door box. Its token lives on the dev host alone and is never placed
-    in CI.
+  * **zone** holds the organisation's own zone `fauna.build` (a registered
+    domain: the provider's zones are registrable domains only) and nothing
+    else. Its token is the DNS credential: the admin apps' managed DNS and
+    DNS-01 renewal, and the DNS half of the provisioning drive;
+  * **uat** holds the dev. and test. nests with their firewalls, and the live
+    suite's throwaway boxes;
+  * **acceptance** holds the acceptance nest at the `fauna.build` apex and its
+    firewall. Its token lives on the dev host alone and is never placed in CI;
+  * **production** holds the fauna.social apex zone and the front-door box.
+    Its token lives on the dev host alone and is never placed in CI.
+
+So a host has two projects, one per PURPOSE: its *cloud* project (the server
+and its firewall — the firewall gate, the firewall copy, the per-run
+admission, a box's provisioning) and its *dns* project (the zone its records
+are published in — managed DNS, DNS-01). Under fauna.build they differ: every
+name's dns project is `zone`; the cloud project is `acceptance` for the apex
+alone and `uat` for every name below it. A name below the apex is never the
+acceptance box, so a throwaway box can never be made with the acceptance
+token; a fleet script names the acceptance box by the apex itself.
 
 Every fleet script and the live test harness that speaks to the provider
-resolves its token here, per box, so a run against a uat nest can never pick
-up the production token by accident.
+resolves its token here, per host and purpose, so a run against a uat nest
+can never pick up the acceptance or production token, nor a DNS write a
+token that reaches a server.
 
 THE RESOLUTION ORDER (`token_for`):
   1. `$HETZNER_API_TOKEN` when set and non-blank — how CI hands a job its one
-     token; it wins everywhere, so a job holds exactly the token it was given.
+     token; it wins everywhere, for both purposes, so a job holds exactly the
+     token it was given (one project's, by construction).
   2. `~/.config/fauna/cloud/<project>.token` — the dev host's per-project
-     file, mode 0600, first non-empty line.
+     file, mode 0600, first non-empty line. A missing file is no token: a
+     purpose never falls back to another project's file.
   3. For the production project only, the legacy `~/.hetzner-token`: today's
      single project becomes the production project once the dev nest leaves
      it, so that file IS the production token. Its read goes when the dev
@@ -43,12 +58,21 @@ from collections.abc import Mapping
 
 ENV_VAR = "HETZNER_API_TOKEN"
 
+ZONE = "zone"
 UAT = "uat"
+ACCEPTANCE = "acceptance"
 PRODUCTION = "production"
-PROJECTS = (UAT, PRODUCTION)
+PROJECTS = (ZONE, UAT, ACCEPTANCE, PRODUCTION)
 
-#: The organisation's own zone, a registered domain, in the uat project.
-UAT_ZONE = "fauna.build"
+#: A host's server and firewall.
+CLOUD = "cloud"
+#: The zone a host's records are published in.
+DNS = "dns"
+PURPOSES = (CLOUD, DNS)
+
+#: The organisation's own zone, a registered domain, in the zone project; its
+#: apex is the acceptance box, every name below it a uat box.
+ORG_ZONE = "fauna.build"
 #: The apex zone, in the production project.
 PRODUCTION_APEX = "fauna.social"
 #: TRANSITIONAL: the dev nest still runs as dev.example.com in today's single
@@ -56,9 +80,10 @@ PRODUCTION_APEX = "fauna.social"
 #: the dev nest is re-created as dev.fauna.build.
 _LEGACY_PRODUCTION_ZONE = "example.com"
 
-#: The project a run that names no box works in: the live suite's throwaway
-#: boxes are made in the uat project, never in production.
-DEFAULT_PROJECT = UAT
+#: The project a run that names no box works in, per purpose: the live
+#: suite's throwaway boxes are made in the uat project, their records go in
+#: the organisation's zone — never production, never the acceptance box.
+DEFAULT_PROJECT = {CLOUD: UAT, DNS: ZONE}
 
 TOKEN_DIR = "~/.config/fauna/cloud"
 #: TRANSITIONAL: the production project's token under its pre-split name.
@@ -83,16 +108,21 @@ def _within(host: str, zone: str) -> bool:
     return host == zone or host.endswith("." + zone)
 
 
-def project_for(host: str | None) -> str | None:
-    """`uat`, `production`, or None for a host outside the organisation's map.
+def project_for(host: str | None, purpose: str = CLOUD) -> str | None:
+    """The project host's `purpose` token comes from, or None for a host
+    outside the organisation's map.
 
     No host (`None` or blank) is the live suite's default project."""
+    if purpose not in PURPOSES:
+        raise ValueError(f"unknown purpose {purpose!r} (known: {', '.join(PURPOSES)})")
     if host is None or not host.strip():
-        return DEFAULT_PROJECT
+        return DEFAULT_PROJECT[purpose]
     h = normalize_host(host)
-    # The two zones are disjoint domains; the uat check merely comes first.
-    if _within(h, UAT_ZONE):
-        return UAT
+    # The zones are disjoint domains; the organisation's merely comes first.
+    if _within(h, ORG_ZONE):
+        if purpose == DNS:
+            return ZONE
+        return ACCEPTANCE if h == ORG_ZONE else UAT
     if _within(h, PRODUCTION_APEX) or _within(h, _LEGACY_PRODUCTION_ZONE):
         return PRODUCTION
     return None
@@ -133,8 +163,9 @@ def _read_first_line(path: str, *, private: bool = True) -> str:
     return ""
 
 
-def token_for(host: str | None, env: Mapping[str, str] | None = None) -> str:
-    """The API token for the project `host` lives in, or "" when there is none.
+def token_for(host: str | None, env: Mapping[str, str] | None = None,
+              purpose: str = CLOUD) -> str:
+    """The API token of host's `purpose` project, or "" when there is none.
 
     Never prints or logs the value. Raises TokenFileModeError for a token file
     other users can read."""
@@ -142,7 +173,7 @@ def token_for(host: str | None, env: Mapping[str, str] | None = None) -> str:
     tok = env.get(ENV_VAR, "").strip()
     if tok:
         return tok
-    project = project_for(host)
+    project = project_for(host, purpose)
     if project is None:
         return ""
     tok = _read_first_line(token_file(project))
@@ -151,9 +182,9 @@ def token_for(host: str | None, env: Mapping[str, str] | None = None) -> str:
     return tok
 
 
-def where_to_put(host: str | None) -> str:
-    """One line for an error message: where the token for `host` is looked for."""
-    project = project_for(host)
+def where_to_put(host: str | None, purpose: str = CLOUD) -> str:
+    """One line for an error message: where host's `purpose` token is looked for."""
+    project = project_for(host, purpose)
     if project is None:
         return (f"{normalize_host(host or '')} is not one of the organisation's boxes — "
                 f"set {ENV_VAR} to its project's token")

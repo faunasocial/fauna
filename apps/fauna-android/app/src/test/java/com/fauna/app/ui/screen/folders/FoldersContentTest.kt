@@ -1096,6 +1096,17 @@ class FoldersContentTest {
         composeTestRule
             .onNodeWithText(context.getString(R.string.devices_paywall_tier_needs_tier))
             .assertExists()
+        composeTestRule.onNodeWithTag("folder-paywall-hint", useUnmergedTree = true).assertExists()
+    }
+
+    @Test
+    fun paywallHintIsAbsentOnceTheActorHasATier() {
+        render(
+            snapshot(folders = listOf(folder("gallery", websiteEnabled = true))),
+            ownTiers = listOf("Supporter"),
+        )
+        composeTestRule.onNodeWithTag("folder-paywall-tier-select").assertExists()
+        composeTestRule.onNodeWithTag("folder-paywall-hint", useUnmergedTree = true).assertDoesNotExist()
     }
 
     // ── Page-level "Sync defaults" (`sync-default-conflict-policy-select`) —

@@ -1,9 +1,9 @@
 """`fauna-wasm-launch`'s registry save accessors refuse corrupt JSON.
 
-`registry_save_pending_invite` / `registry_save_awaiting_dns`
+`registry_save_pending_invite` / `registry_persist_awaiting_dns`
 (`libs/fauna-wasm-launch/src/lib.rs`) document a defensive invariant: a
 payload that doesn't parse as `PendingInviteRecord` / `AwaitingDnsRecord` is
-refused (returns `false`, writes nothing) rather than stored — "a corrupt
+refused (resolves `false` / `undefined`, writes nothing) rather than stored — "a corrupt
 slot would read back as absent anyway". This guard against corrupted/stale
 `localStorage` state (cross-version drift, not normal TS-side input) had
 **zero test coverage anywhere**: no crate-level test file, and the two
@@ -107,18 +107,22 @@ def test_registry_save_pending_invite_refuses_corrupt_json(app):
     )
 
 
-def test_registry_save_awaiting_dns_refuses_corrupt_json(app):
-    """Same contract as above for `registrySaveAwaitingDns` /
+def test_registry_persist_awaiting_dns_refuses_corrupt_json(app):
+    """Same contract as above for `registryPersistAwaitingDns` /
     `registryLoadAwaitingDns` — a second, independently-guarded accessor over
-    the same `serde_json::from_str` pattern."""
+    the same `serde_json::from_str` pattern. The write is the shared
+    `persist_awaiting_dns` terminal, keyed by the secret it is handed, so the
+    accepted control resolves to that identity's actor id."""
     driver = app.driver
-    _seed_active_account(driver)
+    actor = _seed_active_account(driver)
     _load_registry_module(driver)
+    secret = json.dumps(VALID_SECRET_HEX)
 
     refused = driver.eval_js(
-        "window.__faunaWasmLaunchTest.registrySaveAwaitingDns('{ this is: not, valid json }')"
+        "window.__faunaWasmLaunchTest.registryPersistAwaitingDns("
+        f"{secret}, '{{ this is: not, valid json }}').then((r) => r ?? null)"
     )
-    assert refused is False, f"expected refusal for corrupt JSON, got {refused!r}"
+    assert refused is None, f"expected refusal for corrupt JSON, got {refused!r}"
 
     after_refusal = driver.eval_js(
         "window.__faunaWasmLaunchTest.registryLoadAwaitingDns() ?? null"
@@ -127,23 +131,24 @@ def test_registry_save_awaiting_dns_refuses_corrupt_json(app):
         f"a refused corrupt payload must not be stored; read back {after_refusal!r}"
     )
 
-    # separators matches serde_json::to_string's compact (no-space) output —
-    # see the pending-invite test's identical comment above.
-    valid_record = json.dumps({
+    valid = {
         "nest_url": "https://nest.example.test",
         "handle": "alice@nest.example.test",
         "dns_records_json": "[]",
         "claim_code": "claim-corrupt-json-control-001",
-    }, separators=(",", ":"))
+    }
     accepted = driver.eval_js(
-        "window.__faunaWasmLaunchTest.registrySaveAwaitingDns("
-        f"{json.dumps(valid_record)})"
+        "window.__faunaWasmLaunchTest.registryPersistAwaitingDns("
+        f"{secret}, {json.dumps(json.dumps(valid))})"
     )
-    assert accepted is True, f"expected acceptance of well-formed JSON, got {accepted!r}"
+    assert accepted == actor, f"expected acceptance of well-formed JSON, got {accepted!r}"
 
+    # The shared writer re-serializes the completed record (its optional
+    # fields included), so the read-back is compared field by field.
     after_accept = driver.eval_js(
         "window.__faunaWasmLaunchTest.registryLoadAwaitingDns()"
     )
-    assert after_accept == valid_record, (
-        f"well-formed write should read back verbatim; got {after_accept!r}"
+    stored = json.loads(after_accept or "{}")
+    assert {k: stored.get(k) for k in valid} == valid, (
+        f"a well-formed write should read back its fields; got {after_accept!r}"
     )

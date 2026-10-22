@@ -61,7 +61,7 @@ class NotifyBuffer {
     // (WS-RPC round trips, page loads) would flush before the test can reach its
     // own switch step, exactly the wall-clock race testing.md convention 14
     // forbids. Tests drive checks explicitly via the `family_notify_check_now`
-    // e2e command (`$lib/family-notify-e2e`), which calls `flushIfDue()` directly
+    // e2e command (`#lib/family-notify-e2e`), which calls `flushIfDue()` directly
     // — the same "hasAgent" idiom as `conversations.ts`'s `pollIntervalMs()`.
     const hasAgent =
       __FAUNA_E2E_AUTOMATION__ &&

@@ -41,6 +41,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_enrollment_strict_reported_on_provisioned_box`
 5. [nest] Stopping the nest tells a connected app that the nest is going away, so the app reconnects by itself instead of treating it as an error — `docs/goal/architecture/transport-connection.md` § Graceful shutdown
    - `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_docker_stop_emits_ws_1001`
+   - `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_slow_nest_stop_fits_s6_grace`
 6. [nest] A mail helper that starts without its walls, its sandbox off or the nest's sealed store within its reach, shows up as a warning in the admin's log that names what is wrong — `docs/goal/architecture/security.md` § Confinement self-probe
    - `tests/e2e-unified/tests/platform/docker/test_bridge_confinement_degraded_docker.py::test_an_unsandboxed_mail_helper_warns_in_the_admins_log`
 7. [nest] A nest set up without its helpers' identities says so: the admin's read-out reports that helper enrolment is not strict, and the nest's log carries a warning — `docs/goal/architecture/security.md` § Implementation status — UID isolation
@@ -61,13 +62,13 @@ Stamped 2026-10-01 at dc4b94e0f1.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| linux | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| windows | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| ios | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| android | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
-| tui | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
+| web | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| windows | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| macos | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| ios | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| android | ✅ full | 0.1.2-dev+b3cb40c5 docker |
+| tui | ✅ full | 0.1.2-dev+b3cb40c5 docker |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -89,11 +90,12 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_bridges_self_report_their_confinement_over_the_wire` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_enrollment_strict_reported_on_provisioned_box` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_docker_stop_emits_ws_1001` | nest (linux): passed |
+| 5 | nest | `tests/e2e-unified/tests/platform/docker/test_graceful_shutdown.py::test_slow_nest_stop_fits_s6_grace` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_confinement_degraded_docker.py::test_an_unsandboxed_mail_helper_warns_in_the_admins_log` | nest (linux): passed |
-| 7 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_lenient_box_forged_enrollment_is_accepted` | — |
+| 7 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_enrollment_pop.py::test_lenient_box_forged_enrollment_is_accepted` | nest (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_graceful_shutdown_in_flight.py::test_a_request_in_flight_at_stop_is_answered_before_the_1001_close` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/platform/docker/test_proxy_forgery_docker.py::test_a_helper_cannot_fake_where_a_connection_comes_from` | nest (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_each_service_runs_under_its_own_uid` | nest (linux): passed |
-| 11 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_nests_secrets_to_its_own_uid` | — |
-| 12 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_pds_key_to_the_atproto_bridges_remux` | — |
+| 11 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_nests_secrets_to_its_own_uid` | nest (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/platform/docker/test_uid_isolation.py::test_transcode_domain_denies_the_pds_key_to_the_atproto_bridges_remux` | nest (linux): passed |
 <!-- features-render:end -->

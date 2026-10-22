@@ -124,6 +124,69 @@ func TestReadyConstrainsTheRoleToKnownServiceNames(t *testing.T) {
 	}
 }
 
+// Ready is shared by every bridge binary, so it names the bridge kind from the
+// role: an atproto bridge must never announce itself as a mail bridge, and a
+// role outside the known set names neither.
+func TestReadyNamesTheBridgeKindFromTheRole(t *testing.T) {
+	setup(t)
+	Ready("mta")
+	Ready("atproto.pds")
+	Ready("no-such-role")
+	batch, _, ok := takeBatch()
+	if !ok || len(batch) != 3 {
+		t.Fatalf("expected 3 events, got ok=%v len=%d", ok, len(batch))
+	}
+	for i, want := range []string{
+		"mail bridge ready (role mta)",
+		"atproto bridge ready (role atproto.pds)",
+		"bridge ready (role unknown)",
+	} {
+		if batch[i].Event != "ready" || batch[i].Message != want {
+			t.Errorf("event %d = {%q %q}, want {ready %q}", i, batch[i].Event, batch[i].Message, want)
+		}
+	}
+}
+
+// A tally coalesces: many occurrences between two flushes are ONE event naming
+// the count, the count resets after it is reported, and a quiet tally adds no
+// event (and so no wire traffic) at all.
+func TestTallyEventsCoalescePerFlush(t *testing.T) {
+	setup(t)
+	for range 5 {
+		VideoRemuxFailed()
+	}
+	RepoSelfCheckFailed()
+	batch, _, ok := takeBatch()
+	if !ok || len(batch) != 2 {
+		t.Fatalf("expected 2 coalesced events, got ok=%v len=%d: %+v", ok, len(batch), batch)
+	}
+	got := map[string]string{}
+	for _, ev := range batch {
+		got[ev.Event] = ev.Level + " " + ev.Message
+	}
+	if want := "warn 5 video post(s) skipped: remux to MP4 failed; see the bridge log"; got["video_remux_failed"] != want {
+		t.Errorf("video_remux_failed = %q, want %q", got["video_remux_failed"], want)
+	}
+	if want := "error 1 hosted atproto repo(s) failed the self-check (reload or signature); see the bridge log"; got["repo_self_check_failed"] != want {
+		t.Errorf("repo_self_check_failed = %q, want %q", got["repo_self_check_failed"], want)
+	}
+	if _, _, ok := takeBatch(); ok {
+		t.Error("a reported tally must reset: the next flush had something to say")
+	}
+}
+
+// A tally obeys the disable rule like Emit: once nest has refused the kind,
+// counting stops rather than accumulating a number no flush will ever send.
+func TestTallyIsInertWhileDisabled(t *testing.T) {
+	setup(t)
+	setDisabled(true)
+	VideoRemuxFailed()
+	setDisabled(false)
+	if _, _, ok := takeBatch(); ok {
+		t.Error("a tally counted while the plane was disabled")
+	}
+}
+
 // PortOf is the guard that keeps a bind *host* — which can be an arbitrary
 // operator-hatch string — off the wire while still reporting the port an admin
 // needs. The hostile rows are the ones that matter.
@@ -159,5 +222,32 @@ func TestListenerBindFailedCarriesNoBindHost(t *testing.T) {
 	}
 	if strings.Contains(batch[0].Message, "example.com") || strings.Contains(batch[0].Message, "@") {
 		t.Errorf("bind host leaked into the plane: %q", batch[0].Message)
+	}
+}
+
+// The scanner name is a closed pair: the two real scanners render, anything
+// else collapses to a constant, and the level split is warn (down) / info (up).
+func TestScannerEventsConstrainTheNameToTheFixedPair(t *testing.T) {
+	setup(t)
+	ScannerUnavailable(ScannerClamd)
+	ScannerUnavailable(ScannerRspamd)
+	ScannerRecovered(ScannerClamd)
+	ScannerUnavailable("evil@example.com scanner")
+	batch, _, ok := takeBatch()
+	if !ok || len(batch) != 4 {
+		t.Fatalf("expected 4 events, got ok=%v len=%d", ok, len(batch))
+	}
+	want := []struct{ event, level, msg string }{
+		{"scanner_unavailable", "warn", "scanner clamd unavailable: breaker open, inbound mail tempfails"},
+		{"scanner_unavailable", "warn", "scanner rspamd unavailable: breaker open, inbound mail tempfails"},
+		{"scanner_recovered", "info", "scanner clamd recovered: breaker closed, inbound scanning resumed"},
+		{"scanner_unavailable", "warn", "scanner unknown unavailable: breaker open, inbound mail tempfails"},
+	}
+	for i, w := range want {
+		got := batch[i]
+		if got.Event != w.event || got.Level != w.level || got.Message != w.msg {
+			t.Errorf("event %d = {%q %q %q}, want {%q %q %q}", i,
+				got.Event, got.Level, got.Message, w.event, w.level, w.msg)
+		}
 	}
 }

@@ -130,7 +130,7 @@ pub struct ContactListRequest {
 /// accepted). `handle`/`domain` are joined nest-side from the peer's Profile
 /// (`docs/goal/ui/contacts.md` § State & data shape) — both additive fields
 /// (absent for a federated peer with no profile handle).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ContactItem {
     /// Hex-encoded peer actor id.
     pub peer_id: String,
@@ -153,6 +153,15 @@ pub struct ContactItem {
     /// peer's `handle@domain` identity the roster filter matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
+    /// The peer's home nest URL, for a federated peer whose edge formed from
+    /// a knock that arrived over federation: the edge records the VERIFIED
+    /// origin nest, which the nest resolves here at read time through its
+    /// nest-address directory, proven addresses first. `None` for a local
+    /// peer, an edge with no recorded origin, or an origin with no known
+    /// address. The contact row's tap carries it as the Profile's home
+    /// (`docs/goal/ui/contacts.md` § State & data shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -398,7 +407,7 @@ mod tests {
                     created_at: 1200,
                     handle: Some("alice".into()),
                     domain: Some("fauna.example".into()),
-                    extra: BTreeMap::new(),
+                    ..Default::default()
                 },
                 ContactItem {
                     peer_id: "22".repeat(32),
@@ -407,7 +416,7 @@ mod tests {
                     created_at: 1100,
                     handle: None,
                     domain: None,
-                    extra: BTreeMap::new(),
+                    ..Default::default()
                 },
             ],
             extra: BTreeMap::new(),
@@ -450,7 +459,7 @@ mod tests {
             created_at: 1000,
             handle: None,
             domain: None,
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&item).unwrap();
         let decoded: ContactItem = decode(&bytes).unwrap();
@@ -467,7 +476,7 @@ mod tests {
             created_at: 1000,
             handle: Some("alice".into()),
             domain: Some("fauna.example".into()),
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&item).unwrap();
         let decoded: ContactItem = decode(&bytes).unwrap();
@@ -487,7 +496,7 @@ mod tests {
             created_at: 1000,
             handle: None,
             domain: None,
-            extra: BTreeMap::new(),
+            ..Default::default()
         };
         let bytes = encode_canonical(&item).unwrap();
         // Re-decode as an old-shape struct (only the original four fields) to
@@ -496,6 +505,39 @@ mod tests {
         assert_eq!(item, decoded);
         assert!(decoded.handle.is_none());
         assert!(decoded.domain.is_none());
+    }
+
+    #[test]
+    fn contact_item_carries_home_nest_url_only_when_known() {
+        // A federated peer's home round-trips under its own key...
+        let item = ContactItem {
+            peer_id: "66".repeat(32),
+            status: "pending".into(),
+            created_at: 1000,
+            home_nest_url: Some("https://peer.example".into()),
+            ..Default::default()
+        };
+        let bytes = encode_canonical(&item).unwrap();
+        let decoded: ContactItem = decode(&bytes).unwrap();
+        assert_eq!(item, decoded);
+        assert!(
+            decoded.extra.is_empty(),
+            "the field is not swept into extra"
+        );
+
+        // ...and an unknown home is absent on the wire, decoding to `None`.
+        let none = ContactItem {
+            home_nest_url: None,
+            ..item
+        };
+        let wire: Value = decode(&encode_canonical(&none).unwrap()).unwrap();
+        let Value::Map(entries) = wire else {
+            panic!("a ContactItem encodes as a map")
+        };
+        assert!(
+            !entries.contains_key("home_nest_url"),
+            "no home_nest_url key when the home is unknown"
+        );
     }
 
     #[test]

@@ -160,6 +160,11 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false, feature
 fauna-core = { path = "../fauna-core", default-features = false, features = ["js"] }
 fauna-mls = { path = "../fauna-mls", default-features = false, features = ["js"] }
 fauna-client-core = { path = "../fauna-client-core", default-features = false, features = ["js"] }
+# This crate is the one caller of the registry's `*_serialized` entries, whose
+# wasm arm takes the cross-tab Web Lock only under `web-localstorage`; without
+# the feature they mutate unlocked. Requiring it here keeps every wasm build
+# that reaches those entries on the locked arm, whatever its chunk declares.
+fauna-client-accounts = { path = "../fauna-client-accounts", features = ["web-localstorage"] }
 
 [dev-dependencies]
 # The in-memory `FakeNest` requester the ceremony tests drive: it needs the

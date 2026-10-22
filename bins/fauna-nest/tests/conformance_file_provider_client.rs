@@ -204,9 +204,8 @@ async fn start_test_nest_with_state(
 ) -> (String, String, Arc<AppState>, PlaneMachine) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
 
@@ -266,7 +265,7 @@ async fn start_test_nest_with_state(
             ..Default::default()
         },
         nest_signing_key: Some(deployment_key()),
-        ..AppState::for_test(db.clone())
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());
@@ -676,7 +675,7 @@ async fn app_dead_host(
     url: &str,
     bearer: &str,
     backup_key: Vec<u8>,
-) -> (Arc<FfiFileProviderHost>, std::path::PathBuf) {
+) -> (Arc<FfiFileProviderHost>, HostRoot) {
     // `start_test_nest` mints FOLDER as the first and only row in a fresh
     // in-memory DB, so its `folders.id` is always 1.
     app_dead_host_on(
@@ -696,16 +695,13 @@ fn app_dead_host_on(
     backup_key: Vec<u8>,
     folder_ref: FolderRef,
     signer: Arc<TestSigner>,
-) -> (Arc<FfiFileProviderHost>, std::path::PathBuf) {
+) -> (Arc<FfiFileProviderHost>, HostRoot) {
     let owner = ActorKeypair::from_secret(OWNER_SECRET).actor_id().0;
-    let state_dir = tempfile::tempdir().unwrap();
-    let root_dir = tempfile::tempdir().unwrap();
-    // The dirs must outlive the host; leak them (test-only) so the returned host
-    // stays usable without threading the guards back to the caller.
-    let state_path = state_dir.path().to_string_lossy().into_owned();
-    let root_path = root_dir.path().to_path_buf();
-    std::mem::forget(state_dir);
-    std::mem::forget(root_dir);
+    // The dirs must outlive the host: the returned `HostRoot` owns them, so the
+    // caller keeps it (as `root` / `_root`) for as long as it uses the host.
+    let root = HostRoot::new();
+    let state_path = root.state_path();
+    let root_path = root.path.clone();
 
     let host = FfiFileProviderHost::app_dead(
         url.to_string(),
@@ -723,7 +719,38 @@ fn app_dead_host_on(
         None,
     )
     .expect("app_dead host builds (32-byte inputs, owner-only set)");
-    (host, root_path)
+    (host, root)
+}
+
+/// An app-dead host's staging root plus its state dir. Owns both temp dirs and
+/// removes them on drop; derefs to the staging root path.
+struct HostRoot {
+    path: std::path::PathBuf,
+    state_dir: tempfile::TempDir,
+    _root_dir: tempfile::TempDir,
+}
+
+impl HostRoot {
+    fn new() -> Self {
+        let state_dir = tempfile::tempdir().unwrap();
+        let root_dir = tempfile::tempdir().unwrap();
+        Self {
+            path: root_dir.path().to_path_buf(),
+            state_dir,
+            _root_dir: root_dir,
+        }
+    }
+
+    fn state_path(&self) -> String {
+        self.state_dir.path().to_string_lossy().into_owned()
+    }
+}
+
+impl std::ops::Deref for HostRoot {
+    type Target = std::path::PathBuf;
+    fn deref(&self) -> &std::path::PathBuf {
+        &self.path
+    }
 }
 
 /// The fixture itself: the custody [`start_test_nest`] writes through the plane
@@ -1993,9 +2020,8 @@ async fn shared_set() -> SharedSet {
     let authority = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
 
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         Arc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
 
@@ -2037,7 +2063,7 @@ async fn shared_set() -> SharedSet {
             ..Default::default()
         },
         enforce_tier_quotas: Arc::new(tokio::sync::RwLock::new(false)),
-        ..AppState::for_test(db)
+        ..base
     });
     let app = fauna_nest::build_router(state.clone());
     tokio::spawn(async move {
@@ -2296,22 +2322,15 @@ impl SharedSet {
 
     /// A capability host for `secret`'s account: its `BackupKey` and a bearer,
     /// nothing else. Returns the host and its root (where the OS stages writes).
-    fn host(
-        &self,
-        secret: [u8; 32],
-        device: [u8; 32],
-    ) -> (Arc<FfiFileProviderHost>, std::path::PathBuf) {
+    fn host(&self, secret: [u8; 32], device: [u8; 32]) -> (Arc<FfiFileProviderHost>, HostRoot) {
         let (bearer, principal) = if secret == A_SECRET {
             (&self.a_bearer, A_PRINCIPAL_SECRET)
         } else {
             (&self.b_bearer, B_PRINCIPAL_SECRET)
         };
-        let state_dir = tempfile::tempdir().unwrap();
-        let root_dir = tempfile::tempdir().unwrap();
-        let state_path = state_dir.path().to_string_lossy().into_owned();
-        let root_path = root_dir.path().to_path_buf();
-        std::mem::forget(state_dir);
-        std::mem::forget(root_dir);
+        let root = HostRoot::new();
+        let state_path = root.state_path();
+        let root_path = root.path.clone();
         let host = FfiFileProviderHost::app_dead(
             self.url.clone(),
             actor_of(secret).to_vec(),
@@ -2330,7 +2349,7 @@ impl SharedSet {
             None,
         )
         .expect("app_dead host builds");
-        (host, root_path)
+        (host, root)
     }
 
     /// The generation the nest recorded `rel` under (`Some(None)` = recorded

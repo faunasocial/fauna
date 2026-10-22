@@ -50,8 +50,10 @@ pub const LEASE_TTL_SECS: i64 = 300;
 /// How long a hold is used before this seat renews it — half the TTL.
 ///
 /// A renewal is just another `lease.acquire` from the same device (the nest's
-/// `WHERE NOT EXISTS (… device_id != ?2)` makes the same device's re-acquire an
-/// extension, costing one kind and no new state), so the only question is
+/// `WHERE NOT EXISTS (… device_id != ?2 OR actor_id != ?5)` makes the same
+/// account's same device's re-acquire an extension — and another account
+/// naming this device id a refused takeover — costing one kind and no new
+/// state), so the only question is
 /// cadence. Half the TTL leaves a full half-TTL of slack for a slow or retried
 /// RPC before the lease could lapse under a long-running pass.
 pub const LEASE_RENEW_AFTER_SECS: i64 = LEASE_TTL_SECS / 2;

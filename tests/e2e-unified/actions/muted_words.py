@@ -188,3 +188,39 @@ class MutedWordsActions:
         """Click the `muted-word-remove-button` of the `index`-th row (set the
         stored list minus that term)."""
         self.driver.click("muted-word-remove-button", scope=f"muted-word-item[{index}]")
+
+    # ── the level picker (docs/goal/ui/settings.md § Muted words — the level
+    # picker): option values `hide` | `show-less`, the level's own spelling ──
+    def level(self, index: int = 0) -> str:
+        """The `muted-word-level-select` value of the `index`-th row."""
+        return self.driver.get_text(
+            "muted-word-level-select", scope=f"muted-word-item[{index}]"
+        )
+
+    def set_level(self, level: str, index: int = 0) -> None:
+        """Pick `level` on the `index`-th row's `muted-word-level-select` — a
+        save at once, like the remove button."""
+        self.driver.select(
+            "muted-word-level-select", level, scope=f"muted-word-item[{index}]"
+        )
+
+    def index_of(self, word: str) -> int:
+        """The row index the term `word` renders at (LookupError if absent)."""
+        words = self.words()
+        if word not in words:
+            raise LookupError(f"{word!r} is not a listed term; words={words!r}")
+        return words.index(word)
+
+    def wait_for_level(self, word: str, level: str, timeout: float = 12.0) -> bool:
+        """Poll until the row of `word` reads `level` (the save → returned
+        record → repaint round trip is async)."""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                if self.level(self.index_of(word)) == level:
+                    return True
+            except LookupError:
+                pass  # a row the list rebuilt away between the count and the read
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.3)

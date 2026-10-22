@@ -2400,7 +2400,90 @@ pub(crate) fn log_pump(label: &str, report: &PumpReport) {
 mod tests {
     use std::time::Duration;
 
-    use super::PassTimings;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Level, Metadata, Subscriber, span};
+
+    use super::{PassTimings, PumpReport, log_pump};
+
+    /// A subscriber that keeps `(level, message)` of every event — the
+    /// crate carries no `tracing-subscriber`, and the capture needs only this.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<(Level, String)>>>);
+
+    struct Message(String);
+
+    impl Visit for Message {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut message = Message(String::new());
+            event.record(&mut message);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), message.0));
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+
+    fn logged(report: &PumpReport) -> Vec<(Level, String)> {
+        let capture = Capture::default();
+        tracing::subscriber::with_default(capture.clone(), || log_pump("test", report));
+        capture.0.lock().unwrap().clone()
+    }
+
+    /// A pass with a failing step logs one `warn` line carrying the step's
+    /// error — the holder's `ReconcileNow` pass reaches a caller that drops
+    /// the report, so this line is the only trace of the failure.
+    #[test]
+    fn a_failing_step_is_logged_at_warn_with_its_error() {
+        let report = PumpReport {
+            errors: vec!["reconcile: boom".to_owned()],
+            ..PumpReport::default()
+        };
+        let events = logged(&report);
+        let warns: Vec<_> = events.iter().filter(|(l, _)| *l == Level::WARN).collect();
+        assert_eq!(warns.len(), 1, "{events:?}");
+        assert!(warns[0].1.contains("had failures"), "{events:?}");
+    }
+
+    /// A quiet pass writes nothing above `debug`.
+    #[test]
+    fn a_clean_pass_logs_nothing_above_debug() {
+        let events = logged(&PumpReport::default());
+        assert!(events.iter().all(|(l, _)| *l >= Level::DEBUG), "{events:?}");
+    }
+
+    /// The holder's `ReconcileNow` arm logs its pass: the agent's pass nudge
+    /// and the content-key door both drop the reply's report.
+    #[test]
+    fn the_reconcile_now_arm_logs_its_pass() {
+        let src = include_str!("mod.rs");
+        let production = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let arm = production
+            .split("\"reconcile-now\",\n                                Some(cycles)")
+            .nth(1)
+            .and_then(|rest| rest.split("reply.send(report)").next())
+            .expect("the holder's reconcile-now arm");
+        assert!(arm.contains("log_pump(\"reconcile-now\", &report)"));
+    }
 
     /// The steps partition the pass: every awaited line of `pump` and
     /// `seed_pass` sits inside a `let step = now_ms();` … `since(step)`

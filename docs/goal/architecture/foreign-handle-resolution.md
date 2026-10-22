@@ -91,7 +91,7 @@ Last verified: 2026-09-28 (the split; every ruling date, pin and residual below 
      because a Fauna `ActorId` *is* a self-minted Ed25519 public key with no
      issuing authority to verify it against. The one cryptographic bind on an
      actor id is `credential == leaf signature key`, enforced at every group
-     admission ([`../ui/conversations.md`](../ui/conversations.md)
+     admission ([`../behavior/message-reactions.md`](../behavior/message-reactions.md)
      § Reactions & message delete → *Leaf-credential binding*), and the residual that
      ruling rests on — the delivery service is trusted to serve the honest
      KeyPackage for the requested actor id — stands **ratified and is NOT
@@ -349,9 +349,9 @@ Last verified: 2026-09-28 (the split; every ruling date, pin and residual below 
   find_user_by_handle` names a qualified find result by the typed
   `localpart@domain` and reads the reply's `handle`/`domain` only for a bare
   handle resolved on the home nest. The UniFFI `resolve_handle` face (apple,
-  windows, android), the wasm `actorByHandle` twin (web) and linux's
-  `find_user_message` all route through it; tui never read the echo
-  (`resolve_on_peer` keeps only the actor id and URL). Pinned by
+  windows, android), the wasm `findUser` twin (web), linux's
+  `find_user_message` and tui's Contacts lookup (via `find_user_across_nests`)
+  all route through it. Pinned by
   `find_user.rs`'s
   `a_peer_echoing_a_domain_it_was_not_dialed_at_is_named_by_the_dial` and
   linux's `a_foreign_peers_echo_never_names_the_find_result`.

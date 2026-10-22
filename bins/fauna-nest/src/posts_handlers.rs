@@ -28,8 +28,8 @@ use fauna_protocol::{
     RpcError, Value, decode_strict as decode,
     posts::{
         POST_ROOM_LABELS_MAX_IDS, PostCreateReply, PostCreateRequest, PostDeleteReply,
-        PostDeleteRequest, PostGetReply, PostGetRequest, PostInteractReply, PostInteractRequest,
-        PostRoomLabelsEntry, PostRoomLabelsRemoteRequest, PostRoomLabelsReply,
+        PostDeleteRequest, PostGetRemoteRequest, PostGetReply, PostGetRequest, PostInteractReply,
+        PostInteractRequest, PostRoomLabelsEntry, PostRoomLabelsRemoteRequest, PostRoomLabelsReply,
         PostRoomLabelsRequest, PostsListItem, PostsListReply, PostsListRequest,
     },
 };
@@ -184,13 +184,11 @@ fn posts_get_handler() -> RpcHandler {
             match get_post_core(&state, Some(actor_id), post_id).await {
                 GetPostOutcome::Found(bytes) => {
                     let author_display =
-                        crate::feed_routes::bridged_author_display_best_effort(&state, &bytes)
-                            .await;
+                        crate::feed_routes::author_display_best_effort(&state, &bytes).await;
                     encode_reply(&PostGetReply {
                         body: serde_bytes::ByteBuf::from(bytes),
-                        legal_takedown: None,
                         author_display,
-                        extra: std::collections::BTreeMap::new(),
+                        ..Default::default()
                     })
                 }
                 // Taken down under legal obligation: withhold the body (empty)
@@ -199,13 +197,31 @@ fn posts_get_handler() -> RpcHandler {
                 // (moderation.md § Categories & enforcement item 1).
                 GetPostOutcome::LegalTakedown { reference } => encode_reply(&PostGetReply {
                     body: serde_bytes::ByteBuf::new(),
-                    legal_takedown: Some(fauna_protocol::posts::LegalTakedownMarker {
+                    legal_takedown: fauna_protocol::posts::LegalTakedownMarker::from_ref(Some(
                         reference,
-                        extra: std::collections::BTreeMap::new(),
-                    }),
-                    author_display: None,
-                    extra: std::collections::BTreeMap::new(),
+                    )),
+                    ..Default::default()
                 }),
+                // Blocked by this nest's admin after a report (`moderation.md`
+                // § Admin block of a reported item): every viewer gets the
+                // notice's marker; only the author's read keeps the body
+                // (`body` is `Some` for them alone).
+                GetPostOutcome::AdminBlocked { reason, body } => {
+                    let author_display = match &body {
+                        Some(bytes) => {
+                            crate::feed_routes::author_display_best_effort(&state, bytes).await
+                        }
+                        None => None,
+                    };
+                    encode_reply(&PostGetReply {
+                        body: serde_bytes::ByteBuf::from(body.unwrap_or_default()),
+                        admin_block: fauna_protocol::posts::AdminBlockMarker::from_reason(Some(
+                            &reason,
+                        )),
+                        author_display,
+                        ..Default::default()
+                    })
+                }
                 GetPostOutcome::NotFound => Err(not_found("post not found")),
                 GetPostOutcome::Error => Err(internal("storage error")),
             }
@@ -408,6 +424,87 @@ fn posts_room_labels_remote_handler() -> RpcHandler {
     })
 }
 
+// ── fauna.posts.get_remote ─────────────────────────────────────
+
+/// The deep-link door's read of a post homed on **another nest**, relayed by
+/// the reader's own nest (`feed.md` § The read model → *Opening a post the
+/// timeline never loaded* → *A post homed on another nest*). The client asks
+/// this only after its own nest answered `fauna.posts.not_found`, naming the
+/// post's home from the link it was handed.
+///
+/// The home serves `fauna.federation.post.get` with `caller = None` — the
+/// stored bytes (a room post's sealed envelope; the relay never holds its key)
+/// or a withhold marker over an empty body — the legal takedown's, or the home
+/// admin's block of a reported item (`moderation.md` § Admin block of a
+/// reported item, decision 3: the reader is never the home's author-by-
+/// connection, so it gets the notice and no body) — and its "not held" is the
+/// federation namespace's `not_found`, re-spoken here as the same
+/// `fauna.posts.not_found` the same-nest read answers, so the client handles
+/// both doors alike. Every other typed refusal rides through
+/// [`map_peer_relay_error`](crate::rpc_errors::map_peer_relay_error).
+///
+/// **This nest keeps nothing** (the `room_labels_remote` posture): it forwards
+/// the home's answer and ingests none of it — the post is not this nest's to
+/// serve, and the trend import is the only path that stores a fetched post.
+fn posts_get_remote_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.posts.get_remote").await?;
+            let req: PostGetRemoteRequest = decode(&payload).map_err(malformed)?;
+            let post_id = parse_post_id(&req.post_id)?;
+            let peer_url = req.nest_url.trim();
+            if peer_url.is_empty() {
+                return Err(invalid_params(
+                    "nest_url must name the post's home nest (same-nest reads use posts.get)",
+                ));
+            }
+
+            match crate::federation_pool::originate_post_get(
+                &state.federation_pool,
+                &state,
+                peer_url,
+                hex::encode(post_id),
+            )
+            .await
+            {
+                Ok(Ok(reply)) => {
+                    // The identity `originate` just dialed the channel as
+                    // (cached, so no second dial) — this nest's verified
+                    // knowledge of the home, never the home's own word. The
+                    // reader's byte plane graduates its pin against it
+                    // (`transport-trust.md` § The post arm). A lookup that
+                    // fails now leaves the field absent: the reader keeps the
+                    // WebPKI floor, never weaker.
+                    let home_nest_actor_id = state
+                        .federation_pool
+                        .resolve_peer_nest_id(peer_url)
+                        .await
+                        .ok()
+                        .map(hex::encode);
+                    encode_reply(&PostGetReply {
+                        body: serde_bytes::ByteBuf::from(reply.post),
+                        legal_takedown: reply.legal_takedown,
+                        admin_block: reply.admin_block,
+                        home_nest_actor_id,
+                        ..Default::default()
+                    })
+                }
+                Ok(Err(peer_err)) if peer_err.code == "fauna.federation.not_found" => {
+                    Err(not_found("post not found on its home nest"))
+                }
+                Ok(Err(peer_err)) => Err(crate::rpc_errors::map_peer_relay_error(
+                    peer_err,
+                    "the cross-nest post read relay",
+                )),
+                Err(pool_err) => {
+                    tracing::error!("federation post read (get_remote): {pool_err}");
+                    Err(internal("federation post read failed"))
+                }
+            }
+        })
+    })
+}
+
 // ── fauna.posts.list ───────────────────────────────────────────
 
 /// Default page size when the request omits `limit`, and the ceiling any
@@ -561,6 +658,17 @@ pub fn register_posts_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(30),
             handler: posts_room_labels_remote_handler(),
+        },
+    );
+    // - get_remote: `get` relayed to a post's home nest, the deep-link door
+    //   for a post this nest does not hold. Pure read, replay-safe; 30 s for
+    //   the peer round trip.
+    b.add(
+        "fauna.posts.get_remote",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(30),
+            handler: posts_get_remote_handler(),
         },
     );
     // - list: pure paged read, self-scoped by construction (replay-safe @5s).

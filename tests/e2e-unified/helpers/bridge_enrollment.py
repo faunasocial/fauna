@@ -59,3 +59,47 @@ def enroll_and_approve_bridge(
     no-op."""
     enroll_bridge(nest_url, ed25519_pubkey, role, bridge_id)
     approve_bridge(nest_url, admin_signing_key, ed25519_pubkey, role)
+
+
+def revoke_bridge(nest_url: str, admin_signing_key, ed25519_pubkey: bytes) -> None:
+    """Revoke an enrolled bridge as the admin, over the app's own rotate kind
+    (`fauna.bridges.revoke_service_user`). Idempotent on an already-revoked
+    row; the row stays, `revoked`, so the key can never re-pend."""
+    admin_ws = WsRpcAdminClient(
+        nest_url,
+        actor_id=bytes(admin_signing_key.verify_key),
+        signing_key=bytes(admin_signing_key),
+    )
+    with admin_ws:
+        admin_ws.call(
+            "fauna.bridges.revoke_service_user", {"bridge_actor_id": bytes(ed25519_pubkey)}
+        )
+
+
+class PlantedBridges:
+    """Approved bridge rows a test plants on a SHARED nest with no bridge
+    process behind them, revoked again by :meth:`retire_all` (the
+    `planted_bridges` fixture's teardown).
+
+    An approved `mta`/`mda` row that never connects is not inert: the mail
+    health readout counts every approved mail helper and reads one with no live
+    socket as down (`fauna_mail::health`, "N of M connected"), so a row left
+    behind on the session nest turns a later test's healthy readout into
+    `bridge_down`."""
+
+    def __init__(self, nest_url: str, admin_signing_key):
+        self.nest_url = nest_url
+        self._admin_sk = admin_signing_key
+        self._planted: list[bytes] = []
+
+    def plant(self, ed25519_pubkey: bytes, role: str, bridge_id: str = "") -> None:
+        """Enroll and approve `ed25519_pubkey` (`enroll_and_approve_bridge`),
+        recorded for retirement."""
+        self._planted.append(bytes(ed25519_pubkey))
+        enroll_and_approve_bridge(self.nest_url, self._admin_sk, ed25519_pubkey, role, bridge_id)
+
+    def retire_all(self) -> None:
+        """Revoke every planted row; a row the test itself already revoked (a
+        rotate) is a no-op."""
+        while self._planted:
+            revoke_bridge(self.nest_url, self._admin_sk, self._planted.pop())

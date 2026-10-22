@@ -17,9 +17,9 @@ The Notifications page shows the user's notification feed (mentions, replies, re
 
 Page elements (from ui.yaml):
 
-- `page-heading`, `notification-mark-read`, `notification-count-badge`, `error-message`.
+- `page-heading`, `notification-mark-read`, `notification-clear`, `notification-count-badge`, `error-message`.
 
-Components used: `notification-row`.
+Components used: `notification-row` (`notification-item`, `notification-type-icon`, `notification-dismiss`).
 
 State fields (from ui.yaml):
 - `data.notifications.unread_count`.
@@ -178,18 +178,23 @@ nest's bodyless knock, or a newer nest's unknown key — paints the toast's own
 `notifications.knock_body` sentence naming the sender's 8-hex prefix (what
 every knock toast said before the push carried a body). A knock's `summary`
 is the knocker's raw message, not an English rendering of the row, so unlike
-`NotificationPayload.summary` it is never the painted fallback. **The
-knocker's message in the known-key sentence is a stranger's text, and is plain
-text on every seat.** `knock_push_text` runs every arg of the knock body through
-`fauna_core::control_chars::sanitize_plain_line` — control, bidi and other
-format characters dropped, newlines and line separators collapsed to a space,
-the result capped at 200 characters on a character boundary — so no app
-paints it as anything but one plain line (the nest's own
-`MAX_KNOCK_SUMMARY_BYTES` refusal is the first bound; this is the second). A
-shell that hands the body to an OS surface which interprets markup escapes it
-too (linux's freedesktop body: `&`, `<`, `>`), and a knock toast carries one
-notification id per app, never one per sender, so a flood of fresh keys
-replaces one toast instead of stacking.
+`NotificationPayload.summary` it is never the painted fallback. **Every arg of
+a row's sentence is someone else's text — the knocker's message, a bridged
+author's self-chosen display name — and is plain text on every seat, in the
+row and in the toast alike.** The shared decision (`notification_text`,
+`notification_push_text` and `knock_push_text` all share it) runs every arg
+through `fauna_core::control_chars::sanitize_plain_line` — control, bidi and
+other format characters dropped, newlines and line separators collapsed to a
+space, the result capped at 200 characters on a character boundary — and
+reduces a verbatim English `summary` the same way (capped at 1000), so no app
+paints a row or a toast as anything but plain lines and a row and its toast
+still say the same thing (for a knock the nest's own `MAX_KNOCK_SUMMARY_BYTES`
+refusal is the first bound; this is the second). A shell that hands any toast
+body to an OS surface which interprets markup escapes it too (linux's
+freedesktop body: `&`, `<`, `>`, applied in the one builder every linux
+notifier starts from), and a knock toast carries one notification id per app,
+never one per sender, so a flood of fresh keys replaces one toast instead of
+stacking.
 
 **The nest cannot mint a row without a key.** `insert_notification` takes the
 body and the fallback together (`NotificationText { body, summary }`), so
@@ -308,6 +313,13 @@ the same posture § Localized body takes for an unknown body key.
   `NotificationsClient`.
 - **Mark-read mutation.** Shared Rust — `NotificationsClient` →
   `fauna.notifications.mark_read` (nest-side flip, `{marked_read}` echo).
+- **A third-party principal's read and mark-read (ruled and built 2026-10-17).** The
+  arms `fauna:notifications:read` (list, count) and `fauna:notifications:write`
+  (mark read only; dismiss and clear stay the owner's) —
+  [`authorization-server.md`](authorization-server.md) § Scope grammar → *The
+  notifications arms*; the cli's poll and mark-read tools are
+  [`../architecture/apps/cli.md`](../architecture/apps/cli.md) § Resources and
+  prompts'.
 - **Deep-link routing on tap.** Shared Rust returns the destination from the
   row; app glue navigates. `fauna_client_notifications::
   notification_destination(&NotifItem)` → `Option<NotificationDestination>`
@@ -334,9 +346,10 @@ the same posture § Localized body takes for an unknown body key.
   [`moderation.md`](moderation.md) § User-initiated reporting): 🚩 for the
   emoji family, `flag.fill` on apple.
 - **Muted-word collapse and the toast gate.** Shared Rust decides
-  (`notification_muted` / `notification_push_muted`, § Muted words);
-  app glue paints the placeholder, keeps the session-local revealed
-  set, and withholds the toast. Unbuilt (§ Implementation status today).
+  (`notification_muted` / `notification_push_muted` / `knock_push_muted`,
+  § Muted words); app glue paints the placeholder, keeps the session-local
+  revealed set, and withholds the toast. Built on tui, web and linux; the
+  rest per § Implementation status today.
 
 ## Security notices
 
@@ -439,14 +452,14 @@ critical-alert severity bar.
 
 **A muted word collapses the notification rows that carry it — the same collapse-with-reveal verb as the feed's `feed-post-muted` and the conversation's `dm-message-muted`, the third surface of one concept** ([`../architecture/content-moderation-and-ranking.md`](../architecture/content-moderation-and-ranking.md) § Composition: "a user's composed lens applies wherever content is rendered — feed, conversations, notifications"; the frame owns the list, the matcher and the levels, this section owns only what a notification does with them). The list is the user's sealed `fauna.state.moderation` muted-keywords list, and the nest never holds it, so everything below runs client-side over the rows the list reply and the push frame already carry — no wire change and no nest change.
 
-1. **What is matched: the relayed text the row carries, never the catalog's sentence.** A row's `body.args` values — a display name, a knock's message, a group's name — are text other people wrote, substituted verbatim in every language; the sentence around them is our own catalog entry, identical in every row of its kind, so matching it would mute "post" out of every like row, and in English only. The match is the shared matcher over the concatenation of every `body.args` value; a row with no `body` (an older nest's row, or a pre-column one — § Localized body's compat table) matches on its `summary`, the only text it has, over-matching the English sentence in that one legacy case rather than showing what the user asked to hide. The content a row is *about* — the reply, the quote — is not fetched to decide the row: content is scored where it is rendered, and a tapped row lands on a post the feed collapses by the same list ([`../ui/feed.md`](../ui/feed.md) § The read model — the rendered set treats a deep-linked post as a listed one). A later nest that carries an excerpt of the subject as an arg is matched by this rule unchanged.
+1. **What is matched: the relayed text the row carries, never the catalog's sentence.** A row's `body.args` values — a display name, a knock's message, a group's name — are text other people wrote, substituted verbatim in every language; the sentence around them is our own catalog entry, identical in every row of its kind, so matching it would mute "post" out of every like row, and in English only. The match is the shared matcher over the concatenation of every `body.args` value; a row with no `body` (an older nest's row, or a pre-column one — § Localized body's compat table) matches on its `summary`, the only text it has, over-matching the English sentence in that one legacy case rather than showing what the user asked to hide. The content a row is *about* — the reply, the quote — is not fetched to decide the row: content is scored where it is rendered, and a tapped row lands on a post the feed collapses by the same list ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model — the rendered set treats a deep-linked post as a listed one). A later nest that carries an excerpt of the subject as an arg is matched by this rule unchanged.
 2. **Which words collapse: a word muted at Hide; Show less changes nothing.** A notification list is not ranked, so the soft level has nothing to demote — the conversation's rule exactly, through the one collapse decision `fauna_core::scoring::muted_keywords_collapse` ([`../ui/settings.md`](../ui/settings.md) § Muted words — the level picker names the two levels).
-3. **A collapsed row paints the placeholder, its type icon and its timestamp, and offers one gesture: reveal.** The twins of the feed and conversation shape: `notification-muted` (indexed, within `notification-row`) in place of the sentence, beside `notification-muted-reveal-button`; the reveal is per-row and session-local, the mute stays, and a revealed row paints and navigates as any other (§ Deep-link destinations). A collapsed row is not a tap target: like the conversation's collapsed bubble it carries no body and no action but the reveal, so a muted sender's name is never painted as a button label. The two ids are pending rule-A approval, tui-first.
+3. **A collapsed row paints the placeholder, its type icon and its timestamp, and offers one gesture: reveal.** The twins of the feed and conversation shape: `notification-muted` (indexed, within `notification-row`) in place of the sentence, beside `notification-muted-reveal-button`; the reveal is per-row and session-local, the mute stays, and a revealed row paints and navigates as any other (§ Deep-link destinations). A collapsed row is not a tap target: like the conversation's collapsed bubble it carries no body and no action but the reveal, so a muted sender's name is never painted as a button label. The placeholder and the reveal say the one collapse pair every muted surface shares (`i18n` `muted_words.collapsed` / `muted_words.reveal`).
 4. **The unread badge counts every unread row, muted or not.** `fauna.notifications.count` is the nest's number and the nest cannot read the list; a client-side recount would page every unread row down on every push, for a number that already points at something on the page — the placeholder is visible. Mark-all-read, dismiss and clear reach a collapsed row exactly as an open one (§ Retention): the mute is a render verb, never a delete.
-5. **A `security.notice` row is never collapsed.** The muted list is written by a User-class session — the very party a security notice exposes (§ Retention, the security-notice window's reasoning) — so a stolen key's session could mute its own IP prefix and collapse the new-sign-in notice on the user's other seats. The predicate the retention window keys on (`NOTIF_TYPE_SECURITY_NOTICE`) exempts the whole class: the row renders in full whatever its args carry.
+5. **A `security.notice` row is never collapsed.** The muted list is written by a User-class session — the very party a security notice exposes (§ Retention, the security-notice window's reasoning) — so a stolen key's session could mute its own IP prefix and collapse the new-sign-in notice on the user's other seats. The type the retention window keys on (`NotifType::SecurityNotice`, `libs/fauna-protocol/src/notifications.rs` `is_security_notice_retained`) exempts the whole class: the row renders in full whatever its args carry.
 6. **An OS toast the app itself raises follows the row: none for a row that would collapse.** The toast over `PushEvent::Notification` (linux's `notify_unified`, and any app's twin) and the knock toast (§ Localized body — the knock's message is an arg) paint the same relayed text, cannot be revealed, and ask the same question over `NotificationPayload` / `KnockPayload` before they fire. A toast raised by a process that never holds the list delivers unchanged, and that is not a defect: the sync agent's `ws-device` toast (`PushNotificationPayload` — a nest-composed title and body; the agent links no plane, [`../architecture/apps/common.md`](../architecture/apps/common.md) § Push Notifications → *Transports*) and the nest's web-push preview. Carrying the mute into those channels would mean handing the sealed list to the nest, which the frame forbids; they announce, and the app collapses.
 
-**Where logic lives.** Shared Rust: `fauna_client_notifications::notification_muted(&[MutedKeyword], &NotifItem) -> bool` and `notification_push_muted(&[MutedKeyword], &NotificationPayload) -> bool` — one private decision over `notif_type`, `body` and `summary` (rules 1, 2 and 5) on top of `fauna_core::scoring::muted_keywords_collapse`; the UniFFI and wasm façades land with their first consumer, as the deep-link and text façades did. The list is the one in-memory copy each app already holds for its conversation collapse (tui: `SettingsState::muted_words`, loaded at login so a fresh launch collapses without a Settings visit), never a third read. App glue: the collapsed paint, the session-local revealed set, and the toast gate.
+**Where logic lives.** Shared Rust: `fauna_client_notifications::notification_muted(&[MutedKeyword], &NotifItem) -> bool`, `notification_push_muted(&[MutedKeyword], &NotificationPayload) -> bool` and `knock_push_muted(&[MutedKeyword], &KnockPayload) -> bool` — one private decision over `notif_type`, `body` and `summary` (rules 1, 2 and 5) on top of `fauna_core::scoring::muted_keywords_collapse`; a knock push is decided as its `knock` row (its `summary` is the knocker's message). The façades: UniFFI `notification_muted_for(FfiNotifItem, …)`, `notification_push_muted_for(FfiNotification, …)` (the push mirror carries `body` for it) and `knock_push_muted_for(FfiKnock, …)` in `libs/fauna-ffi/src/muted_keywords.rs`; wasm `notificationMuted(row, keywords)` over the row as it arrived. The list is the one in-memory copy each app already holds for its conversation collapse (tui: `SettingsState::muted_words`, loaded at login so a fresh launch collapses without a Settings visit), never a third read. App glue: the collapsed paint, the session-local revealed set, and the toast gate.
 
 ## User actions
 
@@ -454,9 +467,9 @@ critical-alert severity bar.
 |---|---|---|
 | `notification-mark-read` | Mark all read. | Shared Rust (`NotificationsClient` → `fauna.notifications.mark_read`). |
 | `notification-item[i]` | Open what the row is about. | Shared Rust returns the destination (`notification_destination`, § Deep-link destinations); the app navigates. A row with no destination renders inert. |
-| per-row dismiss (id pending user approval into ui.yaml; tui-first) | Delete this one row. | Shared Rust (`NotificationsClient` → `fauna.notifications.dismiss`); § Retention rule 2. |
-| clear-all (id pending user approval into ui.yaml; tui-first) | Delete every row created up to now. | Shared Rust (`NotificationsClient` → `fauna.notifications.clear`); § Retention rule 2. |
-| `notification-muted-reveal-button[i]` (id pending user approval into ui.yaml; tui-first) | Reveal this one collapsed row for the session; the mute stays. | App glue (the session-local revealed set); the collapse decision is shared Rust (§ Muted words). |
+| `notification-dismiss[i]` (within `notification-row`, one per row) | Delete this one row. Greyed on a row `is_security_notice_retained` holds (§ Retention, the security-notice window); a `fauna.notifications.retained` refusal that still arrives (a clock at the window's edge) lands on `error-message`. | Shared Rust (`NotificationsClient` → `fauna.notifications.dismiss`; the grey test is the shared predicate); § Retention rule 2. |
+| `notification-clear` | Delete every row created up to the newest `created_at` the page has shown; retained security notices stay listed. | Shared Rust (`NotificationsClient` → `fauna.notifications.clear`); § Retention rule 2. |
+| `notification-muted-reveal-button[i]` (within `notification-row`, one per collapsed row) | Reveal this one collapsed row for the session; the mute stays. | App glue (the session-local revealed set); the collapse decision is shared Rust (§ Muted words). |
 
 ## Persistence
 
@@ -469,7 +482,7 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
 **A notification row is the user's own record of what others did toward their account, and nothing on the nest sweeps it by age or by count.** That is the reading the actor-table registry already gives the table (`bins/fauna-nest/src/db/actor_tables.rs`: purged with the account, moved with it on succession, exported verbatim — "the user's record of their own account"), and for several rows it is the *only* record on the nest: a security notice on a deployment with no mail domain (§ Security notices), a forward-queue eviction, every bridged row once the upstream's own window closes. An age or count sweep would delete that record on the nest's say-so — the no-user-data-loss invariant (`../principles.md` § No user-data loss) forbids destroying what the user cannot recreate, and the deciding case is the security notice, whose only copy an age sweep would take. The table grows with the user's own life on the box — their contacts, wards, bridges and account — except for the one stranger-written row, the knock doorbell, which is bounded at the door (`../ui/contacts.md` § Persistence: ≤ ~1 KiB of stranger text per row, ≤ 1 000 pending per recipient) and bound to its knock (rule 3), so every stranger-written byte on this table is bounded in size, in count and in time. A row therefore leaves the table on exactly three paths:
 
 1. **With the account.** `Policy::Purge` in `actor_tables.rs`, unchanged; the same registry moves the rows to a successor and exports them verbatim.
-2. **By the user's hand, on the Notifications page.** Two grains, both nest-side deletes keyed on the connection actor: `fauna.notifications.dismiss { id }` → `{ dismissed }` deletes one row (`false` when no row of that id is the caller's — idempotent, never an error, so a replay or a double-tap deletes nothing new), and `fauna.notifications.clear { up_to? }` → `{ cleared }` deletes every row of the caller's created at or before `up_to` (default now — `mark_read`'s shape, so a page that lists then clears cannot delete a row that arrived after it looked). Both are `OfflineSafe` and replay-safe @5 s. The UI is a per-row dismiss and a clear-all, **tui-first** — the lead app lands them with ids the user approves into ui.yaml, the other six follow in trickle-down; the shared `NotificationsClient` carries both calls from day one. **One carve-out: a `security.notice` row is deletable by neither grain for 14 days after it is written** — the security-notice window, below.
+2. **By the user's hand, on the Notifications page.** Two grains, both nest-side deletes keyed on the connection actor: `fauna.notifications.dismiss { id }` → `{ dismissed }` deletes one row (`false` when no row of that id is the caller's — idempotent, never an error, so a replay or a double-tap deletes nothing new), and `fauna.notifications.clear { up_to? }` → `{ cleared }` deletes every row of the caller's created at or before `up_to` (default now — `mark_read`'s shape, so a page that lists then clears cannot delete a row that arrived after it looked). Both are `OfflineSafe` and replay-safe @5 s. The UI is a per-row dismiss and a clear-all, **tui-first** — `notification-dismiss[i]` and `notification-clear` (§ User actions; ids user-approved 2026-10-16), the other six follow in trickle-down; the shared `NotificationsClient` carries both calls from day one. **One carve-out: a `security.notice` row is deletable by neither grain for 14 days after it is written** — the security-notice window, below.
 3. **A knock doorbell goes with its knock.** The `knock` row announces a *pending* request and its only content is the stranger's text, so it lives exactly as long as the knock: `fauna.knocks.dismiss` and `fauna.knocks.block` delete it with the knock (the knock, its pending edge and its doorbell are one thing the user turned away — two dismissals per spam knock would be a chore, and text the user refused has no business outliving the refusal), and the hourly `expire_old_knocks` sweep (`PENDING_KNOCK_TTL_SECS`, 90 days unacted) deletes it with the knock it expires — a doorbell for a request the nest no longer holds, and the step that keeps a rotating-keypair flood's residue bounded in *time* the way the knock queue already bounds it in count (the same sweep now also drops the knock's `pending` contact edge, `../ui/contacts.md` § Persistence — without that an expired knocker was refused as still-pending for ever). **`fauna.knocks.accept` keeps it**: the knock row goes on accept, so from then on the doorbell is the knocker's message's only home and the record of an accepted request — the user's own record, rule 2's to remove. **A re-knock supersedes its own doorbell**: `store_knock` deletes the sender's standing `knock` row before inserting the new one, so a second knock from the same person (after an accepted edge lapsed, say — `contacts.md` § Persistence, 30 days) rings again instead of being swallowed as a duplicate by `insert_notification`'s dedup.
 
 **The security-notice window — rule 2's one carve-out (ruled 2026-09-24, user decision).** A `security.notice` row (§ Security notices) is the account's record of what a *session* did — a new sign-in from an unseen address, a scheduled account action, a recovery-key replacement — and the session it exposes holds a User-class bearer that can call rule 2's deletes the second the row lands: a stolen key's first sign-in would otherwise erase the one record of itself (on a nest with no mail domain the only copy; the push reached only the seats online at that instant, and the acked inbox envelope is rendered by no app). So for **`SECURITY_NOTICE_RETENTION_SECS` = 14 days after `created_at`** neither grain removes it: `fauna.notifications.dismiss` on a retained row refuses with **`fauna.notifications.retained`** (a within-family refusal in the shape of `../architecture/api-layers.md` § Refusal codes at the gate — never `{ dismissed: false }`, which means "no row of that id is yours"), and `fauna.notifications.clear` skips retained rows, counts only what went, and leaves them listed. After the window the row is the user's to remove, rule 2 unchanged; rule 1 (purge with the account, the succession move, the export) is untouched — the window binds the account's *sessions*, not the account. The constant is a hard-coded Rust constant in `libs/fauna-protocol` (bucket 1 of `../principles.md` § One configuration surface: no user would tune it), shared with the apps so a Notifications page can grey the dismiss affordance on a row whose `notif_type` is `security.notice` and whose `created_at` is inside the window with no wire change — the nest's refusal stays the authority. **Why 14 days, and why this is not a breach of the user's control of their own data** (`../principles.md` § The user always controls their data): it is the same window, for the same reason, as the delay on account deletion (`bins/fauna-nest/src/pending_actions.rs`, the 14-day-delayed account deletion) — an irreversible act by one session waits long enough for the user's other seats to see it, because the account's own session is exactly the party the nest cannot tell from a thief. The delete affordance stays in the app; only its timing moves. Every `security.notice` row takes the window, not just the new-sign-in one — one predicate, and each of those events is a record of a session's act in the same sense.
@@ -527,13 +540,36 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
 
 - **Security-notice deadlines — built on every app.** tui, linux and the UniFFI apps (via `value-format`) render `execute_after` / `lands_at` as local time inside the shared `notification_text`; the web SPA, where `local-clock` is off on the wasm leg, rewrites those two numeric args with the browser's own `Date` in `notificationDeadlines.ts` (non-numeric values pass through).
 
-- **Muted words (§ Muted words) — ratified 2026-10-09, nothing built.** No
-  notification surface consults the muted-keyword list: every app's list
-  paints every row in full, linux's `notify_unified` toasts every
-  `PushEvent::Notification`, and every knock toast fires. Owed: the two
-  shared predicates, the two ids (rule-A approval pending), tui first, then
-  the six-app trickle-down; the witness is `muted-words` outcome 8
-  (`docs/features/muted-words.md`), which no test carries yet.
+- **Muted words (§ Muted words) — shared Rust + tui built 2026-10-17.** The
+  two predicates (`fauna_client_notifications::{notification_muted,
+  notification_push_muted}`) and both ids are in; tui collapses a row behind
+  `notification-muted` with its reveal, witnessed by
+  `test_notifications_muted.py` (`muted-words` outcome 8). tui raises no
+  notification or knock toast, so rule 6 has no tui leg. **web and linux
+  built 2026-10-17** (the witness carries both markers): web collapses over
+  the wasm `notificationMuted` and raises no notification or knock toast (its
+  one in-page `Notification` is the conversation message banner), so rule 6
+  has no web leg; linux collapses in `views/notifications.rs` and gates
+  `notify_unified` and `notify_knock` at the `app.rs` push arm and the list
+  load's toast. The UniFFI and wasm façades are in. tui, web and linux paint
+  their feed and conversation collapse with `muted_words.collapsed` /
+  `muted_words.reveal`. **android built 2026-10-17:** the notifications page
+  collapses over `notificationMutedFor` against the process-held list
+  (`MutedWordsHolder`, the one copy its conversation collapse reads), the
+  knock toast asks `knockPushMutedFor` first, and android raises no toast over
+  `PushEvent::Notification`; its feed and conversation collapse paint the
+  shared pair. **macos and ios built 2026-10-21:** both notifications pages
+  collapse over `notificationMutedFor` through the shared FaunaKit
+  `NotificationMutedRow`, against the process-held list (`MutedWordsHolder`,
+  the one copy the conversation collapse reads too; loaded as the knock pump
+  arms), the knock toast asks `knockPushMutedFor` first, and apple raises no
+  toast over `PushEvent::Notification`; the FaunaKit feed and conversation
+  collapse paint the shared pair. **Not built:** windows paints
+  every row in full, its knock toast fires unasked, and its feed and
+  conversation collapse still read the four old keys
+  (`feed.post_muted_placeholder` / `post_muted_reveal`,
+  `conversations.detail.muted_word` / `muted_reveal`), which are deleted with
+  the last of them.
 - **Built:** the full wire surface (`fauna.notifications.{list, mark_read,
   count}` — handlers + kind registry; HTTP twins deleted), the shared typed
   client (`libs/fauna-client-notifications`), wasm passthroughs, and a
@@ -571,10 +607,20 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   `NOTIF_TYPE_SECURITY_NOTICE` and `is_security_notice_retained` in
   `libs/fauna-protocol/src/notifications.rs`, one SQL predicate in `CacheDb::
   {dismiss_notification, clear_notifications}` (the `retained` refusal, the
-  clear skip), pinned in `conformance_notifications.rs`. **Not built:** the per-row dismiss and clear-all UI on any app (tui leads; the
-  ids need user approval into ui.yaml), the wasm passthroughs and the
-  `FfiNotificationsClient` methods — each lands with its first consumer, as
-  the deep-link and localized-body façades did.
+  clear skip), pinned in `conformance_notifications.rs`. **Built 2026-10-17 (tui):** the per-row dismiss and the clear-all
+  (`notification-dismiss[i]`, `notification-clear`; § User actions) — the
+  dismiss greyed through `is_security_notice_retained`, the clear passing the
+  newest shown `created_at`; witnessed by
+  `test_notifications_dismiss_and_clear.py` (both grains, and rule 3's
+  doorbell leaving with its dismissed knock). **Built 2026-10-17 (web, linux,
+  android):** the same two ids over the wasm `notificationsDismiss`/
+  `notificationsClear` passthroughs, `NotificationsClient` direct (linux) and
+  the `FfiNotificationsClient::{dismiss, clear}` methods (android); the grey
+  predicate crosses the wasm/UniFFI boundary as the row-shaped
+  `notification_retained` (`notificationRetained`, `notification_retained_for`).
+  The web and linux marks ride the same witness; android is compile-proved (no
+  e2e venue). **Not built:** the same UI on windows, macos and ios (the
+  `FfiNotificationsClient` methods and the Go binding they need have landed).
 - **App-global unread count (§ Architectural rules, rule 4) — macOS + iOS
   joined 2026-09-24.** Until then apple wrote `notificationsUnreadCount` only
   from the Notifications page's own load, so a push landing while the user sat
@@ -690,7 +736,18 @@ count via `fauna.notifications.count`. How long a row lives: § Retention.
   the only sanitizer), and `AppNotificationBuilder.AddText` escapes toast XML
   itself, so the windows seat passes the plain line through unescaped;
   `KnockToastBuilderTests` witnesses both that escaping and the one shared
-  tag. **Not built:** the nest's offline web-push
+  tag. **Not built (macOS + iOS, found 2026-10-15):** the one id per app —
+  `postKnockNotification` still names each request `knock-<senderId>`, so a
+  flood of fresh keys stacks one banner per key there (the text itself is
+  already the shared plain line). **Built
+  2026-10-15 (shared Rust, linux):** every row and toast arg and the verbatim
+  summary take `sanitize_plain_line` in the shared decision (witnesses
+  `a_remote_sender_arg_is_plain_capped_text_on_row_and_toast`,
+  `a_verbatim_summary_is_one_plain_line`), and every linux notifier, including
+  `notify_unified` and `notify_event_reminder`, builds its body through the one
+  escaping `toast` builder (witness
+  `every_toast_body_reaches_the_daemon_escaped`, which asserts each builder's
+  body). **Not built:** the nest's offline web-push
   preview for a knock (`routes.rs`, "New knock from …"), which is
   nest-composed English on a channel with no app pipeline behind it and is
   not ruled here.

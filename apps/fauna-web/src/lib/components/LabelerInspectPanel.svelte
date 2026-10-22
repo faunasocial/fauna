@@ -7,11 +7,11 @@
   // value, hosted by Settings → Community labelers and, in place, by the
   // community room's policy editor (`ui/conversations.md` § Element IDs → *The
   // room's labeler set*) — one panel, so the two cannot drift.
-  import { ngramDirectionLabel, ngramDocCountLabel } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { t } from '$lib/i18n/strings';
-  import type { LabelerCatalogSnapshot } from '$lib/labeler-catalog-machine';
-  import { IDS } from '$lib/generated/uiIds';
+  import { ngramDirectionLabel, ngramDocCountLabel } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { t } from '#lib/i18n/strings';
+  import type { LabelerCatalogSnapshot } from '#lib/labeler-catalog-machine';
+  import { IDS } from '#lib/generated/uiIds';
 
   let {
     inspecting,

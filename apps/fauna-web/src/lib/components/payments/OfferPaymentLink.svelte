@@ -5,8 +5,8 @@
   // price-and-route class*). Isolated here, imported only from behind
   // `__FAUNA_PAYMENTS__`. The open itself stays the page's `openPayment`, whose
   // `isSafeNavUrl` guard is glue, not a payments face.
-  import { t } from '$lib/i18n/strings';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import { t } from '#lib/i18n/strings';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     onopen: () => void;

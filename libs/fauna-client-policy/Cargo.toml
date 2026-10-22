@@ -1,0 +1,36 @@
+[package]
+name = "fauna-client-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# UniFFI derives on the editor's view and option types, for `fauna-ffi`'s
+# `rule-editor` face. Forwards `fauna-core/uniffi` for the `LocalizedText`
+# registration the view embeds.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
+# Run a nest's or a guardian's document's bundled `wasm` labelers on the device
+# (`NestRulesBook::join_labels`, `GuardianRules::join_labels`), through the
+# shared runner the region plane uses. Gated so a build that must carry no
+# interpreter (the store-safe FFI flavor) keeps the editor and the book without
+# it: there the labeler rules add no factor, and the member's summary names
+# them not applied on this device.
+scorers = ["dep:fauna-labeler"]
+
+[dependencies]
+# The one shared scorer runner (`fauna_labeler::region`), behind `scorers`.
+fauna-labeler = { workspace = true, optional = true }
+# The content-policy grammar the editor edits (`fauna_core::content_policy`),
+# its one structural validator, the guardian policy (`obligation`) and the
+# canonical `LocalizedText`. `default-features = false` keeps it wasm-clean.
+# The path form (rather than `workspace = true`) is what lets the override
+# stand (see `fauna-client-mail-settings`' manifest).
+fauna-core = { path = "../fauna-core", default-features = false }
+serde = { workspace = true }
+uniffi = { workspace = true, optional = true }
+
+[dev-dependencies]
+# A loaded document's catch-all fields are dag-cbor values.
+fauna-cbor = { workspace = true }
+# Every key the editor emits must resolve in the shared string table.
+fauna-i18n = { path = "../fauna-i18n" }

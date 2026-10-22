@@ -445,6 +445,12 @@ async fn ovh_list_is_unfiltered_and_every_row_is_unmarked() {
         .mount(&mock)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/1.0/cloud/project"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(["proj-1"])))
+        .mount(&mock)
+        .await;
+
     // No label/tag query param is sent — OVH instance-create has no label
     // field, so there is nothing to filter on and the whole project lists.
     Mock::given(method("GET"))
@@ -471,13 +477,12 @@ async fn ovh_list_is_unfiltered_and_every_row_is_unmarked() {
         .mount(&mock)
         .await;
 
-    let mut ovh = Ovh::with_base_url(
+    let ovh = Ovh::with_base_url(
         "myAppKey".into(),
         "myAppSecret".into(),
         "myConsumerKey".into(),
         mock.uri(),
     );
-    ovh.project_id = "proj-1".into();
 
     let client = reqwest::Client::new();
     let servers = ovh.list_managed_servers(&client).await.unwrap();
@@ -487,6 +492,7 @@ async fn ovh_list_is_unfiltered_and_every_row_is_unmarked() {
         2,
         "OVH lists the project unfiltered — the view's typed confirm is the guard"
     );
+    assert_eq!(servers[0].server_id, "proj-1/instance-uuid-1");
     assert!(
         servers.iter().all(|s| !s.marked),
         "OVH boxes carry no marker, so every row reports marked: false"
@@ -501,11 +507,10 @@ async fn ovh_list_is_unfiltered_and_every_row_is_unmarked() {
 }
 
 #[tokio::test]
-async fn ovh_with_no_project_chosen_lists_every_project_in_the_account() {
-    // The retire view builds the adapter from credentials alone (it has no
-    // project picker), so the list must walk every project the credentials
-    // see — and each row's id must carry its project, or the delete that
-    // follows cannot find it.
+async fn ovh_lists_every_project_in_the_account() {
+    // The adapter holds credentials alone, so the list walks every project
+    // the credentials see — and each row's id carries its project, or the
+    // delete that follows cannot find it.
     let mock = MockServer::start().await;
 
     Mock::given(method("GET"))

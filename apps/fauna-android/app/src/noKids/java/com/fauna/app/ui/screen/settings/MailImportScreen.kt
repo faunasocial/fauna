@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.settings
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -12,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -19,21 +21,25 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
+import com.fauna.app.core.UrlOpener
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.rememberTwoClickArm
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.MailTransferText
+import com.fauna.app.ui.util.AutomationAttributePack
 import com.fauna.app.ui.util.faunaGate
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.app.ui.viewmodel.MailImportVM
 import uniffi.fauna_client_mail_settings.ImportMailboxProgress
+import uniffi.fauna_client_mail_settings.ImportPauseReason
 import uniffi.fauna_client_mail_settings.ImportSessionState
 import uniffi.fauna_client_mail_settings.ImportSourceKind
 import uniffi.fauna_client_mail_settings.ImportStep
 import uniffi.fauna_client_mail_settings.ImportTlsMode
 import uniffi.fauna_client_mail_settings.MailImportSnapshot
+import uniffi.fauna_client_mail_settings.MicrosoftSignInState
 import uniffi.fauna_client_mail_settings.SourceMailboxOption
 import uniffi.fauna_client_mail_settings.importMailboxProgressText
 import uniffi.fauna_client_mail_settings.importSelectedTotals
@@ -63,11 +69,20 @@ import social.fauna.generated.Ids
  *
  * `mailbox-migration.md` § Wizard steps step 1's "Required fields", as
  * transcribed by the tui lead: Gmail/iCloud show username + app-password (plus
- * that provider's help line); Outlook shows the OAuth button AND the IMAP
- * fallback beside it; Generic shows the IMAP fields alone. `source-username` is
- * the one field painted for every kind. The OAuth button is painted but never
- * enabled — no app wires the Microsoft Graph dance yet
- * (`mailbox-migration.md`'s own "Not in scope" list).
+ * that provider's help line); Outlook shows the address and **Sign in with
+ * Microsoft** — no password, no host, no Connect (the IMAP fallback is
+ * withdrawn; § Microsoft sign-in — the device-code grant); Generic shows the
+ * IMAP fields alone. `source-username` is the one field painted for every kind.
+ *
+ * ## The Outlook source signs in with Microsoft
+ *
+ * The button asks the VM for a code ([MailImportVM.signInWithMicrosoft]); while
+ * Microsoft's code is out, `mail-import-source-oauth-code` paints the code and
+ * the address beside an id-less **Open in browser**, its `code` and `url`
+ * attributes packed on the node, and the grant connects by itself — the step
+ * moves on to Scope with nothing more pressed. A platform without a
+ * registration paints the unavailable sentence and keeps the button inert
+ * (`MailImportSnapshot.microsoftSigninAvailable`).
  *
  * ## The text fields are DRAFTS, committed at the transition
  *
@@ -102,6 +117,7 @@ fun MailImportScreen(
         onSelectSourceKind = vm::selectSourceKind,
         onSetTlsMode = vm::setTlsMode,
         onConnect = vm::connect,
+        onSignInWithMicrosoft = vm::signInWithMicrosoft,
         onToggleMailbox = vm::toggleMailbox,
         onScopeNext = vm::scopeNext,
         onPrev = vm::back,
@@ -109,6 +125,11 @@ fun MailImportScreen(
         onPause = vm::pause,
         onResume = vm::resume,
         onCancel = vm::cancel,
+        onSkipRest = vm::skipRest,
+        onRestart = vm::restart,
+        onDismiss = vm::dismiss,
+        onForgetSource = vm::forgetSource,
+        onSetImportDuplicates = vm::setImportDuplicates,
         onViewImported = { navController.popBackStack() },
     )
 }
@@ -123,6 +144,7 @@ fun MailImportContent(
     onSelectSourceKind: (ImportSourceKind) -> Unit,
     onSetTlsMode: (ImportTlsMode) -> Unit,
     onConnect: (ImportSourceKind, String, String, String, String) -> Unit,
+    onSignInWithMicrosoft: (String) -> Unit,
     onToggleMailbox: (String) -> Unit,
     onScopeNext: (String, String) -> Unit,
     onPrev: () -> Unit,
@@ -130,6 +152,11 @@ fun MailImportContent(
     onPause: () -> Unit,
     onResume: (String, String) -> Unit,
     onCancel: () -> Unit,
+    onSkipRest: () -> Unit,
+    onRestart: () -> Unit,
+    onDismiss: () -> Unit,
+    onForgetSource: () -> Unit,
+    onSetImportDuplicates: (Boolean) -> Unit,
     onViewImported: () -> Unit,
 ) {
     Scaffold(
@@ -161,10 +188,10 @@ fun MailImportContent(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             when (snapshot.step) {
-                ImportStep.SOURCE -> SourceStep(snapshot, sourceKindLabel, tlsModeLabel, onSelectSourceKind, onSetTlsMode, onConnect)
-                ImportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onScopeNext, onPrev)
+                ImportStep.SOURCE -> SourceStep(snapshot, sourceKindLabel, tlsModeLabel, onSelectSourceKind, onSetTlsMode, onConnect, onSignInWithMicrosoft, onForgetSource)
+                ImportStep.SCOPE -> ScopeStep(snapshot, onToggleMailbox, onSetImportDuplicates, onScopeNext, onPrev)
                 ImportStep.CONFIRM -> ConfirmStep(snapshot, sourceKindLabel, onPrev, onStart)
-                ImportStep.PROGRESS -> ProgressStep(snapshot, onSetTlsMode, tlsModeLabel, onPause, onResume, onCancel)
+                ImportStep.PROGRESS -> ProgressStep(snapshot, onSetTlsMode, tlsModeLabel, onSignInWithMicrosoft, onPause, onResume, onRestart, onDismiss, onCancel, onSkipRest)
                 ImportStep.DONE -> DoneStep(snapshot, onViewImported)
             }
         }
@@ -179,6 +206,8 @@ private fun SourceStep(
     onSelectSourceKind: (ImportSourceKind) -> Unit,
     onSetTlsMode: (ImportTlsMode) -> Unit,
     onConnect: (ImportSourceKind, String, String, String, String) -> Unit,
+    onSignInWithMicrosoft: (String) -> Unit,
+    onForgetSource: () -> Unit,
 ) {
     // Page-local drafts — see the class docs on why these are not per-keystroke
     // dispatches. Keyed on nothing, so they survive every re-render of this step
@@ -192,7 +221,8 @@ private fun SourceStep(
 
     val kind = snapshot.sourceKind
     val appPasswordKind = kind == ImportSourceKind.GMAIL || kind == ImportSourceKind.I_CLOUD
-    val imapFieldsKind = kind == ImportSourceKind.OUTLOOK || kind == ImportSourceKind.GENERIC
+    val outlook = kind == ImportSourceKind.OUTLOOK
+    val imapFieldsKind = kind == ImportSourceKind.GENERIC
 
     // Re-seed the host/port drafts from the snapshot's own value whenever the
     // picked kind actually CHANGES — `SelectSourceKind`'s provider preset
@@ -210,6 +240,28 @@ private fun SourceStep(
     // own, so it keeps whatever the previous kind painted, matching apple's own
     // accepted quirk.
     var previousKind by remember { mutableStateOf<ImportSourceKind?>(null) }
+    // The source the account remembers (`mailbox-migration.md` § Credential
+    // handling → *The remembered source*): the machine prefilled the Source step
+    // from it, so this visit's drafts fill from the snapshot once — never over
+    // what the user has typed — and empty when the user's Forget lands (tui:
+    // `settings::apply_mail_import_snapshot`). The step leaves composition with
+    // the visit, so `seeded` is per visit.
+    var seeded by remember { mutableStateOf(false) }
+    var wasRemembered by remember { mutableStateOf(false) }
+    LaunchedEffect(snapshot.sourceRemembered) {
+        if (snapshot.sourceRemembered && !seeded && username.isEmpty()) {
+            host = snapshot.host
+            port = snapshot.port.toString()
+            username = snapshot.username
+            seeded = true
+        } else if (wasRemembered && !snapshot.sourceRemembered) {
+            host = ""
+            port = ""
+            username = ""
+            password = ""
+        }
+        wasRemembered = snapshot.sourceRemembered
+    }
     LaunchedEffect(kind) {
         if (previousKind != null) {
             host = snapshot.host
@@ -235,11 +287,19 @@ private fun SourceStep(
     }
 
     // Painted for every kind — nothing in ui.yaml scopes `source-username` to a
-    // subset the way the other four are annotated.
+    // subset the way the other four are annotated. Outlook asks for the
+    // Microsoft account's address, the XOAUTH2 user.
     OutlinedTextField(
         value = username,
         onValueChange = { username = it },
-        label = { Text(stringResource(R.string.mail_import_source_username_placeholder)) },
+        label = {
+            Text(
+                stringResource(
+                    if (outlook) R.string.mail_import_source_outlook_address_label
+                    else R.string.mail_import_source_username_placeholder,
+                ),
+            )
+        },
         singleLine = true,
         modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_USERNAME),
     )
@@ -272,15 +332,8 @@ private fun SourceStep(
         )
     }
 
-    if (kind == ImportSourceKind.OUTLOOK) {
-        // Painted because ui.yaml requires the element exist, but never enabled:
-        // no app wires the Microsoft Graph dance yet. The IMAP fallback below is
-        // the real path for an Outlook account today.
-        OutlinedButton(
-            onClick = {},
-            enabled = false,
-            modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_BUTTON),
-        ) { Text(stringResource(R.string.mail_import_source_oauth_button)) }
+    if (outlook) {
+        MicrosoftSignIn(snapshot) { onSignInWithMicrosoft(username) }
     }
 
     if (imapFieldsKind) {
@@ -315,24 +368,90 @@ private fun SourceStep(
         )
     }
 
-    Button(
-        onClick = { onConnect(kind, host, port, username, password) },
-        modifier = Modifier.testTag(Ids.MAIL_IMPORT_CONNECT_BUTTON),
-    ) { Text(stringResource(R.string.mail_import_connect_button)) }
+    // Painted for every provider while the account remembers a source.
+    if (snapshot.sourceRemembered) {
+        OutlinedButton(
+            onClick = onForgetSource,
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_FORGET_BUTTON),
+        ) { Text(stringResource(R.string.mail_import_source_forget_button)) }
+    }
+
+    // The Microsoft grant connects by itself — no Connect button beside it.
+    if (!outlook) {
+        Button(
+            onClick = { onConnect(kind, host, port, username, password) },
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_CONNECT_BUTTON),
+        ) { Text(stringResource(R.string.mail_import_connect_button)) }
+    }
+}
+
+/**
+ * The Outlook source's Microsoft sign-in: the button — inert beside the
+ * unavailable sentence until this platform can sign in, and while a sign-in is
+ * in flight — then, once Microsoft has answered, the code and its address with
+ * Open in browser. Shared by the Source step and an adopted session's Progress
+ * step, which repaint the same ids.
+ */
+@Composable
+private fun MicrosoftSignIn(snapshot: MailImportSnapshot, onSignIn: () -> Unit) {
+    val available = snapshot.microsoftSigninAvailable
+    val view = snapshot.microsoftSignin
+    val inFlight = view != null && (
+        view.state == MicrosoftSignInState.REQUESTING ||
+            view.state == MicrosoftSignInState.WAITING ||
+            view.state == MicrosoftSignInState.CONNECTING
+        )
+    OutlinedButton(
+        onClick = onSignIn,
+        enabled = available && !inFlight,
+        modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_BUTTON),
+    ) { Text(stringResource(R.string.mail_import_source_oauth_button)) }
+    if (!available) {
+        Text(
+            stringResource(R.string.mail_import_microsoft_unavailable),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        return
+    }
+    if (view != null && view.state == MicrosoftSignInState.WAITING && view.userCode.isNotEmpty()) {
+        val context = LocalContext.current
+        Text(
+            stringResourceFmt(R.string.mail_import_microsoft_code_fmt, view.verificationUri, view.userCode),
+            style = MaterialTheme.typography.bodyMedium,
+            // The code and the address each ride alone as attributes — the
+            // observables the cross-app journey reads (tui's `.attr("code", …)`).
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_CODE).semantics {
+                stateDescription = AutomationAttributePack.pack(
+                    "code" to view.userCode,
+                    "url" to view.verificationUri,
+                )
+            },
+        )
+        OutlinedButton(onClick = { UrlOpener.open(context, view.verificationUri) }) {
+            Text(stringResource(R.string.mail_import_microsoft_open_browser))
+        }
+        Text(
+            stringResource(R.string.mail_import_microsoft_waiting),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**
  * The Source step's own credential field for the adopted session's provider,
  * painted on the Progress step under the same ids: the app password (Gmail,
  * iCloud), Generic's password with its port and connection security (the
- * session row records neither), or the Microsoft sign-in note (Outlook,
- * whose button stays inert — see [SourceStep]).
+ * session row records neither), or the Microsoft sign-in (Outlook — see
+ * [MicrosoftSignIn]).
  */
 @Composable
 private fun ResumeCredentialFields(
     snapshot: MailImportSnapshot,
     tlsModeLabel: (ImportTlsMode) -> String,
     onSetTlsMode: (ImportTlsMode) -> Unit,
+    onSignInWithMicrosoft: () -> Unit,
     port: String,
     onPortChange: (String) -> Unit,
     password: String,
@@ -382,11 +501,7 @@ private fun ResumeCredentialFields(
                 modifier = Modifier.fillMaxWidth().testTag(Ids.MAIL_IMPORT_SOURCE_PASSWORD),
             )
         }
-        ImportSourceKind.OUTLOOK -> OutlinedButton(
-            onClick = {},
-            enabled = false,
-            modifier = Modifier.testTag(Ids.MAIL_IMPORT_SOURCE_OAUTH_BUTTON),
-        ) { Text(stringResource(R.string.mail_import_source_oauth_button)) }
+        ImportSourceKind.OUTLOOK -> MicrosoftSignIn(snapshot, onSignInWithMicrosoft)
     }
 }
 
@@ -420,6 +535,7 @@ private fun TlsOption(
 private fun ScopeStep(
     snapshot: MailImportSnapshot,
     onToggleMailbox: (String) -> Unit,
+    onSetImportDuplicates: (Boolean) -> Unit,
     onScopeNext: (String, String) -> Unit,
     onPrev: () -> Unit,
 ) {
@@ -473,6 +589,24 @@ private fun ScopeStep(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.testTag(Ids.MAIL_IMPORT_SCOPE_MAILBOX_MAPPING),
     )
+
+    // The advanced opt-out, off by default; its label carries the double-storage
+    // warning itself (§ Don't do these) — never painted without it. The `state`
+    // attribute reads the snapshot, never a click echo.
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .testTag(Ids.MAIL_IMPORT_SCOPE_IMPORT_DUPLICATES_TOGGLE)
+            .toggleable(
+                value = snapshot.importDuplicates,
+                role = Role.Checkbox,
+                onValueChange = onSetImportDuplicates,
+            )
+            .semantics { stateDescription = if (snapshot.importDuplicates) "on" else "off" },
+    ) {
+        Checkbox(checked = snapshot.importDuplicates, onCheckedChange = null)
+        Text(stringResource(R.string.mail_import_scope_import_duplicates_label))
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedButton(onClick = onPrev, modifier = Modifier.testTag(Ids.WIZARD_BACK_BUTTON)) {
@@ -551,17 +685,26 @@ private fun ProgressStep(
     snapshot: MailImportSnapshot,
     onSetTlsMode: (ImportTlsMode) -> Unit,
     tlsModeLabel: (ImportTlsMode) -> String,
+    onSignInWithMicrosoft: (String) -> Unit,
     onPause: () -> Unit,
     onResume: (String, String) -> Unit,
+    onRestart: () -> Unit,
+    onDismiss: () -> Unit,
     onCancel: () -> Unit,
+    onSkipRest: () -> Unit,
 ) {
+    // A failed import is a record, not a run (`mailbox-migration.md` § A failed
+    // import is a record the wizard shows until the user moves on): none of the
+    // controls — nor the resume credential — applies, and its one control is
+    // Dismiss.
+    val failed = snapshot.sessionState == ImportSessionState.ERRORED
     // Page-local drafts for the credential a session adopted after a restart
     // asks for beside Resume (`MailImportSnapshot.resumeNeedsCredentials`,
     // § Resume protocol step 2). The port is seeded from the session when the
     // ask begins; the password is dropped once a Resume has used it.
     var port by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    val needsCredentials = snapshot.resumeNeedsCredentials
+    val needsCredentials = snapshot.resumeNeedsCredentials && !failed
     LaunchedEffect(needsCredentials) {
         if (needsCredentials) port = snapshot.port.toString() else password = ""
     }
@@ -592,46 +735,93 @@ private fun ProgressStep(
     if (needsCredentials) {
         ResumeCredentialFields(
             snapshot, tlsModeLabel, onSetTlsMode,
+            // An adopted session signs in with its own address.
+            { onSignInWithMicrosoft("") },
             port, { port = it }, password, { password = it },
         )
     }
-    // Each control drives an import-session row on the nest (OnlineOnly).
-    val pauseGate = faunaGate("fauna.bridges.pause_import_session")
-    val resumeGate = faunaGate("fauna.bridges.resume_import_session")
-    val cancelGate = faunaGate("fauna.bridges.cancel_import_session")
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    if (failed) {
+        val dismissGate = faunaGate("fauna.bridges.discard_import_session")
         OutlinedButton(
-            onClick = onPause,
-            enabled = pauseGate.enabled,
-            modifier = Modifier.testTag(Ids.MAIL_IMPORT_PAUSE_BUTTON),
-        ) {
-            Text(stringResource(R.string.mail_import_pause_button))
-        }
-        OutlinedButton(
-            onClick = { onResume(port, password) },
-            enabled = resumeGate.enabled,
-            modifier = Modifier.testTag(Ids.MAIL_IMPORT_RESUME_BUTTON),
-        ) {
-            Text(stringResource(R.string.mail_import_resume_button))
-        }
-        // Two-click confirm (`common.md` § Two-click confirm): Cancel
-        // stops a running import, so it arms before it performs.
-        val cancelArm = rememberTwoClickArm()
-        OutlinedButton(
-            onClick = { cancelArm.press(onCancel) },
-            enabled = cancelGate.enabled,
+            onClick = onDismiss,
+            enabled = dismissGate.enabled,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            modifier = Modifier.testTag(Ids.MAIL_IMPORT_CANCEL_BUTTON),
+            modifier = Modifier.testTag(Ids.MAIL_IMPORT_DISMISS_BUTTON),
         ) {
+            Text(stringResource(R.string.mail_import_dismiss_failed_button))
+        }
+        DisabledControlReasonText(dismissGate.reason)
+    } else {
+        // Each control drives an import-session row on the nest (OnlineOnly).
+        val pauseGate = faunaGate("fauna.bridges.pause_import_session")
+        val resumeGate = faunaGate("fauna.bridges.resume_import_session")
+        val cancelGate = faunaGate("fauna.bridges.cancel_import_session")
+        // The full-mailbox notice (`mailbox-migration.md` § Failure handling →
+        // *Nest-side errors*): ask the admin then Resume, Skip the rest or Cancel.
+        val mailboxFull = snapshot.sessionState == ImportSessionState.PAUSED &&
+            snapshot.pauseReason == ImportPauseReason.MAILBOX_FULL
+        if (mailboxFull) {
             Text(
-                stringResource(
-                    if (cancelArm.armed) R.string.common_confirm_q else R.string.mail_import_cancel_button,
-                ),
+                stringResource(R.string.mail_import_quota_notice),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.MAIL_IMPORT_QUOTA_NOTICE),
             )
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onPause,
+                enabled = pauseGate.enabled,
+                modifier = Modifier.testTag(Ids.MAIL_IMPORT_PAUSE_BUTTON),
+            ) {
+                Text(stringResource(R.string.mail_import_pause_button))
+            }
+            OutlinedButton(
+                onClick = { onResume(port, password) },
+                enabled = resumeGate.enabled,
+                modifier = Modifier.testTag(Ids.MAIL_IMPORT_RESUME_BUTTON),
+            ) {
+                Text(stringResource(R.string.mail_import_resume_button))
+            }
+            if (mailboxFull) {
+                OutlinedButton(
+                    onClick = onSkipRest,
+                    enabled = resumeGate.enabled,
+                    modifier = Modifier.testTag(Ids.MAIL_IMPORT_QUOTA_SKIP_REST_BUTTON),
+                ) {
+                    Text(stringResource(R.string.mail_import_quota_skip_rest_button))
+                }
+            }
+            // Offered only while the shared machine holds a source mailbox the old
+            // provider rebuilt (§ Resume protocol step 4); a Resume that starts the
+            // mailbox over.
+            if (snapshot.rebuiltMailboxes.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = onRestart,
+                    enabled = resumeGate.enabled,
+                    modifier = Modifier.testTag(Ids.MAIL_IMPORT_RESTART_BUTTON),
+                ) {
+                    Text(stringResource(R.string.mail_import_restart_button))
+                }
+            }
+            // Two-click confirm (`common.md` § Two-click confirm): Cancel
+            // stops a running import, so it arms before it performs.
+            val cancelArm = rememberTwoClickArm()
+            OutlinedButton(
+                onClick = { cancelArm.press(onCancel) },
+                enabled = cancelGate.enabled,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag(Ids.MAIL_IMPORT_CANCEL_BUTTON),
+            ) {
+                Text(
+                    stringResource(
+                        if (cancelArm.armed) R.string.common_confirm_q else R.string.mail_import_cancel_button,
+                    ),
+                )
+            }
+        }
+        // One reason for the three controls: they gate on the same condition.
+        DisabledControlReasonText(pauseGate.reason)
     }
-    // One reason for the three controls: they gate on the same condition.
-    DisabledControlReasonText(pauseGate.reason)
     // Per-mailbox rows (indexed). The machine tracks only GLOBAL counts — no
     // per-mailbox breakdown exists on the snapshot the way export's does — so
     // each row shows its PLANNED message count, the tui lead's own

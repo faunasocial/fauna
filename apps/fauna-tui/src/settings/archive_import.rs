@@ -269,18 +269,32 @@ fn run_state_label(state: Option<RunState>) -> &'static str {
     }
 }
 
-/// Step 1 — the platform picker and how to request the export there.
-fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element> {
-    let kind = snapshot
+/// The platform step 1 shows: the snapshot's, or Facebook before the first
+/// hydrate (the machine's own default).
+fn source_kind(snapshot: Option<&ArchiveImportSnapshot>) -> ArchiveSourceKind {
+    snapshot
         .map(|s| s.source_kind)
-        .unwrap_or(ArchiveSourceKind::Facebook);
+        .unwrap_or(ArchiveSourceKind::Facebook)
+}
+
+/// Step 1's deep link: the chosen platform's export page — the snapshot's
+/// derived `source_export_url`, or the shared constant before the first
+/// hydrate. Never typed by anyone, so it is safe to hand to the OS opener.
+pub(super) fn source_export_url(snapshot: Option<&ArchiveImportSnapshot>) -> String {
+    snapshot
+        .map(|s| s.source_export_url.clone())
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| source_kind(snapshot).export_request_url().to_string())
+}
+
+/// Step 1 — the platform picker, how to request the export there, and the
+/// link that opens the platform's page (§ The wizard and its machine, step 1).
+fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element> {
+    let kind = source_kind(snapshot);
     let help = match kind {
         ArchiveSourceKind::Facebook => t::SOURCE_HELP_FACEBOOK,
         ArchiveSourceKind::Instagram => t::SOURCE_HELP_INSTAGRAM,
     };
-    // The deep link (§ The wizard and its machine, step 1) rides in the help
-    // as the platform's own address, from the shared constant.
-    let link = t::source_link_fmt(kind.export_request_url());
     vec![
         Element::chrome(t::SOURCE_TITLE),
         Element::select(
@@ -290,7 +304,13 @@ fn source_step_elements(snapshot: Option<&ArchiveImportSnapshot>) -> Vec<Element
             SOURCE_KINDS.into_iter().map(source_kind_label).collect(),
         )
         .labelled(t::SOURCE_TITLE),
-        Element::label(ids::ARCHIVE_IMPORT_SOURCE_HELP, format!("{help} {link}")),
+        Element::label(ids::ARCHIVE_IMPORT_SOURCE_HELP, help),
+        Element::gesture_button(
+            ids::ARCHIVE_IMPORT_SOURCE_EXPORT_LINK,
+            t::source_link_fmt(&source_export_url(snapshot)),
+            true,
+            Gesture::Settings(Action::ArchiveImportOpenExportPage),
+        ),
         next_button(),
     ]
 }
@@ -612,6 +632,7 @@ fn done_step_elements(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::element::Role;
     use crate::settings::SubPage;
     use fauna_archive_import_machine::{ArchiveSummaryView, CategoryRow, RunState};
 
@@ -731,6 +752,7 @@ mod tests {
             // "error-message" is registered globally by ui::register_frame.
             "archive-import-source-picker",
             "archive-import-source-help",
+            "archive-import-source-export-link",
             "archive-import-archive-path",
             "archive-import-archive-open-button",
             "archive-import-archive-summary",
@@ -806,13 +828,44 @@ mod tests {
             text_of(&els, "archive-import-source-picker", 0),
             source_kind_label(ArchiveSourceKind::Facebook)
         );
-        let help = text_of(&els, "archive-import-source-help", 0);
-        assert!(help.starts_with(t::SOURCE_HELP_FACEBOOK), "{help}");
-        assert!(
-            help.ends_with(&t::source_link_fmt(
-                ArchiveSourceKind::Facebook.export_request_url()
-            )),
-            "step 1 carries the platform's export page: {help}"
+        assert_eq!(
+            text_of(&els, "archive-import-source-help", 0),
+            t::SOURCE_HELP_FACEBOOK
+        );
+        assert_eq!(
+            text_of(&els, "archive-import-source-export-link", 0),
+            t::source_link_fmt(ArchiveSourceKind::Facebook.export_request_url()),
+            "step 1 links the platform's export page before the first hydrate"
+        );
+    }
+
+    /// The link names the snapshot's derived address and dispatches the
+    /// local open — the platform the user picked, never a stale default.
+    #[test]
+    fn the_export_link_names_the_chosen_platforms_page_and_opens_it() {
+        let mut snap = a_snapshot(ArchiveImportStep::Source);
+        snap.source_kind = ArchiveSourceKind::Instagram;
+        snap.source_export_url = ArchiveSourceKind::Instagram
+            .export_request_url()
+            .to_string();
+        let els = archive_import_elements(&state_with(snap.clone()));
+        assert_eq!(
+            text_of(&els, "archive-import-source-export-link", 0),
+            t::source_link_fmt(&snap.source_export_url)
+        );
+        let link = els
+            .iter()
+            .find(|e| e.id == "archive-import-source-export-link")
+            .expect("the link paints on step 1");
+        assert!(link.enabled, "the link is actuable");
+        assert!(matches!(
+            link.role,
+            Role::Button(Gesture::Settings(Action::ArchiveImportOpenExportPage))
+        ));
+        assert_eq!(source_export_url(Some(&snap)), snap.source_export_url);
+        assert_eq!(
+            source_export_url(None),
+            ArchiveSourceKind::Facebook.export_request_url()
         );
     }
 

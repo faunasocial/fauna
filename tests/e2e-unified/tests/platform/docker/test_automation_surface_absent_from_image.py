@@ -117,5 +117,5 @@ def test_no_fauna_automation_hook_reaches_the_shipped_spa(docker_image):
         f"the shipped SPA carries a `window.__fauna_*` automation name in {hits}. "
         f"Grep the file for `__fauna_[A-Za-z0-9_]*` to see which; then find its "
         f"install site in `apps/fauna-web/src/` and put it behind "
-        f"`__FAUNA_E2E_AUTOMATION__` or inside `$lib/e2e-automation`."
+        f"`__FAUNA_E2E_AUTOMATION__` or inside `#lib/e2e-automation`."
     )

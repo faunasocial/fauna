@@ -398,7 +398,7 @@ pub struct FolderWizardMachine(Arc<InnerMachine>);
 #[wasm_bindgen]
 impl FolderWizardMachine {
     /// Build the wizard over the SPA core chunk's socket, lent as `port` (a
-    /// `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's `requestRaw`
+    /// `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's `requestRaw`
     /// runs `submit()`'s `fauna.folders.create` + `places.set`, so web keeps
     /// one WebSocket per actor). Throws on an object that is not a port.
     /// `availableDevices` is a JSON-deserializable array of
@@ -573,12 +573,23 @@ extern "C" {
     pub type JsMlsQuery;
     #[wasm_bindgen(method, js_name = isJoinedSharedSet)]
     fn is_joined_shared_set(this: &JsMlsQuery, mls_group_id_hex: &str) -> bool;
+    /// The channel's MLS-recorded folder owner (hex actor id), or nothing —
+    /// the member-row declassification anchor, backed by the MAIN bundle's
+    /// `WasmConversationsManager.foldersChannelOwner`.
+    #[wasm_bindgen(method, js_name = folderChannelOwner)]
+    fn folder_channel_owner(this: &JsMlsQuery, channel_id: &[u8]) -> Option<String>;
 }
 
 struct MlsQueryShim(JsMlsQuery);
 // SAFETY: wasm32 is single-threaded; the JS object never crosses a thread.
 unsafe impl Send for MlsQueryShim {}
 unsafe impl Sync for MlsQueryShim {}
+impl fauna_devices_machine::FolderChannelOwners for MlsQueryShim {
+    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        let owner = self.0.folder_channel_owner(channel_id)?;
+        fauna_core::identity::ActorId::from_hex(&owner).ok()
+    }
+}
 impl InnerMlsQuery for MlsQueryShim {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
         self.0.is_joined_shared_set(mls_group_id_hex)
@@ -595,7 +606,7 @@ pub struct DevicesMachine(
 #[wasm_bindgen]
 impl DevicesMachine {
     /// Build the page machine over the SPA core chunk's socket, lent as
-    /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's
+    /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's
     /// `requestRaw` runs every request this machine and its embedded wizard
     /// make, so web keeps one WebSocket per actor — and a gesture issued while
     /// the app's `connection` indicator reads online rides a socket that IS
@@ -736,7 +747,7 @@ impl DevicesMachine {
     pub fn set_predecessor_chain(&self, secret_hex: String) -> Result<(), JsValue> {
         let keypair = fauna_rpc_wasm::keypair_from_secret_hex(&secret_hex)?;
         let registry = fauna_client_accounts::AccountRegistry::new(Arc::new(
-            fauna_client_accounts::LocalStorageSecretStore,
+            fauna_client_accounts::WebIdentityStore,
         ));
         let (ids, keys) = registry.predecessor_chain_wire(&keypair.actor_id_hex());
         if !ids.is_empty() {
@@ -762,7 +773,7 @@ impl DevicesMachine {
     }
 
     /// Wire the tab's account runtime, lent as `port` (a `SharedAccountPort`
-    /// — `$lib/account-runtime`'s `sharedAccountPort`, minted for this
+    /// — `#lib/account-runtime`'s `sharedAccountPort`, minted for this
     /// machine's account), as the page's fleet door: a removal then resolves
     /// and stages its fleet leg BEFORE the nest deletion and settles it on
     /// the outcome, and the member group reads through it — the machine and

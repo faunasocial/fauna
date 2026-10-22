@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -82,6 +83,7 @@ class LinkedNestsContentTest {
         trustGenerations: List<TrustGenerationRow> = emptyList(),
         blessed: Boolean = false,
         mintDefaultDuration: TrustGrantDuration = TrustGrantDuration.ONE_OFF,
+        trustHoldersUnreachable: Boolean = false,
     ) = LinkedNestRow(
         nestId = "aa".repeat(32),
         capabilities = emptyList(),
@@ -99,7 +101,7 @@ class LinkedNestsContentTest {
         mintDefaultDuration = mintDefaultDuration,
         trustBackups = trustBackups,
         trustGenerations = trustGenerations,
-        trustHoldersUnreachable = false,
+        trustHoldersUnreachable = trustHoldersUnreachable,
     )
 
     private fun pairingRow(
@@ -221,6 +223,8 @@ class LinkedNestsContentTest {
         custodyNestRows: List<CustodyHolderRowView> = emptyList(),
         escrowHolders: Set<String> = emptySet(),
         onRevokeCustody: (ByteArray, ByteArray?) -> Unit = { _, _ -> },
+        restoreNotice: () -> com.fauna.app.ui.viewmodel.LinkedNestsVM.RestoreNotice? = { null },
+        onRestoreFromCustodian: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
             LinkedNestsContent(
@@ -246,6 +250,9 @@ class LinkedNestsContentTest {
                 onRevokeCustody = onRevokeCustody,
                 receiptStatusLine = { "STATUS:${it.statusLabel.key}" },
                 heldBytesLine = { "HELD:${it.heldBytes}" },
+                restoreNotice = restoreNotice(),
+                onRestoreFromCustodian = onRestoreFromCustodian,
+                restoreNoticeText = { "NOTICE:${it::class.simpleName}" },
             )
         }
     }
@@ -507,6 +514,24 @@ class LinkedNestsContentTest {
     }
 
     @Test
+    fun anUnreadableHolderRosterReplacesTheEmptyState() {
+        // A roster that could not be read is not an empty one (`nests.md:125`):
+        // `nest-trust-holders-status` says so and takes `nest-trust-empty`'s place.
+        render(snapshot(home = homeRow(trustHoldersUnreachable = true)))
+        composeTestRule.onNodeWithTag("nest-trust-holders-status").assertTextEquals(
+            ctx.getString(R.string.nests_holders_status_unreachable),
+        )
+        composeTestRule.onNodeWithTag("nest-trust-empty").assertDoesNotExist()
+    }
+
+    @Test
+    fun aReadableHolderRosterKeepsTheEmptyState() {
+        render(snapshot(home = homeRow(trustHoldersUnreachable = false)))
+        composeTestRule.onNodeWithTag("nest-trust-holders-status").assertTextEquals("")
+        composeTestRule.onNodeWithTag("nest-trust-empty").assertExists()
+    }
+
+    @Test
     fun unreachableStaysDistinctFromMissing() {
         // Collapsing these would let a flaky network read as a revoked backup.
         render(
@@ -746,6 +771,78 @@ class LinkedNestsContentTest {
             .performScrollTo().assertIsEnabled().performClick()
         assertTrue(revoked!!.first.contentEquals(ByteArray(16) { 7 }))
         assertTrue(revoked!!.second!!.contentEquals(ByteArray(32) { 3 }))
+    }
+
+    // ── Restore from a custodian nest (nests.md § Trust facet — restore from
+    //    a custodian nest; tui's `push_custody_restore`) ──
+
+    /** The reveal renders with no rows at all (the cold device has none); the
+     *  form and notice stay absent until used; the submit waits for an
+     *  address and dispatches it through the one command. */
+    @Test
+    fun theRestoreFormRendersWithoutRowsAndDispatchesTheTypedAddress() {
+        var restored: String? = null
+        render(snapshot(), onRestoreFromCustodian = { restored = it })
+        composeTestRule.onNodeWithTag("nests-custody-restore-button").assertExists()
+        for (id in listOf(
+            "nests-custody-restore-input",
+            "nests-custody-restore-submit-button",
+            "nests-custody-restore-cancel-button",
+            "nests-custody-restore-notice",
+        )) {
+            composeTestRule.onNodeWithTag(id).assertDoesNotExist()
+        }
+        composeTestRule.onNodeWithTag("nests-custody-restore-button").performClick()
+        composeTestRule.onNodeWithTag("nests-custody-restore-submit-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("nests-custody-restore-input")
+            .performTextInput("https://friend-nest.example")
+        composeTestRule.onNodeWithTag("nests-custody-restore-submit-button")
+            .assertIsEnabled().performClick()
+        assertEquals("https://friend-nest.example", restored)
+        composeTestRule.onNodeWithTag("nests-custody-restore-cancel-button").performClick()
+        composeTestRule.onNodeWithTag("nests-custody-restore-input").assertDoesNotExist()
+    }
+
+    /** The notice reads *running*, then the outcome's own text; a restore that
+     *  reached the custodian closes the form, a failure keeps it open with the
+     *  address kept. */
+    @Test
+    fun theNoticeReadsEachStateAndOnlyAReachedCustodianClosesTheForm() {
+        val notice = mutableStateOf<com.fauna.app.ui.viewmodel.LinkedNestsVM.RestoreNotice?>(null)
+        render(snapshot(), restoreNotice = { notice.value })
+        composeTestRule.onNodeWithTag("nests-custody-restore-button").performClick()
+        composeTestRule.onNodeWithTag("nests-custody-restore-input").performTextInput("https://x.example")
+
+        notice.value = com.fauna.app.ui.viewmodel.LinkedNestsVM.RestoreNotice.Running
+        composeTestRule.onNodeWithTag("nests-custody-restore-notice")
+            .assertTextEquals(ctx.getString(R.string.nests_custody_restore_running))
+        composeTestRule.onNodeWithTag("nests-custody-restore-submit-button").assertIsNotEnabled()
+
+        notice.value = com.fauna.app.ui.viewmodel.LinkedNestsVM.RestoreNotice.Done(
+            com.fauna.ffi.FfiCustodianRestoreOutcome.NotAdmitted,
+        )
+        composeTestRule.onNodeWithTag("nests-custody-restore-notice").assertTextEquals("NOTICE:NotAdmitted")
+        composeTestRule.onNodeWithTag("nests-custody-restore-input").assertTextContains("https://x.example")
+
+        notice.value = com.fauna.app.ui.viewmodel.LinkedNestsVM.RestoreNotice.Done(
+            com.fauna.ffi.FfiCustodianRestoreOutcome.NothingNew,
+        )
+        composeTestRule.onNodeWithTag("nests-custody-restore-notice").assertTextEquals("NOTICE:NothingNew")
+        composeTestRule.onNodeWithTag("nests-custody-restore-input").assertDoesNotExist()
+    }
+
+    /** A custodian-NEST row carries the warm gesture, its own address riding it. */
+    @Test
+    fun aCustodianNestRowRestoresFromItsOwnAddress() {
+        var restored: String? = null
+        render(
+            snapshot(),
+            custodyNestRows = listOf(custodyNest()),
+            onRestoreFromCustodian = { restored = it },
+        )
+        composeTestRule.onNodeWithTag("nest-trust-custody-restore-button")
+            .performScrollTo().performClick()
+        assertEquals("wss://friend.example", restored)
     }
 
     /** A pending ceremony has minted nothing to revoke — the control is off. */

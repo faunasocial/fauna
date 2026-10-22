@@ -9,8 +9,10 @@ import com.fauna.ffi.FfiNotifItem
 import com.fauna.ffi.actorIdFromSecret
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+import uniffi.fauna_core.MutedKeyword
 
 @HiltViewModel
 class NotificationsVM @Inject constructor(
@@ -23,6 +25,10 @@ class NotificationsVM @Inject constructor(
     val isLoading = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
     private var cursor: Long? = null
+
+    /** The process-held muted-word list ([ApiClient.mutedWords]) the rows'
+     *  collapse matches against (notifications.md § Muted words). */
+    val mutedKeywords: StateFlow<List<MutedKeyword>> get() = api.mutedWords.words
 
     private fun actorId(): String? =
         secureStorage.secretHex?.let {
@@ -73,6 +79,39 @@ class NotificationsVM @Inject constructor(
                 val response = api.getNotifications(actor, cursor = cur)
                 notifications.value = notifications.value + response.notifications
                 cursor = response.cursor
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    /**
+     * `notification-dismiss` — delete one row, then refetch (the reply is a bare
+     * echo; the fresh list is the observable effect). A `retained` refusal at the
+     * security window's edge lands on the shared error banner.
+     */
+    fun dismiss(id: Long) {
+        viewModelScope.launch {
+            try {
+                api.dismissNotification(id)
+                loadNotifications()
+            } catch (e: Exception) {
+                errorMessage.value = e.message
+            }
+        }
+    }
+
+    /**
+     * `notification-clear` — delete every row up to the newest one loaded (so a
+     * row that arrived after the user looked survives), then refetch. Retained
+     * security notices stay listed.
+     */
+    fun clearAll() {
+        val upTo = notifications.value.maxOfOrNull { it.createdAt } ?: return
+        viewModelScope.launch {
+            try {
+                api.clearNotifications(upTo)
+                loadNotifications()
             } catch (e: Exception) {
                 errorMessage.value = e.message
             }

@@ -2,9 +2,9 @@
 `internal/auth.SplitEmailDefault` contract — over IMAP + SMTP
 submission + CalDAV.
 
-The user's report (2026-06-04): macOS Calendar.app hangs connecting to example.com
+The user's report (2026-06-04): macOS Calendar.app hangs connecting to the live nest
 CalDAV though the password works for IMAP. Root cause: Apple
-Calendar parses the configured `test@example.com`, uses the domain for server
+Calendar parses the configured `test@example.net`, uses the domain for server
 discovery, and sends **only the bare local part `test`** (no `@domain`) as the
 Basic-auth / SASL username. The strict pre-fix `auth.SplitEmail` 401-looped a
 domain-less username → a "Connecting…" hang.

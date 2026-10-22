@@ -43,13 +43,16 @@ use super::ImapClock;
 /// setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MicrosoftIdentity {
-    /// The Microsoft identity platform v2.0 authority, tenant `common` — work,
-    /// school and personal accounts alike.
-    pub authority: &'static str,
-    /// Appended to [`Self::authority`]: where a code is asked for.
+    /// The Microsoft identity platform's host. The v2.0 authority for a
+    /// directory is `<login_host>/<tenant>/oauth2/v2.0` ([`Self::authority`]).
+    pub login_host: &'static str,
+    /// The project registration's directory: `common` — work, school and
+    /// personal accounts alike.
+    pub tenant: &'static str,
+    /// Appended to the authority: where a code is asked for.
     pub device_code_path: &'static str,
-    /// Appended to [`Self::authority`]: where the code is redeemed and a
-    /// refresh token traded.
+    /// Appended to the authority: where the code is redeemed and a refresh
+    /// token traded.
     pub token_path: &'static str,
     /// The Outlook IMAP resource's delegated permission plus
     /// `offline_access` (for the refresh token). Never Microsoft Graph — a
@@ -65,7 +68,8 @@ pub struct MicrosoftIdentity {
 /// The Outlook source's identity platform (§ Microsoft sign-in — the
 /// device-code grant).
 pub const MICROSOFT: MicrosoftIdentity = MicrosoftIdentity {
-    authority: "https://login.microsoftonline.com/common/oauth2/v2.0",
+    login_host: "https://login.microsoftonline.com",
+    tenant: fauna_protocol::microsoft_registration::DEFAULT_TENANT,
     device_code_path: "/devicecode",
     token_path: "/token",
     scope: "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
@@ -80,18 +84,100 @@ impl MicrosoftIdentity {
         !self.client_id.is_empty()
     }
 
-    /// The ONE door that builds the flow's endpoints — so the e2e authority
-    /// seed (`e2e-automation-surface-gating.md` § The Microsoft authority
-    /// seed) lives in one place and no consumer can be the one that forgot
-    /// it.
+    /// The v2.0 authority for `tenant`.
+    pub fn authority(&self, tenant: &str) -> String {
+        format!("{}/{tenant}/oauth2/v2.0", self.login_host)
+    }
+
+    /// The project's own registration's endpoints —
+    /// [`MicrosoftRegistration::project`]'s client.
     pub fn client(&self) -> OAuthClient {
-        let base = authority_base(self.authority);
+        self.client_for(self.client_id, self.tenant)
+    }
+
+    /// The ONE door that builds the flow's endpoints — so the e2e authority
+    /// seed (`e2e-gated-seeds.md` § The Microsoft authority
+    /// seed) lives in one place and no consumer can be the one that forgot
+    /// it. The seed replaces the whole authority and ignores `tenant`, so a
+    /// fake far end still receives the effective client ID.
+    fn client_for(&self, client_id: &str, tenant: &str) -> OAuthClient {
+        let base = authority_base(&self.authority(tenant));
         OAuthClient {
             device_code_url: format!("{base}{}", self.device_code_path),
             token_url: format!("{base}{}", self.token_path),
-            client_id: self.client_id.to_string(),
+            client_id: client_id.to_string(),
             scope: self.scope.to_string(),
         }
+    }
+}
+
+/// The registration a sign-in uses — the client ID and the directory —
+/// resolved between the deployment's own (an admin's, bucket 2, read off
+/// `fauna.setup.status`) and the project's constant [`MICROSOFT`] (bucket 1).
+/// `mailbox-migration.md` § Microsoft sign-in, *An admin-supplied
+/// registration*, owns the precedence; [`Self::effective`] is its one home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrosoftRegistration {
+    /// The Application (client) ID; empty only for the project's while its
+    /// constant is unfilled.
+    pub client_id: String,
+    /// The directory the authority is built for.
+    pub tenant: String,
+}
+
+impl MicrosoftRegistration {
+    /// The project's own registration, [`MICROSOFT`].
+    pub fn project() -> Self {
+        Self {
+            client_id: MICROSOFT.client_id.to_string(),
+            tenant: MICROSOFT.tenant.to_string(),
+        }
+    }
+
+    /// The admin's registration as `fauna.setup.status` carries it. An
+    /// absent tenant (an older writer, a hand-made fixture) is `common`.
+    pub fn from_status(
+        status: &fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus,
+    ) -> Self {
+        let tenant = status.tenant.trim();
+        Self {
+            client_id: status.client_id.trim().to_string(),
+            tenant: if tenant.is_empty() {
+                fauna_protocol::microsoft_registration::DEFAULT_TENANT.to_string()
+            } else {
+                tenant.to_string()
+            },
+        }
+    }
+
+    /// The pair every app signs in with: the admin's when one is set (and
+    /// has a client ID), else the project's. An admin-set registration makes
+    /// the sign-in available even while the project's constant is unfilled —
+    /// the deployment's registration is a complete one.
+    pub fn effective(admin: Option<&MicrosoftRegistration>) -> Self {
+        match admin {
+            Some(admin) if !admin.client_id.is_empty() => Self {
+                client_id: admin.client_id.clone(),
+                tenant: if admin.tenant.is_empty() {
+                    fauna_protocol::microsoft_registration::DEFAULT_TENANT.to_string()
+                } else {
+                    admin.tenant.clone()
+                },
+            },
+            _ => Self::project(),
+        }
+    }
+
+    /// Whether a sign-in can be attempted: the button is live exactly when
+    /// this holds (and the platform has the HTTPS seam).
+    pub fn is_available(&self) -> bool {
+        !self.client_id.is_empty()
+    }
+
+    /// The endpoints and identity this registration signs in with, through
+    /// [`MICROSOFT`]'s one door.
+    pub fn client(&self) -> OAuthClient {
+        MICROSOFT.client_for(&self.client_id, &self.tenant)
     }
 }
 
@@ -107,7 +193,7 @@ pub struct OAuthClient {
 }
 
 /// The Microsoft authority seed's env var: an absolute `https://` base URL
-/// that stands in for [`MicrosoftIdentity::authority`], so the Outlook
+/// that stands in for the whole [`MicrosoftIdentity::authority`], so the Outlook
 /// sign-in's witnesses run against a fake far end and never reach Microsoft.
 ///
 /// Gated exactly as the source-IMAP trust seed
@@ -122,7 +208,7 @@ pub const E2E_AUTHORITY_ENV: &str = "FAUNA_E2E_MICROSOFT_AUTHORITY";
 /// The authority every request goes to: the seed's, when a test-capable
 /// build has it set, else the constant's.
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-fn authority_base(default: &'static str) -> String {
+fn authority_base(default: &str) -> String {
     seeded_authority(std::env::var(E2E_AUTHORITY_ENV).ok().as_deref(), default)
 }
 
@@ -130,7 +216,7 @@ fn authority_base(default: &'static str) -> String {
 /// 15's same-signature no-op twin — [`MicrosoftIdentity::client`] is the
 /// plumbing the app compiles unconditionally).
 #[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
-fn authority_base(default: &'static str) -> String {
+fn authority_base(default: &str) -> String {
     default.to_string()
 }
 
@@ -141,7 +227,7 @@ fn authority_base(default: &'static str) -> String {
 /// is a harness bug that should say so rather than read like a sign-in bug —
 /// the source-IMAP trust seed's reasoning.
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
-fn seeded_authority(seed: Option<&str>, default: &'static str) -> String {
+fn seeded_authority(seed: Option<&str>, default: &str) -> String {
     match seed.map(str::trim) {
         None | Some("") => default.to_string(),
         Some(seed) if seed.starts_with("https://") => seed.trim_end_matches('/').to_string(),
@@ -639,7 +725,7 @@ mod tests {
     #[test]
     fn the_constants_match_the_ruling() {
         assert_eq!(
-            MICROSOFT.authority,
+            MICROSOFT.authority(MICROSOFT.tenant),
             "https://login.microsoftonline.com/common/oauth2/v2.0"
         );
         assert_eq!(
@@ -658,15 +744,81 @@ mod tests {
 
     #[test]
     fn the_authority_seed_redirects_only_to_https() {
-        let d = MICROSOFT.authority;
-        assert_eq!(seeded_authority(None, d), d);
-        assert_eq!(seeded_authority(Some("  "), d), d);
+        let d = &MICROSOFT.authority(MICROSOFT.tenant);
+        assert_eq!(seeded_authority(None, d), *d);
+        assert_eq!(seeded_authority(Some("  "), d), *d);
         assert_eq!(
             seeded_authority(Some("https://127.0.0.1:4443/fake/"), d),
             "https://127.0.0.1:4443/fake"
         );
         let plaintext = std::panic::catch_unwind(|| seeded_authority(Some("http://x"), d));
         assert!(plaintext.is_err(), "a plaintext authority is refused");
+    }
+
+    fn admin(client_id: &str, tenant: &str) -> MicrosoftRegistration {
+        MicrosoftRegistration {
+            client_id: client_id.into(),
+            tenant: tenant.into(),
+        }
+    }
+
+    #[test]
+    fn the_admins_registration_wins_over_the_constant() {
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        let got = MicrosoftRegistration::effective(Some(&admin(id, "contoso.example")));
+        assert_eq!(got, admin(id, "contoso.example"));
+        assert!(
+            got.is_available(),
+            "live even while the constant is unfilled"
+        );
+        let c = got.client();
+        assert_eq!(c.client_id, id);
+        // The authority is built for the admin's tenant (no seed in this
+        // process — tests never set the variable).
+        if std::env::var(E2E_AUTHORITY_ENV).is_err() {
+            assert_eq!(
+                c.device_code_url,
+                "https://login.microsoftonline.com/contoso.example/oauth2/v2.0/devicecode"
+            );
+            assert_eq!(
+                c.token_url,
+                "https://login.microsoftonline.com/contoso.example/oauth2/v2.0/token"
+            );
+        }
+        assert_eq!(c.scope, MICROSOFT.scope);
+    }
+
+    #[test]
+    fn an_admin_id_alone_signs_in_through_common() {
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        assert_eq!(
+            MicrosoftRegistration::effective(Some(&admin(id, ""))),
+            admin(id, "common")
+        );
+        let status = fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus {
+            client_id: id.into(),
+            tenant: String::new(),
+            extra: Default::default(),
+        };
+        assert_eq!(
+            MicrosoftRegistration::from_status(&status),
+            admin(id, "common")
+        );
+    }
+
+    #[test]
+    fn no_admin_registration_is_the_project_constant() {
+        let project = MicrosoftRegistration::project();
+        assert_eq!(project.client_id, MICROSOFT.client_id);
+        assert_eq!(project.tenant, "common");
+        assert_eq!(MicrosoftRegistration::effective(None), project);
+        // A cleared (empty) admin pair is the project's too.
+        assert_eq!(
+            MicrosoftRegistration::effective(Some(&admin("", ""))),
+            project
+        );
+        assert_eq!(project.is_available(), MICROSOFT.is_available());
+        assert_eq!(project.client(), MICROSOFT.client());
     }
 
     #[test]

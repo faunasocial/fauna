@@ -105,6 +105,8 @@ struct DoSize {
     disk: u32,          // GB
     price_monthly: f64, // USD
     available: bool,
+    /// Region slugs that sell this size.
+    regions: Vec<String>,
 }
 
 impl DigitalOcean {
@@ -153,7 +155,7 @@ impl VpsProvider for DigitalOcean {
             "name": name,
             "region": location,
             "size": server_type,
-            "image": "ubuntu-24-04-x64",
+            "image": "ubuntu-26-04-x64",
             "user_data": user_data,
             "ipv6": true,
         });
@@ -203,6 +205,7 @@ impl VpsProvider for DigitalOcean {
         &self,
         client: &Client,
         curated_ids: &[&str],
+        location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         let resp = crate::vps::get_bearer(
             client,
@@ -215,11 +218,9 @@ impl VpsProvider for DigitalOcean {
         let data: SizesResponse = resp.json().await?;
         let mut out = Vec::with_capacity(curated_ids.len());
         for curated in curated_ids {
-            if let Some(s) = data
-                .sizes
-                .iter()
-                .find(|s| s.slug == *curated && s.available)
-            {
+            if let Some(s) = data.sizes.iter().find(|s| {
+                s.slug == *curated && s.available && s.regions.iter().any(|r| r == location)
+            }) {
                 out.push(ServerTypeInfo {
                     id: s.slug.clone(),
                     vcpu: s.vcpus,
@@ -397,12 +398,14 @@ mod tests {
                     "memory": 1024,
                     "disk": 25,
                     "price_monthly": 6.0,
-                    "available": true
+                    "available": true,
+                    "regions": ["nyc1", "sfo3"]
                 }
             ]
         }"#;
         let parsed: SizesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.sizes[0].vcpus, 1);
+        assert_eq!(parsed.sizes[0].regions, ["nyc1", "sfo3"]);
     }
 
     #[test]

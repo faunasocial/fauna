@@ -5,9 +5,9 @@ part of the test"*): every `live_box` module signed in with
 ``FAUNA_LIVE_SECRET_HEX`` and then demanded the *same account's handle* a second
 time as ``FAUNA_LIVE_HANDLE`` / ``FAUNA_LIVE_MAIL_ADDRESS``. That value exists in
 no artifact in the repo or on any dev machine — every docstring and the
-`justfile` carry ``test@example.com`` as an example — so the standing "run this
+`justfile` carry ``test@example.net`` as an example — so the standing "run this
 against the live box" ask could not be self-served: a session had to interrupt a
-human for a value the box already knows. After the 2026-08-16 example.com release
+human for a value the box already knows. After the 2026-08-16 live-nest release
 that alone blocked the ActivityPub journey, with the binary built, the secret
 located and the box verified clean.
 
@@ -51,7 +51,7 @@ from helpers.live_handle import (
 
 pytestmark = pytest.mark.tier_1
 
-_LIVE_URL = "https://example.com"
+_LIVE_URL = "https://example.net"
 _AP_LIVE_MODULE = Path(__file__).parent / "test_activitypub_live.py"
 
 # The handle charset the nest registers under: 3–63 lowercase alphanumerics and
@@ -89,28 +89,28 @@ def test_the_derivation_runs_with_no_handle_variable_set():
     """The whole point: URL + SECRET alone must be enough."""
     assert handle_override() == ""
     app = _FakeApp(["admin"])
-    assert derive_handle(app, _LIVE_URL) == ("admin@example.com", "admin")
+    assert derive_handle(app, _LIVE_URL) == ("admin@example.net", "admin")
 
 
 @pytest.mark.parametrize("var", ["FAUNA_LIVE_HANDLE", "FAUNA_LIVE_MAIL_ADDRESS"])
 def test_an_explicit_handle_still_wins_over_the_box(monkeypatch, var):
-    monkeypatch.setenv(var, "someone@example.com")
+    monkeypatch.setenv(var, "someone@example.net")
     # A driver that would answer differently — the override must not consult it.
     app = _FakeApp(["derived-instead"])
-    assert derive_handle(app, _LIVE_URL) == ("someone@example.com", "someone")
-    assert sign_in_handle(_LIVE_URL) == "someone@example.com"
+    assert derive_handle(app, _LIVE_URL) == ("someone@example.net", "someone")
+    assert sign_in_handle(_LIVE_URL) == "someone@example.net"
 
 
 def test_a_bare_override_is_qualified_with_the_box_host(monkeypatch):
     monkeypatch.setenv("FAUNA_LIVE_HANDLE", "someone")
     app = _FakeApp([""])
-    assert derive_handle(app, _LIVE_URL) == ("someone@example.com", "someone")
+    assert derive_handle(app, _LIVE_URL) == ("someone@example.net", "someone")
 
 
 def test_FAUNA_LIVE_HANDLE_wins_over_the_mail_address_alias(monkeypatch):
-    monkeypatch.setenv("FAUNA_LIVE_HANDLE", "chosen@example.com")
-    monkeypatch.setenv("FAUNA_LIVE_MAIL_ADDRESS", "fallback@example.com")
-    assert handle_override() == "chosen@example.com"
+    monkeypatch.setenv("FAUNA_LIVE_HANDLE", "chosen@example.net")
+    monkeypatch.setenv("FAUNA_LIVE_MAIL_ADDRESS", "fallback@example.net")
+    assert handle_override() == "chosen@example.net"
 
 
 # ── 2. what gets typed into the wizard ─────────────────────────────────────
@@ -122,14 +122,14 @@ def test_the_probe_is_a_valid_handle_on_the_boxs_own_host():
     assert _HANDLE_RE.match(PROBE_LOCALPART), (
         f"the probe localpart {PROBE_LOCALPART!r} is outside the handle charset"
     )
-    assert sign_in_handle(_LIVE_URL) == f"{PROBE_LOCALPART}@example.com"
+    assert sign_in_handle(_LIVE_URL) == f"{PROBE_LOCALPART}@example.net"
 
 
 @pytest.mark.parametrize(
     ("url", "host"),
     [
-        ("https://example.com", "example.com"),
-        ("https://example.com/", "example.com"),
+        ("https://example.net", "example.net"),
+        ("https://example.net/", "example.net"),
         ("http://localhost:3000", "localhost:3000"),
         ("https://box.example.test:8443/api", "box.example.test:8443"),
     ],
@@ -152,7 +152,7 @@ def test_the_derivation_waits_for_the_account_fetch_rather_than_the_shell():
     """`session.handle` arrives on the account fetch that FOLLOWS auth, so an
     empty first read is normal, not a failure."""
     app = _FakeApp(["", "", "admin"])
-    assert derive_handle(app, _LIVE_URL, timeout=30.0) == ("admin@example.com", "admin")
+    assert derive_handle(app, _LIVE_URL, timeout=30.0) == ("admin@example.net", "admin")
 
 
 def test_the_localpart_is_the_activitypub_username():
@@ -165,8 +165,8 @@ def test_the_localpart_is_the_activitypub_username():
 
 
 def test_a_nest_returned_full_handle_is_not_double_qualified():
-    app = _FakeApp(["admin@example.com"])
-    assert derive_handle(app, _LIVE_URL) == ("admin@example.com", "admin")
+    app = _FakeApp(["admin@example.net"])
+    assert derive_handle(app, _LIVE_URL) == ("admin@example.net", "admin")
 
 
 # ── 4. it refuses rather than fabricates ───────────────────────────────────

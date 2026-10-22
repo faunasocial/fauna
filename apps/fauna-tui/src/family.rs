@@ -76,7 +76,7 @@ use fauna_client_family::family::{
 };
 use fauna_client_family::row_text::{approval_item_text, own_age_band_text, ward_age_band_text};
 use fauna_core::data::{FeedSources, UnknownPeerDm, UnknownSenderMail};
-use fauna_core::obligation::{ContentFloor, ContentPolicy, GUARDIAN_FLOOR_CATEGORIES};
+use fauna_core::obligation::ContentPolicy;
 use fauna_i18n::strings::family as t;
 use fauna_protocol::family::FamilyAgeBandInfo;
 use tokio::sync::mpsc::UnboundedSender;
@@ -94,7 +94,7 @@ use crate::wizard::localized;
 /// Holds **parsed** knob values rather than raw wire strings: every value that
 /// enters here has already been through the shared fail-closed parse
 /// ([`UnknownSenderMail::from_wire`] / [`FeedSources::from_wire`] /
-/// [`ContentFloor::from_wire`]), so it is always a member of its picker catalog
+/// [`UnknownPeerDm::from_wire`]), so it is always a member of its picker catalog
 /// and the save direction cannot write back a value the nest would reject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyEditor {
@@ -116,12 +116,11 @@ pub struct PolicyEditor {
     /// have written verbatim, which this build fails closed to `hold` on render
     /// — echoing that render back on an unrelated save would rewrite the ward's
     /// knob to a value the guardian never chose. No sibling knob needs this: the
-    /// other reach knobs are non-optional on the wire, and the content floors'
-    /// fail-closed option is already their strictest.
+    /// other reach knobs are non-optional on the wire.
     pub unknown_peer_dm_edited: bool,
-    /// The four per-category content floors, index-aligned with
-    /// [`GUARDIAN_FLOOR_CATEGORIES`] (nsfw / spam / phishing / commercial).
-    pub content: [ContentFloor; 4],
+    /// The content pillar's Notify knob. The content rules themselves are the
+    /// shared rule editor's ([`FamilyState::rules`]), saved by its own button,
+    /// so this editor sends the content pillar absent — unchanged.
     pub content_notify: bool,
     /// Screen time, held as the guardian's **raw typed text** rather than
     /// parsed minutes — unlike every knob above.
@@ -150,7 +149,6 @@ impl PolicyEditor {
     /// Load a ward's persisted policy into the editor, parsing every string knob
     /// through its shared fail-closed rule.
     fn from_policy(policy: &ReachPolicy) -> Self {
-        let content = policy.content_policy.unwrap_or_default();
         // An absent pillar is the unsupervised-equivalent default: every field
         // empty, i.e. no limit. Stored minutes render back through the same
         // shared formatter the parse side inverts, so what a guardian sees is
@@ -173,12 +171,6 @@ impl PolicyEditor {
                 .map(UnknownPeerDm::from_wire)
                 .unwrap_or(UnknownPeerDm::Allow),
             unknown_peer_dm_edited: false,
-            content: GUARDIAN_FLOOR_CATEGORIES.map(|c| match content.floor_for(c) {
-                // `Unknown` is not a picker option — a floor this build cannot
-                // parse renders (and re-saves) at the strict `block` position.
-                ContentFloor::Unknown => ContentFloor::FAIL_CLOSED,
-                v => v,
-            }),
             content_notify: policy.content_notify.unwrap_or(false),
             screen_window_start: screen
                 .window_start
@@ -198,8 +190,10 @@ impl PolicyEditor {
     /// The editor's current state as the `fauna.family.policy.update` document,
     /// or the reason it cannot be one.
     ///
-    /// All three pillars are `Some(..)` because this editor authors all three.
-    /// For screen time that is load-bearing rather than incidental: absent means
+    /// The content pillar is sent **absent** (unchanged): its rules are the
+    /// shared rule editor's and ride that editor's own save
+    /// ([`Action::SaveRules`]), so a reach-knob save never rewrites them.
+    /// Screen time is `Some(..)`, and that is load-bearing: absent means
     /// "leave unchanged" (`family-safety.md` § Policy-update compatibility), so
     /// an all-empty editor sending absent could never *clear* a limit — the
     /// guardian would have no way to remove a bedtime they set. Sending the
@@ -223,12 +217,7 @@ impl PolicyEditor {
             unknown_sender_mail: self.unknown_sender.as_str().to_string(),
             federation_contact: self.federation,
             feed_sources: self.feed_sources.as_str().to_string(),
-            content_policy: Some(ContentPolicy {
-                nsfw: self.content[0],
-                spam: self.content[1],
-                phishing: self.content[2],
-                commercial: self.content[3],
-            }),
+            content_policy: None,
             content_notify: Some(self.content_notify),
             screen_time: Some(screen_time),
             // Sent only once the guardian has touched the select — absent means
@@ -310,6 +299,13 @@ pub struct FamilyState {
     pub feature_editor: Option<fauna_client_features::PolicyEditor>,
     /// `feature-policy-editor-status` — the last write's verdict line.
     pub feature_editor_status: Option<String>,
+    /// The guardian's mounting of the shared rule editor
+    /// (`family-policy-rules-section`) over the selected ward's content policy.
+    pub rules: crate::rule_editor::Mount,
+    /// The ward and the stored content policy [`Self::rules`] was loaded from.
+    /// A refresh reloads the editor only when either moved, so an unsaved rule
+    /// survives a refresh that changed nothing it shows.
+    rules_source: Option<(Vec<u8>, Option<ContentPolicy>)>,
 }
 
 /// The two live states a ward's feed-source ask can be in — the shared
@@ -391,8 +387,30 @@ impl FamilyState {
         }
         self.selected_ward = Some(ward.actor_id.to_vec());
         self.editor = PolicyEditor::from_policy(&ward.policy);
+        let source = (ward.actor_id.to_vec(), ward.policy.content_policy.clone());
+        if self.rules_source.as_ref() != Some(&source) {
+            // A set floor shows as a rule (`RuleEditor::load_guardian`), so the
+            // document the guardian saves carries every rule that binds.
+            self.rules
+                .load(fauna_client_policy::RuleEditor::load_guardian(
+                    source.1.as_ref(),
+                ));
+            self.rules.status = None;
+            self.rules_source = Some(source);
+        }
         self.graduate_revealed = false;
         self.transfer_input.clear();
+    }
+
+    /// Close the editors — no ward is selected.
+    fn clear_editor(&mut self) {
+        self.selected_ward = None;
+        self.editor = PolicyEditor::default();
+        self.graduate_revealed = false;
+        self.feature_editor = None;
+        self.feature_editor_status = None;
+        self.rules = crate::rule_editor::Mount::default();
+        self.rules_source = None;
     }
 }
 
@@ -467,6 +485,9 @@ pub enum FamilyField {
     /// guardian-tier feature editor, owned by the shared `PolicyEditor` and
     /// committed by that editor's own save button, not the policy form's.
     FeatureLimitCell { cell: usize },
+    /// A text input of the shared rule editor in `family-policy-rules-section`,
+    /// committed by `rule-editor-save-button`.
+    RuleEditor(crate::rule_editor::Input),
 }
 
 pub fn field(state: &FamilyState, field: &FamilyField) -> String {
@@ -481,6 +502,7 @@ pub fn field(state: &FamilyState, field: &FamilyField) -> String {
             .as_ref()
             .map(|editor| editor.cell_text(*cell).to_string())
             .unwrap_or_default(),
+        FamilyField::RuleEditor(input) => state.rules.field(input),
     }
 }
 
@@ -496,6 +518,7 @@ pub fn set_field(state: &mut FamilyState, field: FamilyField, value: String) {
                 editor.set_cell(cell, value);
             }
         }
+        FamilyField::RuleEditor(input) => state.rules.set_field(input, value),
     }
 }
 
@@ -525,10 +548,12 @@ pub enum Action {
     /// marks the knob edited, which is what lets it ride the save at all
     /// (`PolicyEditor::unknown_peer_dm_edited`).
     SetUnknownPeerDm(String),
-    /// `family-policy-content-{nsfw,spam,phishing,commercial}-select` — the
-    /// category is the [`GUARDIAN_FLOOR_CATEGORIES`] index (a `usize`, so
-    /// [`SelectTarget`] stays `Copy`), the value the localized label.
-    SetContentFloor { category: usize, label: String },
+    /// A local edit in the shared rule editor (`family-policy-rules-section`).
+    RuleEditor(crate::rule_editor::Edit),
+    /// `rule-editor-save-button` in `family-policy-rules-section` — the
+    /// ward's content rules through `fauna.family.policy.update`
+    /// (`FamilyClient::save_content_rules`), then refresh.
+    SaveRules,
     /// `family-policy-save-button` — `fauna.family.policy.update`, then refresh.
     SavePolicy,
     /// `family-contact-add-button` — `fauna.family.contact.add` from the hex
@@ -625,7 +650,10 @@ impl Action {
             | Action::SetUnknownSender(_)
             | Action::SetFeedSources(_)
             | Action::SetUnknownPeerDm(_)
-            | Action::SetContentFloor { .. }
+            // A rule edit is local. Picking a subscribed labeler reads its
+            // module (`fauna.labelers.inspect`), which fails soft offline: the
+            // rule keeps its missing-labeler defect and nothing is gated.
+            | Action::RuleEditor(_)
             // Revealing the graduate confirm step is a view-local flip; the
             // call is on `ConfirmGraduate`.
             | Action::RevealGraduate
@@ -637,6 +665,8 @@ impl Action {
 
             // ── The guardian's own documents + replayable intents ───────────
             Action::SavePolicy => Some("fauna.family.policy.update"),
+            // The content rules ride the same policy write.
+            Action::SaveRules => Some("fauna.family.policy.update"),
             // The guardian tier mints no kind: a feature limit rides the same
             // policy write as the reach knobs (`family-safety.md` § Wire &
             // data shape), so these declare the kind they actually issue. It
@@ -695,11 +725,31 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.family.editor.unknown_peer_dm_edited = true;
             None
         }
-        Action::SetContentFloor { category, label } => {
-            if let Some(slot) = app.family.editor.content.get_mut(category) {
-                *slot = content_floor_for_label(&label);
-            }
-            None
+        Action::RuleEditor(edit) => {
+            let fetch = app.family.rules.apply(edit)?;
+            Some(Op::FetchRuleLabeler {
+                nest: app.family.nest.clone()?,
+                fetch,
+            })
+        }
+        Action::SaveRules => {
+            // Enabled only while the crate's `can_save` holds; the guard keeps
+            // an agent click on a disabled button inert too.
+            let document = app
+                .family
+                .rules
+                .editor
+                .as_ref()
+                .filter(|e| e.can_save())?
+                .document();
+            let nest = app.family.nest.clone()?;
+            let ward = app.family.selected()?.actor_id.to_vec();
+            app.family.rules.status = Some(fauna_i18n::strings::rule_editor::SAVING.to_string());
+            Some(Op::SaveRules {
+                nest,
+                ward,
+                document: Box::new(document),
+            })
         }
         Action::RevealGraduate => {
             app.family.graduate_revealed = true;
@@ -871,6 +921,19 @@ pub enum Op {
         ward: Vec<u8>,
         policy: Box<ReachPolicy>,
     },
+    /// A subscribed labeler picked in the content rules: its module
+    /// (`fauna.labelers.inspect`), for the rule to bundle.
+    FetchRuleLabeler {
+        nest: Arc<NestClient>,
+        fetch: crate::rule_editor::LabelerFetch,
+    },
+    /// The selected ward's content rules from the shared rule editor — boxed
+    /// like the policy above.
+    SaveRules {
+        nest: Arc<NestClient>,
+        ward: Vec<u8>,
+        document: Box<fauna_core::content_policy::ContentPolicyDocument>,
+    },
     /// Boxed for the same reason: an approval entry carries eleven owned fields,
     /// and each kind names its item with a different one — so the whole entry
     /// travels and `run` passes every key through (`family-safety.md` § Reach
@@ -985,6 +1048,9 @@ pub struct FamilyView {
     /// The nest's capability set ([`FamilyState::capabilities`]) — read only
     /// when the caller guards someone, `None` otherwise or when it failed.
     pub capabilities: Option<Vec<String>>,
+    /// The guardian's subscribed labelers a content rule may name (hex ids) —
+    /// read only when the caller guards someone.
+    pub rule_labelers: Vec<String>,
 }
 
 /// What an op resolved to.
@@ -1002,6 +1068,18 @@ pub enum Outcome {
         view: Box<FamilyView>,
         editor: Box<Option<fauna_client_features::PolicyEditor>>,
         status: String,
+    },
+    /// The content rules landed: the fresh whole-page view; the rule editor's
+    /// status reads saved.
+    RulesSaved(Box<FamilyView>),
+    /// The content rules write was refused or failed — the nest's reason, on
+    /// the rule editor's own status line.
+    RulesFailed(String),
+    /// A picked labeler's module, or `None` when it is not a usable one or
+    /// the read failed.
+    RuleLabelerFetched {
+        fetch: crate::rule_editor::LabelerFetch,
+        module: Option<Vec<u8>>,
     },
     /// A transport or authorization failure — lands on `error-message`.
     Failed(String),
@@ -1059,6 +1137,29 @@ impl Op {
                 match client.policy_update(ward, *policy).await {
                     Ok(()) => refresh(nest).await,
                     Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
+            Op::FetchRuleLabeler { nest, fetch } => {
+                let module = crate::rule_editor::fetch_labeler(&nest, &fetch).await;
+                Outcome::RuleLabelerFetched { fetch, module }
+            }
+            Op::SaveRules {
+                nest,
+                ward,
+                document,
+            } => {
+                let client = FamilyClient::new(Arc::clone(&nest));
+                match client.save_content_rules(&ward, *document).await {
+                    // Written: the page re-reads, and the editor re-loads from
+                    // what the nest now stores.
+                    Ok(Some(_)) => match refresh(nest).await {
+                        Outcome::Loaded(view) => Outcome::RulesSaved(view),
+                        other => other,
+                    },
+                    // No longer this caller's ward: nothing was written, and
+                    // the refresh closes the editor.
+                    Ok(None) => refresh(nest).await,
+                    Err(e) => Outcome::RulesFailed(e.to_string()),
                 }
             }
             Op::Decide {
@@ -1263,8 +1364,16 @@ async fn refresh(nest: Arc<NestClient>) -> Outcome {
             .await
             .ok()
     };
+    // The guardian's subscribed labelers a content rule may name — the rule
+    // editor's labeler picker, read only for a caller who guards someone.
+    let rule_labelers = if status.wards.is_empty() {
+        Vec::new()
+    } else {
+        crate::rule_editor::read_labelers(&nest).await
+    };
     Outcome::Loaded(Box::new(FamilyView {
         capabilities,
+        rule_labelers,
         supervised_by: status.supervised_by.map(|g| g.handle),
         age_band: status.age_band,
         snapshot,
@@ -1332,7 +1441,7 @@ pub(crate) fn restore_supervision_snapshot(app: &mut App, actor_id: &str) {
     app.screen_lock
         .set_ward_screen_time(snapshot.screen_time, guardian.clone(), None);
     app.content_policy
-        .set_ward_content_policy(snapshot.content_policy);
+        .set_ward_content_policy(snapshot.content_policy.clone());
     app.content_policy
         .set_ward_content_notify(snapshot.content_notify);
     if snapshot.is_supervised() {
@@ -1358,8 +1467,10 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 contact_requests,
                 feed_requests,
                 capabilities,
+                rule_labelers,
             } = *view;
             app.family.capabilities = capabilities;
+            app.family.rules.labelers = rule_labelers;
             // Clause 2: this successful read is the moment to remember. Persist
             // BEFORE folding into the in-memory surfaces below, so a crash
             // between the two loses nothing a following launch needed — the
@@ -1392,7 +1503,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 policy
                     .as_ref()
                     .filter(|_| supervised)
-                    .and_then(|p| p.content_policy),
+                    .and_then(|p| p.content_policy.clone()),
             );
             app.content_policy.set_ward_content_notify(
                 supervised && policy.as_ref().and_then(|p| p.content_notify) == Some(true),
@@ -1446,13 +1557,7 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 });
             match index {
                 Some(i) => app.family.load_editor(i),
-                None => {
-                    app.family.selected_ward = None;
-                    app.family.editor = PolicyEditor::default();
-                    app.family.graduate_revealed = false;
-                    app.family.feature_editor = None;
-                    app.family.feature_editor_status = None;
-                }
+                None => app.family.clear_editor(),
             }
             app.errors.remove(&Page::Family);
         }
@@ -1478,6 +1583,18 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 app.family.feature_editor = None;
                 app.family.feature_editor_status = None;
             }
+        }
+        Outcome::RulesSaved(view) => {
+            apply_outcome(app, Outcome::Loaded(view));
+            if app.family.rules.editor.is_some() {
+                app.family.rules.status = Some(fauna_i18n::strings::rule_editor::SAVED.to_string());
+            }
+        }
+        Outcome::RulesFailed(msg) => {
+            app.family.rules.status = Some(msg);
+        }
+        Outcome::RuleLabelerFetched { fetch, module } => {
+            app.family.rules.labeler_fetched(&fetch, module);
         }
         Outcome::Failed(msg) => {
             app.errors.insert(Page::Family, msg);
@@ -1554,10 +1671,6 @@ fn unknown_peer_dm_labels() -> Vec<String> {
     fauna_core::format::unknown_peer_dm_option_labels(fauna_i18n::strings::lookup)
 }
 
-fn content_floor_labels() -> Vec<String> {
-    fauna_core::format::content_floor_option_labels(fauna_i18n::strings::lookup)
-}
-
 /// Map a committed **label** back to its wire value, using the same shared
 /// catalog the option list came from. `None` when the label is not in the
 /// catalog — the caller then applies its knob's fail-closed rule.
@@ -1599,17 +1712,6 @@ fn unknown_peer_dm_for_label(label: &str) -> UnknownPeerDm {
     }
 }
 
-/// Same shape; `block` again, never the permissive `inherit`.
-fn content_floor_for_label(label: &str) -> ContentFloor {
-    match wire_for_label(fauna_core::format::content_floor_options(), label) {
-        Some(wire) => match ContentFloor::from_wire(&wire) {
-            ContentFloor::Unknown => ContentFloor::FAIL_CLOSED,
-            v => v,
-        },
-        None => ContentFloor::FAIL_CLOSED,
-    }
-}
-
 /// The label a stored knob value renders as — always through the shared
 /// fail-closed lookup, so an unrecognized wire value shows the STRICT option.
 fn unknown_sender_label(value: UnknownSenderMail) -> String {
@@ -1622,10 +1724,6 @@ fn feed_sources_label(value: FeedSources) -> String {
 
 fn unknown_peer_dm_label(value: UnknownPeerDm) -> String {
     localized(&fauna_core::format::unknown_peer_dm_label(value.as_str()))
-}
-
-fn content_floor_label(value: ContentFloor) -> String {
-    localized(&fauna_core::format::content_floor_label(value.as_str()))
 }
 
 // ── Paint ────────────────────────────────────────────────────────────────────
@@ -1641,11 +1739,22 @@ fn content_floor_label(value: ContentFloor) -> String {
 /// *is* a line of "the active policy, read-only" — the same shape as every
 /// other rule shown here. `None` renders nothing at all: no budget, no
 /// accounting.
+///
+/// A line a rule of the guardian's document makes carries that rule's reason
+/// (`PolicySummaryLine::reason`), appended verbatim as
+/// "{label}: {value} — {reason}" (`nest-rules.md` § The shared rule editor →
+/// *The reason is the member's to read*); every other line is unchanged.
 fn policy_summary_text(policy: &ReachPolicy, usage_today_minutes: Option<u32>) -> String {
     let mut lines = policy
         .summary_lines()
         .into_iter()
-        .map(|l| format!("{}: {}", localized(&l.label), localized(&l.value)))
+        .map(|l| {
+            let line = format!("{}: {}", localized(&l.label), localized(&l.value));
+            match l.reason_text(crate::nest_rules::UI_LANG) {
+                Some(reason) => format!("{line} — {reason}"),
+                None => line,
+            }
+        })
         .collect::<Vec<_>>();
     if let Some(used) = usage_today_minutes {
         lines.push(usage_today_text(used, policy.screen_time));
@@ -1846,40 +1955,24 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
         .labelled(t::POLICY_UNKNOWN_PEER_DM_LABEL),
     );
 
-    // The four per-category content floors, index-aligned with
-    // GUARDIAN_FLOOR_CATEGORIES and all rendering the ONE shared catalog.
-    for (category, id, label) in [
-        (
-            0usize,
-            "family-policy-content-nsfw-select",
-            t::POLICY_CONTENT_NSFW_LABEL,
-        ),
-        (
-            1,
-            "family-policy-content-spam-select",
-            t::POLICY_CONTENT_SPAM_LABEL,
-        ),
-        (
-            2,
-            "family-policy-content-phishing-select",
-            t::POLICY_CONTENT_PHISHING_LABEL,
-        ),
-        (
-            3,
-            "family-policy-content-commercial-select",
-            t::POLICY_CONTENT_COMMERCIAL_LABEL,
-        ),
-    ] {
-        out.push(
-            Element::select(
-                id,
-                content_floor_label(ed.content[category]),
-                SelectTarget::FamilyContentFloor { category },
-                content_floor_labels(),
-            )
-            .labelled(label),
-        );
-    }
+    // The content rules — the guardian's mounting of the shared rule editor
+    // (`nest-rules.md` § The shared rule editor (b); `family-safety.md` § App
+    // surface → *Content rules*), where the four floor selects stood. It saves
+    // through its own button: the policy form's save leaves the rules as they
+    // are.
+    out.push(Element::label(
+        ids::FAMILY_POLICY_RULES_SECTION,
+        fauna_i18n::strings::rule_editor::FAMILY_SECTION,
+    ));
+    out.extend(crate::rule_editor::elements(
+        &st.rules,
+        crate::rule_editor::Bindings {
+            host: crate::rule_editor::Host::Family,
+            edit: |e| Gesture::Family(Action::RuleEditor(e)),
+            input: |i| Field::Family(FamilyField::RuleEditor(i)),
+            save: Gesture::Family(Action::SaveRules),
+        },
+    ));
     out.push(
         Element::checkbox_gesture(
             ids::FAMILY_POLICY_CONTENT_NOTIFY_TOGGLE,
@@ -1889,6 +1982,15 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
         )
         .attr("state", if ed.content_notify { "on" } else { "off" }),
     );
+    // The honest bound on content categories, stated on the editor surface
+    // (`family-client-enforcement.md` § Content policy → *Where it binds*):
+    // the apps do not detect adult content or ads yet, so a limit on them
+    // waits for a label. `family-policy-content-hint`, user-approved
+    // 2026-10-16; its sentence is a public text (`family.policy_content_hint`).
+    out.push(Element::label(
+        ids::FAMILY_POLICY_CONTENT_HINT,
+        t::POLICY_CONTENT_HINT,
+    ));
 
     // Screen time (§ Screen time, Slice E) — the guardian's three typed inputs,
     // in the same editor and committed by the same Save button as every knob
@@ -1926,8 +2028,12 @@ fn policy_editor_elements(st: &FamilyState, ward: &FamilyWardInfo, out: &mut Vec
     }
     // The conforming-client bound, stated on the editor surface itself
     // (§ Screen time's last bullet) — and the empty-clears rule, which is not
-    // discoverable from an empty box.
-    out.push(Element::chrome(t::POLICY_SCREEN_CAVEAT));
+    // discoverable from an empty box. `family-policy-screen-hint`, user-approved
+    // 2026-10-16.
+    out.push(Element::label(
+        ids::FAMILY_POLICY_SCREEN_HINT,
+        t::POLICY_SCREEN_CAVEAT,
+    ));
 
     out.push(Element::gesture_button(
         ids::FAMILY_POLICY_SAVE_BUTTON,
@@ -2266,6 +2372,7 @@ fn incoming_elements(st: &FamilyState, out: &mut Vec<Element>) {
 mod tests {
     use super::*;
     use crate::app::tests::authed_app;
+    use fauna_core::obligation::ContentFloor;
     use fauna_protocol::ByteBuf;
     use fauna_protocol::family::{
         FamilyBlockedPeerInfo, FamilyGuardianInfo, FamilyPendingTransferInfo, FamilyStatusReply,
@@ -2777,10 +2884,9 @@ mod tests {
             "family-policy-federation-toggle",
             "family-policy-feed-sources-select",
             "family-policy-unknown-peer-dm-select",
-            "family-policy-content-nsfw-select",
-            "family-policy-content-spam-select",
-            "family-policy-content-phishing-select",
-            "family-policy-content-commercial-select",
+            "family-policy-rules-section",
+            "rule-editor-add-button",
+            "rule-editor-save-button",
             "family-policy-content-notify-toggle",
             "family-policy-screen-window-start-input",
             "family-policy-screen-window-end-input",
@@ -2925,10 +3031,6 @@ mod tests {
             ["Allow", "Hold for review", "Reject"]
         );
         assert_eq!(feed_sources_labels(), ["Allow", "Block"]);
-        assert_eq!(
-            content_floor_labels(),
-            ["Use my settings", "Collapse", "Block"]
-        );
         // Anti-drift: the labels this page paints are index-aligned with the
         // shared catalogs' wire values, in the ratified order.
         let wires: Vec<String> = fauna_core::format::unknown_sender_options()
@@ -2940,13 +3042,6 @@ mod tests {
             UnknownSenderMail::ORDER.map(|v| v.as_str()).to_vec(),
             wires,
             "the local knob order must equal the shared catalog order"
-        );
-        assert_eq!(
-            ContentFloor::ORDER.map(|v| v.as_str()).to_vec(),
-            fauna_core::format::content_floor_options()
-                .into_iter()
-                .map(|o| o.value)
-                .collect::<Vec<_>>()
         );
 
         // The painted select carries the persisted knob's LABEL.
@@ -2996,23 +3091,6 @@ mod tests {
         assert_eq!(app.family.editor.feed_sources, FeedSources::Allow);
         apply_local(&mut app, Action::SetFeedSources("Curated".into()));
         assert_eq!(app.family.editor.feed_sources, FeedSources::Block);
-
-        apply_local(
-            &mut app,
-            Action::SetContentFloor {
-                category: 1,
-                label: "Collapse".into(),
-            },
-        );
-        assert_eq!(app.family.editor.content[1], ContentFloor::Collapse);
-        apply_local(
-            &mut app,
-            Action::SetContentFloor {
-                category: 1,
-                label: "Nonsense".into(),
-            },
-        );
-        assert_eq!(app.family.editor.content[1], ContentFloor::Block);
     }
 
     /// The bridge-DM knob renders from the ward's stored policy through the
@@ -3165,10 +3243,11 @@ mod tests {
         );
     }
 
-    /// Save sends the editor buffer for the SELECTED ward, with all three v1.x
-    /// pillars authored (`Some`). Screen time is `Some` even when every field is
-    /// empty: absent would mean "leave unchanged" and could never CLEAR a limit,
-    /// so an untouched editor must still send the all-`None` policy.
+    /// Save sends the editor buffer for the SELECTED ward. Screen time is
+    /// `Some` even when every field is empty: absent would mean "leave
+    /// unchanged" and could never CLEAR a limit, so an untouched editor must
+    /// still send the all-`None` policy. The content pillar goes ABSENT: its
+    /// rules are the shared rule editor's, saved by that editor's own button.
     #[test]
     fn save_sends_the_edited_buffer_for_the_selected_ward() {
         let mut app = guardian_app(vec![
@@ -3181,13 +3260,6 @@ mod tests {
         apply_local(&mut app, Action::SetUnknownSender("Reject".into()));
         apply_local(&mut app, Action::SetFeedSources("Block".into()));
         apply_local(&mut app, Action::SetContentNotify(true));
-        apply_local(
-            &mut app,
-            Action::SetContentFloor {
-                category: 0,
-                label: "Block".into(),
-            },
-        );
 
         let op = apply_local(&mut app, Action::SavePolicy).expect("save returns an op");
         match op {
@@ -3197,11 +3269,10 @@ mod tests {
                 assert_eq!(policy.unknown_sender_mail, "reject");
                 assert_eq!(policy.feed_sources, "block");
                 assert_eq!(policy.content_notify, Some(true));
-                let content = policy
-                    .content_policy
-                    .expect("the content pillar is authored");
-                assert_eq!(content.nsfw, ContentFloor::Block);
-                assert_eq!(content.spam, ContentFloor::Inherit);
+                assert_eq!(
+                    policy.content_policy, None,
+                    "the policy form never rewrites the content rules"
+                );
                 assert_eq!(
                     policy.screen_time,
                     Some(fauna_core::screen_time::ScreenTimePolicy::default()),
@@ -4072,6 +4143,53 @@ mod tests {
         assert!(!app.sidebar_pages().contains(&Page::Family));
     }
 
+    /// `nest-rules.md` § The shared rule editor → *The reason is the member's
+    /// to read*: the line a guardian document rule makes carries its reason
+    /// verbatim after the value; a floor's line carries none.
+    #[test]
+    fn the_summary_line_of_a_guardian_rule_carries_its_reason() {
+        use fauna_core::content_policy::{
+            ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+        };
+        use fauna_core::obligation::{ContentFloor, ContentPolicy};
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(ContentRule {
+            factor: "spam".into(),
+            min_permille: 500,
+            verdict: ContentVerdict::Block,
+            reason_code: "rule-1".into(),
+            reason: [(
+                REASON_DEFAULT_KEY.to_string(),
+                "Not for this account".to_string(),
+            )]
+            .into(),
+            extra: Default::default(),
+        });
+        let policy = ReachPolicy {
+            content_policy: Some(ContentPolicy {
+                nsfw: ContentFloor::Block,
+                document: Some(document),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let summary = policy_summary_text(&policy, None);
+        let with_reason: Vec<&str> = summary
+            .lines()
+            .filter(|l| l.ends_with(" — Not for this account"))
+            .collect();
+        assert_eq!(
+            with_reason.len(),
+            1,
+            "one rule, one reasoned line: {summary}"
+        );
+        assert_eq!(
+            summary.lines().filter(|l| l.contains(" — ")).count(),
+            1,
+            "the floor's line and the reach lines carry none: {summary}"
+        );
+    }
+
     /// A refresh keeps the editor pointed at the SAME ward when it survives, and
     /// falls back to the first ward when it does not — the windows `LoadAsync`
     /// rule, and what stops a save from landing on the wrong child.
@@ -4135,12 +4253,94 @@ mod tests {
         )]);
         assert_eq!(app.family.editor.unknown_sender, UnknownSenderMail::Hold);
         assert_eq!(app.family.editor.feed_sources, FeedSources::Block);
-        assert_eq!(app.family.editor.content[0], ContentFloor::Block);
         assert_eq!(
             text_of(&app, "family-policy-unknown-sender-select"),
             "Hold for review"
         );
-        assert_eq!(text_of(&app, "family-policy-content-nsfw-select"), "Block");
+        // The unknown floor shows in the rule editor as what binds: a block.
+        assert_eq!(text_of(&app, ids::RULE_EDITOR_ITEM_VERDICT_SELECT), "Block");
+    }
+
+    /// The guardian's mounting of the shared rule editor stands where the four
+    /// floor selects stood (`family-safety.md` § App surface → *Content
+    /// rules*): a floor still set shows as a rule; editing a rule and saving
+    /// writes the ward's document through the rules op, for the SELECTED ward;
+    /// a refresh that changed nothing the editor shows keeps an unsaved edit.
+    #[test]
+    fn the_rule_editor_replaces_the_floor_selects_and_saves_the_selected_wards_document() {
+        let mut app = guardian_app(vec![
+            ward(2, "kid", ReachPolicy::default()),
+            ward(
+                3,
+                "sibling",
+                ReachPolicy {
+                    content_policy: Some(ContentPolicy {
+                        spam: ContentFloor::Collapse,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        apply_local(&mut app, Action::SelectWard { index: 1 });
+        let ids_painted: Vec<String> = elements(&app).into_iter().map(|e| e.id).collect();
+        assert!(
+            ids_painted
+                .iter()
+                .any(|i| i == ids::FAMILY_POLICY_RULES_SECTION)
+        );
+        for category in ["nsfw", "spam", "phishing", "commercial"] {
+            let gone = format!("family-policy-content-{category}-select");
+            assert!(!ids_painted.contains(&gone), "{gone} retires on tui");
+        }
+        assert_eq!(
+            text_of(&app, ids::RULE_EDITOR_ITEM_CATEGORY_SELECT),
+            "Spam",
+            "the set floor shows as a category rule"
+        );
+        assert_eq!(
+            text_of(&app, ids::RULE_EDITOR_ITEM_VERDICT_SELECT),
+            "Hide behind a warning"
+        );
+        // A floor carries no reason: the guardian writes one before saving.
+        assert!(apply_local(&mut app, Action::SaveRules).is_none());
+        app.family.rules.set_field(
+            crate::rule_editor::Input::Reason(0),
+            "Not for this account".to_string(),
+        );
+
+        // A refresh that changed nothing keeps the unsaved reason.
+        let wards = app.family.wards.clone();
+        load(
+            &mut app,
+            FamilyView {
+                wards,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            app.family
+                .rules
+                .field(&crate::rule_editor::Input::Reason(0)),
+            "Not for this account"
+        );
+
+        match apply_local(&mut app, Action::SaveRules).expect("a saveable document") {
+            Op::SaveRules { ward, document, .. } => {
+                assert_eq!(ward, vec![3u8; 32], "the SELECTED ward");
+                assert_eq!(document.rules.len(), 1);
+                assert_eq!(document.rules[0].factor, "spam");
+            }
+            _ => panic!("expected Op::SaveRules"),
+        }
+        assert_eq!(
+            app.family.rules.status.as_deref(),
+            Some(fauna_i18n::strings::rule_editor::SAVING)
+        );
+        assert_eq!(
+            Action::SaveRules.wire_kind(),
+            Some("fauna.family.policy.update")
+        );
     }
 
     /// Folding a `Failed` outcome lands on the page error; a `Loaded` clears it.
@@ -4178,10 +4378,8 @@ mod tests {
             Action::SetContentNotify(true),
             Action::SetUnknownSender("Block".to_string()),
             Action::SetFeedSources("Block".to_string()),
-            Action::SetContentFloor {
-                category: 0,
-                label: "Block".to_string(),
-            },
+            Action::RuleEditor(crate::rule_editor::Edit::Add),
+            Action::SaveRules,
             Action::SavePolicy,
             Action::AddContact,
             Action::Transfer,
@@ -4210,7 +4408,7 @@ mod tests {
 
     /// `Action` has this many variants; [`every_action`] carries one instance of
     /// each, plus the second `DecideIncoming`.
-    const ACTION_COUNT: usize = 16;
+    const ACTION_COUNT: usize = 17;
 
     #[test]
     fn every_family_action_is_in_the_corpus() {
@@ -4339,10 +4537,7 @@ mod tests {
             Action::SetContentNotify(true),
             Action::SetUnknownSender("Block".to_string()),
             Action::SetFeedSources("Block".to_string()),
-            Action::SetContentFloor {
-                category: 0,
-                label: "Block".to_string(),
-            },
+            Action::RuleEditor(crate::rule_editor::Edit::Add),
             Action::RevealGraduate,
         ] {
             assert_eq!(

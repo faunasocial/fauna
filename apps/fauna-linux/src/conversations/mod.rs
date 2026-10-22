@@ -33,9 +33,11 @@ use fauna_conversations::message::MessageId;
 // list through every render call: it is populated once at auth
 // (`FaunaClient::load_muted_keywords`, mirroring `refresh_mail_epoch_schedule`'s
 // post-auth hook) and again on every Settings "Muted words" page load/save
-// (`settings/muted_words.rs`), both of which run strictly *before* any
-// conversation bubble renders for this session — no re-render trigger is
-// needed on cache update.
+// (`settings/muted_words.rs`). An edit made AFTER a thread rendered (a term's
+// level flipped, a term added or removed) must reach that thread's reused
+// bubbles, whose collapse is decided at build time: [`muted_keywords_epoch`]
+// moves whenever the list does, and the thread view folds it into its rebuild
+// check beside the content-policy epoch.
 //
 // `REVEALED_MUTED` is the session-local "show anyway" set: revealing a
 // muted-collapsed message un-collapses that one message for the rest of the
@@ -43,6 +45,8 @@ use fauna_conversations::message::MessageId;
 // to stop future messages collapsing).
 thread_local! {
     static MUTED_KEYWORDS: RefCell<Vec<fauna_core::data::MutedKeyword>> = const { RefCell::new(Vec::new()) };
+    /// See [`muted_keywords_epoch`].
+    static MUTED_KEYWORDS_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static REVEALED_MUTED: RefCell<HashSet<MessageId>> = RefCell::new(HashSet::new());
     /// Session-local set of message ids whose content-policy `collapse` the viewer
     /// revealed (`family-safety.md` § Content policy — the `Collapse` verdict's
@@ -60,7 +64,20 @@ pub fn muted_keywords_cache() -> Vec<fauna_core::data::MutedKeyword> {
 /// Replace the cached muted-keyword list — called after every load/save of the
 /// Settings "Muted words" page and once at auth.
 pub fn set_muted_keywords_cache(list: Vec<fauna_core::data::MutedKeyword>) {
-    MUTED_KEYWORDS.with(|c| *c.borrow_mut() = list);
+    MUTED_KEYWORDS.with(|c| {
+        let mut cached = c.borrow_mut();
+        if *cached != list {
+            MUTED_KEYWORDS_EPOCH.with(|e| e.set(e.get() + 1));
+            *cached = list;
+        }
+    });
+}
+
+/// A counter that moves whenever the cached muted-keyword list changes (terms
+/// or levels) — a bubble's muted collapse is decided when it is built, so the
+/// thread view rebuilds every reused bubble when this moves.
+pub fn muted_keywords_epoch() -> u64 {
+    MUTED_KEYWORDS_EPOCH.with(|e| e.get())
 }
 
 /// Whether `id` has been revealed ("show anyway") this session.
@@ -86,4 +103,42 @@ pub fn reveal_content(id: MessageId) {
     REVEALED_CONTENT.with(|s| {
         s.borrow_mut().insert(id);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keyword(word: &str, weight: i64) -> fauna_core::data::MutedKeyword {
+        fauna_core::data::MutedKeyword {
+            keyword: word.to_string(),
+            weight,
+        }
+    }
+
+    /// An open thread's reused bubbles rebuild only when this moves
+    /// (`views/conversations/detail.rs::bubble_policy_epoch`), so it must move
+    /// when a term's LEVEL flips (same words, a different weight) and must not
+    /// move when a reload hands back the list it already holds.
+    #[test]
+    fn the_muted_keywords_epoch_moves_exactly_when_the_list_does() {
+        let start = muted_keywords_epoch();
+        set_muted_keywords_cache(vec![keyword("lottery", -1000)]);
+        let added = muted_keywords_epoch();
+        assert_eq!(added, start + 1, "a new list moves the epoch");
+
+        set_muted_keywords_cache(vec![keyword("lottery", -1000)]);
+        assert_eq!(
+            muted_keywords_epoch(),
+            added,
+            "an identical reload does not"
+        );
+
+        set_muted_keywords_cache(vec![keyword("lottery", -500)]);
+        assert_eq!(
+            muted_keywords_epoch(),
+            added + 1,
+            "a level flip on the same word moves it"
+        );
+    }
 }

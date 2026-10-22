@@ -40,7 +40,9 @@ pub use fauna_client_mail_settings::{
     BridgeApprovalAction, BridgeApprovalMachine, BridgeApprovalSnapshot, BridgeApprovalStatus,
     CaldavPolicyAction, CaldavPolicyMachine, CaldavPolicySnapshot, CaldavPolicyStatus,
     CarddavPolicyAction, CarddavPolicyMachine, CarddavPolicySnapshot, CarddavPolicyStatus,
-    CredentialKind, DispatchError, DmarcForensicMode, DmarcPolicyView, ExportFormat, ExportScope,
+    CredentialKind, DispatchError, DmarcCountRow, DmarcForensicMode, DmarcOpenedReport,
+    DmarcPolicyView, DmarcReportRowView, DmarcReportsAction, DmarcReportsMachine,
+    DmarcReportsSnapshot, DmarcReportsStatus, DmarcWindowTotals, ExportFormat, ExportScope,
     ExportSessionState, ExportSessionView, ExportStatus, ExportStep, ForwarderAction,
     ForwarderMachine, ForwarderStatus, ForwarderView, ForwardersSnapshot, ImapPolicyView,
     ImportResult, ImportSessionState, ImportSourceKind, ImportStatus, ImportStep, ImportTlsMode,
@@ -200,6 +202,16 @@ pub fn build_forwarders_machine(nest: Arc<FfiNestClient>) -> Arc<ForwarderMachin
     Arc::new(fauna_client_mail_settings::rpc_glue::build_forwarders_machine(nest.nest_arc()))
 }
 
+/// Build a [`DmarcReportsMachine`] for the `admin-mail-reports` page — the DMARC
+/// aggregate reports peers send about this nest's domains (dmarc-reporting.md
+/// § Admin pane summary surface) — over `nest`'s WS-RPC connection. Admin
+/// machine: `list_dmarc_aggregate_reports` / `get_dmarc_aggregate_report` /
+/// `list_local_domains` are Admin-class, no actor secret.
+#[uniffi::export]
+pub fn build_dmarc_reports_machine(nest: Arc<FfiNestClient>) -> Arc<DmarcReportsMachine> {
+    Arc::new(fauna_client_mail_settings::rpc_glue::build_dmarc_reports_machine(nest.nest_arc()))
+}
+
 /// Build a [`MailSettingsMachine`] for the user-facing `mail-settings` page over
 /// `nest`'s WS-RPC connection. Unlike the admin machines, this one needs the
 /// actor's 32-byte ed25519 `secret` (to sign submission tokens + derive the
@@ -244,6 +256,26 @@ pub async fn start_mail_epoch_refresh_on_every_connect(nest: Arc<FfiNestClient>)
             crate::account_runtime::mail_store(),
         ),
     );
+}
+
+/// Set the submission-token refresh's clock offset
+/// (`fauna_client_mail_settings::token_refresh::set_clock_offset_secs`) — the
+/// `mail_token_refresh_advance_clock` agent command's mechanism, moving the
+/// `now` the 7-day re-mint cadence is measured against and each re-minted
+/// token's `issued_at` (never the bearer clock) without sleeping out the
+/// cadence (testing.md convention 14). The loop
+/// [`start_mail_epoch_refresh_on_every_connect`] starts reads it on its next
+/// pass. Gated on `test-helpers` so the symbol is absent from a release binding
+/// (convention 15); `test-helpers` forwards the mail-settings crate's
+/// `e2e-agent` so the setter exists in the release-profile `*-ffi-test` builds.
+/// Mirrors `set_trust_clock_offset_secs`.
+///
+/// ⚠ Process-wide, and nothing auto-resets it — zero it once the assertions
+/// are done.
+#[cfg(feature = "test-helpers")]
+#[uniffi::export]
+pub fn set_mail_token_refresh_clock_offset_secs(offset_secs: i64) {
+    fauna_client_mail_settings::token_refresh::set_clock_offset_secs(offset_secs);
 }
 
 /// The post-claim serving enablement (`onboarding.md` § 3b *Mechanism*) — the
@@ -414,7 +446,10 @@ pub fn build_mail_export_machine_with_key_custody(
 /// does not self-spawn it; tui and linux each do this in their own runtime).
 #[uniffi::export]
 pub fn build_mail_import_machine(nest: Arc<FfiNestClient>) -> Arc<MailImportMachine> {
-    Arc::new(fauna_client_mail_settings::rpc_glue::build_mail_import_machine(nest.nest_arc()))
+    Arc::new(
+        fauna_client_mail_settings::rpc_glue::build_mail_import_machine(nest.nest_arc())
+            .with_source_memory(crate::account_runtime::mail_import_source_store()),
+    )
 }
 
 /// Build a [`MailSpamMachine`] for the user-facing `mail-spam` page over `nest`'s

@@ -16,6 +16,10 @@
 //!    lines, the revoked-folder park line, and the ~80 further sites across
 //!    `engine.rs`, `always_resident.rs`, `share_pump.rs`, `share_glue.rs` and
 //!    `watcher.rs`), not just the two driven end to end below.
+//!    That list knows only the old spellings, so
+//!    [`no_log_macro_carries_an_unwrapped_name_or_path_value`] is the
+//!    spelling-independent half: it reddens on any bare name/path-shaped value
+//!    in any log macro body (shorthand, `{x}`, `%x`, `.display()`).
 //! 2. [`pull_reaches_the_ring_with_only_the_folder_name_redacted`] — proven
 //!    end to end, not just at the source level: a real `SyncEngine::pull_remote_changes`
 //!    call, over a real (mocked-socket) `NestClient`/supervisor, with its
@@ -28,6 +32,7 @@ use std::time::Duration;
 use fauna_client::testing::{MockClientChannel, connect_queue, mpsc_pair};
 use fauna_client::{AuthClient, NestClient, PushBroker};
 use fauna_core::identity::ActorKeypair;
+use fauna_core::log_redact_scan::{leaked_words, macro_bodies};
 use fauna_protocol::sync::SyncChangesListReply;
 use fauna_protocol::{Frame, Reply, RpcError, decode_frame, encode_frame};
 use fauna_ws_substrate::{Supervisor, run_supervisor};
@@ -80,6 +85,33 @@ fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// The re-seed's delivery legs moved to `fauna-client-sync` (2026-10-18) so
+/// web runs them; the engine still drives them natively, so their error and
+/// log strings stay under this crate's scan. Each is named by its crate and
+/// file in the allowlist below.
+const MOVED_LEG_FILES: &[&str] = &["reseed_pull.rs", "reseed_leg.rs"];
+
+/// Every file the scans read: this crate's own `src/`, then the moved legs.
+fn scanned_files(src_dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    rust_files(src_dir, &mut files);
+    let moved = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fauna-client-sync/src");
+    files.extend(MOVED_LEG_FILES.iter().map(|f| moved.join(f)));
+    files
+}
+
+/// A scanned file's allowlist name: its path under this crate's `src/`, or
+/// `fauna-client-sync/<file>` for a moved leg.
+fn scanned_name(path: &Path, src_dir: &Path) -> String {
+    match path.strip_prefix(src_dir) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => format!(
+            "fauna-client-sync/{}",
+            path.file_name().unwrap().to_string_lossy()
+        ),
+    }
+}
+
 /// A source-level pin over the WHOLE crate, not just the two sites driven end
 /// to end below: every `.rs` file under `src/` (production and test code
 /// alike — the banned shapes are specific enough that no test fixture should
@@ -89,8 +121,7 @@ fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn no_plaintext_folder_or_path_shape_reaches_a_tracing_call() {
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&src_dir, &mut files);
+    let files = scanned_files(&src_dir);
     assert!(
         files.len() > 50,
         "the walk found suspiciously few files ({}) under {src_dir:?} — the scan is \
@@ -111,6 +142,247 @@ fn no_plaintext_folder_or_path_shape_reaches_a_tracing_call() {
         offenders.is_empty(),
         "an unredacted folder-name/path shape fixed has come back:\n{}",
         offenders.join("\n")
+    );
+}
+
+const LOG_MACROS: &[&str] = &["trace!(", "debug!(", "info!(", "warn!(", "error!("];
+
+/// The error-string constructors: an error message is a confidentiality
+/// boundary exactly like a log line (S7 says "log line and error string"), and
+/// the host apps log `{e:#}`. A `format!(` is scanned only as the argument of
+/// one of these (a bare `format!` builds file names, URLs and prefixes too).
+const ERROR_MACROS: &[&str] = &[
+    "anyhow!(",
+    "bail!(",
+    "ensure!(",
+    "context(",
+    "with_context(",
+];
+
+/// Every log-macro body in `src`, with its 1-based line.
+fn log_macro_bodies(src: &str) -> Vec<(usize, String)> {
+    macro_bodies(src, LOG_MACROS)
+}
+
+/// The spelling-independent pin: no `tracing` macro in this crate carries a
+/// folder-name/path-shaped value that has not been through a `log_*` wrapper.
+/// Unlike the shape list above it does not know the bug's spelling — a new
+/// shorthand field, `{folder}` interpolation, `%req.folder` or
+/// `path = %p.display()` all redden it.
+#[test]
+fn no_log_macro_carries_an_unwrapped_name_or_path_value() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = scanned_files(&src_dir);
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        let contents = std::fs::read_to_string(path).unwrap();
+        for (line, body) in log_macro_bodies(&contents) {
+            let leaked = leaked_words(&body);
+            if !leaked.is_empty() {
+                offenders.push(format!("{}:{line}: {leaked:?}", path.display()));
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "a log macro carries a bare folder-name/path-shaped value — wrap it in \
+         `fauna_core::log_redact::{{log_folder_name,log_path}}` (or, for a value that is not \
+         user-chosen, rename it so it is not name-shaped):\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The cleared classes of name/path-shaped words inside an error constructor:
+/// `(file under src/, a substring of the macro body, why it is not a
+/// user-chosen name or path)`. Every entry is one shape in one file — never a
+/// blanket per-file skip — and the test below also reddens on an entry that no
+/// longer matches anything, so the list cannot rot.
+const ERROR_STRING_ALLOWLIST: &[(&str, &str, &str)] = &[
+    // custodian_store.rs: internal storage roots keyed by `actor_id_hex` or a fixed
+    // subdirectory name — never a user-chosen name or folder-relative path.
+    (
+        "custodian_store.rs",
+        "read custodian index {}",
+        "internal store root path",
+    ),
+    (
+        "custodian_store.rs",
+        "custodian index {} was written",
+        "internal store root path",
+    ),
+    (
+        "custodian_store.rs",
+        "parse custodian index {}",
+        "internal store root path",
+    ),
+    (
+        "custodian_store.rs",
+        "read custodian manifest {}",
+        "internal store root path",
+    ),
+    (
+        "custodian_store.rs",
+        "read staged chunk {}",
+        "internal store root path",
+    ),
+    (
+        "custodian_store.rs",
+        "scan {}",
+        "internal store root directory",
+    ),
+    (
+        "custodian_store.rs",
+        "reclaim {}",
+        "internal store root entry",
+    ),
+    // custodian_store.rs: `{path}` is a held address — a set-qualified reserved name plus hashes.
+    (
+        "custodian_store.rs",
+        "holds no live generation at {path}",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "custodian_store.rs",
+        "custodian row {path}",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "custodian_store.rs",
+        "{path}: ",
+        "held address, reserved name plus hashes",
+    ),
+    // reseed.rs: `{path}` is a held address (reserved name plus hashes), not a folder-relative path.
+    (
+        "reseed.rs",
+        "sealing {path} under",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "reseed.rs",
+        "for {kind} path {path}",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "reseed.rs",
+        "retiring {path} in this",
+        "held address, reserved name plus hashes",
+    ),
+    // The pull-back's `path`/`g.path` is the same held address.
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "{set}/{path} names",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "landing {}'s bytes",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "recording {} on the target",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "fetching {path}'s manifest",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "for {path} failed hash",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "fetching {path}'s chunks",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "of {path}'s {} chunks",
+        "held address, reserved name plus hashes",
+    ),
+    (
+        "fauna-client-sync/reseed_pull.rs",
+        "chunk {} of {path} failed",
+        "held address, reserved name plus hashes",
+    ),
+];
+
+/// The error-string half of the spelling-independent pin: no `anyhow!` /
+/// `bail!` / `ensure!` / `context` / `with_context` body carries a
+/// folder-name/path-shaped value that has not been through a `log_*` wrapper,
+/// except the named cleared classes in [`ERROR_STRING_ALLOWLIST`].
+#[test]
+fn no_error_string_carries_an_unwrapped_name_or_path_value() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = scanned_files(&src_dir);
+
+    let mut offenders = Vec::new();
+    let mut used = vec![false; ERROR_STRING_ALLOWLIST.len()];
+    for path in &files {
+        let rel = scanned_name(path, &src_dir);
+        let contents = std::fs::read_to_string(path).unwrap();
+        for (line, body) in macro_bodies(&contents, ERROR_MACROS) {
+            let leaked = leaked_words(&body);
+            if leaked.is_empty() {
+                continue;
+            }
+            let cleared = ERROR_STRING_ALLOWLIST
+                .iter()
+                .position(|(file, shape, _)| rel == *file && body.contains(shape));
+            match cleared {
+                Some(i) => used[i] = true,
+                None => offenders.push(format!("{rel}:{line}: {leaked:?}: {}", body.trim())),
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "an error constructor carries a bare folder-name/path-shaped value — wrap it in \
+         `fauna_core::log_redact::{{log_folder_name,log_path}}`, or add a `file:shape` entry with a \
+         reason to ERROR_STRING_ALLOWLIST if it is not user-chosen:\n{}",
+        offenders.join("\n")
+    );
+    let stale: Vec<_> = ERROR_STRING_ALLOWLIST
+        .iter()
+        .zip(&used)
+        .filter(|(_, u)| !**u)
+        .map(|((file, shape, _), _)| format!("{file}: {shape:?}"))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "ERROR_STRING_ALLOWLIST entries that match nothing — delete them:\n{}",
+        stale.join("\n")
+    );
+}
+
+/// The error-macro scanner itself: each constructor spelling is found, and a
+/// wrapped value passes.
+#[test]
+fn the_scanner_sees_every_error_constructor() {
+    for bad in [
+        r#"fn f() { anyhow::bail!("x {folder}"); }"#,
+        r#"fn f() { return Err(anyhow!("not a path: {rel:?}")); }"#,
+        r#"fn f() { ensure!(ok, "bad {name}"); }"#,
+        r#"fn f() { r.with_context(|| format!("listing {}", dir.display()))?; }"#,
+        r#"fn f() { r.context(format!("removing {path}"))?; }"#,
+    ] {
+        let flagged = macro_bodies(bad, ERROR_MACROS)
+            .iter()
+            .any(|(_, b)| !leaked_words(b).is_empty());
+        assert!(flagged, "{bad} must be flagged");
+    }
+    let good = r#"fn f() { bail!("{} is excluded", log_path(rel)); r.context("plain")?; }"#;
+    assert!(
+        macro_bodies(good, ERROR_MACROS)
+            .iter()
+            .all(|(_, b)| leaked_words(b).is_empty()),
+        "wrapped values must pass"
     );
 }
 

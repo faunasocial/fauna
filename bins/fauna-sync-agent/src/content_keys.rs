@@ -259,8 +259,12 @@ async fn resolve(state: &SyncServiceState) -> Option<ResolvedContentKeys> {
             return None;
         }
     };
+    // The gated read: a mounted store that has not listed custody yet — a
+    // successor's, the moment the account switch mounts it — is refused as not
+    // ready rather than read as an account that owns no set, and the edge
+    // task re-reads at the store's next change (`run`).
     let (cfg, custody_read) =
-        match tokio::time::timeout(RESOLVE_TIMEOUT, state.folder_keys.load()).await {
+        match tokio::time::timeout(RESOLVE_TIMEOUT, state.folder_keys.load_listed()).await {
             Ok(Ok(cfg)) => (cfg, true),
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -467,6 +471,19 @@ async fn await_runtime_walk(state: &SyncServiceState) {
     let _ = tokio::time::timeout(RESOLVE_TIMEOUT, walked).await;
 }
 
+/// Did the published resolution go without a custody read — the store not
+/// mounted, not ready (never listed, or held), or failing? Every bound set it
+/// covers then builds keyless, and a set it cannot name counts as no pending
+/// key ([`keys_pending`]).
+async fn custody_unread(state: &SyncServiceState) -> bool {
+    state
+        .content_keys
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|resolved| !resolved.custody_read)
+}
+
 /// The edge task: re-resolve on every wake (a reconcile, an engine's refresh
 /// edge, the mount coming up or down), on every custody nudge once the runtime
 /// has walked, and on the backstop; re-reconcile when the resolution changed.
@@ -514,11 +531,35 @@ pub async fn run(state: Arc<SyncServiceState>, mut shutdown: watch::Receiver<boo
             BACKSTOP_INTERVAL
         });
         tokio::pin!(backstop);
+        // While custody went unread or a bound set is still pending its keys,
+        // the mounted store's next change is an edge too: a store just mounted
+        // (a successor's, at the account switch) answers custody only once its
+        // first listing has landed, whichever process's pass lands it — no
+        // custody nudge comes for rows the account already held, and the
+        // backstop is minutes away.
+        let mut store_change = match state.mounted_store.lock().ok().and_then(|h| h.clone()) {
+            Some(handle) if custody_unread(&state).await || keys_pending(&state).await => {
+                Some(fauna_account_seams::store_change::StoreChangeWatch::new(handle).await)
+            }
+            _ => None,
+        };
         loop {
             tokio::select! {
                 _ = shutdown.changed() => return,
                 () = state.content_keys_wake.notified() => break,
                 () = &mut backstop => break,
+                changed = async {
+                    match store_change.as_mut() {
+                        Some(watch) => watch.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if changed {
+                        break;
+                    }
+                    // The runtime is gone; its teardown wakes the task anyway.
+                    store_change = None;
+                }
                 event = async {
                     match subscribed.as_mut() {
                         Some((_, rx)) => rx.recv().await,

@@ -124,8 +124,113 @@ fn reports_elements(state: &AdminState, els: &mut Vec<Element>) {
                 outcome: AbuseReportOutcome::Dismissed,
             }),
         ));
+        // The admin block (`moderation.md` § Admin block of a reported item):
+        // rendered only for an item subject (the shared `can_block`), so it is
+        // indexed over the rows that carry it, like open-takedown.
+        if view.can_block {
+            let form = fauna_client_moderation::block::block_form_view(&entry.subject, false);
+            els.push(Element::gesture_button(
+                ids::ADMIN_NEST_REPORT_BLOCK_BUTTON,
+                localized(&form.arm_label),
+                true,
+                Gesture::Admin(Action::OpenBlockConfirm {
+                    report_id: entry.report_id.clone(),
+                    restore: false,
+                }),
+            ));
+        }
     }
     if let Some(status) = state.reports_status.as_ref() {
+        els.push(Element::chrome(status.clone()));
+    }
+    blocked_elements(state, els);
+    rules_elements(state, els);
+}
+
+/// The admin's nest rules (`admin-nest-rules-section` — `nest-rules.md` § The
+/// shared rule editor (a); `admin.md` § N. Nest → *Nest rules*), directly after
+/// the reports queue and its blocked list: the shared `rule-editor` component,
+/// whose save writes `fauna.admin.content_policy.set`.
+fn rules_elements(state: &AdminState, els: &mut Vec<Element>) {
+    use crate::rule_editor::{Bindings, Host};
+    els.push(Element::label(
+        ids::ADMIN_NEST_RULES_SECTION,
+        fauna_i18n::strings::rule_editor::NEST_SECTION,
+    ));
+    els.extend(crate::rule_editor::elements(
+        &state.rules,
+        Bindings {
+            host: Host::Admin,
+            edit: |e| Gesture::Admin(Action::RuleEditor(e)),
+            input: |i| Field::Admin(super::AdminField::RuleEditor(i)),
+            save: Gesture::Admin(Action::SaveNestRules),
+        },
+    ));
+}
+
+/// The blocked list (`admin-nest-blocked-section` — `moderation.md` § Admin
+/// block of a reported item) below the queue, then the one Block / Unblock
+/// confirm both lists arm. Paint only: every word is a shared
+/// `fauna_client_moderation::block` fold, and the confirm renders the summary
+/// captured at arm time — the verb, the item and the report's reason — so a
+/// lever on another user's content is never confirmed blind.
+fn blocked_elements(state: &AdminState, els: &mut Vec<Element>) {
+    use fauna_client_moderation::block;
+    els.push(Element::label(
+        ids::ADMIN_NEST_BLOCKED_SECTION,
+        t::nest_page::BLOCKED_LABEL,
+    ));
+    els.push(Element::chrome(t::nest_page::BLOCKED_DESC));
+    if !state.blocked_loaded {
+        els.push(Element::chrome(t::nest_page::BLOCKED_LOADING));
+    } else if state.blocked.is_empty() {
+        els.push(Element::chrome(t::nest_page::BLOCKED_EMPTY));
+    }
+    for entry in &state.blocked {
+        let row = block::blocked_row_view(entry);
+        els.push(
+            Element::label(
+                ids::ADMIN_NEST_BLOCKED_ITEM,
+                format!(
+                    "{} · {} {} · {}",
+                    localized(&row.reason),
+                    row.subject_kind,
+                    row.subject_id,
+                    crate::format::format_epoch_us(row.blocked_at),
+                ),
+            )
+            .attr("subject", row.subject_id.clone())
+            .attr("kind", row.subject_kind.clone()),
+        );
+        els.push(Element::gesture_button(
+            ids::ADMIN_NEST_BLOCKED_UNBLOCK_BUTTON,
+            localized(&row.unblock.arm_label),
+            row.unblock.can_submit,
+            Gesture::Admin(Action::OpenBlockConfirm {
+                report_id: row.report_id.clone(),
+                restore: true,
+            }),
+        ));
+    }
+    if let Some(armed) = state.block_confirm.as_ref() {
+        els.push(Element::label(
+            ids::ADMIN_NEST_REPORT_BLOCK_CONFIRM_SUMMARY,
+            armed.summary.resolve_nested(fauna_i18n::strings::lookup),
+        ));
+        els.push(Element::gesture_button(
+            ids::ADMIN_NEST_REPORT_BLOCK_CONFIRM_BUTTON,
+            localized(&armed.confirm_label),
+            true,
+            Gesture::Admin(Action::ConfirmBlock),
+        ));
+        els.push(Element::gesture_button(
+            ids::ADMIN_NEST_REPORT_BLOCK_CANCEL_BUTTON,
+            t::nest_page::BLOCK_CANCEL_BUTTON,
+            true,
+            Gesture::Admin(Action::CancelBlock),
+        ));
+    }
+    if let Some(status) = state.block_status.as_ref() {
         els.push(Element::chrome(status.clone()));
     }
 }
@@ -188,10 +293,64 @@ fn web_app_origin_elements(state: &AdminState, els: &mut Vec<Element>) {
     }
 }
 
+/// The update-channel section (`admin-nest-update-channel-*` —
+/// `nest/update-channel.md` § The UI), directly after the web-app origin and
+/// mirroring the NAT-mode radio shape. Paint only: the radios' labels and
+/// descriptions are the wizard's, every status sentence the shared
+/// `admin_update_channel_view` fold's; the select is local, the save commits.
+fn update_channel_elements(state: &AdminState, els: &mut Vec<Element>) {
+    use fauna_client_admin::UpdateChannel;
+    let view = state.nest_snapshot.as_ref().map(|s| &s.update_channel);
+    // Until the read lands nothing is settable or marked (the NAT rule, as for
+    // the web-app origin); the options are the fold's either way.
+    let can_set = view.is_some_and(|v| v.can_set);
+    let draft = state.update_channel_draft;
+    let fallback = fauna_client_admin::AdminUpdateChannelView::default();
+    let options = &view.unwrap_or(&fallback).options;
+    els.push(Element::label(
+        ids::ADMIN_NEST_UPDATE_CHANNEL_SECTION,
+        t::nest_page::UPDATE_CHANNEL_LABEL,
+    ));
+    els.push(Element::chrome(t::nest_page::UPDATE_CHANNEL_DESC));
+    for option in options {
+        let id = match option.channel {
+            UpdateChannel::Stable => ids::ADMIN_NEST_UPDATE_CHANNEL_STABLE_RADIO,
+            UpdateChannel::Test => ids::ADMIN_NEST_UPDATE_CHANNEL_TEST_RADIO,
+            UpdateChannel::Dev => ids::ADMIN_NEST_UPDATE_CHANNEL_DEV_RADIO,
+        };
+        let on = draft == Some(option.channel);
+        els.push(
+            Element::radio_gesture(
+                id,
+                localized(&option.label),
+                on,
+                Gesture::Admin(Action::SelectUpdateChannel(option.channel)),
+            )
+            .attr("state", if on { "on" } else { "off" })
+            .enabled(can_set),
+        );
+        els.push(Element::chrome(localized(&option.description)));
+    }
+    els.push(Element::gesture_button(
+        ids::ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON,
+        t::nest_page::UPDATE_CHANNEL_SAVE,
+        can_set && draft.is_some(),
+        Gesture::Admin(Action::SaveUpdateChannel),
+    ));
+    els.push(Element::label(
+        ids::ADMIN_NEST_UPDATE_CHANNEL_STATUS,
+        view.map(|v| localized(&v.status))
+            .unwrap_or_else(|| t::nest_page::UPDATE_CHANNEL_LOADING.to_string()),
+    ));
+}
+
 pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
     let reflective = state.nest_snapshot.as_ref();
     let pairing_enabled = reflective.map(|s| s.pairing_enabled).unwrap_or(false);
     let fronted = reflective.map(|s| s.fronted_by_router).unwrap_or(false);
+    let os_host_status = reflective
+        .map(|s| s.os_host_status_present)
+        .unwrap_or(false);
     let os_updates = reflective
         .map(|s| s.os_security_updates_pending)
         .unwrap_or(0);
@@ -291,6 +450,7 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
     ];
 
     web_app_origin_elements(state, &mut els);
+    update_channel_elements(state, &mut els);
 
     els.extend([
         // Host-OS maintenance — the always-present status line (the state→key
@@ -299,7 +459,9 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
         Element::label(
             ids::NEST_OS_MAINTENANCE_STATUS,
             localized(&fauna_core::format::os_maintenance_status_label(
-                os_updates, os_reboot,
+                os_host_status,
+                os_updates,
+                os_reboot,
             )),
         ),
     ]);
@@ -418,9 +580,10 @@ pub(super) fn nest_elements(state: &AdminState) -> Vec<Element> {
                 view.can_confirm,
             ),
         };
-        for (i, inheritor) in rows.iter().enumerate() {
+        // One repeated id per row, addressed by index (convention 1).
+        for inheritor in rows {
             els.push(Element::label(
-                format!("admin-nest-seed-rotate-roster-item-{i}"),
+                ids::ADMIN_NEST_SEED_ROTATE_ROSTER_ITEM,
                 inheritor.label.clone(),
             ));
         }
@@ -699,9 +862,9 @@ fn oauth_elements(state: &AdminState, els: &mut Vec<Element>) {
             // counted against the wall clock at paint (`crate::format`'s
             // relative-time shape); the instant it counts to is the nest's own.
             let now = fauna_core::data::Timestamp::now_secs_or_zero();
-            for (i, row) in view.keys.iter().enumerate() {
+            for row in &view.keys {
                 els.push(Element::label(
-                    format!("{}-{i}", ids::ADMIN_NEST_OAUTH_KEY_ITEM),
+                    ids::ADMIN_NEST_OAUTH_KEY_ITEM,
                     localized(&fauna_client_admin::issuer_key_row_label(row, now)),
                 ));
             }
@@ -870,6 +1033,148 @@ mod tests {
         assert!(!arm.enabled, "a pre-filled takedown still needs a citation");
     }
 
+    /// The admin block (`moderation.md` § Admin block of a reported item):
+    /// Block paints only on an item row; arming names the verb, the item and the
+    /// reason before anything dispatches; the confirm disarms first and
+    /// dispatches; the blocked list paints its rows with Unblock, which arms the
+    /// same confirm as the unblock verb.
+    #[test]
+    fn the_block_verb_arms_a_named_confirm_and_the_blocked_list_offers_unblock() {
+        use fauna_protocol::moderation::{
+            AbuseReportQueueEntry, AbuseReportReason, AbuseReportSubject, AdminBlockEntry,
+        };
+        let mut app = crate::app::tests::test_app();
+        let entry = |id: &str, subject| AbuseReportQueueEntry {
+            report_id: id.into(),
+            subject,
+            subject_actor: None,
+            reason: AbuseReportReason::Harassment,
+            note: None,
+            excerpt: None,
+            reporter_handle: Some("alice".into()),
+            origin_nest: None,
+            created_at: 0,
+            extra: Default::default(),
+        };
+        app.admin.reports_loaded = true;
+        app.admin.reports = vec![
+            entry(
+                "r-actor",
+                AbuseReportSubject::Actor {
+                    actor_id: "cd".repeat(32),
+                },
+            ),
+            entry(
+                "r-post",
+                AbuseReportSubject::Post {
+                    cid: "ab".repeat(32),
+                },
+            ),
+        ];
+        let els = nest_elements(&app.admin);
+        let count = |els: &[Element], id: &str| els.iter().filter(|e| e.id == id).count();
+        assert_eq!(
+            count(&els, "admin-nest-report-block-button"),
+            1,
+            "item rows only"
+        );
+        assert_eq!(count(&els, "admin-nest-report-block-confirm-button"), 0);
+        // Loading is not empty: no empty line before the list read lands.
+        assert!(!els.iter().any(|e| e.text == t::nest_page::BLOCKED_EMPTY));
+
+        // A forced press on the account row arms nothing.
+        assert!(
+            crate::admin::apply_local(
+                &mut app,
+                Action::OpenBlockConfirm {
+                    report_id: "r-actor".into(),
+                    restore: false,
+                },
+            )
+            .is_none()
+        );
+        assert!(app.admin.block_confirm.is_none());
+
+        let _ = crate::admin::apply_local(
+            &mut app,
+            Action::OpenBlockConfirm {
+                report_id: "r-post".into(),
+                restore: false,
+            },
+        );
+        let els = nest_elements(&app.admin);
+        let summary = els
+            .iter()
+            .find(|e| e.id == "admin-nest-report-block-confirm-summary")
+            .expect("the armed summary paints")
+            .text
+            .clone();
+        assert!(
+            summary.starts_with("Block post"),
+            "names the verb + item: {summary}"
+        );
+        assert!(
+            summary.contains(&"ab".repeat(32)),
+            "names the id: {summary}"
+        );
+        assert!(
+            summary.contains("Harassment"),
+            "names the reason: {summary}"
+        );
+        assert_eq!(count(&els, "admin-nest-report-block-cancel-button"), 1);
+
+        // Disarm-first dispatch.
+        let op = crate::admin::apply_local(&mut app, Action::ConfirmBlock);
+        assert!(app.admin.block_confirm.is_none());
+        assert!(
+            crate::admin::apply_local(&mut app, Action::ConfirmBlock).is_none(),
+            "a second click dispatches nothing"
+        );
+        // The test app holds no nest client, so there is no op to inspect;
+        // what matters is that the confirm disarmed before any dispatch.
+        let _ = op;
+
+        // The blocked list: rows with Unblock arming the same confirm.
+        app.admin.blocked_loaded = true;
+        assert!(
+            nest_elements(&app.admin)
+                .iter()
+                .any(|e| e.text == t::nest_page::BLOCKED_EMPTY)
+        );
+        app.admin.blocked = vec![AdminBlockEntry {
+            report_id: "r-post".into(),
+            subject: AbuseReportSubject::Post {
+                cid: "ab".repeat(32),
+            },
+            reason: AbuseReportReason::Harassment,
+            blocked_at: 0,
+            extra: Default::default(),
+        }];
+        let els = nest_elements(&app.admin);
+        assert_eq!(count(&els, "admin-nest-blocked-item"), 1);
+        assert_eq!(count(&els, "admin-nest-blocked-unblock-button"), 1);
+        let _ = crate::admin::apply_local(
+            &mut app,
+            Action::OpenBlockConfirm {
+                report_id: "r-post".into(),
+                restore: true,
+            },
+        );
+        let els = nest_elements(&app.admin);
+        let summary = els
+            .iter()
+            .find(|e| e.id == "admin-nest-report-block-confirm-summary")
+            .expect("the unblock summary paints")
+            .text
+            .clone();
+        assert!(summary.starts_with("Unblock post"), "{summary}");
+        let confirm = els
+            .iter()
+            .find(|e| e.id == "admin-nest-report-block-confirm-button")
+            .expect("confirm");
+        assert_eq!(confirm.text, t::nest_page::BLOCK_CONFIRM_BUTTON_UNBLOCK);
+    }
+
     /// The page paints its required ui.yaml `elements` in order (no optional
     /// elements when nothing is pending / the confirm is un-armed), and the pairing
     /// toggle's `state` attr + status text reflect the snapshot.
@@ -903,6 +1208,12 @@ mod tests {
                 "admin-nest-web-app-origin-central-radio",
                 "admin-nest-web-app-origin-save-button",
                 "admin-nest-web-app-origin-status",
+                "admin-nest-update-channel-section",
+                "admin-nest-update-channel-stable-radio",
+                "admin-nest-update-channel-test-radio",
+                "admin-nest-update-channel-dev-radio",
+                "admin-nest-update-channel-save-button",
+                "admin-nest-update-channel-status",
                 "nest-os-maintenance-status",
                 "admin-nest-region-section",
                 "admin-nest-region-status",
@@ -931,6 +1242,13 @@ mod tests {
                 // The takedown console's inbox, right after it — its rows
                 // paint only once the queue read lands.
                 "admin-nest-reports-section",
+                // The blocked list, below the queue — its rows paint only once
+                // the list read lands.
+                "admin-nest-blocked-section",
+                // The nest rules after the queue (`admin.md` § N. Nest); the
+                // editor paints only its status until the rules read lands.
+                "admin-nest-rules-section",
+                "rule-editor-status",
                 "admin-nest-retire-section",
                 "admin-nest-retire-button",
                 "admin-factory-reset-section",
@@ -1025,6 +1343,27 @@ mod tests {
         assert!(!ids.contains(&"admin-factory-reset-cancel-button"));
     }
 
+    /// A nest that read no host-status file (a hand-built box) says so — never
+    /// "OS up to date"; one that read the file with nothing pending is up to date.
+    #[test]
+    fn os_status_line_distinguishes_no_host_data() {
+        let mut app = crate::app::tests::test_app();
+        let line = |app: &crate::app::App| {
+            nest_elements(&app.admin)
+                .into_iter()
+                .find(|e| e.id == "nest-os-maintenance-status")
+                .unwrap()
+                .text
+        };
+        app.admin.nest_snapshot = Some(NestPageSnapshot::default());
+        assert_eq!(line(&app), t::nest_page::OS_NO_HOST_DATA);
+        app.admin.nest_snapshot = Some(NestPageSnapshot {
+            os_host_status_present: true,
+            ..Default::default()
+        });
+        assert_eq!(line(&app), t::nest_page::OS_UP_TO_DATE);
+    }
+
     fn inheritor(label: &str) -> fauna_client_admin::SeedRotationInheritor {
         fauna_client_admin::SeedRotationInheritor {
             actor_id: vec![7u8; 32],
@@ -1050,7 +1389,7 @@ mod tests {
             "admin-nest-seed-rotate-confirm-button",
             "admin-nest-seed-rotate-cancel-button",
             "admin-nest-seed-rotate-roster-reason",
-            "admin-nest-seed-rotate-roster-item-0",
+            "admin-nest-seed-rotate-roster-item",
             "admin-nest-seed-rotate-status",
         ] {
             assert!(!ids.contains(&absent), "{absent} must not paint un-armed");
@@ -1116,17 +1455,14 @@ mod tests {
 
         let els = nest_elements(&app.admin);
         let ids = tagged_ids(&els);
-        assert!(ids.contains(&"admin-nest-seed-rotate-roster-item-0"));
-        assert!(ids.contains(&"admin-nest-seed-rotate-roster-item-1"));
-        assert!(!ids.contains(&"admin-nest-seed-rotate-roster-item-2"));
+        // One repeated id, a row per inheritor, in the nest's order.
+        let rows: Vec<&str> = els
+            .iter()
+            .filter(|e| e.id == "admin-nest-seed-rotate-roster-item")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(rows, ["root@fauna.test", "aabbccddeeff…"]);
         assert!(!ids.contains(&"admin-nest-seed-rotate-roster-reason"));
-        assert_eq!(
-            els.iter()
-                .find(|e| e.id == "admin-nest-seed-rotate-roster-item-0")
-                .unwrap()
-                .text,
-            "root@fauna.test"
-        );
         assert!(
             els.iter()
                 .find(|e| e.id == "admin-nest-seed-rotate-confirm-button")
@@ -1433,20 +1769,18 @@ mod tests {
         let mut app = crate::app::tests::test_app();
         app.admin.nest_snapshot = Some(with_oauth(served(Some(600))));
         let els = nest_elements(&app.admin);
-        let text = |id: &str| {
-            els.iter()
-                .find(|e| e.id == id)
-                .unwrap_or_else(|| panic!("{id} painted"))
-                .text
-                .clone()
-        };
+        // One repeated id, a row per key, signer first (convention 1).
+        let rows: Vec<String> = els
+            .iter()
+            .filter(|e| e.id == "admin-nest-oauth-key-item")
+            .map(|e| e.text.clone())
+            .collect();
         assert_eq!(
-            text("admin-nest-oauth-key-item-0"),
-            t::nest_page::oauth_key_signing("kid-new")
-        );
-        assert_eq!(
-            text("admin-nest-oauth-key-item-1"),
-            t::nest_page::oauth_key_retiring("kid-old", "10")
+            rows,
+            [
+                t::nest_page::oauth_key_signing("kid-new"),
+                t::nest_page::oauth_key_retiring("kid-old", "10"),
+            ]
         );
         assert!(!tagged_ids(&els).contains(&"admin-nest-oauth-key-reason"));
         for id in OAUTH_BUTTONS {
@@ -1637,6 +1971,159 @@ mod tests {
                 .is_none()
         );
         assert_eq!(app.admin.web_app_origin_draft, Some(WebAppOrigin::Central));
+    }
+
+    /// An update-channel-carrying snapshot; `None` is a nest predating the
+    /// choice.
+    fn with_channel(reply: Option<fauna_client_admin::UpdateChannelStatus>) -> NestPageSnapshot {
+        NestPageSnapshot {
+            update_channel: fauna_client_admin::admin_update_channel_view(reply.as_ref()),
+            ..Default::default()
+        }
+    }
+
+    fn channel_reply(
+        channel: Option<&str>,
+        running: &str,
+        head: Option<&str>,
+    ) -> fauna_client_admin::UpdateChannelStatus {
+        fauna_client_admin::UpdateChannelStatus {
+            channel: channel.map(str::to_string),
+            running_version: running.into(),
+            channel_head_version: head.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    const CHANNEL_RADIOS: [&str; 3] = [
+        "admin-nest-update-channel-stable-radio",
+        "admin-nest-update-channel-test-radio",
+        "admin-nest-update-channel-dev-radio",
+    ];
+
+    /// Before the read lands: no radio marked or live, the save dead, the status
+    /// loading — and the radios still carry the wizard's labels.
+    #[test]
+    fn an_unloaded_update_channel_marks_no_radio_and_cannot_save() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        let els = nest_elements(&app.admin);
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        for radio in CHANNEL_RADIOS {
+            assert!(!find(radio).enabled, "{radio} live before the read");
+            assert_eq!(state_attr(&find(radio)), Some("off"));
+        }
+        assert_eq!(
+            find("admin-nest-update-channel-stable-radio").text,
+            fauna_i18n::strings::onboarding::vps_config::UPDATE_CHANNEL_STABLE_LABEL
+        );
+        assert!(!find("admin-nest-update-channel-save-button").enabled);
+        assert_eq!(
+            find("admin-nest-update-channel-status").text,
+            t::nest_page::UPDATE_CHANNEL_LOADING
+        );
+    }
+
+    /// The section sits directly after the web-app origin's status line.
+    #[test]
+    fn the_update_channel_section_follows_the_web_app_origin() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        let els = nest_elements(&app.admin);
+        let at = |id: &str| els.iter().position(|e| e.id == id).expect(id);
+        assert!(
+            at("admin-nest-web-app-origin-status") < at("admin-nest-update-channel-section"),
+            "update channel before the web-app origin"
+        );
+        assert!(at("admin-nest-update-channel-status") < at("nest-os-maintenance-status"));
+    }
+
+    /// A followed channel marks its radio, the save is live, and the status is
+    /// the fold's Following sentence with the running version.
+    #[test]
+    fn a_followed_channel_marks_its_radio_and_renders_the_folds_status() {
+        use fauna_client_admin::UpdateChannel;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        let snapshot = with_channel(Some(channel_reply(Some("dev"), "0.1.4", Some("0.1.4"))));
+        let want = localized(&snapshot.update_channel.status);
+        app.admin.nest_snapshot = Some(snapshot);
+        app.admin.update_channel_draft = Some(UpdateChannel::Dev);
+        let els = nest_elements(&app.admin);
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        assert_eq!(
+            state_attr(&find("admin-nest-update-channel-dev-radio")),
+            Some("on")
+        );
+        assert_eq!(
+            state_attr(&find("admin-nest-update-channel-stable-radio")),
+            Some("off")
+        );
+        assert!(find("admin-nest-update-channel-save-button").enabled);
+        let status = find("admin-nest-update-channel-status").text;
+        assert_eq!(status, want);
+        assert!(status.starts_with("Following Dev"), "{status}");
+        assert!(status.contains("0.1.4"), "{status}");
+    }
+
+    /// A nest predating the choice: nothing live, a radio press changes nothing,
+    /// the status says why.
+    #[test]
+    fn a_nest_predating_the_update_channel_paints_it_unsettable() {
+        use fauna_client_admin::UpdateChannel;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        app.admin.nest_snapshot = Some(with_channel(None));
+        assert!(
+            super::super::apply_local(&mut app, Action::SelectUpdateChannel(UpdateChannel::Dev))
+                .is_none()
+        );
+        assert_eq!(app.admin.update_channel_draft, None);
+        assert!(super::super::apply_local(&mut app, Action::SaveUpdateChannel).is_none());
+        let els = nest_elements(&app.admin);
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        for radio in CHANNEL_RADIOS {
+            assert!(!find(radio).enabled, "{radio}");
+        }
+        assert!(!find("admin-nest-update-channel-save-button").enabled);
+        assert_eq!(
+            find("admin-nest-update-channel-status").text,
+            t::nest_page::UPDATE_CHANNEL_STATUS_PREDATES
+        );
+    }
+
+    /// A pinned box marks no radio but is settable: picking one is local and
+    /// arms the save.
+    #[test]
+    fn a_pinned_box_marks_no_radio_and_picking_one_arms_the_save() {
+        use fauna_client_admin::UpdateChannel;
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Nest;
+        app.admin.nest_snapshot = Some(with_channel(Some(channel_reply(None, "0.1.4", None))));
+        let els = nest_elements(&app.admin);
+        let find = |id: &str| els.iter().find(|e| e.id == id).expect(id).clone();
+        for radio in CHANNEL_RADIOS {
+            assert!(find(radio).enabled, "{radio}");
+            assert_eq!(state_attr(&find(radio)), Some("off"), "{radio}");
+        }
+        assert!(!find("admin-nest-update-channel-save-button").enabled);
+        assert!(
+            find("admin-nest-update-channel-status")
+                .text
+                .contains("follows no channel")
+        );
+        assert!(
+            super::super::apply_local(&mut app, Action::SelectUpdateChannel(UpdateChannel::Stable))
+                .is_none()
+        );
+        assert_eq!(app.admin.update_channel_draft, Some(UpdateChannel::Stable));
+        let els = nest_elements(&app.admin);
+        assert!(
+            els.iter()
+                .find(|e| e.id == "admin-nest-update-channel-save-button")
+                .expect("save")
+                .enabled
+        );
     }
 
     /// A region-carrying snapshot for the region tests.

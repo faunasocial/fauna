@@ -1,19 +1,19 @@
-# Bring your posts from Facebook or Instagram
+# Bring your posts from Facebook
 
 Your old posts, photos and events can live in Fauna too — at the dates you
 posted them, visible to the same kind of people who could see them there.
-Fauna never talks to Facebook or Instagram for this. You download the export
-archive those services give you, and the Fauna app reads it on your own
-device.
+Fauna never talks to Facebook for this. You download the export archive
+Facebook gives you, and the Fauna app reads it on your own device.
 
 ## 1. Request your archive
 
 - **Facebook:** Settings & privacy → Settings → Accounts Center → Your
   information and permissions → Download your information. Choose *Download
   to device*, the **JSON** format, and any media quality.
-- **Instagram:** Settings → Accounts Center → Your information and
-  permissions → Download your information. Choose *Download to device* and
-  the **JSON** format.
+- **Instagram:** importing Instagram archives is planned; Fauna can't read
+  them yet. If you want one ready for then, request it the same way: Settings
+  → Accounts Center → Your information and permissions → Download your
+  information, then *Download to device* and the **JSON** format.
 
 The service emails you when the archive is ready. The download link expires
 after a few days, so save the zip file somewhere you can find it.
@@ -55,9 +55,9 @@ steps:
   *Going*, one you declined *Declined*, one you marked interested
   *Interested*. Events you hosted are yours as organizer; the other guests are
   kept inside the archive, not added to the event.
-- The untouched archive rests in a sealed folder on your nest. Delete the
-  folder whenever you like; the posts it produced are ordinary posts, deleted
-  like any other.
+- The untouched archive is stored encrypted in a folder on your nest. Delete
+  the folder whenever you like; the posts it produced are ordinary posts,
+  deleted like any other.
 - Importing the same archive again, or a newer one, adds only what is new.
 
 ## Not yet

@@ -220,6 +220,7 @@ public struct PersonalizationView: View {
             await trainedTopicsVM.load()
             await hydrateSignalShare()
         }
+        .onStoreChange { await trainedTopicsVM.resync() }
     }
 
     /// The Trained-topics facet's row container (topic-factors.md § Authoring

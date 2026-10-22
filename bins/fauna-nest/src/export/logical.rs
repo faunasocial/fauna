@@ -273,14 +273,29 @@ mod tests {
     }
 
     /// Does this column name mark credential material (a bearer token, a
-    /// password hash, a secret, a private or symmetric key)?
+    /// password hash, a secret, a private or symmetric key, a seed or salt)?
+    /// Singular and plural forms both count (`*_token` and `*_tokens`).
     fn is_credential_column(col: &str) -> bool {
+        let ends = |suffixes: &[&str]| suffixes.iter().any(|s| col.ends_with(s));
         col == "token"
-            || col.ends_with("_token")
-            || col.ends_with("_hash")
-            || col.starts_with("secret")
+            || col == "seed"
+            || col == "salt"
+            || col.contains("secret")
+            || col.contains("password")
+            || col.contains("passphrase")
             || col.contains("privkey")
-            || col.ends_with("_key")
+            || ends(&[
+                "_token",
+                "_tokens",
+                "_hash",
+                "_key",
+                "_keys",
+                "_seed",
+                "_seeds",
+                "_salt",
+                "_credential",
+                "_credentials",
+            ])
     }
 
     /// Every dumped table is checked for credential-named columns: `SELECT *`
@@ -300,6 +315,10 @@ mod tests {
             ),
             ("blob_metadata.thumbnail_hash", "public content digest"),
             ("backup_snapshots.blob_hash", "public content digest"),
+            (
+                "feeds.contributor_seeds",
+                "JSON list of peer-nest seed URLs for a discovery feed, not key material",
+            ),
         ];
 
         let db = crate::db::CacheDb::open_in_memory().unwrap();

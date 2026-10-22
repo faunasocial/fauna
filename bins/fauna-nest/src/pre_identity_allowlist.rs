@@ -31,8 +31,9 @@ pub fn is_pre_identity_kind(kind: &str) -> bool {
             // exists — the first-contact trust leg of a client-provisioned box
             // (security.md § Transport trust Axis 2, client-provisioned row).
             // Not throttled: it is the opening step of every pre-claim
-            // connection, signature-work-bounded (one Ed25519 sign per call)
-            // and mutation-free (see `is_throttled_anonymous_kind`).
+            // connection and mutation-free; its one Ed25519 sign per call is
+            // bounded by the per-connection pre-identity frame budget (see
+            // `is_throttled_anonymous_kind`).
             | "fauna.auth.nest_handshake"
             // Renewal-grant bearer mint (sync-agent.md § Credential model,
             // additive 2026-07-19): the sync agent renews its bearer app-dead
@@ -194,10 +195,14 @@ pub fn requires_loopback_peer(kind: &str) -> bool {
 /// `invite_code.verify`, `register` and `invite_request.submit` each carry their
 /// **own** dedicated dispatcher limiter with a distinct budget (a shared budget
 /// would be wrong for a credential-guess surface), enrollment is loopback-gated,
-/// and the auth ceremony is left open because throttling it per source could
-/// lock a legitimate actor out of bootstrap. (`device_handshake`'s one bound is
-/// the refusal-counting `crate::failed_credential_throttle`, which a
-/// successful mint never spends.)
+/// and the auth ceremony's signature kinds are left out because an
+/// attempt-counting throttle could lock a legitimate actor out of bootstrap.
+/// Their verify/sign work is bounded per connection instead, by the dispatcher's
+/// pre-identity frame budget (`routes::PRE_IDENTITY_FRAMES_PER_SECOND`), which
+/// counts frames and never attempts. (`device_handshake`'s other bound is the
+/// refusal-counting `crate::failed_credential_throttle`, which a successful
+/// mint never spends.) The ceremony's `challenge` is the exception, and a
+/// member: it is a nonce mint, class 2's `challenge` profile.
 ///
 /// ⚠ When adding an anonymous signature-bound kind, class 2 is the default —
 /// "it is signature-gated" argues *for* membership here, not against it.
@@ -263,6 +268,18 @@ pub fn is_throttled_anonymous_kind(kind: &str) -> bool {
             // fetches the chain once per observed identity change, and the
             // bucket keys on the unspoofable TCP peer.
             | "fauna.auth.rotation_chain"
+            // The sign-in challenge is the escrow/veto `challenge` profile
+            // exactly: an unauthenticated write to an in-memory nonce store,
+            // for any valid Ed25519 point, registered or not. Left out of this
+            // set until 2026-10-17 with the rest of the auth ceremony — which
+            // made it one connection's way to fill memory
+            // (`deployment-threat-model.md` § Concern 1a, finding H2). The
+            // store is also capped on its own (`challenge_auth`); this bounds
+            // the rate. It cannot lock a legitimate actor out: a sign-in mints
+            // one challenge, a refresh another, and the bucket keys on the
+            // source — never on the actor the challenge names, so a flood
+            // naming someone else's key throttles only the flooder.
+            | "fauna.auth.challenge"
     )
 }
 
@@ -303,6 +320,12 @@ mod tests {
         for kind in [
             "fauna.posts.create",
             "fauna.posts.get",
+            // A relay that makes this nest dial a caller-named peer is never
+            // pre-identity.
+            "fauna.posts.get_remote",
+            // Its profile twin: the 2026-08-17 decline of any anonymous
+            // profile read stands (`identity-succession.md` § Don't do these).
+            "fauna.profile.get_remote",
             "fauna.spam.get_preferences",
             "fauna.conversations.channel.send",
             "fauna.protocol.echo",
@@ -344,7 +367,8 @@ mod tests {
         // Auth-bootstrap / claim / invite / enrollment are pre-identity but NOT
         // throttled *here* — the credential-guess surfaces carry their own
         // dedicated limiters, enrollment is loopback-gated, and the auth
-        // ceremony must stay reachable.
+        // ceremony's signature kinds must stay reachable (the frame budget
+        // bounds their work instead).
         for kind in [
             "fauna.auth.handshake",
             "fauna.auth.verify",
@@ -363,6 +387,16 @@ mod tests {
                 "{kind} must not be throttled"
             );
         }
+    }
+
+    #[test]
+    fn the_sign_in_challenge_is_pre_identity_and_throttled() {
+        // An unauthenticated nonce mint, like the escrow / veto challenges:
+        // unthrottled, it was a memory-growth surface for one connection
+        // (`deployment-threat-model.md` § Concern 1a, finding H2).
+        assert!(is_pre_identity_kind("fauna.auth.challenge"));
+        assert!(is_throttled_anonymous_kind("fauna.auth.challenge"));
+        assert!(!requires_loopback_peer("fauna.auth.challenge"));
     }
 
     #[test]

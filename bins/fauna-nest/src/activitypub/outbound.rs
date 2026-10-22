@@ -65,11 +65,12 @@ pub(crate) async fn error_body_snippet(resp: reqwest::Response) -> String {
 /// `keyId=https://<domain>/ap/instance#main-key`, deliveries carry the actor —
 /// so threading the domain here would add a parameter to the single dialer and
 /// tell a remote nothing it was not already told.
-const AP_USER_AGENT: &str = concat!(
-    "fauna-nest/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://fauna.social/)"
-);
+///
+/// And carrying **no version**: the actor fetch is dialed at a URI an
+/// anonymous, unverified delivery names, so a version here told any stranger
+/// exactly which release this nest runs — a free fingerprint for matching a
+/// known flaw. GoToSocial asks only that a UA be present.
+const AP_USER_AGENT: &str = "fauna-nest (+https://fauna.social/)";
 
 /// The guarded dial with **no test hook in front of it** — byte-for-byte the
 /// body `ap_outbound_client` compiles down to under `not(feature = "test-hooks")`,
@@ -202,6 +203,14 @@ pub(super) fn is_loopback_url(url_str: &str) -> bool {
 mod tests {
     use super::*;
     use crate::ssrf::SsrfError;
+
+    /// The UA attributes the dial (GoToSocial refuses a UA-less request) and
+    /// tells the stranger whose URI we dial nothing more: no release version.
+    #[test]
+    fn the_user_agent_attributes_the_project_and_carries_no_version() {
+        assert_eq!(AP_USER_AGENT, "fauna-nest (+https://fauna.social/)");
+        assert!(!AP_USER_AGENT.contains(env!("CARGO_PKG_VERSION")));
+    }
 
     /// The F1 gate: an `actor` naming the cloud metadata service must be
     /// rejected before any socket is opened. IMDS is not loopback, so this holds

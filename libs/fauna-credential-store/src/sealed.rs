@@ -30,10 +30,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use fauna_core::aead_seal::{self, NONCE_LEN, SALT_LEN};
 use fauna_core::kdf::{Argon2idParams, derive_key_argon2id};
-use rand::RngCore;
 use zeroize::Zeroizing;
 
 /// File magic — first bytes of every sealed store file.
@@ -49,8 +47,6 @@ const VERSION: u8 = 1;
 /// convention); the store's namespace is appended.
 const AAD_CONTEXT: &[u8] = b"fauna.credential-store.v1\0";
 
-const SALT_LEN: usize = 16;
-const NONCE_LEN: usize = 12;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 12 + SALT_LEN + NONCE_LEN;
 
 /// A sealed-store failure. `WrongPassphraseOrCorrupt` is the user-facing arm:
@@ -229,17 +225,8 @@ impl SealedFileStore {
         let key = derive_key_argon2id(passphrase.as_bytes(), &file.salt, file.params)?;
         // Proof-of-key: the open IS the passphrase check (AEAD success is the
         // only verifier — no separate hash rests in the file to attack).
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
-        cipher
-            .decrypt(
-                Nonce::from_slice(&file.nonce),
-                Payload {
-                    msg: &file.ciphertext,
-                    aad: &self.aad(),
-                },
-            )
-            .map_err(|_| SealedStoreError::WrongPassphraseOrCorrupt)
-            .map(Zeroizing::new)?;
+        aead_seal::open_with_nonce(&key, &file.nonce, &self.aad(), &file.ciphertext)
+            .ok_or(SealedStoreError::WrongPassphraseOrCorrupt)?;
         *self.state.lock().expect("not poisoned") = Some(UnlockedState {
             key,
             params: file.params,
@@ -261,8 +248,7 @@ impl SealedFileStore {
             return Err(SealedStoreError::AlreadyExists(path));
         }
         let params = Argon2idParams::interactive();
-        let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let salt = aead_seal::fresh_salt();
         let key = derive_key_argon2id(passphrase.as_bytes(), &salt, params)?;
         {
             let mut state = self.state.lock().expect("not poisoned");
@@ -318,16 +304,14 @@ impl SealedFileStore {
         let file = SealedFile::parse(&bytes).inspect_err(|e| {
             tracing::warn!("[cred-store] sealed store unreadable: {e:#}");
         })?;
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*unlocked.key));
-        let plaintext = match cipher.decrypt(
-            Nonce::from_slice(&file.nonce),
-            Payload {
-                msg: &file.ciphertext,
-                aad: &self.aad(),
-            },
+        let plaintext = match aead_seal::open_with_nonce(
+            &unlocked.key,
+            &file.nonce,
+            &self.aad(),
+            &file.ciphertext,
         ) {
-            Ok(p) => Zeroizing::new(p),
-            Err(_) => {
+            Some(p) => p,
+            None => {
                 // The file changed under the cached key (an external re-key?).
                 // Read empty rather than serving another key's map.
                 tracing::warn!("[cred-store] sealed store no longer opens under the cached key");
@@ -354,18 +338,8 @@ impl SealedFileStore {
             return Err(SealedStoreError::Locked);
         };
         let plaintext = Zeroizing::new(serde_json::to_vec(map).expect("string map serializes"));
-        let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*unlocked.key));
-        let ciphertext = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: &plaintext,
-                    aad: &self.aad(),
-                },
-            )
-            .expect("ChaCha20-Poly1305 encrypt is infallible for in-memory buffers");
+        let nonce = aead_seal::fresh_nonce();
+        let ciphertext = aead_seal::seal_with_nonce(&unlocked.key, &nonce, &self.aad(), &plaintext);
         let file = SealedFile {
             params: unlocked.params,
             salt: unlocked.salt,
@@ -477,34 +451,15 @@ impl SealedFileStore {
         };
         let file = SealedFile::parse(&bytes)?;
         let old_key = derive_key_argon2id(current.as_bytes(), &file.salt, file.params)?;
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*old_key));
-        let plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(&file.nonce),
-                Payload {
-                    msg: &file.ciphertext,
-                    aad: &self.aad(),
-                },
-            )
-            .map(Zeroizing::new)
-            .map_err(|_| SealedStoreError::WrongPassphraseOrCorrupt)?;
+        let plaintext =
+            aead_seal::open_with_nonce(&old_key, &file.nonce, &self.aad(), &file.ciphertext)
+                .ok_or(SealedStoreError::WrongPassphraseOrCorrupt)?;
 
         let params = Argon2idParams::interactive();
-        let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let salt = aead_seal::fresh_salt();
         let key = derive_key_argon2id(new.as_bytes(), &salt, params)?;
-        let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
-        let ciphertext = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: &plaintext,
-                    aad: &self.aad(),
-                },
-            )
-            .expect("ChaCha20-Poly1305 encrypt is infallible for in-memory buffers");
+        let nonce = aead_seal::fresh_nonce();
+        let ciphertext = aead_seal::seal_with_nonce(&key, &nonce, &self.aad(), &plaintext);
         self.persist(&SealedFile {
             params,
             salt,
@@ -1075,18 +1030,8 @@ mod tests {
             let unlocked = state.as_ref().unwrap();
             (unlocked.params, unlocked.salt, unlocked.key.clone())
         };
-        let mut nonce = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&*key));
-        let ciphertext = cipher
-            .encrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: br#"{"a": 1}"#.as_ref(),
-                    aad: &store.aad(),
-                },
-            )
-            .unwrap();
+        let nonce = aead_seal::fresh_nonce();
+        let ciphertext = aead_seal::seal_with_nonce(&key, &nonce, &store.aad(), br#"{"a": 1}"#);
         store
             .persist(&SealedFile {
                 params,

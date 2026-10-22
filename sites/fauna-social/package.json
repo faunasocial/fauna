@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@fontsource-variable/nunito": "^5.0.0",
+    "astro": "^7.2.8"
+  }
+}

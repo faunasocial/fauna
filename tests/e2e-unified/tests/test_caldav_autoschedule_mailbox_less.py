@@ -805,6 +805,9 @@ def test_a_succeeded_organizers_cancel_removes_the_invite_from_the_events_page(
 @pytest.mark.tui
 @pytest.mark.linux
 @pytest.mark.web
+@pytest.mark.windows
+@pytest.mark.macos
+@pytest.mark.ios
 @pytest.mark.real_conversations
 def test_a_refused_cancel_is_listed_on_the_events_page(
     app, dedicated_caldav_only_nest, caldav_mailbox_less_attendee_app,

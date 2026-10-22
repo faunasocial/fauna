@@ -126,11 +126,11 @@ async fn nest_with_posts(bodies: &[&[u8]]) -> (RouterRequester, SyncClient, Vec<
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
     db.create_user(&owner, "free", "test").await.unwrap();
 
-    // Real on-disk segment area. Leaked deliberately: the axum server outlives
-    // the test body and would otherwise read a deleted directory.
-    let dir = tempfile::tempdir().unwrap();
-    let seg_root = dir.path().to_path_buf();
-    std::mem::forget(dir);
+    // Real on-disk segment area, under the state's own scratch root: the state
+    // Arc (held by the returned requester and the spawned server) owns it and
+    // removes it when the last holder drops.
+    let base = AppState::for_test(db.clone());
+    let seg_root = base.test_scratch_path("post-segments");
 
     let token_store = Arc::new(TokenStore::new());
     let token = token_store
@@ -143,7 +143,7 @@ async fn nest_with_posts(bodies: &[&[u8]]) -> (RouterRequester, SyncClient, Vec<
             token_store,
             ..Default::default()
         },
-        ..AppState::for_test(db)
+        ..base
     });
 
     // The records themselves, written by the nest's own append path — a
@@ -195,7 +195,7 @@ async fn nest_with_posts(bodies: &[&[u8]]) -> (RouterRequester, SyncClient, Vec<
 ///
 /// Directory-backed, not in-memory: adoption files whole segment pairs into
 /// the store's **segment area**, which only a store on a directory has.
-async fn empty_replica() -> AccountStore<SqliteBackend> {
+async fn empty_replica() -> (tempfile::TempDir, AccountStore<SqliteBackend>) {
     replica_for(owner()).await
 }
 
@@ -203,17 +203,20 @@ async fn empty_replica() -> AccountStore<SqliteBackend> {
 /// channel *member* and the probing *stranger*, whose replicas are their own
 /// accounts' (a conv scope's member replicas belong to different accounts —
 /// charter § Feeds and cursors → *The scope string* ruling 1).
-async fn replica_for(actor: [u8; 32]) -> AccountStore<SqliteBackend> {
+///
+/// Returns the temp dir's guard first: the caller binds it (`_dir`) before the
+/// store so the store drops first and the dir is removed after it.
+async fn replica_for(actor: [u8; 32]) -> (tempfile::TempDir, AccountStore<SqliteBackend>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    std::mem::forget(dir); // outlive the store; never deleted under test
-    AccountStore::open(
+    let store = AccountStore::open(
         SqliteBackend::open(path).unwrap(),
         &hex::encode(actor),
         WriterId([0x0B; 32]),
     )
     .await
-    .unwrap()
+    .unwrap();
+    (dir, store)
 }
 
 fn binding() -> ScopeBinding {
@@ -232,7 +235,7 @@ fn binding() -> ScopeBinding {
 async fn a_fresh_replica_bootstraps_a_scope_off_a_real_nest() {
     let bodies: [&[u8]; 3] = [b"first post", b"second post", b"third post"];
     let (rpc, bytes, cids) = nest_with_posts(&bodies).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let source = NestBootstrapSource::new(&rpc, &bytes, binding());
 
     let report = store
@@ -275,7 +278,7 @@ async fn a_fresh_replica_bootstraps_a_scope_off_a_real_nest() {
 async fn re_bootstrapping_the_same_scope_adopts_nothing_twice() {
     let bodies: [&[u8]; 2] = [b"alpha", b"beta"];
     let (rpc, bytes, _) = nest_with_posts(&bodies).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let source = NestBootstrapSource::new(&rpc, &bytes, binding());
 
     let first = store
@@ -307,7 +310,7 @@ async fn re_bootstrapping_the_same_scope_adopts_nothing_twice() {
 async fn a_dehydrating_replica_never_fetches_the_bytes() {
     let bodies: [&[u8]; 1] = [b"never pulled"];
     let (rpc, bytes, _) = nest_with_posts(&bodies).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     store
         .set_hydration_policy(&fauna_account_store::types::HydrationPolicy {
             default: fauna_account_store::types::Hydration::OnDemand,
@@ -413,7 +416,7 @@ async fn indexed_cids(store: &AccountStore<SqliteBackend>) -> Vec<Cid> {
 async fn a_bootstrapped_scope_walks_its_feed_onto_the_nests_current_state() {
     let bodies: [&[u8]; 3] = [b"kept one", b"deleted one", b"kept two"];
     let (rpc, bytes, cids) = nest_with_posts(&bodies).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let source = NestBootstrapSource::new(&rpc, &bytes, binding());
 
     store
@@ -478,7 +481,7 @@ async fn a_bootstrapped_scope_walks_its_feed_onto_the_nests_current_state() {
 #[tokio::test]
 async fn a_delete_after_the_replica_caught_up_still_reaches_it() {
     let (rpc, _bytes, cids) = nest_with_posts(&[b"stays", b"goes"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
 
     // Caught up: the replica's frontier now sits past both records.
     let first = plane(&store, &rpc).walk().await.unwrap();
@@ -505,7 +508,7 @@ async fn a_delete_after_the_replica_caught_up_still_reaches_it() {
 #[tokio::test]
 async fn a_second_walk_over_an_unchanged_scope_applies_nothing() {
     let (rpc, _bytes, _cids) = nest_with_posts(&[b"one", b"two"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
 
     let first = plane(&store, &rpc).walk().await.unwrap();
     assert_eq!((first.rows, first.indexed), (2, 2));
@@ -531,7 +534,7 @@ async fn a_second_walk_over_an_unchanged_scope_applies_nothing() {
 #[tokio::test]
 async fn a_replica_with_no_segments_materializes_the_index_from_the_walk_alone() {
     let (rpc, _bytes, cids) = nest_with_posts(&[b"alpha", b"beta"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
 
     let report = plane(&store, &rpc).walk().await.unwrap();
     assert_eq!(report.indexed, 2);
@@ -559,7 +562,7 @@ async fn a_replica_with_no_segments_materializes_the_index_from_the_walk_alone()
 #[tokio::test]
 async fn a_kind_this_nest_does_not_serve_is_a_refusal_not_an_empty_walk() {
     let (rpc, _bytes, _) = nest_with_posts(&[b"a post"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let unserved = ContentScopePlane::new(
         &store,
         &rpc,
@@ -586,7 +589,7 @@ async fn a_kind_this_nest_does_not_serve_is_a_refusal_not_an_empty_walk() {
 #[tokio::test]
 async fn another_actors_content_scope_is_refused() {
     let (rpc, _bytes, _) = nest_with_posts(&[b"a post"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let stranger = ContentScopePlane::new(
         &store,
         &rpc,
@@ -636,7 +639,7 @@ impl fauna_account_store::store::BootstrapSource for CountingSource<'_> {
 #[tokio::test]
 async fn a_source_refuses_a_scope_it_was_not_built_for() {
     let (rpc, bytes, _) = nest_with_posts(&[b"only post"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let source = NestBootstrapSource::new(&rpc, &bytes, binding());
 
     let err = store
@@ -770,7 +773,7 @@ async fn mail_indexed_cids(store: &AccountStore<SqliteBackend>) -> Vec<Cid> {
 #[tokio::test]
 async fn a_mail_relay_ack_purge_reaches_a_replica_that_had_already_caught_up() {
     let (rpc, cids) = nest_with_mail(&[b"goes", b"stays"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let plane = ContentScopePlane::new(
         &store,
         &rpc,
@@ -812,7 +815,7 @@ async fn a_mail_relay_ack_purge_reaches_a_replica_that_had_already_caught_up() {
 #[tokio::test]
 async fn a_mail_scope_is_no_longer_refused_on_the_content_feed() {
     let (rpc, cids) = nest_with_mail(&[b"alpha", b"beta"]).await;
-    let store = empty_replica().await;
+    let (_dir, store) = empty_replica().await;
     let plane = ContentScopePlane::new(
         &store,
         &rpc,
@@ -957,7 +960,7 @@ async fn conv_indexed_cids(store: &AccountStore<SqliteBackend>) -> Vec<Cid> {
 async fn a_channel_members_replica_walks_the_conv_scope_feed() {
     let (state, cids) = nest_with_conv(&[b"purged later", b"kept"]).await;
     let rpc = requester_as(&state, member());
-    let store = replica_for(member()).await;
+    let (_dir, store) = replica_for(member()).await;
     let plane = ContentScopePlane::new(
         &store,
         &rpc,
@@ -1017,7 +1020,7 @@ async fn a_channel_members_replica_walks_the_conv_scope_feed() {
 async fn a_non_members_conv_walk_is_refused_and_registers_nothing() {
     let (state, _cids) = nest_with_conv(&[b"a private coordinate"]).await;
     let rpc = requester_as(&state, stranger());
-    let store = replica_for(stranger()).await;
+    let (_dir, store) = replica_for(stranger()).await;
     let plane = ContentScopePlane::new(
         &store,
         &rpc,
@@ -1059,7 +1062,7 @@ async fn a_non_members_conv_walk_is_refused_and_registers_nothing() {
 async fn an_evicted_members_conv_walk_is_refused() {
     let (state, _cids) = nest_with_conv(&[b"was readable while a member"]).await;
     let rpc = requester_as(&state, member());
-    let store = replica_for(member()).await;
+    let (_dir, store) = replica_for(member()).await;
     let plane = ContentScopePlane::new(
         &store,
         &rpc,

@@ -61,6 +61,7 @@ use serde::{Deserialize, Serialize};
 mod error;
 pub use error::{PairDispatchError, PairNestError, StoreError, TrustSignerError};
 
+pub mod deployment_seed;
 pub mod trust;
 pub use trust::{
     BackupStateStore, BackupTrustSeams, BlessedNestsStore, GrantEventSigner, NoAccountRuntime,
@@ -1105,7 +1106,6 @@ impl LinkedNestsMachine {
                 b.connector.as_ref(),
             )
             .await
-            .unwrap_or_default()
             .into_iter()
             .map(trust::project_backup_row)
             .collect(),
@@ -1113,10 +1113,10 @@ impl LinkedNestsMachine {
         };
         // Retained generations, read over each destination's OWN connection —
         // no source seam is passed because none exists on this API, so
-        // "accidentally ask the source" is not expressible here. Unlike the
-        // rows above there is no `unwrap_or_default()`: the shared read never
-        // fails wholesale, degrading per destination to an `Unreachable` group
-        // instead, which is precisely the distinction the facet must preserve
+        // "accidentally ask the source" is not expressible here. Like the rows
+        // above, the shared read never fails wholesale, degrading per
+        // destination to an `Unreachable` group instead, which is precisely
+        // the distinction the facet must preserve
         // (`nests.md:122`). Collapsing that to `Vec::new()` on error would
         // reintroduce the "could not ask" → "nothing to recover" lie.
         let trust_generations = match &seams.backup {
@@ -7214,8 +7214,9 @@ mod tests {
     /// (`onboarding.md` § 3b-ter, honest bound (1)): the tap blesses the box,
     /// so its trust renews itself and the offer may not promise a fixed limit
     /// the blessing removes. Worded for the weakest app — renewal "while you
-    /// use Fauna" (no background promise) and revocation, not un-blessing, as
-    /// the stop every app renders.
+    /// use Fauna" (no background promise) — and naming revocation in Settings →
+    /// Nests as the stop (every app also renders the un-bless toggle now, so
+    /// the copy may name that too; the pin requires only the revocation).
     #[tokio::test]
     async fn the_one_tap_offer_copy_matches_the_blessing_the_tap_writes() {
         use fauna_i18n::strings::onboarding::trust_prompt::SUMMARY;
@@ -7456,6 +7457,58 @@ mod tests {
             })
             .await;
         assert!(manual.is_err(), "the manual renew refuses");
+        assert!(
+            nest.state.lock().unwrap().renewed.is_empty(),
+            "no keyless bump reached the nest"
+        );
+        assert!(
+            stored_events(&store)
+                .iter()
+                .all(|e| e.kind != GrantEventKind::Renew),
+            "no Renew moved the recorded end"
+        );
+    }
+
+    /// The tick's half of the same rule: on a blessed nest, a due bounded
+    /// grant whose wraps cannot be sealed — its holder is on the roster, but
+    /// the mail custody holds no MSEK to derive the epoch keys from — is
+    /// skipped, never renewed keyless: nothing reaches the nest and no `Renew`
+    /// moves the recorded end.
+    #[tokio::test]
+    async fn the_tick_skips_a_bounded_mail_grant_whose_wraps_cannot_be_sealed() {
+        let kp = ActorKeypair::generate();
+        let nest = Arc::new(FakeNest::default());
+        nest.state.lock().unwrap().holders = vec![mda_holder()];
+        let mut cfg = trust_cfg(kp.actor_id());
+        let grant_id = [0x42u8; 16];
+        record_mint_cfg(
+            &mut cfg,
+            kp.signing_key(),
+            grant_id,
+            mda_holder().pubkey,
+            vec![grant_log::bounded_mail_event_scope()],
+            NOW,
+            NOW + 90 * DAY,
+            NOW,
+        )
+        .unwrap();
+        // The default custody: no MSEK, so no epoch key can be derived.
+        let (machine, store, plat) =
+            trust_machine_traced(nest.clone(), &kp, cfg, Default::default(), None);
+        let home = home_id(&machine).await;
+        machine
+            .dispatch(LinkedNestsAction::SetBlessed {
+                nest_id: home,
+                blessed: true,
+            })
+            .await
+            .unwrap();
+
+        plat.set_now(NOW + 80 * DAY);
+        machine
+            .dispatch(LinkedNestsAction::AutoRenew)
+            .await
+            .unwrap();
         assert!(
             nest.state.lock().unwrap().renewed.is_empty(),
             "no keyless bump reached the nest"

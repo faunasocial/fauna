@@ -43,6 +43,7 @@ pub mod index;
 pub mod pragma;
 pub mod ranged;
 pub mod reader;
+pub mod scan;
 pub mod v1;
 pub mod writer;
 
@@ -52,6 +53,7 @@ pub use index::{IndexEntry, MULTIHASH_BLAKE3_256, MULTIHASH_INDEX_SORTED_CODEC};
 pub use pragma::{Pragma, parse_pragma};
 pub use ranged::{RangedReader, ReadAt, SeekReadAt};
 pub use reader::{Iter, Reader};
+pub use scan::{DataScan, scan_data_section};
 pub use writer::Writer;
 
 use fauna_cbor::Cid;

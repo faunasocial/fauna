@@ -11,9 +11,9 @@
 // the frame paints is never seen, exactly as it is never painted; one that
 // paints always is.
 //
-// Test bundles only: the sole importer is `$lib/e2e-automation` (convention 15).
+// Test bundles only: the sole importer is `#lib/e2e-automation` (convention 15).
 
-import { paintedErrorsObserveForTest } from '$lib/wasm';
+import { paintedErrorsObserveForTest } from '#lib/wasm';
 
 /** An *error surface* in the contract's sense: the page's `error-message`, or a
  *  per-action `…-error` line — never a `…-error-log`. The tally re-applies the

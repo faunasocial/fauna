@@ -19,6 +19,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.util.faunaGate
@@ -28,7 +29,9 @@ import com.fauna.app.ui.viewmodel.AdminNestVM
 import com.fauna.app.ui.viewmodel.FeatureAuthoringState
 import com.fauna.app.ui.viewmodel.FeatureEditorActions
 import com.fauna.ffi.FfiAdminRegionView
+import com.fauna.ffi.FfiAdminUpdateChannelView
 import com.fauna.ffi.FfiAdminWebAppOriginView
+import com.fauna.ffi.provisioning.UpdateChannel
 import com.fauna.ffi.FfiIssuerForcedArm
 import com.fauna.ffi.FfiIssuerKeyRow
 import com.fauna.ffi.FfiIssuerKeyView
@@ -76,6 +79,7 @@ fun AdminNestScreen(
     val pairing by vm.pairing.collectAsState()
     val servingPort by vm.servingPort.collectAsState()
     val frontedByRouter by vm.frontedByRouter.collectAsState()
+    val osHostStatusPresent by vm.osHostStatusPresent.collectAsState()
     val osSecurityUpdates by vm.osSecurityUpdates.collectAsState()
     val osRebootPending by vm.osRebootPending.collectAsState()
     val restartingNow by vm.restartingNow.collectAsState()
@@ -90,11 +94,15 @@ fun AdminNestScreen(
     val webAppOriginView by vm.webAppOriginView.collectAsState()
     val webAppOriginDraft by vm.webAppOriginDraft.collectAsState()
     val webAppOriginWorking by vm.webAppOriginWorking.collectAsState()
+    val updateChannelView by vm.updateChannelView.collectAsState()
+    val updateChannelDraft by vm.updateChannelDraft.collectAsState()
+    val updateChannelWorking by vm.updateChannelWorking.collectAsState()
     val seedRotateConfirm by vm.seedRotateConfirm.collectAsState()
     val seedRotateStatus by vm.seedRotateStatus.collectAsState()
     val takedownArmed by vm.takedownArmed.collectAsState()
     val takedownStatus by vm.takedownStatus.collectAsState()
     val reports by vm.reports.collectAsState()
+    val blocked by vm.blocked.collectAsState()
     val takedownPrefill by vm.takedownPrefill.collectAsState()
     // ONE flow for the whole sign-in key section, so a dispatch's verdict,
     // re-read key set and released in-flight guard recompose together.
@@ -108,6 +116,7 @@ fun AdminNestScreen(
         pairing = pairing,
         servingPort = servingPort,
         frontedByRouter = frontedByRouter,
+        osHostStatusPresent = osHostStatusPresent,
         osSecurityUpdates = osSecurityUpdates,
         osRebootPending = osRebootPending,
         restartingNow = restartingNow,
@@ -128,6 +137,11 @@ fun AdminNestScreen(
         webAppOriginWorking = webAppOriginWorking,
         onSelectWebAppOrigin = vm::selectWebAppOrigin,
         onSaveWebAppOrigin = vm::saveWebAppOrigin,
+        updateChannelView = updateChannelView,
+        updateChannelDraft = updateChannelDraft,
+        updateChannelWorking = updateChannelWorking,
+        onSelectUpdateChannel = vm::selectUpdateChannel,
+        onSaveUpdateChannel = vm::saveUpdateChannel,
         seedRotateConfirm = seedRotateConfirm,
         seedRotateStatus = seedRotateStatus,
         takedownArmed = takedownArmed,
@@ -163,6 +177,14 @@ fun AdminNestScreen(
         onResolveReport = vm::resolveReport,
         onOpenReportTakedown = vm::openReportTakedown,
         onConsumeTakedownPrefill = vm::consumeTakedownPrefill,
+        blocked = blocked,
+        onBlockReport = vm::armBlock,
+        onUnblock = vm::armUnblock,
+        onCancelBlock = vm::cancelBlock,
+        onConfirmBlock = vm::confirmBlock,
+        // The shared rule editor's admin mounting (nest-rules.md § The shared
+        // rule editor (a); admin.md § N. Nest → Nest rules).
+        rulesSection = { AdminNestRulesSection() },
     )
 }
 
@@ -172,6 +194,7 @@ fun AdminNestContent(
     pairing: Boolean,
     servingPort: Int,
     frontedByRouter: Boolean,
+    osHostStatusPresent: Boolean,
     osSecurityUpdates: Int,
     osRebootPending: Boolean,
     restartingNow: Boolean,
@@ -237,6 +260,11 @@ fun AdminNestContent(
     webAppOriginWorking: Boolean = false,
     onSelectWebAppOrigin: (FfiWebAppOrigin) -> Unit = {},
     onSaveWebAppOrigin: () -> Unit = {},
+    updateChannelView: FfiAdminUpdateChannelView? = null,
+    updateChannelDraft: UpdateChannel? = null,
+    updateChannelWorking: Boolean = false,
+    onSelectUpdateChannel: (UpdateChannel) -> Unit = {},
+    onSaveUpdateChannel: () -> Unit = {},
     // The shared `takedown_form_view` fold (moderation.md § Legal takedown →
     // Invocation surface), injected for the same FFI-free-test reason.
     takedownFormView: (String, Boolean, String, Boolean) -> com.fauna.ffi.FfiTakedownFormView =
@@ -260,6 +288,17 @@ fun AdminNestContent(
     onResolveReport: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit = { _, _ -> },
     onOpenReportTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
     onConsumeTakedownPrefill: () -> Unit = {},
+    // The admin block of a reported item (moderation.md § Admin block of a
+    // reported item): the Block verb on a queue row, the blocked list below it,
+    // and the one armed confirm both lists share.
+    blocked: AdminNestVM.BlockedState = AdminNestVM.BlockedState(),
+    onBlockReport: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
+    onUnblock: (com.fauna.ffi.FfiBlockedRow) -> Unit = {},
+    onCancelBlock: () -> Unit = {},
+    onConfirmBlock: () -> Unit = {},
+    // `admin-nest-rules-section` — a slot, so a host test renders the page
+    // without the editor's Hilt host.
+    rulesSection: @Composable () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -353,6 +392,21 @@ fun AdminNestContent(
                 onSave = onSaveWebAppOrigin,
             )
 
+            // ── Update channel (fauna.admin.update_channel.{get,set}) ──
+            // Which builds this nest installs on its own (nest/update-channel.md
+            // § The UI; admin.md § N Nest → Update channel), directly after the
+            // web-app origin and mirroring its radio shape. The radios' labels
+            // and descriptions, every status sentence and the can-set verdict
+            // are the shared FfiAdminUpdateChannelView fold (tui's
+            // admin/nest.rs, the reference leg) — this file paints and wires.
+            UpdateChannelSection(
+                view = updateChannelView,
+                draft = updateChannelDraft,
+                working = updateChannelWorking,
+                onSelect = onSelectUpdateChannel,
+                onSave = onSaveUpdateChannel,
+            )
+
             // ── Declared region (fauna.admin.region.{get,set}) ──
             // The deployment's legal situs — the region tier's one human
             // choice (region-blocking.md § Region determination;
@@ -386,8 +440,9 @@ fun AdminNestContent(
             // across all 7 apps); the count badge shows only when updates pend;
             // the restart-now button shows only when a reboot pends and drives
             // fauna.admin.request_host_restart. A nest with no host channel reads
-            // the defaults → "OS up to date" (no false alarm).
+            // no host-status file → "OS status not reported by this host".
             OsMaintenanceRow(
+                hostStatusPresent = osHostStatusPresent,
                 securityUpdates = osSecurityUpdates,
                 rebootPending = osRebootPending,
                 restartingNow = restartingNow,
@@ -460,16 +515,33 @@ fun AdminNestContent(
                 reports = reports,
                 onResolve = onResolveReport,
                 onOpenTakedown = onOpenReportTakedown,
+                onBlock = onBlockReport,
             )
+
+            // ── Blocked items (admin-nest-blocked-*) — below the queue: a blocked
+            // item's report has left the open queue, so Unblock acts from here.
+            BlockedItemsSection(
+                blocked = blocked,
+                onUnblock = onUnblock,
+                onCancel = onCancelBlock,
+                onConfirm = onConfirmBlock,
+            )
+
+            // ── Nest rules (admin-nest-rules-section) — the shared rule editor
+            // after the reports queue and its blocked list, as ui.yaml's
+            // admin-nest element order declares (admin.md § N. Nest).
+            rulesSection()
 
             HorizontalDivider()
 
             // ── Retire this server (nest-retirement.md § Layout & flow) — between
             // the reports section and Factory reset, labelled sharply apart from
             // it: reset wipes a box you keep, retire destroys it.
-            RetireSection(onRetire)
+            if (!BuildConfig.KIDS) {
+                RetireSection(onRetire)
 
-            HorizontalDivider()
+                HorizontalDivider()
+            }
 
             // ── Danger zone — Factory reset ──
             FactoryResetSection(onFactoryReset)
@@ -788,6 +860,76 @@ private fun WebAppOriginSection(
     }
 }
 
+/** The update-channel section (`admin-nest-update-channel-*`,
+ *  `fauna.admin.update_channel.{get,set}`; nest/update-channel.md § The UI).
+ *  Radios stay unmarked and disabled until the read lands ([view] `null`) and
+ *  whenever `canSet` is false. A radio pick is local; the save commits it. */
+@Composable
+private fun UpdateChannelSection(
+    view: FfiAdminUpdateChannelView?,
+    draft: UpdateChannel?,
+    working: Boolean,
+    onSelect: (UpdateChannel) -> Unit,
+    onSave: () -> Unit,
+) {
+    val canSet = view?.canSet == true && !working
+    val gate = faunaGate("fauna.admin.update_channel.set", enabled = canSet && draft != null)
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_SECTION)) {
+        Column(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                stringResource(R.string.admin_nest_page_update_channel_label),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                stringResource(R.string.admin_nest_page_update_channel_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            view?.options?.forEach { option ->
+                WebAppOriginRadioRow(
+                    testTag = when (option.channel) {
+                        UpdateChannel.STABLE -> Ids.ADMIN_NEST_UPDATE_CHANNEL_STABLE_RADIO
+                        UpdateChannel.TEST -> Ids.ADMIN_NEST_UPDATE_CHANNEL_TEST_RADIO
+                        UpdateChannel.DEV -> Ids.ADMIN_NEST_UPDATE_CHANNEL_DEV_RADIO
+                    },
+                    selected = draft == option.channel,
+                    enabled = canSet,
+                    onClick = { onSelect(option.channel) },
+                    label = localized(option.label).orEmpty(),
+                )
+                Text(
+                    localized(option.description).orEmpty(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 40.dp),
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    view?.let { localized(it.status) }
+                        ?: stringResource(R.string.admin_nest_page_update_channel_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_STATUS),
+                )
+                Button(
+                    onClick = onSave,
+                    enabled = gate.enabled,
+                    modifier = Modifier.testTag(Ids.ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON),
+                ) { Text(stringResource(R.string.admin_nest_page_update_channel_save)) }
+            }
+            DisabledControlReasonText(gate.reason)
+        }
+    }
+}
+
 @Composable
 private fun WebAppOriginRadioRow(
     testTag: String,
@@ -942,6 +1084,7 @@ private fun RegionSection(
  *  os-maintenance section + the linux `build_nest_page` os row. */
 @Composable
 private fun OsMaintenanceRow(
+    hostStatusPresent: Boolean,
     securityUpdates: Int,
     rebootPending: Boolean,
     restartingNow: Boolean,
@@ -956,7 +1099,11 @@ private fun OsMaintenanceRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     localized(
-                        com.fauna.ffi.osMaintenanceStatusLabel(securityUpdates.toUInt(), rebootPending)
+                        com.fauna.ffi.osMaintenanceStatusLabel(
+                            hostStatusPresent,
+                            securityUpdates.toUInt(),
+                            rebootPending,
+                        )
                     ).orEmpty(),
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.testTag(Ids.NEST_OS_MAINTENANCE_STATUS),
@@ -1048,11 +1195,11 @@ private fun SeedRotateSection(
                         )
                     }
                     is AdminNestVM.SeedRotateConfirmState.Ready -> {
-                        confirm.view.inheritors.forEachIndexed { i, inheritor ->
+                        confirm.view.inheritors.forEach { inheritor ->
                             Text(
                                 inheritor.label,
                                 style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.testTag("${Ids.ADMIN_NEST_SEED_ROTATE_ROSTER_ITEM}-$i"),
+                                modifier = Modifier.testTag(Ids.ADMIN_NEST_SEED_ROTATE_ROSTER_ITEM),
                             )
                         }
                         val reason = localized(confirm.view.blockedReason)
@@ -1160,11 +1307,11 @@ private fun OauthKeysSection(
                     // is counted against the wall clock at paint; the instant it
                     // counts to is the nest's own.
                     val nowSecs = System.currentTimeMillis() / 1000
-                    keys.view.keys.forEachIndexed { i, row ->
+                    keys.view.keys.forEach { row ->
                         Text(
                             localized(issuerKeyRowLabel(row, nowSecs)).orEmpty(),
                             style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.testTag("${Ids.ADMIN_NEST_OAUTH_KEY_ITEM}-$i"),
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_OAUTH_KEY_ITEM),
                         )
                     }
                 }
@@ -1432,6 +1579,7 @@ private fun ReportsQueueSection(
     reports: AdminNestVM.ReportsState,
     onResolve: (com.fauna.ffi.FfiReportQueueRow, Boolean) -> Unit,
     onOpenTakedown: (com.fauna.ffi.FfiReportQueueRow) -> Unit,
+    onBlock: (com.fauna.ffi.FfiReportQueueRow) -> Unit = {},
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_REPORTS_SECTION)) {
@@ -1487,12 +1635,106 @@ private fun ReportsQueueSection(
                                 enabled = gate.enabled,
                                 modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_DISMISS_BUTTON),
                             ) { Text(stringResource(R.string.admin_nest_page_reports_dismiss)) }
+                            // The admin block: only an item subject arms it (the shared
+                            // `can_block`); arming is local, so it declares no gate — the
+                            // confirm below carries the kind.
+                            if (row.canBlock) {
+                                OutlinedButton(
+                                    onClick = { onBlock(row) },
+                                    modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_BLOCK_BUTTON),
+                                ) { Text(stringResource(R.string.admin_nest_page_block_arm_block)) }
+                            }
                         }
                         DisabledControlReasonText(gate.reason)
                     }
                 }
             }
             reports.status?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+// ── Blocked items + the armed Block / Unblock confirm ─────────────────────────
+// moderation.md § Admin block of a reported item. Paint only: every word is a
+// shared `block` fold. The confirm renders the summary captured at arm time —
+// verb, item and the report's reason — so a lever on another user's content is
+// never confirmed blind; its button is the one `OnlineOnly` call.
+@Composable
+private fun BlockedItemsSection(
+    blocked: AdminNestVM.BlockedState,
+    onUnblock: (com.fauna.ffi.FfiBlockedRow) -> Unit,
+    onCancel: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Card(modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_NEST_BLOCKED_SECTION)) {
+        Column(
+            modifier = Modifier.padding(16.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                stringResource(R.string.admin_nest_page_blocked_label),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                stringResource(R.string.admin_nest_page_blocked_desc),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!blocked.loaded) {
+                Text(
+                    stringResource(R.string.admin_nest_page_blocked_loading),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else if (blocked.rows.isEmpty()) {
+                Text(
+                    stringResource(R.string.admin_nest_page_blocked_empty),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            blocked.rows.forEach { row ->
+                key(row.reportId) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            AdminNestVM.blockedLine(row) { resolveLocalized(context, it).orEmpty() },
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_BLOCKED_ITEM),
+                        )
+                        OutlinedButton(
+                            onClick = { onUnblock(row) },
+                            enabled = row.unblock.canSubmit,
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_BLOCKED_UNBLOCK_BUTTON),
+                        ) { Text(resolveLocalized(context, row.unblock.armLabel).orEmpty()) }
+                    }
+                }
+            }
+            blocked.armed?.let { armed ->
+                val gate = faunaGate("fauna.moderation.admin_block")
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        armed.summary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_BLOCK_CONFIRM_SUMMARY),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onConfirm,
+                            enabled = gate.enabled,
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_BLOCK_CONFIRM_BUTTON),
+                        ) { Text(armed.confirmLabel) }
+                        OutlinedButton(
+                            onClick = onCancel,
+                            modifier = Modifier.testTag(Ids.ADMIN_NEST_REPORT_BLOCK_CANCEL_BUTTON),
+                        ) { Text(stringResource(R.string.admin_nest_page_block_cancel_button)) }
+                    }
+                    DisabledControlReasonText(gate.reason)
+                }
+            }
+            blocked.status?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall)
             }
         }

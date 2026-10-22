@@ -105,6 +105,10 @@ public struct AccountSwitcherSection: View {
         // entry). The on-appear `.task` above only covers a switcher opened AFTER
         // the write.
         .onAccountRegistryChanged { vm.reload() }
+        // The append flow's refused add (account list full) — see `.faunaAccountAddRefused`.
+        .onReceive(NotificationCenter.default.publisher(for: .faunaAccountAddRefused)) {
+            vm.reportAddRefused($0)
+        }
     }
 
     @ViewBuilder

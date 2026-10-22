@@ -93,6 +93,12 @@ struct HandleEntryView: View {
                 ErrorBanner(message: error)
             }
 
+            // The by-continuing notice only while Continue signs in — the
+            // shared `terms_notice_visible` (true iff `AlreadyOnNest`).
+            if snap.termsNoticeVisible {
+                TermsNotice()
+            }
+
             Button(L.common.continue) { submitContinue() }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)

@@ -445,6 +445,14 @@ class WindowsBridgeDriver(HttpBridgeDriver):
         except Exception:
             pass
 
+    def capture_window(self, name: str, width_dip: int, height_dip: int) -> dict:
+        """`PlatformDriver.capture_window` over the bridge's `/window/capture`
+        (Actions.CaptureWindow): SetWindowPos in DIP at the window's own DPI,
+        then a PrintWindow render cropped to the visible frame."""
+        return self._post("/window/capture", {
+            "name": name, "width_dip": width_dip, "height_dip": height_dip,
+        })
+
     def is_app_alive(self) -> bool:
         """True while the launched FaunaApp.exe process is still running.
 

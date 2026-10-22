@@ -255,4 +255,70 @@ mod tests {
         let buf = [0x17, 0x03, 0x03, 0x00, 0x01, 0xff];
         assert_eq!(parse_sni(&buf), None);
     }
+
+    // Property tests: the parser reads stranger bytes before anything is
+    // authenticated, so the residual bug class is a panic or an unbounded
+    // allocation. The router peeks at most `MAX_CLIENT_HELLO` bytes (`main.rs`).
+    use proptest::prelude::*;
+
+    /// The peek bound the connection handler buffers up to (`main.rs`).
+    const PEEK_BOUND: usize = crate::MAX_CLIENT_HELLO;
+
+    proptest! {
+        #[test]
+        fn arbitrary_bytes_never_panic_and_stay_bounded(
+            buf in proptest::collection::vec(any::<u8>(), 0..PEEK_BOUND)
+        ) {
+            if let Some(n) = first_record_len(&buf) {
+                prop_assert!((5..=5 + 0xffff).contains(&n));
+            }
+            if let Some(name) = parse_sni(&buf) {
+                prop_assert!(name.len() <= buf.len());
+            }
+        }
+
+        /// A well-formed hello with a valid-looking host is found, lowercased.
+        #[test]
+        fn valid_hello_roundtrips(host in "[A-Za-z0-9][A-Za-z0-9.-]{0,62}") {
+            let rec = client_hello_with_sni(&host);
+            prop_assert_eq!(first_record_len(&rec), Some(rec.len()));
+            prop_assert_eq!(parse_sni(&rec), Some(host.to_ascii_lowercase()));
+        }
+
+        /// Single-byte corruption and every truncation of a valid hello stay
+        /// panic-free, and a returned name never holds a control byte.
+        #[test]
+        fn mutated_hello_never_panics(
+            host in "[a-z0-9.-]{1,40}",
+            idx in any::<prop::sample::Index>(),
+            byte in any::<u8>(),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            let mut rec = client_hello_with_sni(&host);
+            let i = idx.index(rec.len());
+            rec[i] = byte;
+            rec.truncate(cut.index(rec.len() + 1));
+            if let Some(name) = parse_sni(&rec) {
+                prop_assert!(!name.is_empty());
+                prop_assert!(name.bytes().all(|b| b >= 0x20 && b != 0x7f));
+            }
+        }
+
+        /// Length fields that lie (huge hs_len, ext_len) must not over-read.
+        #[test]
+        fn lying_lengths_never_panic(
+            prefix in proptest::collection::vec(any::<u8>(), 0..64),
+            lens in proptest::collection::vec(any::<u16>(), 0..8),
+        ) {
+            let mut buf = vec![0x16, 0x03, 0x01];
+            buf.extend_from_slice(&0xffffu16.to_be_bytes());
+            buf.push(0x01);
+            buf.extend_from_slice(&[0xff, 0xff, 0xff]);
+            buf.extend_from_slice(&prefix);
+            for l in lens {
+                buf.extend_from_slice(&l.to_be_bytes());
+            }
+            let _ = parse_sni(&buf);
+        }
+    }
 }

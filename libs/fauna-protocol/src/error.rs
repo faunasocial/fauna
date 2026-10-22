@@ -237,6 +237,20 @@ impl RpcError {
     /// CardDAV, the Go MTA `552 5.2.2`.
     pub const CODE_BRIDGES_OVER_QUOTA: &'static str = "fauna.bridges.over_quota";
 
+    /// `fauna.bridges.set_mail_enabled(true)` on a box that cannot run the
+    /// MTA: the public axis, and the deployment declared no content scanners
+    /// (`fauna_core::mail_availability::mail_unavailable_here`;
+    /// `mail-bridge-lifecycle.md` § Default-off on first claim → *A box with no
+    /// content scanners cannot enable mail*). Nothing was persisted. It clears
+    /// only when the box is re-deployed with scanners, so [`Self::action`]
+    /// classes it [`RpcErrorAction::Rejected`] — the one non-retry class that
+    /// is not an update prompt. **A client machine must match this exact code
+    /// and surface it as the Mail page's error**, never fold it into the
+    /// generic non-admin `Rejected` it swallows on a load; [`Self::localized`]
+    /// carries its sentence. Minted by the nest's `set_mail_enabled_handler`.
+    pub const CODE_BRIDGES_MAIL_UNAVAILABLE_HERE: &'static str =
+        "fauna.bridges.mail_unavailable_here";
+
     /// The bridged reply/quote/interact doors' refusals (`feed.md`
     /// § Interaction bar → *Reply and quote on a bridged post*): one code per
     /// remedy, a remedy being what to change AND on which page. Minted by the
@@ -570,7 +584,7 @@ impl RpcError {
             Self::CODE_NEST_OUTDATED
             | Self::CODE_NEST_SCHEMA_MISMATCH
             // A cross-nest relay reached a peer nest that predates the required
-            // federation kind (S5, `federation.md` § Cross-nest shared folders
+            // federation kind (S5, `federation-shared-folders.md` § Cross-nest shared folders
             // + channel append): software out of date — the *peer's* — so the
             // update affordance, never an auto-retry or an auth framing.
             | "fauna.federation.peer_nest_outdated" => RpcErrorAction::NeedsUpdate,
@@ -586,6 +600,10 @@ impl RpcError {
             // classification move together (`localized` carries this code's
             // exact arm), so a later reader finds both halves side by side.
             Self::CODE_SYNC_DEVICE_LIMIT_EXCEEDED => RpcErrorAction::Rejected,
+            // No content scanners on a public box: clears only on a re-deploy
+            // with scanners. Explicit for the same side-by-side reason as the
+            // device cap; the client machines key on the exact code.
+            Self::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE => RpcErrorAction::Rejected,
             "fauna.protocol.timeout"
             | "fauna.protocol.disconnected"
             | "fauna.protocol.resync_required"
@@ -724,6 +742,9 @@ impl RpcError {
             // a bigger allowance — instead of the generic fallback it rendered
             // until the DAV writes began enforcing the quota.
             Self::CODE_BRIDGES_OVER_QUOTA => error::bridges::OVER_QUOTA,
+            // Mail on a box deployed without content scanners: the sentence
+            // names the remedy, a deployment with mail.
+            Self::CODE_BRIDGES_MAIL_UNAVAILABLE_HERE => error::bridges::MAIL_UNAVAILABLE_HERE,
             // A forward-all target on a hosted domain (`mail-forwarding.md`
             // § Don't do these) — the same remedy, an alias.
             "fauna.bridges.forward_target_on_local_domain" => {

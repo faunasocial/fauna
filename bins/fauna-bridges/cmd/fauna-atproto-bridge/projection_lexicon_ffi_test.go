@@ -316,7 +316,7 @@ func TestProjectedProfileRecordsSatisfyTheirLexicon(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := faunaFfi.BuildEditedProfile(projSecret, nil, nil, tc.displayName, tc.bio, tc.links)
+			body, err := faunaFfi.BuildEditedProfile(projSecret, nil, nil, nil, tc.displayName, tc.bio, tc.links)
 			if err != nil {
 				t.Fatalf("build the profile bytes the apps would publish: %v", err)
 			}
@@ -355,7 +355,7 @@ func TestProjectedRecordsAreCappedInBytesNotJustGraphemes(t *testing.T) {
 	})
 
 	t.Run("profile display name and description", func(t *testing.T) {
-		body, err := faunaFfi.BuildEditedProfile(projSecret, nil, nil,
+		body, err := faunaFfi.BuildEditedProfile(projSecret, nil, nil, nil,
 			strptr(strings.Repeat(familyEmoji, 64)), strptr(strings.Repeat(familyEmoji, 256)), nil)
 		if err != nil {
 			t.Fatalf("build profile: %v", err)

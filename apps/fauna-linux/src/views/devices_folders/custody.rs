@@ -324,6 +324,23 @@ fn build_held_card(held: &HeldCustodyView, draft: &str, on: &OnGesture) -> gtk::
         .build();
     set_test_id(&bytes, ids::CUSTODY_HELD_BYTES);
 
+    // A NEST-form hold carries the address the owner's cold device restores
+    // from — the accept's URL verbatim, handed over out of band (`devices.md`
+    // § Custody facet; the owner's half is `nests.md` § Trust facet — restore
+    // from a custodian nest).
+    let restore_address = held.custodian_nest_url.as_deref().map(|address| {
+        let label = gtk::Label::builder()
+            .label(strings::devices::custody_held_restore_address(address))
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .css_classes(["caption"])
+            .build();
+        set_test_id(&label, ids::CUSTODY_HELD_RESTORE_ADDRESS);
+        label
+    });
+
     let budget_label = gtk::Label::builder()
         .label(strings::devices::CUSTODY_BUDGET_LABEL)
         .halign(gtk::Align::Start)
@@ -395,6 +412,9 @@ fn build_held_card(held: &HeldCustodyView, draft: &str, on: &OnGesture) -> gtk::
     card.append(&owner);
     card.append(&scope);
     card.append(&bytes);
+    if let Some(address) = &restore_address {
+        card.append(address);
+    }
     card.append(&budget_row);
     card.append(&buttons);
     list_row(&card)

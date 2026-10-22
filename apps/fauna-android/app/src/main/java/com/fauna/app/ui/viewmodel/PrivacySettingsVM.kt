@@ -10,12 +10,14 @@ import com.fauna.app.core.InheritedFilterMarks
 import com.fauna.app.core.SecureStorage
 import com.fauna.ffi.FfiEmailFilter
 import com.fauna.ffi.FfiFilterActionInputs
+import com.fauna.ffi.FfiFilterRuleInputs
 import com.fauna.ffi.actorIdFromSecret
 import com.fauna.ffi.describeEmailFilterActionInputs
-import com.fauna.ffi.describeEmailFilterRule
-import com.fauna.ffi.emailFilterIsEditableFor
+import com.fauna.ffi.describeEmailFilterRuleInputs
+import com.fauna.ffi.emailFilterIsEditable
 import com.fauna.ffi.encodeEmailFilterActionInputs
-import com.fauna.ffi.encodeEmailFilterRule
+import com.fauna.ffi.encodeEmailFilterRuleInputs
+import com.fauna.ffi.parseEmailFilterPriority
 import com.fauna.ffi.perMilleToProbability
 import com.fauna.ffi.probabilityToPerMille
 import com.fauna.ffi.spamThresholdBand
@@ -26,19 +28,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** The shared filter form's pre-populate values for an edit — the
- *  create-dialog `(kind, value)` / action inputs [describeEmailFilterRule] /
- *  [describeEmailFilterActionInputs] decode a stored filter into. */
-data class FilterPrefill(
+/** Everything the shared filter form holds — the condition and action inputs
+ *  [describeEmailFilterRuleInputs] / [describeEmailFilterActionInputs] decode a
+ *  stored filter into, its order as typed (`filter-priority-input`, blank is
+ *  0) and its `continue` flag (`filter-continue-toggle`) — what an edit
+ *  pre-populates and what create/save encode. */
+data class FilterForm(
     val name: String,
-    val ruleType: String,
-    val ruleValue: String,
+    val rule: FfiFilterRuleInputs,
     val action: FfiFilterActionInputs,
+    val priority: String,
+    val continueOnMatch: Boolean,
 )
-
-/** The action kinds the form collects inputs for (`SUPPORTED_ACTION_KINDS`) —
- *  what [emailFilterIsEditableFor] gates a stored filter against. */
-private val SUPPORTED_ACTION_KINDS = listOf("Allow", "Discard", "Reject", "Forward")
 
 @HiltViewModel
 class PrivacySettingsVM @Inject constructor(
@@ -69,7 +70,7 @@ class PrivacySettingsVM @Inject constructor(
     // shared form. Set only after a successful filters_get decode, so the
     // sheet opens already pre-populated (never an empty flash).
     val editingFilterId = MutableStateFlow<Long?>(null)
-    val editFilterPrefill = MutableStateFlow<FilterPrefill?>(null)
+    val editFilterPrefill = MutableStateFlow<FilterForm?>(null)
     // The ids of every rule the succession aftermath carried across that the
     // owner has not answered — `filter-unattested-mark` +
     // `filter-review-keep-button` render on exactly these rows. The shared
@@ -144,21 +145,19 @@ class PrivacySettingsVM @Inject constructor(
         }
     }
 
-    fun createFilter(name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) {
+    fun createFilter(form: FilterForm) {
         viewModelScope.launch {
             creatingFilter.value = true
             emailFilterError.value = null
             try {
-                // Map the dropdown (kind, value) onto the typed wire variants via the
-                // shared encoder (fauna_protocol::email::encode_filter_rule / _action) —
-                // the single source of truth every app shares instead of re-deriving
-                // the map per client (priority #2/#4; docs/goal/ui/settings.md § Email
-                // filter create-dialog encoding). An unknown tag throws; an empty Reject
-                // reason rides the canonical default. Linux template:
-                // apps/fauna-linux/src/settings/privacy.rs § create_email_filter.
-                val rule = encodeEmailFilterRule(ruleType, ruleValue)
-                val actionTyped = encodeEmailFilterActionInputs(action)
-                api.createEmailFilter(name, listOf(rule), "all", actionTyped, 0)
+                // The form onto the typed wire values via the shared encoders
+                // (fauna_protocol::email::encode_filter_rule_inputs / _action /
+                // parse_filter_priority) — the single source of truth every app
+                // shares (priority #2/#4). A bad input throws onto the error line.
+                val rule = encodeEmailFilterRuleInputs(form.rule)
+                val actionTyped = encodeEmailFilterActionInputs(form.action)
+                val priority = parseEmailFilterPriority(form.priority)
+                api.createEmailFilter(form.name, listOf(rule), "all", actionTyped, priority, form.continueOnMatch)
                 loadFilters()
             } catch (e: Exception) {
                 emailFilterError.value = e.message
@@ -168,13 +167,12 @@ class PrivacySettingsVM @Inject constructor(
     }
 
     /** Whether `filter` can open the shared edit form — gated exactly like the
-     *  other apps (`fauna_protocol::email::filter_is_editable` via the
-     *  UniFFI free function): single rule, both rule + action inside the
-     *  create-dialog's dropdown-covered subset. A filter only a raw API call
-     *  could have produced never opens a form that would silently narrow it
-     *  on save. */
+     *  other apps (`fauna_protocol::email::filter_is_editable` via the UniFFI
+     *  free function): one condition, and both it and the action describe. A
+     *  filter only a raw API call could have produced never opens a form that
+     *  would silently narrow it on save. */
     fun isFilterEditable(filter: FfiEmailFilter): Boolean =
-        emailFilterIsEditableFor(filter.rules, filter.action, SUPPORTED_ACTION_KINDS)
+        emailFilterIsEditable(filter.rules, filter.action)
 
     /** Open the shared form pre-populated for an existing filter — a fresh
      *  `filters_get` (not the cached list row), so the edit reflects current
@@ -186,13 +184,15 @@ class PrivacySettingsVM @Inject constructor(
             emailFilterError.value = null
             try {
                 val filter = api.getEmailFilter(id)
-                val rule = filter.rules.firstOrNull()?.let { describeEmailFilterRule(it) }
+                val rule = filter.rules.firstOrNull()?.let { describeEmailFilterRuleInputs(it) }
                 val action = describeEmailFilterActionInputs(filter.action)
                 if (rule == null || action == null) {
                     emailFilterError.value = appContext.getString(R.string.settings_errors_update_filter)
                     return@launch
                 }
-                editFilterPrefill.value = FilterPrefill(filter.name, rule.kind, rule.value, action)
+                editFilterPrefill.value = FilterForm(
+                    filter.name, rule, action, filter.priority.toString(), filter.continueOnMatch,
+                )
                 editingFilterId.value = filter.id
             } catch (e: Exception) {
                 emailFilterError.value = e.message
@@ -205,15 +205,16 @@ class PrivacySettingsVM @Inject constructor(
         editFilterPrefill.value = null
     }
 
-    fun saveFilter(name: String, ruleType: String, ruleValue: String, action: FfiFilterActionInputs) {
+    fun saveFilter(form: FilterForm) {
         val id = editingFilterId.value ?: return
         viewModelScope.launch {
             creatingFilter.value = true
             emailFilterError.value = null
             try {
-                val rule = encodeEmailFilterRule(ruleType, ruleValue)
-                val actionTyped = encodeEmailFilterActionInputs(action)
-                api.updateEmailFilter(id, name, listOf(rule), "all", actionTyped, 0)
+                val rule = encodeEmailFilterRuleInputs(form.rule)
+                val actionTyped = encodeEmailFilterActionInputs(form.action)
+                val priority = parseEmailFilterPriority(form.priority)
+                api.updateEmailFilter(id, form.name, listOf(rule), "all", actionTyped, priority, form.continueOnMatch)
                 cancelEditFilter()
                 loadFilters()
             } catch (e: Exception) {

@@ -205,3 +205,49 @@ def test_tlsrpt_report_is_stored_and_listed_never_delivered(tlsrpt_venue):
             "no report may reach a mailbox: this venue's inbound heartbeat moved, "
             f"so something was ingested into one ({health.get('last_inbound_accepted_at')})"
         )
+
+
+def _nest_hook(handle, path: str, body: dict) -> dict:
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{handle.nest['url']}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15.0) as resp:
+        assert resp.status == 200, f"{path} returned {resp.status}"
+        return json.loads(resp.read())
+
+
+@pytest.mark.feature("tlsrpt-reporting")
+def test_tlsrpt_report_is_kept_inside_ninety_days_and_pruned_past_them(tlsrpt_venue):
+    """The daily mail sweep's retention prune, run at a scripted instant, keeps
+    a stored report inside the 90-day window and removes it past it
+    (``smtp-server.md`` § TLSRPT inbound report listener: the nest prunes past
+    a 90-day constant in the daily mail sweep)."""
+    handle = tlsrpt_venue
+    domain = handle.domain
+    rcpt = f"tlsrpt@{domain}"
+    kept_id = f"retained-{int(time.time() * 1000)}"
+
+    _mail(handle, rcpt, _report_message(rcpt, _report_json(domain, kept_id), kept_id))
+
+    def mine(ws) -> list:
+        listed = ws.call("fauna.bridges.list_tlsrpt_inbound_reports", {"window_days": 1})
+        return [r for r in listed["reports"] if r["report_id"] == kept_id]
+
+    day = 86_400
+    with _admin_ws(handle.nest) as ws:
+        stored = mine(ws)
+        assert len(stored) == 1, f"the report {kept_id} was not stored: {stored}"
+        received_at = stored[0]["received_at"]
+
+        # Inside the window: the report stays.
+        _nest_hook(handle, "/api/v1/test/tlsrpt/prune_now", {"now": received_at + 89 * day})
+        assert len(mine(ws)) == 1, "a report 89 days old must be kept"
+
+        # Past the 90-day retention: it is removed.
+        _nest_hook(handle, "/api/v1/test/tlsrpt/prune_now", {"now": received_at + 91 * day})
+        assert mine(ws) == [], "a report past 90 days must be pruned"

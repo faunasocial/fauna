@@ -43,8 +43,8 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::retention::{
-    FolderRetention, SNAPSHOT_HARD_FLOOR, SnapshotMeta, evaluate_folder_retention_at,
-    parse_folder_retention,
+    FolderRetention, SNAPSHOT_HARD_FLOOR, SnapshotMeta, effective_folder_retention,
+    evaluate_folder_retention_at,
 };
 use crate::db::{CacheDb, FolderRow, SnapshotRow};
 
@@ -70,7 +70,7 @@ pub fn is_active_snapshot(s: &SnapshotRow) -> bool {
 /// Returns the number of snapshots scheduled for pruning (0 when the set has no
 /// policy, an unreadable one, or nothing out of bounds). Never deletes.
 pub async fn schedule_auto_prune(db: &Arc<CacheDb>, fs: &FolderRow) -> Result<usize> {
-    let policy = match parse_folder_retention(fs.retention_policy.as_deref()) {
+    let policy = match effective_folder_retention(fs) {
         FolderRetention::Policy(p) => p,
         // The healthy default on every set that has never been given a policy:
         // keep everything, silently.
@@ -93,7 +93,7 @@ pub async fn schedule_auto_prune(db: &Arc<CacheDb>, fs: &FolderRow) -> Result<us
     // [`is_active_snapshot`] predicate; its doc comment carries the three
     // reasons, all of them deletion-shaped.
     let mut metas: Vec<SnapshotMeta> = db
-        .list_snapshots(fs.id)
+        .list_set_snapshots(fs.id)
         .await?
         .iter()
         .filter(|s| is_active_snapshot(s))
@@ -133,4 +133,84 @@ pub async fn schedule_auto_prune(db: &Arc<CacheDb>, fs: &FolderRow) -> Result<us
         "auto-prune scheduled: snapshots enter the cancellable window (backup-restore.md § 7)"
     );
     Ok(prunable_ids.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backup::retention::MESSAGE_KIND_DEFAULT_RETENTION;
+
+    /// `n` snapshot rows on the set — message-kind rows when `kind` is given,
+    /// as the creators write them on a reserved row, else folder rows.
+    async fn with_snapshots(
+        db: &Arc<CacheDb>,
+        folder_id: i64,
+        kind: Option<&str>,
+        n: i64,
+    ) -> FolderRow {
+        {
+            let conn = db.conn().await;
+            for i in 0..n {
+                conn.execute(
+                    "INSERT INTO snapshots (folder_id, created_at, file_count, total_bytes, message_kind)
+                     VALUES (?1, ?2, 0, 0, ?3)",
+                    rusqlite::params![folder_id, 1_000 + i, kind],
+                )
+                .unwrap();
+            }
+        }
+        db.get_folder_by_id(folder_id).await.unwrap().unwrap()
+    }
+
+    /// `backup-restore.md` § 8 → *Message-kind rows*: an unset kind row keeps
+    /// the newest 48, through the cancellable pending action — never a delete.
+    #[tokio::test]
+    async fn an_unset_kind_row_schedules_its_overflow_through_the_pending_action() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let actor = [0x51u8; 32];
+        let fs_id = db
+            .get_or_create_reserved_folder(&actor, "mail")
+            .await
+            .unwrap();
+        let fs = with_snapshots(&db, fs_id, Some("mail"), 50).await;
+        assert_eq!(fs.retention_policy, None, "nobody chose a policy");
+        assert_eq!(
+            effective_folder_retention(&fs),
+            FolderRetention::Policy(MESSAGE_KIND_DEFAULT_RETENTION)
+        );
+
+        assert_eq!(schedule_auto_prune(&db, &fs).await.unwrap(), 2);
+        let snaps = db.list_set_snapshots(fs_id).await.unwrap();
+        assert_eq!(snaps.len(), 50, "a prune schedules — nothing is deleted");
+        assert_eq!(snaps.iter().filter(|s| s.deletion_pending).count(), 2);
+        assert!(snaps.iter().all(|s| !s.soft_deleted));
+        let actions = db.list_pending_actions_for_actor(&actor).await.unwrap();
+        assert_eq!(actions.len(), 1, "one cancellable SnapshotBulkPrune action");
+    }
+
+    /// The default is the kind rows' alone: an ordinary folder with no policy
+    /// still keeps everything.
+    #[tokio::test]
+    async fn a_folder_row_with_no_policy_keeps_everything() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let actor = [0x52u8; 32];
+        let fs_id = db.create_folder("docs", &actor).await.unwrap();
+        let fs = with_snapshots(&db, fs_id, None, 50).await;
+        assert_eq!(effective_folder_retention(&fs), FolderRetention::NotSet);
+        assert_eq!(schedule_auto_prune(&db, &fs).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_conv_channel_row_takes_the_kind_default() {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let fs_id = db
+            .get_or_create_reserved_conv_folder(&[0x53u8; 32])
+            .await
+            .unwrap();
+        let fs = db.get_folder_by_id(fs_id).await.unwrap().unwrap();
+        assert_eq!(
+            effective_folder_retention(&fs),
+            FolderRetention::Policy(MESSAGE_KIND_DEFAULT_RETENTION)
+        );
+    }
 }

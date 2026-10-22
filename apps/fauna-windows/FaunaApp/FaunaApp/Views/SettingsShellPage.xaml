@@ -67,11 +67,9 @@
             <NavigationViewItem x:Name="SubDevices" Tag="devices" Content="{loc:Localize Key=devices/title}" />
             <NavigationViewItem x:Name="SubFolders" Tag="folders" Content="{loc:Localize Key=folders/title}" />
             <!-- The standalone Nostr page (nostr.md § Page structure) — its own rail
-                 entry like mail, never a row on the unified Bridges page. The
-                 `nostr-settings-link` id is the actions/nostr.py navigate fallback for
-                 shells that reach the page from a row rather than a rail. -->
+                 entry like mail, never a row on the unified Bridges page. Its id is
+                 `settings-nav-row[nostr]` like every other rail row (set in code-behind). -->
             <NavigationViewItem x:Name="SubNostr" Tag="nostr"
-                                AutomationProperties.AutomationId="{x:Bind ids:Ids.NostrSettingsLink}"
                                 Content="{loc:Localize Key=nostr/title}" />
             <!-- The dedicated AT Protocol page (ui/atproto.md). Slot is "after Nostr" —
                  the sibling deep-integration page. -->

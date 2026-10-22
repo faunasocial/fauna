@@ -650,12 +650,12 @@ impl CacheDb {
     /// `allow_nonempty == false` and the message-placement table has
     /// at least one row).
     ///
-    /// When `allow_nonempty == true` the helper tombstones every
-    /// placed UID into `bridge_imap_expunged` and deletes the
+    /// When `allow_nonempty == true` the helper deletes the
     /// `bridge_imap_messages` rows in the same transaction as the
-    /// mailbox-state-row delete. The tombstones use the post-delete
-    /// `highestmodseq` so QRESYNC clients reconnecting after the
-    /// delete see the rows as VANISHED EARLIER.
+    /// mailbox-state-row delete. The name's `bridge_imap_expunged` rows are
+    /// deleted too, in every case: a deleted mailbox has no VANISHED history
+    /// to serve, and a mailbox created or renamed onto the name later starts
+    /// a fresh UID space.
     pub async fn delete_bridge_imap_mailbox(
         &self,
         actor: &[u8; 32],
@@ -680,7 +680,7 @@ impl CacheDb {
             )
             .optional()
             .context("read bridge imap mailbox state for delete")?;
-        let Some((_, _, prev_hms)) = state_exists else {
+        let Some(_) = state_exists else {
             return Ok(DeleteMailboxDbOutcome::NoSuchMailbox);
         };
 
@@ -697,32 +697,10 @@ impl CacheDb {
             return Ok(DeleteMailboxDbOutcome::NotEmpty);
         }
 
-        // 3. Under `allow_nonempty`, tombstone each placement first.
+        // 3. Under `allow_nonempty`, drop the placements. No tombstone is
+        //    written: a deleted mailbox is unselectable and a re-created one
+        //    has a fresh UIDVALIDITY, so nothing reads this name's history.
         if placement_count > 0 {
-            let new_hms = prev_hms + 1;
-            let expunged_at = now_epoch_secs();
-            // Read the UIDs so we can record them in the expunge log.
-            let mut stmt = tx
-                .prepare(
-                    "SELECT uid FROM bridge_imap_messages \
-                         WHERE actor_id = ?1 AND mailbox = ?2 \
-                         ORDER BY uid ASC",
-                )
-                .context("prep select uids for delete-tombstone")?;
-            let uids: Vec<i64> = stmt
-                .query_map(rusqlite::params![&actor[..], &name], |row| row.get(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .context("read uids for delete-tombstone")?;
-            drop(stmt);
-            for uid in &uids {
-                tx.execute(
-                    "INSERT OR IGNORE INTO bridge_imap_expunged \
-                         (actor_id, mailbox, uid, modseq, expunged_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![&actor[..], &name, uid, new_hms, expunged_at],
-                )
-                .context("insert delete-tombstone")?;
-            }
             tx.execute(
                 "DELETE FROM bridge_imap_messages \
                      WHERE actor_id = ?1 AND mailbox = ?2",
@@ -730,6 +708,18 @@ impl CacheDb {
             )
             .context("delete bridge imap messages")?;
         }
+
+        // 3b. The name's expunge log goes with it (earlier EXPUNGEs' rows
+        //     included): left behind, a mailbox later created or renamed onto
+        //     the name would serve them as VANISHED for its own live UIDs.
+        //     The journalled `Delete` drops the manifest's tombstones the
+        //     same way, so a restore cannot rebuild them.
+        tx.execute(
+            "DELETE FROM bridge_imap_expunged \
+                 WHERE actor_id = ?1 AND mailbox = ?2",
+            rusqlite::params![&actor[..], &name],
+        )
+        .context("clear deleted mailbox expunge log")?;
 
         // 4. Drop the mailbox-state row.
         tx.execute(
@@ -750,15 +740,17 @@ impl CacheDb {
     ///     INBOX row with `inbox_uid_validity` (caller supplies, the
     ///     handler picks a fresh value per the same scheme as
     ///     CREATE); both rows reset `uid_next = 1` and
-    ///     `highestmodseq = 1`. The INBOX-tombstone path is NOT
-    ///     traversed — the UIDs migrate intact to `new_name`, which
-    ///     a QRESYNC-aware client will rediscover via UIDVALIDITY
-    ///     re-sync. (RFC 9051 §6.3.6 does not require a tombstone
-    ///     trail for INBOX-rename.)
+    ///     `highestmodseq = 1`. The moved placements are renumbered
+    ///     from UID 1 (and modseq 1) under the fresh UIDVALIDITY, which
+    ///     a QRESYNC-aware client rediscovers via UIDVALIDITY re-sync.
+    ///     The old INBOX's `bridge_imap_expunged` rows are deleted: they
+    ///     describe a UID space neither mailbox now has. (RFC 9051
+    ///     §6.3.6 does not require a tombstone trail for INBOX-rename.)
     ///   * `old_name != "INBOX"` — flat rename: update
     ///     `bridge_imap_mailbox_state.mailbox = new_name`; update
     ///     every `bridge_imap_messages.mailbox = new_name` for the
-    ///     actor; preserve `uid_validity`. The handler must reject
+    ///     actor and every `bridge_imap_expunged.mailbox`; preserve
+    ///     `uid_validity`. The handler must reject
     ///     `STANDARD_MAILBOXES` non-INBOX names as `ReservedSource`
     ///     before calling.
     ///
@@ -937,6 +929,18 @@ impl CacheDb {
                 rusqlite::params![inbox_uid_validity as i64, &actor[..]],
             )
             .context("re-seed empty INBOX after rename")?;
+
+            // (e) Drop the old INBOX's expunge log. Neither the renamed
+            //     mailbox (fresh UIDVALIDITY, UIDs and modseqs renumbered
+            //     from 1) nor the re-seeded INBOX (UIDs re-issued from 1)
+            //     shares its UID space, so a surviving row would report a
+            //     live UID as VANISHED to a QRESYNC client.
+            tx.execute(
+                "DELETE FROM bridge_imap_expunged \
+                     WHERE actor_id = ?1 AND mailbox = 'INBOX'",
+                rusqlite::params![&actor[..]],
+            )
+            .context("clear old INBOX expunge log")?;
         } else {
             // Flat rename: preserve uid_validity, just relabel the
             // mailbox name on the state row + every dependent row.
@@ -954,6 +958,15 @@ impl CacheDb {
                 rusqlite::params![&new_name, &actor[..], &old_name],
             )
             .context("rename bridge imap message rows")?;
+            // The UID space is kept, so its expunge log (the VANISHED
+            // history) follows the mailbox.
+            tx.execute(
+                "UPDATE bridge_imap_expunged \
+                     SET mailbox = ?1 \
+                     WHERE actor_id = ?2 AND mailbox = ?3",
+                rusqlite::params![&new_name, &actor[..], &old_name],
+            )
+            .context("rename bridge imap expunge rows")?;
         }
 
         tx.commit().context("commit rename bridge imap mailbox")?;
@@ -2996,46 +3009,6 @@ mod tests {
         );
     }
 
-    /// Row 134(a): `delete_bridge_imap_mailbox`'s tombstone leg stamped
-    /// `expunged_at` in **millis** while its three sibling writers
-    /// (`apply_expunge`, `purge_mail_placements_up_to_seq`, `apply_move`) all
-    /// write **seconds** — the same column, two units. Asserted by range
-    /// rather than exact equality: a millis stamp is ~1000x the seconds one,
-    /// so the two units cannot both land within a tight delta of "now in
-    /// seconds", making this deterministic without controlling the clock.
-    #[tokio::test]
-    async fn delete_nonempty_mailbox_tombstones_in_seconds_not_millis() {
-        let db = CacheDb::open_in_memory().unwrap();
-        let actor = make_actor(30);
-        let msg = make_message_id(31);
-        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
-        db.place_inbound_mail(&actor, &msg, "INBOX", 1_700_000_000, "", "", true)
-            .await
-            .unwrap()
-            .expect("placement lands");
-
-        let outcome = db
-            .delete_bridge_imap_mailbox(&actor, "INBOX", true)
-            .await
-            .unwrap();
-        assert_eq!(outcome, DeleteMailboxDbOutcome::Deleted);
-
-        let conn = db.conn().await;
-        let expunged_at: i64 = conn
-            .query_row(
-                "SELECT expunged_at FROM bridge_imap_expunged WHERE actor_id = ?1",
-                rusqlite::params![&actor[..]],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let now = now_epoch_secs();
-        assert!(
-            (expunged_at - now).abs() < 5,
-            "expunged_at ({expunged_at}) must be seconds-since-epoch, within \
-             5s of now ({now}) — a millis stamp would be ~1000x too large"
-        );
-    }
-
     #[tokio::test]
     async fn place_inbound_mail_uid_isolated_per_mailbox() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -3979,6 +3952,400 @@ mod tests {
             Some(vec![]),
             "the re-seeded INBOX has a fresh UIDVALIDITY and no prune floor"
         );
+    }
+
+    /// An INBOX rename renumbers the moved placements from UID 1 under a fresh
+    /// UIDVALIDITY and re-seeds INBOX from UID 1 too, so the old INBOX's
+    /// expunge rows describe neither UID space: left behind they would report
+    /// live UIDs of the new INBOX and of the renamed mailbox as VANISHED.
+    #[tokio::test]
+    async fn inbox_rename_clears_the_old_inbox_expunge_log() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(40);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        {
+            let conn = db.conn().await;
+            // Expunged UIDs 1 and 2 of the old INBOX; UID 3 stays live.
+            for (uid, modseq) in [(1_i64, 10_i64), (2, 11)] {
+                conn.execute(
+                    "INSERT INTO bridge_imap_expunged (actor_id, mailbox, uid, modseq, expunged_at) \
+                     VALUES (?1, 'INBOX', ?2, ?3, 1700000000)",
+                    rusqlite::params![&actor[..], uid, modseq],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO bridge_imap_messages \
+                     (actor_id, mailbox, uid, message_id, internal_date, created_at) \
+                     VALUES (?1, 'INBOX', 3, ?2, 1700000000, 1700000000)",
+                rusqlite::params![&actor[..], &[7u8; 32][..]],
+            )
+            .unwrap();
+        }
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "INBOX", "Archive-old", 7777, 8888)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+
+        // The moved message is now UID 1 of the renamed mailbox.
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Archive-old", 0)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "the renamed mailbox's live UID 1 must not be reported vanished"
+        );
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "INBOX", 0)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "the re-seeded INBOX re-issues UIDs from 1 and has no expunge history"
+        );
+    }
+
+    /// A flat rename keeps the UIDVALIDITY and UID space, so the expunge log
+    /// (the VANISHED history QRESYNC serves) follows the mailbox to its new
+    /// name and nothing is left under the old one.
+    #[tokio::test]
+    async fn flat_rename_relabels_the_expunge_log() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(41);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        {
+            let conn = db.conn().await;
+            conn.execute(
+                "INSERT INTO bridge_imap_mailbox_state \
+                     (actor_id, mailbox, uid_validity, uid_next, highestmodseq) \
+                     VALUES (?1, 'Work', 4242, 9, 12)",
+                rusqlite::params![&actor[..]],
+            )
+            .unwrap();
+            for (uid, modseq) in [(4_i64, 10_i64), (6, 12)] {
+                conn.execute(
+                    "INSERT INTO bridge_imap_expunged (actor_id, mailbox, uid, modseq, expunged_at) \
+                     VALUES (?1, 'Work', ?2, ?3, 1700000000)",
+                    rusqlite::params![&actor[..], uid, modseq],
+                )
+                .unwrap();
+            }
+        }
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "Work", "Projects", 1, 2)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Projects", 0)
+                .await
+                .unwrap(),
+            Some(vec![4, 6]),
+            "the renamed mailbox keeps its VANISHED history"
+        );
+        let conn = db.conn().await;
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM bridge_imap_expunged \
+                 WHERE actor_id = ?1 AND mailbox = 'Work'",
+                rusqlite::params![&actor[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "no expunge row stays under the old name");
+    }
+
+    /// Place one live UID 1 message in `mailbox` (the new mailbox's first).
+    async fn place_live_uid_1(db: &CacheDb, actor: &[u8; 32], mailbox: &str) {
+        db.conn()
+            .await
+            .execute(
+                "INSERT INTO bridge_imap_messages \
+                     (actor_id, mailbox, uid, message_id, internal_date, created_at) \
+                     VALUES (?1, ?2, 1, ?3, 1700000000, 1700000000)",
+                rusqlite::params![&actor[..], mailbox, &[9u8; 32][..]],
+            )
+            .unwrap();
+    }
+
+    /// A deleted mailbox's tombstones (written under `allow_nonempty`) die with
+    /// it: a mailbox later created under the name starts a fresh UID space, so
+    /// a surviving row would report its live UID 1 as VANISHED.
+    #[tokio::test]
+    async fn delete_nonempty_mailbox_clears_its_expunge_log() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(42);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.create_bridge_imap_mailbox(&actor, "Foo", 100)
+            .await
+            .unwrap();
+        place_live_uid_1(&db, &actor, "Foo").await;
+        let out = db
+            .delete_bridge_imap_mailbox(&actor, "Foo", true)
+            .await
+            .unwrap();
+        assert!(matches!(out, DeleteMailboxDbOutcome::Deleted));
+
+        db.create_bridge_imap_mailbox(&actor, "Foo", 200)
+            .await
+            .unwrap();
+        place_live_uid_1(&db, &actor, "Foo").await;
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Foo", 0)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "the re-created Foo's live UID 1 must not be reported vanished"
+        );
+    }
+
+    /// The default `forbidden` policy: expunge everything, then delete the
+    /// empty mailbox. The rows the EXPUNGEs left go with the mailbox too.
+    #[tokio::test]
+    async fn delete_emptied_mailbox_clears_its_expunge_log() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(43);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.create_bridge_imap_mailbox(&actor, "Foo", 100)
+            .await
+            .unwrap();
+        db.conn()
+            .await
+            .execute(
+                "INSERT INTO bridge_imap_expunged (actor_id, mailbox, uid, modseq, expunged_at) \
+                 VALUES (?1, 'Foo', 1, 3, 1700000000)",
+                rusqlite::params![&actor[..]],
+            )
+            .unwrap();
+        let out = db
+            .delete_bridge_imap_mailbox(&actor, "Foo", false)
+            .await
+            .unwrap();
+        assert!(matches!(out, DeleteMailboxDbOutcome::Deleted));
+
+        db.create_bridge_imap_mailbox(&actor, "Foo", 200)
+            .await
+            .unwrap();
+        place_live_uid_1(&db, &actor, "Foo").await;
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Foo", 0)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "an emptied-then-deleted Foo leaves no history for the new Foo"
+        );
+    }
+
+    /// A flat RENAME onto a deleted name must not inherit the deleted
+    /// mailbox's expunge rows either.
+    #[tokio::test]
+    async fn rename_onto_a_deleted_name_inherits_no_expunge_rows() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(44);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.create_bridge_imap_mailbox(&actor, "Foo", 100)
+            .await
+            .unwrap();
+        place_live_uid_1(&db, &actor, "Foo").await;
+        db.delete_bridge_imap_mailbox(&actor, "Foo", true)
+            .await
+            .unwrap();
+        db.create_bridge_imap_mailbox(&actor, "Bar", 300)
+            .await
+            .unwrap();
+        place_live_uid_1(&db, &actor, "Bar").await;
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "Bar", "Foo", 1, 2)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Foo", 0)
+                .await
+                .unwrap(),
+            Some(vec![]),
+            "Bar renamed onto the deleted name Foo keeps only Bar's own history"
+        );
+    }
+
+    /// DELETE clears only its own name's expunge log: another account's
+    /// mailbox of the same name and the same account's other mailboxes keep
+    /// their VANISHED history.
+    #[tokio::test]
+    async fn delete_clears_only_its_own_actor_and_names_expunge_log() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(45);
+        let other = make_actor(46);
+        for a in [&actor, &other] {
+            db.ensure_bridge_imap_mailboxes(a).await.unwrap();
+            db.create_bridge_imap_mailbox(a, "Foo", 100).await.unwrap();
+        }
+        db.create_bridge_imap_mailbox(&actor, "Bar", 101)
+            .await
+            .unwrap();
+        {
+            let conn = db.conn().await;
+            seed_expunged(&conn, &actor, "Foo", 1);
+            seed_expunged(&conn, &actor, "Bar", 2);
+            seed_expunged(&conn, &other, "Foo", 3);
+        }
+        let out = db
+            .delete_bridge_imap_mailbox(&actor, "Foo", false)
+            .await
+            .unwrap();
+        assert!(matches!(out, DeleteMailboxDbOutcome::Deleted));
+
+        let conn = db.conn().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT actor_id, mailbox, uid FROM bridge_imap_expunged \
+                 ORDER BY uid",
+            )
+            .unwrap();
+        let left: Vec<(Vec<u8>, String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            left,
+            vec![
+                (actor.to_vec(), "Bar".to_string(), 2),
+                (other.to_vec(), "Foo".to_string(), 3),
+            ],
+            "only the deleted (actor, Foo) rows go"
+        );
+    }
+
+    /// Seed one expunge-log row for `(actor, mailbox)`.
+    fn seed_expunged(conn: &rusqlite::Connection, actor: &[u8; 32], mailbox: &str, uid: i64) {
+        conn.execute(
+            "INSERT INTO bridge_imap_expunged (actor_id, mailbox, uid, modseq, expunged_at) \
+             VALUES (?1, ?2, ?3, 50, 1700000000)",
+            rusqlite::params![&actor[..], mailbox, uid],
+        )
+        .unwrap();
+    }
+
+    /// The new INBOX an INBOX rename leaves behind takes appends from UID 1
+    /// again, and none of those UIDs may be reported VANISHED; the rename
+    /// leaves every other mailbox's and every other account's expunge log
+    /// as it was.
+    #[tokio::test]
+    async fn inbox_rename_then_append_reports_no_new_uid_vanished() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(42);
+        let other = make_actor(43);
+        db.ensure_bridge_imap_mailboxes(&actor).await.unwrap();
+        db.ensure_bridge_imap_mailboxes(&other).await.unwrap();
+        {
+            let conn = db.conn().await;
+            for uid in [1, 2] {
+                seed_expunged(&conn, &actor, "INBOX", uid);
+            }
+            seed_expunged(&conn, &actor, "Sent", 1);
+            seed_expunged(&conn, &other, "INBOX", 1);
+        }
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "INBOX", "Archive-old", 7777, 8888)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+
+        let mut appended = Vec::new();
+        for (i, byte) in [21u8, 22].into_iter().enumerate() {
+            let (uid, _modseq) = db
+                .place_inbound_mail(
+                    &actor,
+                    &make_message_id(byte),
+                    "INBOX",
+                    1_700_000_100 + i as i64,
+                    "",
+                    "",
+                    true,
+                )
+                .await
+                .unwrap()
+                .expect("a new message is placed");
+            appended.push(uid);
+        }
+        assert_eq!(
+            appended,
+            vec![1, 2],
+            "the re-seeded INBOX re-issues UIDs from 1"
+        );
+
+        let vanished = db
+            .list_bridge_imap_expunged_since(&actor, "INBOX", 0)
+            .await
+            .unwrap()
+            .expect("no prune floor on the re-seeded INBOX");
+        assert!(
+            appended.iter().all(|uid| !vanished.contains(uid)),
+            "an appended UID of the new INBOX is reported vanished: {vanished:?}"
+        );
+
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&actor, "Sent", 0)
+                .await
+                .unwrap(),
+            Some(vec![1]),
+            "another mailbox of the same account keeps its expunge log"
+        );
+        assert_eq!(
+            db.list_bridge_imap_expunged_since(&other, "INBOX", 0)
+                .await
+                .unwrap(),
+            Some(vec![1]),
+            "another account's INBOX keeps its expunge log"
+        );
+    }
+
+    /// A flat rename moves only this account's rows under the old name.
+    #[tokio::test]
+    async fn flat_rename_leaves_other_accounts_and_mailboxes_alone() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let actor = make_actor(44);
+        let other = make_actor(45);
+        for a in [&actor, &other] {
+            db.ensure_bridge_imap_mailboxes(a).await.unwrap();
+            db.create_bridge_imap_mailbox(a, "Work", 4242)
+                .await
+                .unwrap();
+        }
+        {
+            let conn = db.conn().await;
+            seed_expunged(&conn, &actor, "Work", 4);
+            seed_expunged(&conn, &actor, "Sent", 5);
+            seed_expunged(&conn, &other, "Work", 6);
+        }
+
+        let outcome = db
+            .rename_bridge_imap_mailbox(&actor, "Work", "Projects", 1, 2)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RenameMailboxDbOutcome::Renamed));
+
+        for (who, mailbox, want) in [
+            (&actor, "Projects", vec![4]),
+            (&actor, "Sent", vec![5]),
+            (&other, "Work", vec![6]),
+            (&other, "Projects", vec![]),
+        ] {
+            assert_eq!(
+                db.list_bridge_imap_expunged_since(who, mailbox, 0)
+                    .await
+                    .unwrap(),
+                Some(want),
+                "expunge log of {mailbox} (account {:x})",
+                who[0]
+            );
+        }
     }
 
     // ── C.3 DB tests ──────────────────────────────────────────────────────────

@@ -167,6 +167,49 @@ where
     R: RpcRequester + Clone,
     R::Error: RpcErrorClass,
 {
+    let (report, refused) = diff(store, plane, trust, writer_key).await?;
+    // A diff that withheld a sibling's row, or had no listing to judge
+    // against, is the one a nest-is-missing-a-row question is asked of; say
+    // so where the pass's log is read.
+    if !report.listed
+        || report.unvouched
+            + report.dead
+            + report.covered
+            + report.below_cover
+            + report.departed
+            + report.withheld_for_room
+            > 0
+        || !report.is_quiet()
+    {
+        tracing::info!(
+            scope = plane.scope(),
+            listed = report.listed,
+            pushed = report.pushed,
+            refused = report.refused,
+            unvouched = report.unvouched,
+            dead = report.dead,
+            covered = report.covered,
+            below_cover = report.below_cover,
+            departed = report.departed,
+            withheld_for_room = report.withheld_for_room,
+            scope_full = report.scope_full,
+            "publish diff: what the pass sent and withheld"
+        );
+    }
+    Ok((report, refused))
+}
+
+async fn diff<B, R>(
+    store: &AccountStore<B>,
+    plane: &AccountStatePlane<'_, B, R>,
+    trust: &GenerationTrust,
+    writer_key: &SigningKey,
+) -> Result<(DiffPush, Vec<RefusedRow>)>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+    R::Error: RpcErrorClass,
+{
     let mut report = DiffPush::default();
     let mut refused: Vec<RefusedRow> = Vec::new();
     let Some(listing) = plane.listing() else {
@@ -207,6 +250,12 @@ where
                     .is_none_or(|held| *held < row.writer_seq)
         })
         .collect();
+    tracing::debug!(
+        scope = plane.scope(),
+        listed = listing.len(),
+        missing = missing.len(),
+        "publish diff: the listing against the relay plane"
+    );
     if missing.is_empty() {
         return Ok((report, refused));
     }
@@ -264,7 +313,17 @@ where
                 continue;
             }
         }
-        match vouch.judge(store, plane, &row).await? {
+        let verdict = vouch.judge(store, plane, &row).await?;
+        if !matches!(verdict, Verdict::Push) {
+            tracing::debug!(
+                scope = plane.scope(),
+                writer = %row.writer.to_hex(),
+                writer_seq = row.writer_seq,
+                verdict = ?verdict,
+                "publish diff: a sibling's row withheld"
+            );
+        }
+        match verdict {
             Verdict::Push => {}
             Verdict::Unvouched => {
                 report.unvouched += 1;
@@ -327,6 +386,7 @@ fn own_removal_row(row: &RelayRow, plaintext: &EntryPlaintext) -> bool {
         )
 }
 
+#[derive(Debug)]
 enum Verdict {
     Push,
     Unvouched,

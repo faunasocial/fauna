@@ -395,6 +395,41 @@ def _check_region_block_never_silent(state):
     return ""
 
 
+def _check_nest_block_never_silent(state):
+    """A nest ``Block`` verdict never renders silent.
+
+    Owner: `nest-rules.md` § What the build owes in tests — "a nest `Block`
+    verdict never renders silent" (§ Don't do these: every block names the nest
+    and the reason).
+
+    Bug class: **silent withholding**, the region invariant's twin over the
+    fourth source of the composed engine — a surface whose nest arm drops the
+    item, or a new surface that honours the verdict but forgot the placeholder.
+
+    Same two counts as ``region_block_render``, published as
+    ``nest_block_render``: ``blocked`` at the verdict, ``placeholders`` at the
+    registration (``nest-blocked-notice`` elements painted for a block). Fewer
+    placeholders than blocks is the violation. `n/a` for an app that publishes
+    no ``nest_block_render`` mapping.
+    """
+    counts = state.get("nest_block_render", _ABSENT)
+    if counts is _ABSENT:
+        return None
+    if not isinstance(counts, dict):
+        return f"nest_block_render is {type(counts).__name__}, not a mapping"
+    blocked = counts.get("blocked")
+    placeholders = counts.get("placeholders")
+    for name, value in (("blocked", blocked), ("placeholders", placeholders)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return f"nest_block_render.{name} is {value!r}, not an integer"
+    if placeholders < blocked:
+        return (
+            f"{blocked} item(s) nest-blocked this frame but only {placeholders} "
+            "nest-blocked-notice placeholder(s) painted — a nest block rendered silent"
+        )
+    return ""
+
+
 # The catalogue. Few on purpose: each entry is a global property of ANY frame,
 # each names the bug class it catches, and none fires on a legitimate state.
 # Adding one is an adoption event, not an edit — it owes a red-verification.
@@ -404,6 +439,7 @@ INVARIANTS = (
     ("nav-stack", _check_nav_stack),
     ("receive-loop-alive", _check_receive_loop_alive),
     ("region-block-never-silent", _check_region_block_never_silent),
+    ("nest-block-never-silent", _check_nest_block_never_silent),
 )
 
 

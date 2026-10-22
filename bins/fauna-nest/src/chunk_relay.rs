@@ -130,7 +130,7 @@ pub type ForwardAsk = Box<
 >;
 
 /// How long a foreign seat stays a candidate without its member's nest renewing
-/// it (`federation.md` § Cross-nest shared folders + channel append → *Relay
+/// it (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *Relay
 /// serving across nests*: "a lease of a hard-coded length"). The member's nest
 /// renews at half of it, from the length the home nest's reply states. Long
 /// enough that one lost renewal does not drop a seat; short enough that a
@@ -1386,7 +1386,7 @@ mod tests {
         }
     }
 
-    /// The foreign-seat lease (`federation.md` § … → *Relay serving across
+    /// The foreign-seat lease (`federation-shared-folders.md` § … → *Relay serving across
     /// nests*): renewing moves the expiry, a lapsed seat is no candidate, and
     /// the table is bounded per folder and whole — a renewal of a seat already
     /// held always passes.

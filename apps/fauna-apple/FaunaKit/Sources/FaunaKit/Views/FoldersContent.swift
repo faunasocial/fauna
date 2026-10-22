@@ -46,6 +46,8 @@ public struct FoldersContent<BindingContent: View>: View {
     /// … — resolve uniquely to it).
     @State private var expandedFolder: String?
 
+    @Environment(FaunaClient.self) private var client: FaunaClient?
+
     public init(
         vm: DevicesMachineVM,
         boundSets: @escaping () -> Set<String> = { [] },
@@ -104,6 +106,12 @@ public struct FoldersContent<BindingContent: View>: View {
         )) {
             FolderWizardSheetView(vm: vm)
         }
+        // `folder-lease-status` names "this device" by the roster row
+        // `device-this-mark-badge` marks; the Devices page reads it on its own
+        // appear, so this page re-reads it too (a local slot read, no network).
+        .task { await vm.loadThisDeviceRow(ownDeviceId: client?.deviceId) }
+        // Folders and the conflict-policy select read through the account store.
+        .onStoreChange { await vm.resyncStore() }
     }
 
     // MARK: - Photo Library (Apple-only — the photo-backup ingress set's config)
@@ -338,6 +346,8 @@ public struct FoldersContent<BindingContent: View>: View {
                 // owner row: a folder has no type (folders.md § Conflicts).
                 FolderConflictPolicyPicker(vm: vm, folder: folder)
             }
+            // `folder-lease-status` — header line, present only while governed.
+            FolderLeaseStatusLine(vm: vm, folder: folder)
 
             if expandedFolder == folder.name {
                 FolderRowBody(
@@ -429,6 +439,7 @@ public struct FoldersContent<BindingContent: View>: View {
                         .automationActivate(Ids.folderLeaveButton) { leave(groupId) }
                 }
             }
+            FolderLeaseStatusLine(vm: vm, folder: folder)
             // A reader's row has nothing to expand, so its one control — the
             // hide-only on-demand toggle — sits on the row itself.
             memberOnDemandToggle(folder)
@@ -492,6 +503,7 @@ public struct FoldersContent<BindingContent: View>: View {
                         .automationActivate(Ids.folderLeaveButton) { leave(groupId) }
                 }
             }
+            FolderLeaseStatusLine(vm: vm, folder: folder)
 
             if expandedFolder == folder.name {
                 // The owner withdrew this actor's write grant mid-life and the
@@ -862,12 +874,9 @@ private struct FolderNestPlaceEditor: View {
     /// found" on `folder-nest-snapshots-select` after step 3 had saved happily.
     let collapse: () -> Void
 
-    @State private var snapshots: String = ""
-    @State private var quiet: String = ""
-    @State private var retentionSnapshots: String = ""
-    @State private var retentionDays: String = ""
-    @State private var versionRetentionCount: String = ""
-    @State private var versionRetentionDays: String = ""
+    /// The six staged boxes and the form last painted into them — the state
+    /// shared Rust's `nestPlaceReseed` compares (`NestPlaceBuffers`).
+    @State private var buffers = NestPlaceBuffers()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -876,8 +885,8 @@ private struct FolderNestPlaceEditor: View {
                 .foregroundStyle(.secondary)
 
             Picker(L.devices.nestSnapshots, selection: Binding(
-                get: { snapshots },
-                set: { snapshots = $0 }
+                get: { buffers.form.policy.snapshots },
+                set: { buffers.form.policy.snapshots = $0 }
             )) {
                 // Built from the shared catalog (value + i18n label), the same
                 // value/display split every sibling picker uses — no per-app
@@ -892,37 +901,37 @@ private struct FolderNestPlaceEditor: View {
             // only — the write happens on save. Env-gated no-op in production.
             .automationSelect(
                 Ids.folderNestSnapshotsSelect,
-                value: { snapshots },
-                set: { v in snapshots = v }
+                value: { buffers.form.policy.snapshots },
+                set: { v in buffers.form.policy.snapshots = v }
             )
 
-            TextField(L.devices.nestQuiet, text: $quiet)
+            TextField(L.devices.nestQuiet, text: $buffers.form.policy.quietSecs)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.folderNestQuietInput)
-                .automationField(Ids.folderNestQuietInput, text: $quiet)
+                .automationField(Ids.folderNestQuietInput, text: $buffers.form.policy.quietSecs)
 
-            TextField(L.devices.nestRetentionSnapshots, text: $retentionSnapshots)
+            TextField(L.devices.nestRetentionSnapshots, text: $buffers.form.policy.retentionSnapshots)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.folderNestRetentionSnapshots)
-                .automationField(Ids.folderNestRetentionSnapshots, text: $retentionSnapshots)
+                .automationField(Ids.folderNestRetentionSnapshots, text: $buffers.form.policy.retentionSnapshots)
 
-            TextField(L.devices.nestRetentionDays, text: $retentionDays)
+            TextField(L.devices.nestRetentionDays, text: $buffers.form.policy.retentionDays)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.folderNestRetentionDays)
-                .automationField(Ids.folderNestRetentionDays, text: $retentionDays)
+                .automationField(Ids.folderNestRetentionDays, text: $buffers.form.policy.retentionDays)
 
             // The version-retention SIBLING pair (file-versions.md § Retention
             // ruling 1): bounds file-version history, never snapshots — its own
             // `folders.version_retention` column, riding the same save.
-            TextField(L.devices.versionRetentionCount, text: $versionRetentionCount)
+            TextField(L.devices.versionRetentionCount, text: $buffers.form.versionRetention.count)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.folderVersionRetentionCount)
-                .automationField(Ids.folderVersionRetentionCount, text: $versionRetentionCount)
+                .automationField(Ids.folderVersionRetentionCount, text: $buffers.form.versionRetention.count)
 
-            TextField(L.devices.versionRetentionDays, text: $versionRetentionDays)
+            TextField(L.devices.versionRetentionDays, text: $buffers.form.versionRetention.days)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier(Ids.folderVersionRetentionDays)
-                .automationField(Ids.folderVersionRetentionDays, text: $versionRetentionDays)
+                .automationField(Ids.folderVersionRetentionDays, text: $buffers.form.versionRetention.days)
 
             // Not decoration: the only on-screen statement that emptying a box is
             // a real choice rather than a no-op.
@@ -935,12 +944,13 @@ private struct FolderNestPlaceEditor: View {
                 // Same `save()` the Button action runs. Env-gated no-op.
                 .automationActivate(Ids.folderNestSaveButton) { save() }
         }
-        // Seed on appear and re-seed whenever the row's stored policy changes —
-        // the machine refreshes after a successful save, so the controls always
-        // show what the nest actually holds rather than what was last typed.
-        // One key over the three source values, because `onChange` takes a
-        // single `Equatable` (a tuple of them does not conform).
-        .onChange(of: rowPolicyKey, initial: true) { _, _ in prefill() }
+        // Seed on appear and offer every change of the row's stored policy to
+        // shared Rust's `nestPlaceReseed` — it paints only while the boxes still
+        // hold what was last painted (or once a save released them), so a staged
+        // edit survives a policy another device changed meanwhile
+        // (backup-restore.md § 8b). One key over the source values, because
+        // `onChange` takes a single `Equatable` (a tuple of them does not conform).
+        .onChange(of: rowPolicyKey, initial: true) { _, _ in refresh() }
     }
 
     /// The row's stored policy as one `Equatable` — the change signal for the
@@ -952,38 +962,24 @@ private struct FolderNestPlaceEditor: View {
             + "\(folder.versionRetentionMaxVersions)|\(folder.versionRetentionMaxAgeDays)"
     }
 
-    /// Seed the six buffers from the row. Every prefill rule lives in shared
-    /// Rust, so this is a transcription and nothing else.
-    private func prefill() {
-        let edit = nestPlaceEditFromRow(
+    /// Offer the row's form to the reseed rule. Every prefill and hold rule
+    /// lives in shared Rust, so this is a transcription and nothing else.
+    private func refresh() {
+        buffers.refresh(fresh: nestPlaceFormFromRow(
             nestSnapshots: folder.nestSnapshots,
             nestSnapshotQuietSecs: folder.nestSnapshotQuietSecs,
-            retentionPolicy: folder.retentionPolicy
-        )
-        snapshots = edit.snapshots
-        quiet = edit.quietSecs
-        retentionSnapshots = edit.retentionSnapshots
-        retentionDays = edit.retentionDays
-        let versionEdit = versionRetentionEditFromBounds(
-            maxVersionsPerPath: folder.versionRetentionMaxVersions,
-            maxAgeDays: folder.versionRetentionMaxAgeDays
-        )
-        versionRetentionCount = versionEdit.count
-        versionRetentionDays = versionEdit.days
+            retentionPolicy: folder.retentionPolicy,
+            versionRetentionMaxVersions: folder.versionRetentionMaxVersions,
+            versionRetentionMaxAgeDays: folder.versionRetentionMaxAgeDays
+        ))
     }
 
     private func save() {
-        let write = nestPlaceWrite(edit: NestPlaceEdit(
-            snapshots: snapshots,
-            quietSecs: quiet,
-            retentionSnapshots: retentionSnapshots,
-            retentionDays: retentionDays
-        ))
+        let write = nestPlaceWrite(edit: buffers.form.policy)
         // Always non-nil on this call — the boxes are on screen (`nil` stays reserved for an app that has not built the editor at all).
-        let versionRetention = versionRetentionWrite(edit: VersionRetentionEdit(
-            count: versionRetentionCount,
-            days: versionRetentionDays
-        ))
+        let versionRetention = versionRetentionWrite(edit: buffers.form.versionRetention)
+        // Release the boxes: the save's own refresh then shows what the nest stored.
+        buffers.released()
         Task {
             await vm.setFolderNestPlace(
                 name: folder.name,
@@ -1526,6 +1522,11 @@ private struct FolderRowBody: View {
             // `row.add_row(&webdav_row)`. webdav-server.md § Independent enablement pt 2.
             FolderWebdavToggle(vm: vm, folder: folder)
 
+            // Exclusive editing (`folder-exclusive-editing-toggle`) — owner row
+            // body only, default off, non-optimistic (ui/folders.md § Exclusive
+            // editing); the lease line it governs sits on the row header.
+            FolderExclusiveEditingToggle(vm: vm, folder: folder)
+
             #if !FAUNA_KIDS
             // Per-set "paywall to tier" (`folder-paywall-tier-select`) — the
             // structural sibling of the webdav toggle above (folders.md § Web paywall; the linux shape).
@@ -2002,8 +2003,8 @@ private struct FolderDeviceActivitySection: View {
         .task(id: folder.name) {
             await vm.loadFolderDeviceActivity(name: folder.name)
         }
-        .onFolderDeviceActivityChanged { changedFolder in
-            guard changedFolder == folder.name else { return }
+        .onFolderDeviceActivityChanged { change in
+            guard change.names(folder.name) else { return }
             await vm.loadFolderDeviceActivity(name: folder.name)
         }
         // A dropped push (offline, or the socket flapped) is recovered on the

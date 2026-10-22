@@ -346,7 +346,7 @@ pub struct FaunaEventExt {
 }
 
 /// Normalize a CAL-ADDRESS for sidecar matching: trim, lower-case, drop a
-/// leading `mailto:`. So `MAILTO:Alice@example.com` and `alice@example.com` match.
+/// leading `mailto:`. So `MAILTO:Alice@Example.Org` and `alice@example.org` match.
 fn normalize_caladdr(s: &str) -> String {
     let lower = s.trim().to_ascii_lowercase();
     lower.strip_prefix("mailto:").unwrap_or(&lower).to_string()
@@ -2547,7 +2547,7 @@ impl<E: core::fmt::Display> core::fmt::Display for ResolveError<E> {
 
 impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ResolveError<E> {}
 
-/// Split a CAL-ADDRESS (`mailto:Alice@example.com` / `alice@example.com`, any case)
+/// Split a CAL-ADDRESS (`mailto:Alice@Example.Org` / `alice@example.org`, any case)
 /// into `(localpart, domain)`, both lower-cased ([`normalize_caladdr`] — DNS and
 /// Fauna handles are case-insensitive). `Err(addr)` on a missing or empty `@`
 /// part.
@@ -3261,23 +3261,23 @@ mod tests {
         assert_eq!(rsvp_status_verbatim("NEEDS-ACTION"), "invited");
 
         let ext = FaunaEventExt {
-            interested_attendees: vec!["mailto:Alice@example.com".into()],
+            interested_attendees: vec!["mailto:Alice@Example.Org".into()],
             ..Default::default()
         };
         // Alice is marked interested → "interested" despite the wire TENTATIVE,
         // and the match is case-insensitive + mailto-tolerant.
         assert_eq!(
-            project_attendee_rsvp("TENTATIVE", "alice@example.com", Some(&ext)),
+            project_attendee_rsvp("TENTATIVE", "alice@example.org", Some(&ext)),
             "interested"
         );
         // Bob, same wire TENTATIVE but NOT in the sidecar → verbatim "tentative".
         assert_eq!(
-            project_attendee_rsvp("TENTATIVE", "bob@example.com", Some(&ext)),
+            project_attendee_rsvp("TENTATIVE", "bob@example.org", Some(&ext)),
             "tentative"
         );
         // No sidecar at all → verbatim.
         assert_eq!(
-            project_attendee_rsvp("TENTATIVE", "alice@example.com", None),
+            project_attendee_rsvp("TENTATIVE", "alice@example.org", None),
             "tentative"
         );
         // The sidecar never overrides a non-TENTATIVE wire value to interested
@@ -3286,7 +3286,7 @@ mod tests {
         // projection rule renders interested whenever the sidecar says so,
         // matching the goal doc's "iff the sidecar marks that attendee").
         assert_eq!(
-            project_attendee_rsvp("ACCEPTED", "carol@example.com", Some(&ext)),
+            project_attendee_rsvp("ACCEPTED", "carol@example.org", Some(&ext)),
             "going"
         );
     }
@@ -3314,22 +3314,22 @@ mod tests {
         let attendees = vec![
             AttendeeInfo {
                 name: "Alice".into(),
-                email: "alice@example.com".into(),
+                email: "alice@example.org".into(),
                 partstat: "TENTATIVE".into(),
                 fauna_status: "interested".into(),
             },
             AttendeeInfo {
                 name: "Bob".into(),
-                email: "bob@example.com".into(),
+                email: "bob@example.org".into(),
                 partstat: "ACCEPTED".into(),
                 fauna_status: "going".into(),
             },
         ];
-        let ics = generate_ical(&fields, &attendees, "organizer@example.com");
+        let ics = generate_ical(&fields, &attendees, "organizer@example.org");
         // Sidecar marks Alice Interested → the asymmetric projection overrides
         // her bare wire TENTATIVE to "interested"; Bob (not in sidecar) stays.
         let ext = FaunaEventExt {
-            interested_attendees: vec!["alice@example.com".into()],
+            interested_attendees: vec!["alice@example.org".into()],
             ..Default::default()
         };
         let entry = EventEntry {
@@ -3357,13 +3357,13 @@ mod tests {
         let alice = flat
             .attendees
             .iter()
-            .find(|a| a.email == "alice@example.com")
+            .find(|a| a.email == "alice@example.org")
             .expect("alice rostered");
         assert_eq!(alice.rsvp, "interested", "sidecar overrides bare TENTATIVE");
         let bob = flat
             .attendees
             .iter()
-            .find(|a| a.email == "bob@example.com")
+            .find(|a| a.email == "bob@example.org")
             .expect("bob rostered");
         assert_eq!(bob.rsvp, "going");
         assert!(flat.fauna_ext.is_some());
@@ -3383,11 +3383,11 @@ mod tests {
         };
         let attendees = vec![AttendeeInfo {
             name: "Carol".into(),
-            email: "carol@example.com".into(),
+            email: "carol@example.org".into(),
             partstat: "TENTATIVE".into(),
             fauna_status: "interested".into(),
         }];
-        let ics = generate_ical(&fields, &attendees, "organizer@example.com");
+        let ics = generate_ical(&fields, &attendees, "organizer@example.org");
         let entry = EventEntry {
             uid_hash: uid_hash(&fields.uid).to_vec(),
             encrypted_body: seal_event_body(ics.as_bytes(), &MSEK).expect("seal"),
@@ -3404,7 +3404,7 @@ mod tests {
 
     #[test]
     fn decode_event_entry_flat_wrong_msek_fails_unseal() {
-        let ics = generate_ical(&EventFields::default(), &[], "o@example.com");
+        let ics = generate_ical(&EventFields::default(), &[], "o@example.org");
         let entry = EventEntry {
             encrypted_body: seal_event_body(ics.as_bytes(), &MSEK).expect("seal"),
             ..Default::default()
@@ -3420,11 +3420,11 @@ mod tests {
         const MSEK: [u8; 32] = [9u8; 32];
         let mut urls = BTreeMap::new();
         urls.insert(
-            "bob@example.com".to_string(),
+            "bob@example.org".to_string(),
             "https://nest.example".to_string(),
         );
         let ext = FaunaEventExt {
-            interested_attendees: vec!["alice@example.com".into()],
+            interested_attendees: vec!["alice@example.org".into()],
             attendee_nest_urls: urls,
             ..Default::default()
         };
@@ -4175,7 +4175,7 @@ mod tests {
     // ── inbound-mutation authorization fixtures ─────────────────────────────
     // (caldav-server.md § Who may mutate an existing event over the inbound rail)
 
-    /// alice@example.com — the organizer every fixture `.ics` names.
+    /// alice@example.org — the organizer every fixture `.ics` names.
     #[cfg(not(target_arch = "wasm32"))]
     const ORGANIZER_ACTOR: &str =
         "a11ce0000000000000000000000000000000000000000000000000000000a11c";
@@ -4216,7 +4216,7 @@ mod tests {
         }
     }
 
-    /// bob@example.com — the attendee every fixture `REPLY` speaks for.
+    /// bob@example.org — the attendee every fixture `REPLY` speaks for.
     #[cfg(not(target_arch = "wasm32"))]
     const BOB_ACTOR: &str = "b0b0000000000000000000000000000000000000000000000000000000000b0b";
 
@@ -4235,14 +4235,14 @@ mod tests {
     fn fan_resolver() -> MapResolver {
         let mut m = BTreeMap::new();
         m.insert(
-            "alice@example.com".to_string(),
+            "alice@example.org".to_string(),
             SchedulingPrincipal {
                 actor_id: ORGANIZER_ACTOR.into(),
                 home_nest_url: String::new(),
             },
         );
         m.insert(
-            "bob@example.com".to_string(),
+            "bob@example.org".to_string(),
             SchedulingPrincipal {
                 actor_id: BOB_ACTOR.into(),
                 home_nest_url: String::new(),
@@ -4275,7 +4275,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         )
     }
@@ -4314,7 +4314,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_refusal_record_names_the_attested_sender_not_the_forged_organizer() {
-        let uid = "victim-1@example.com";
+        let uid = "victim-1@example.org";
         let rec = requester_holding(bound_entry_for_uid(
             &request_ics(uid),
             uid,
@@ -4333,11 +4333,11 @@ mod tests {
                 ..Default::default()
             },
             &[AttendeeInfo {
-                email: "bob@example.com".into(),
+                email: "bob@example.org".into(),
                 partstat: "NEEDS-ACTION".into(),
                 ..Default::default()
             }],
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         )
         .expect("build imip")
@@ -4402,7 +4402,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn cancel_from_a_non_organizer_is_refused_and_the_event_survives() {
-        let uid = "victim-1@example.com";
+        let uid = "victim-1@example.org";
         for entry in [
             // bound at creation → local compare
             bound_entry_for_uid(&request_ics(uid), uid, ORGANIZER_ACTOR, ""),
@@ -4440,7 +4440,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn request_overwrite_from_a_non_organizer_is_refused() {
-        let uid = "victim-2@example.com";
+        let uid = "victim-2@example.org";
         let rec = requester_holding(bound_entry_for_uid(
             &request_ics(uid),
             uid,
@@ -4478,10 +4478,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_organizer_may_not_rewrite_the_organizer_line() {
-        let uid = "victim-2b@example.com";
+        let uid = "victim-2b@example.org";
         let repointed = request_ics(uid).replace(
-            "ORGANIZER:mailto:alice@example.com",
-            "ORGANIZER:mailto:mallory@example.com",
+            "ORGANIZER:mailto:alice@example.org",
+            "ORGANIZER:mailto:mallory@example.org",
         );
         assert_ne!(
             repointed,
@@ -4521,7 +4521,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_organizers_actor_id_from_another_nest_is_refused() {
-        let uid = "victim-3@example.com";
+        let uid = "victim-3@example.org";
         let rec = requester_holding(bound_entry_for_uid(
             &request_ics(uid),
             uid,
@@ -4557,7 +4557,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn no_answer_refuses_a_mutation() {
-        let uid = "victim-4@example.com";
+        let uid = "victim-4@example.org";
         let rec = requester_holding(sealed_entry_for_uid(&request_ics(uid), uid));
         let client = CalDavClient::new(rec.clone());
 
@@ -4604,7 +4604,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_bound_organizer_cancels_with_no_resolver() {
-        let uid = "mine-5@example.com";
+        let uid = "mine-5@example.org";
         let rec = requester_holding(bound_entry_for_uid(
             &request_ics(uid),
             uid,
@@ -4737,7 +4737,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_succeeded_organizers_cancel_is_honoured_only_through_a_verified_succession() {
-        let uid = "succeeded-1@example.com";
+        let uid = "succeeded-1@example.org";
 
         let rec = held_bound_to_the_organizer(uid);
         let refused = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
@@ -4782,7 +4782,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_succession_admits_only_the_successor_on_the_bound_nest() {
-        let uid = "succeeded-2@example.com";
+        let uid = "succeeded-2@example.org";
 
         let rec = held_bound_to_the_organizer(uid);
         let resolver = SuccessionResolver::organizer_succeeded_to(SUCCESSOR_ACTOR);
@@ -4853,7 +4853,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_strangers_repeated_cancels_pay_one_succession_dial_per_session() {
-        let uid = "succeeded-memo@example.com";
+        let uid = "succeeded-memo@example.org";
         let rec = held_bound_to_the_organizer(uid);
         let bound_nest = UnansweringBoundNest::default();
         let memo = SuccessionMemo::new();
@@ -4913,7 +4913,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_strangers_cancel_before_the_succession_does_not_pin_it_for_the_session() {
-        let uid = "succeeded-unpinned@example.com";
+        let uid = "succeeded-unpinned@example.org";
         let rec = held_bound_to_the_organizer(uid);
         let bound_nest = ScriptedBoundNest {
             answer: std::sync::Mutex::new(SuccessionLookup::NotSucceeded),
@@ -4968,7 +4968,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_bound_organizers_own_cancel_never_asks_for_a_succession() {
-        let uid = "succeeded-3@example.com";
+        let uid = "succeeded-3@example.org";
         let rec = held_bound_to_the_organizer(uid);
         let resolver = SuccessionResolver::organizer_succeeded_to(SUCCESSOR_ACTOR);
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_cancel(
@@ -4990,7 +4990,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_successors_update_rebinds_the_event_to_the_successor() {
-        let uid = "succeeded-4@example.com";
+        let uid = "succeeded-4@example.org";
         let rec = held_bound_to_the_organizer(uid);
         let resolver = SuccessionResolver::organizer_succeeded_to(SUCCESSOR_ACTOR);
         let outcome = block_on(CalDavClient::new(rec.clone()).apply_inbound_request(
@@ -5024,7 +5024,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn creation_binds_the_origin_and_refuses_a_spoofed_organizer() {
-        let uid = "fresh-6@example.com";
+        let uid = "fresh-6@example.org";
         let rec = std::sync::Arc::new(ScheduleRequester::new(vec![], Default::default()));
         let client = CalDavClient::new(rec.clone());
 
@@ -5085,7 +5085,7 @@ mod tests {
             ..Default::default()
         };
         let attendees = vec![AttendeeInfo {
-            email: "bob@example.com".into(),
+            email: "bob@example.org".into(),
             partstat: "NEEDS-ACTION".into(),
             ..Default::default()
         }];
@@ -5093,7 +5093,7 @@ mod tests {
             ITipMethod::Request,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         )
     }
@@ -5109,7 +5109,7 @@ mod tests {
             std::collections::BTreeMap::new(),
         ));
         let client = CalDavClient::new(rec.clone());
-        let uid = "inv-new@example.com";
+        let uid = "inv-new@example.org";
         let outcome = block_on(client.apply_inbound_request(
             &ACTOR,
             &MSEK,
@@ -5156,7 +5156,7 @@ mod tests {
         // The invite's UID already lives in calendar C (an organizer re-send) →
         // update C in place, no Personal provision.
         let cal_c = [0xC1u8; 32];
-        let uid = "inv-resend@example.com";
+        let uid = "inv-resend@example.org";
         let mut events = std::collections::BTreeMap::new();
         events.insert(
             cal_c.to_vec(),
@@ -5215,7 +5215,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         );
         let outcome = block_on(client.apply_inbound_request(
@@ -5236,7 +5236,7 @@ mod tests {
     #[test]
     fn apply_inbound_cancel_removes_matching_event() {
         let cal_c = [0xC2u8; 32];
-        let uid = "inv-cancel@example.com";
+        let uid = "inv-cancel@example.org";
         let mut events = std::collections::BTreeMap::new();
         events.insert(
             cal_c.to_vec(),
@@ -5254,7 +5254,7 @@ mod tests {
                 ..Default::default()
             },
             &[],
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         );
         let outcome = block_on(client.apply_inbound_cancel(
@@ -5293,12 +5293,12 @@ mod tests {
         let cancel = generate_itip(
             ITipMethod::Cancel,
             &EventFields {
-                uid: "ghost@example.com".into(),
+                uid: "ghost@example.org".into(),
                 status: "cancelled".into(),
                 ..Default::default()
             },
             &[],
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         );
         let outcome = block_on(client.apply_inbound_cancel(
@@ -5322,10 +5322,10 @@ mod tests {
     // loop hands each `Scheduling` channel message straight to it.
 
     /// Build a real RFC 5322 iMIP (`build_event_imip` → `text/calendar; method=…`)
-    /// for the given METHOD, single attendee `bob@example.com`.
+    /// for the given METHOD, single attendee `bob@example.org`.
     #[cfg(not(target_arch = "wasm32"))]
     fn imip_bytes(method: ITipMethod, uid: &str, partstat: &str) -> Vec<u8> {
-        imip_bytes_for(method, uid, &["bob@example.com"], partstat)
+        imip_bytes_for(method, uid, &["bob@example.org"], partstat)
     }
 
     /// [`imip_bytes`] naming `emails` as its attendees, each at `partstat`.
@@ -5349,7 +5349,7 @@ mod tests {
             method,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-13T12:00:00Z",
         )
         .expect("build imip")
@@ -5366,7 +5366,7 @@ mod tests {
             std::collections::BTreeMap::new(),
         ));
         let client = CalDavClient::new(rec.clone());
-        let uid = "inv-req@example.com";
+        let uid = "inv-req@example.org";
         let raw = imip_bytes(ITipMethod::Request, uid, "NEEDS-ACTION");
 
         let outcome = block_on(client.apply_inbound_scheduling_from_message(
@@ -5396,7 +5396,7 @@ mod tests {
         // A CANCEL iMIP for an event that exists → tombstone it,
         // `SchedulingApplyOutcome::Request(Cancelled)`.
         let cal_c = [0xC4u8; 32];
-        let uid = "inv-cxl@example.com";
+        let uid = "inv-cxl@example.org";
         let mut events = std::collections::BTreeMap::new();
         events.insert(
             cal_c.to_vec(),
@@ -5433,7 +5433,7 @@ mod tests {
         // The organizer holds the event (bob NEEDS-ACTION); a REPLY iMIP from
         // bob (ACCEPTED) merges his PARTSTAT → `SchedulingApplyOutcome::Reply(Applied)`.
         let cal_c = [0xC5u8; 32];
-        let uid = "inv-rep@example.com";
+        let uid = "inv-rep@example.org";
         let mut events = std::collections::BTreeMap::new();
         events.insert(
             cal_c.to_vec(),
@@ -5463,7 +5463,7 @@ mod tests {
                 assert!(
                     attendees
                         .iter()
-                        .any(|a| a.email == "bob@example.com" && a.partstat == "ACCEPTED"),
+                        .any(|a| a.email == "bob@example.org" && a.partstat == "ACCEPTED"),
                     "bob's PARTSTAT merged to ACCEPTED, got {attendees:?}"
                 );
             }
@@ -5481,7 +5481,7 @@ mod tests {
         origin: &InboundOrigin,
         resolver: &P,
     ) -> (SchedulingApplyOutcome, usize) {
-        let uid = "inv-rep-auth@example.com";
+        let uid = "inv-rep-auth@example.org";
         let (outcome, rec) = apply_reply_to_stored(
             uid,
             &imip_bytes(ITipMethod::Reply, uid, "ACCEPTED"),
@@ -5564,9 +5564,9 @@ mod tests {
         // Nothing is stored under the REPLY's UID, so it can change nothing:
         // the event is looked up FIRST and no attendee address is dialed.
         let resolver = CountingResolver::new(fan_resolver());
-        let raw = imip_bytes(ITipMethod::Reply, "no-such-event@example.com", "ACCEPTED");
+        let raw = imip_bytes(ITipMethod::Reply, "no-such-event@example.org", "ACCEPTED");
         let (outcome, rec) =
-            apply_reply_to_stored("inv-rep-auth@example.com", &raw, &bob_origin(), &resolver);
+            apply_reply_to_stored("inv-rep-auth@example.org", &raw, &bob_origin(), &resolver);
         assert_eq!(
             outcome,
             SchedulingApplyOutcome::Reply(InboundReplyOutcome::NoMatchingEvent)
@@ -5583,7 +5583,7 @@ mod tests {
         // it, so it is never resolved, and a message that can change nothing is
         // `NoMatchingAttendee`, not a refusal (caldav-server.md § Who may
         // mutate an existing event over the inbound rail).
-        let uid = "inv-rep-auth@example.com";
+        let uid = "inv-rep-auth@example.org";
         let resolver = CountingResolver::new(fan_resolver());
         let raw = imip_bytes_for(
             ITipMethod::Reply,
@@ -5607,7 +5607,7 @@ mod tests {
         // nothing, so nothing is resolved and the no-op is `NoMatchingAttendee`
         // — not a refusal, although she is not bob (caldav-server.md § Who may
         // mutate an existing event over the inbound rail).
-        let uid = "inv-rep-auth@example.com";
+        let uid = "inv-rep-auth@example.org";
         let resolver = CountingResolver::new(fan_resolver());
         let raw = imip_bytes(ITipMethod::Reply, uid, "NEEDS-ACTION");
         let (outcome, rec) = apply_reply_to_stored(uid, &raw, &mallory_origin(), &resolver);
@@ -5625,12 +5625,12 @@ mod tests {
         // bob answers for himself and also names an off-roster address: only
         // bob — an address the organizer already holds — is resolved, and the
         // off-roster line neither dials nor blocks bob's own answer.
-        let uid = "inv-rep-auth@example.com";
+        let uid = "inv-rep-auth@example.org";
         let resolver = CountingResolver::new(fan_resolver());
         let raw = imip_bytes_for(
             ITipMethod::Reply,
             uid,
-            &["bob@example.com", "stranger@tracker.example"],
+            &["bob@example.org", "stranger@tracker.example"],
             "ACCEPTED",
         );
         let (outcome, rec) = apply_reply_to_stored(uid, &raw, &bob_origin(), &resolver);
@@ -5652,7 +5652,7 @@ mod tests {
     fn a_refused_reply_walks_the_calendars_once() {
         // The refusal names the stored event it was about from the SAME lookup
         // that gated the check — never a second walk.
-        let uid = "inv-rep-auth@example.com";
+        let uid = "inv-rep-auth@example.org";
         let (outcome, rec) = apply_reply_to_stored(
             uid,
             &imip_bytes(ITipMethod::Reply, uid, "ACCEPTED"),
@@ -5680,7 +5680,7 @@ mod tests {
             SchedulingApplyOutcome::Reply(InboundReplyOutcome::Refused {
                 // The refusal names the stored event, so the row the user
                 // reads can say WHICH event someone tried to answer for.
-                uid_hash: uid_hash("inv-rep-auth@example.com"),
+                uid_hash: uid_hash("inv-rep-auth@example.org"),
                 summary: "Invite".into(),
                 reason: RefusalReason::NotTheAttendee,
             })
@@ -5700,7 +5700,7 @@ mod tests {
             SchedulingApplyOutcome::Reply(InboundReplyOutcome::Refused {
                 // The refusal names the stored event, so the row the user
                 // reads can say WHICH event someone tried to answer for.
-                uid_hash: uid_hash("inv-rep-auth@example.com"),
+                uid_hash: uid_hash("inv-rep-auth@example.org"),
                 summary: "Invite".into(),
                 reason: RefusalReason::AttendeeUnresolvable,
             })
@@ -5722,7 +5722,7 @@ mod tests {
             SchedulingApplyOutcome::Reply(InboundReplyOutcome::Refused {
                 // The refusal names the stored event, so the row the user
                 // reads can say WHICH event someone tried to answer for.
-                uid_hash: uid_hash("inv-rep-auth@example.com"),
+                uid_hash: uid_hash("inv-rep-auth@example.org"),
                 summary: "Invite".into(),
                 reason: RefusalReason::NoAttestedAuthor,
             })
@@ -5737,15 +5737,15 @@ mod tests {
         // the peer URL, and bob resolves to exactly that pair.
         let mut m = BTreeMap::new();
         m.insert(
-            "bob@example.com".to_string(),
+            "bob@example.org".to_string(),
             SchedulingPrincipal {
                 actor_id: BOB_ACTOR.into(),
-                home_nest_url: "https://example.com".into(),
+                home_nest_url: "https://example.org".into(),
             },
         );
         let origin = InboundOrigin {
             author: Some(BOB_ACTOR.into()),
-            home_nest_url: "https://example.com/".into(),
+            home_nest_url: "https://example.org/".into(),
         };
         let (outcome, puts) = apply_bobs_reply(&origin, &MapResolver(m.clone()));
         assert!(
@@ -5767,7 +5767,7 @@ mod tests {
             SchedulingApplyOutcome::Reply(InboundReplyOutcome::Refused {
                 // The refusal names the stored event, so the row the user
                 // reads can say WHICH event someone tried to answer for.
-                uid_hash: uid_hash("inv-rep-auth@example.com"),
+                uid_hash: uid_hash("inv-rep-auth@example.org"),
                 summary: "Invite".into(),
                 reason: RefusalReason::NotTheAttendee,
             })
@@ -5824,10 +5824,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_mailed_reply_stamped_by_its_own_attendee_applies() {
-        let uid = "inv-mail@example.com";
+        let uid = "inv-mail@example.org";
         // The door's stamp is case-insensitive against the roster address.
         let raw = stamped(
-            "Bob@example.com",
+            "Bob@Example.Org",
             &imip_bytes(ITipMethod::Reply, uid, "ACCEPTED"),
         );
         let (outcome, rec) = apply_mailed_reply_to_stored(uid, &raw);
@@ -5840,7 +5840,7 @@ mod tests {
                 assert!(
                     attendees
                         .iter()
-                        .any(|a| a.email == "bob@example.com" && a.partstat == "ACCEPTED"),
+                        .any(|a| a.email == "bob@example.org" && a.partstat == "ACCEPTED"),
                     "bob's PARTSTAT merged, got {attendees:?}"
                 );
             }
@@ -5862,12 +5862,12 @@ mod tests {
         // mallory holds the UID and writes bob's ATTENDEE line — and even a
         // forged stamp further down (the door would have stripped it; here it
         // sits below the genuine one, which wins). The door authenticated HER.
-        let uid = "inv-mail@example.com";
+        let uid = "inv-mail@example.org";
         let forged = stamped(
-            "bob@example.com",
+            "bob@example.org",
             &imip_bytes(ITipMethod::Reply, uid, "ACCEPTED"),
         );
-        let raw = stamped("mallory@example.com", &forged);
+        let raw = stamped("mallory@example.org", &forged);
         let (outcome, rec) = apply_mailed_reply_to_stored(uid, &raw);
         assert_eq!(
             outcome,
@@ -5889,7 +5889,7 @@ mod tests {
             .expect("a refusal is a record");
         assert_eq!(row.author, None, "the mail rail names no actor");
         assert_eq!(row.author_home_nest_url, "");
-        assert_eq!(row.sender_address, "mallory@example.com");
+        assert_eq!(row.sender_address, "mallory@example.org");
         assert_eq!(row.method, "REPLY");
         assert_eq!(row.reason, "not_the_attendee");
         assert_eq!(row.summary, "Invite");
@@ -5902,7 +5902,7 @@ mod tests {
     fn a_mailed_reply_with_no_stamp_is_refused_as_unauthenticated() {
         // Filed by a door that authenticated nobody (APPEND, import, an
         // off-domain `From:`): no answer, and no answer refuses.
-        let uid = "inv-mail@example.com";
+        let uid = "inv-mail@example.org";
         let raw = imip_bytes(ITipMethod::Reply, uid, "ACCEPTED");
         let (outcome, rec) = apply_mailed_reply_to_stored(uid, &raw);
         assert_eq!(
@@ -5925,11 +5925,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_mailed_reply_that_can_change_nothing_is_a_no_op_not_a_refusal() {
-        let uid = "inv-mail@example.com";
+        let uid = "inv-mail@example.org";
         // Unknown UID, even unstamped: looked up first, nothing to refuse.
         let (outcome, rec) = apply_mailed_reply_to_stored(
             uid,
-            &imip_bytes(ITipMethod::Reply, "no-such@example.com", "ACCEPTED"),
+            &imip_bytes(ITipMethod::Reply, "no-such@example.org", "ACCEPTED"),
         );
         assert_eq!(outcome, InboundReplyOutcome::NoMatchingEvent);
         assert_eq!(rec.count("fauna.bridges.put_event_ciphertext"), 0);
@@ -5938,8 +5938,8 @@ mod tests {
         let (outcome, rec) = apply_mailed_reply_to_stored(
             uid,
             &stamped(
-                "mallory@example.com",
-                &imip_bytes_for(ITipMethod::Reply, uid, &["mallory@example.com"], "ACCEPTED"),
+                "mallory@example.org",
+                &imip_bytes_for(ITipMethod::Reply, uid, &["mallory@example.org"], "ACCEPTED"),
             ),
         );
         assert_eq!(outcome, InboundReplyOutcome::NoMatchingAttendee);
@@ -5956,7 +5956,7 @@ mod tests {
     #[test]
     fn a_mailed_reply_speaking_for_its_sender_and_another_rostered_attendee_is_refused() {
         // bob's own stamp may answer for bob alone — not also for carol.
-        let uid = "inv-mail-2@example.com";
+        let uid = "inv-mail-2@example.org";
         let cal_c = [0xC7u8; 32];
         let stored = {
             let event = EventFields {
@@ -5965,7 +5965,7 @@ mod tests {
                 uid: uid.into(),
                 ..Default::default()
             };
-            let roster = ["bob@example.com", "carol@example.com"]
+            let roster = ["bob@example.org", "carol@example.org"]
                 .iter()
                 .map(|e| AttendeeInfo {
                     email: (*e).into(),
@@ -5977,7 +5977,7 @@ mod tests {
                 ITipMethod::Request,
                 &event,
                 &roster,
-                "alice@example.com",
+                "alice@example.org",
                 "2026-06-13T12:00:00Z",
             )
         };
@@ -5985,11 +5985,11 @@ mod tests {
         events.insert(cal_c.to_vec(), vec![sealed_entry_for_uid(&stored, uid)]);
         let rec = std::sync::Arc::new(ScheduleRequester::new(vec![cal_entry(&cal_c)], events));
         let raw = stamped(
-            "bob@example.com",
+            "bob@example.org",
             &imip_bytes_for(
                 ITipMethod::Reply,
                 uid,
-                &["bob@example.com", "carol@example.com"],
+                &["bob@example.org", "carol@example.org"],
                 "DECLINED",
             ),
         );
@@ -6020,7 +6020,7 @@ mod tests {
     #[test]
     fn ordinary_mail_is_not_a_calendar_reply_on_the_mail_rail() {
         let (outcome, rec) = apply_mailed_reply_to_stored(
-            "inv-mail@example.com",
+            "inv-mail@example.org",
             b"From: a@x\r\nTo: b@y\r\nSubject: hi\r\n\r\njust a note\r\n",
         );
         assert_eq!(outcome, InboundReplyOutcome::NotCalendarReply);
@@ -6072,13 +6072,13 @@ mod tests {
         let event = EventFields {
             summary: "Sprint planning".into(),
             dtstart: "2026-07-01T15:00:00Z".into(),
-            uid: "sprint-1@example.com".into(),
+            uid: "sprint-1@example.org".into(),
             ..Default::default()
         };
         let attendees = vec![
             AttendeeInfo {
                 name: "Bob".into(),
-                email: "bob@example.com".into(),
+                email: "bob@example.org".into(),
                 partstat: "NEEDS-ACTION".into(),
                 fauna_status: "invited".into(),
             },
@@ -6103,19 +6103,19 @@ mod tests {
             ITipMethod::Request,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-04T12:00:00Z",
         )
         .expect("a roster yields a message");
-        assert_eq!(msg.recipients, vec!["bob@example.com", "carol@example.com"]);
+        assert_eq!(msg.recipients, vec!["bob@example.org", "carol@example.com"]);
         let text = as_text(&msg);
-        assert!(text.contains("From: alice@example.com\r\n"));
-        assert!(text.contains("To: bob@example.com, carol@example.com\r\n"));
+        assert!(text.contains("From: alice@example.org\r\n"));
+        assert!(text.contains("To: bob@example.org, carol@example.com\r\n"));
         assert!(text.contains("Subject: Invitation: Sprint planning\r\n"));
         assert!(text.contains("Content-Type: text/calendar; charset=UTF-8; method=REQUEST\r\n"));
         // The iTIP body rides in the part, with its own METHOD.
         assert!(text.contains("METHOD:REQUEST"));
-        assert!(text.contains("UID:sprint-1@example.com"));
+        assert!(text.contains("UID:sprint-1@example.org"));
         assert!(text.contains("DTSTAMP:20260604T120000Z"));
     }
 
@@ -6123,22 +6123,22 @@ mod tests {
     fn imip_request_excludes_organizer_and_dedups() {
         let event = EventFields {
             summary: "Standup".into(),
-            uid: "s@example.com".into(),
+            uid: "s@example.org".into(),
             ..Default::default()
         };
         let attendees = vec![
             AttendeeInfo {
-                email: "alice@example.com".into(), // the organizer, self-listed
+                email: "alice@example.org".into(), // the organizer, self-listed
                 partstat: "ACCEPTED".into(),
                 ..Default::default()
             },
             AttendeeInfo {
-                email: "bob@example.com".into(),
+                email: "bob@example.org".into(),
                 partstat: "NEEDS-ACTION".into(),
                 ..Default::default()
             },
             AttendeeInfo {
-                email: "BOB@example.com".into(), // dup, different case
+                email: "BOB@example.org".into(), // dup, different case
                 partstat: "NEEDS-ACTION".into(),
                 ..Default::default()
             },
@@ -6147,22 +6147,22 @@ mod tests {
             ITipMethod::Request,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-04T12:00:00Z",
         )
         .expect("bob is reachable");
-        assert_eq!(msg.recipients, vec!["bob@example.com"]);
+        assert_eq!(msg.recipients, vec!["bob@example.org"]);
     }
 
     #[test]
     fn imip_request_with_no_reachable_recipient_is_none() {
         let event = EventFields {
-            uid: "solo@example.com".into(),
+            uid: "solo@example.org".into(),
             ..Default::default()
         };
         // Only the organizer is on the roster → nobody to invite.
         let attendees = vec![AttendeeInfo {
-            email: "alice@example.com".into(),
+            email: "alice@example.org".into(),
             ..Default::default()
         }];
         assert!(
@@ -6170,7 +6170,7 @@ mod tests {
                 ITipMethod::Request,
                 &event,
                 &attendees,
-                "alice@example.com",
+                "alice@example.org",
                 "2026-06-04T12:00:00Z",
             )
             .is_none()
@@ -6181,7 +6181,7 @@ mod tests {
                 ITipMethod::Request,
                 &event,
                 &[],
-                "alice@example.com",
+                "alice@example.org",
                 "2026-06-04T12:00:00Z",
             )
             .is_none()
@@ -6192,12 +6192,12 @@ mod tests {
     fn imip_reply_goes_from_responder_to_organizer() {
         let event = EventFields {
             summary: "Sprint planning".into(),
-            uid: "sprint-1@example.com".into(),
+            uid: "sprint-1@example.org".into(),
             ..Default::default()
         };
         let responder = vec![AttendeeInfo {
             name: "Bob".into(),
-            email: "bob@example.com".into(),
+            email: "bob@example.org".into(),
             partstat: "ACCEPTED".into(),
             fauna_status: "going".into(),
         }];
@@ -6205,14 +6205,14 @@ mod tests {
             ITipMethod::Reply,
             &event,
             &responder,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-04T12:30:00Z",
         )
         .expect("a reply targets the organizer");
-        assert_eq!(msg.recipients, vec!["alice@example.com"]);
+        assert_eq!(msg.recipients, vec!["alice@example.org"]);
         let text = as_text(&msg);
-        assert!(text.contains("From: bob@example.com\r\n"));
-        assert!(text.contains("To: alice@example.com\r\n"));
+        assert!(text.contains("From: bob@example.org\r\n"));
+        assert!(text.contains("To: alice@example.org\r\n"));
         assert!(text.contains("Subject: Re: Sprint planning\r\n"));
         assert!(text.contains("Content-Type: text/calendar; charset=UTF-8; method=REPLY\r\n"));
         assert!(text.contains("METHOD:REPLY"));
@@ -6228,7 +6228,7 @@ mod tests {
             ITipMethod::Cancel,
             &event,
             &attendees,
-            "alice@example.com",
+            "alice@example.org",
             "2026-06-04T13:00:00Z",
         )
         .expect("attendees to notify");
@@ -6337,8 +6337,8 @@ mod tests {
         let own_id = "0e".repeat(32);
         MockDiscovery::new()
             .with_nest("https://192.168.1.20:8443", &own_id)
-            .with_nest("https://example.com", &own_id)
-            .with_actor("example.com", ORGANIZER_ACTOR, "https://example.com", false)
+            .with_nest("https://example.org", &own_id)
+            .with_actor("example.org", ORGANIZER_ACTOR, "https://example.org", false)
             .with_nest("https://peer.example", &"9e".repeat(32))
             .with_actor("peer.example", MALLORY_ACTOR, "https://peer.example", false)
     }
@@ -6351,14 +6351,14 @@ mod tests {
             own_nest_url: "https://192.168.1.20:8443".into(),
         };
         assert_eq!(
-            block_on(resolver.resolve_principal("mailto:Alice@example.com")),
+            block_on(resolver.resolve_principal("mailto:Alice@Example.Org")),
             Some(SchedulingPrincipal {
                 actor_id: ORGANIZER_ACTOR.into(),
                 home_nest_url: String::new(),
             }),
-            "the nest that answered for example.com IS this client's nest (same \
+            "the nest that answered for example.org IS this client's nest (same \
              nest_id), so the principal carries the empty own-nest home the rail \
-             reports — a URL comparison would have kept https://example.com"
+             reports — a URL comparison would have kept https://example.org"
         );
     }
 
@@ -6387,23 +6387,23 @@ mod tests {
         // for the own nest → no fold.
         let no_found_id = DiscoveryPrincipalResolver {
             discovery: MockDiscovery::new()
-                .with_actor("example.com", ORGANIZER_ACTOR, "https://example.com", false)
-                .with_nest("https://example.com", &"0e".repeat(32)),
-            own_nest_url: "https://example.com".into(),
+                .with_actor("example.org", ORGANIZER_ACTOR, "https://example.org", false)
+                .with_nest("https://example.org", &"0e".repeat(32)),
+            own_nest_url: "https://example.org".into(),
         };
         assert_eq!(
-            block_on(no_found_id.resolve_principal("alice@example.com")).map(|p| p.home_nest_url),
-            Some("https://example.com".to_string())
+            block_on(no_found_id.resolve_principal("alice@example.org")).map(|p| p.home_nest_url),
+            Some("https://example.org".to_string())
         );
         let no_own_id = DiscoveryPrincipalResolver {
             discovery: MockDiscovery::new()
-                .with_nest("https://example.com", &"0e".repeat(32))
-                .with_actor("example.com", ORGANIZER_ACTOR, "https://example.com", false),
+                .with_nest("https://example.org", &"0e".repeat(32))
+                .with_actor("example.org", ORGANIZER_ACTOR, "https://example.org", false),
             own_nest_url: "https://192.168.1.20:8443".into(),
         };
         assert_eq!(
-            block_on(no_own_id.resolve_principal("alice@example.com")).map(|p| p.home_nest_url),
-            Some("https://example.com".to_string())
+            block_on(no_own_id.resolve_principal("alice@example.org")).map(|p| p.home_nest_url),
+            Some("https://example.org".to_string())
         );
     }
 
@@ -6426,7 +6426,7 @@ mod tests {
             },
             own_nest_url: "https://192.168.1.20:8443".into(),
         };
-        assert_eq!(block_on(down.resolve_principal("alice@example.com")), None);
+        assert_eq!(block_on(down.resolve_principal("alice@example.org")), None);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -6444,13 +6444,13 @@ mod tests {
     fn resolve_mail_enabled_fauna_handle_is_mail_reachable() {
         // A Fauna handle whose nest HAS email enabled → iMIP email, not WS-RPC.
         let disco = MockDiscovery::new().with_actor(
-            "example.com",
+            "example.org",
             "aa".repeat(32).as_str(),
-            "https://example.com",
+            "https://example.org",
             true,
         );
         let out =
-            block_on(resolve_attendee_transport(&disco, "alice@example.com")).expect("resolve");
+            block_on(resolve_attendee_transport(&disco, "alice@example.org")).expect("resolve");
         assert_eq!(out, AttendeeTransport::MailReachable);
     }
 
@@ -6483,7 +6483,7 @@ mod tests {
     #[test]
     fn resolve_malformed_address_errs() {
         let disco = MockDiscovery::new();
-        for bad in ["bob", "@example.com", "bob@", "mailto:nope", ""] {
+        for bad in ["bob", "@example.org", "bob@", "mailto:nope", ""] {
             match block_on(resolve_attendee_transport(&disco, bad)) {
                 Err(ResolveError::MalformedAddress(a)) => assert_eq!(a, bad),
                 other => panic!("expected MalformedAddress for {bad:?}, got {other:?}"),
@@ -6500,7 +6500,7 @@ mod tests {
             fail: true,
             ..MockDiscovery::new()
         };
-        match block_on(resolve_attendee_transport(&disco, "alice@example.com")) {
+        match block_on(resolve_attendee_transport(&disco, "alice@example.org")) {
             Err(ResolveError::Discovery(e)) => assert_eq!(e, "discovery transport fault"),
             other => panic!("expected Discovery error, got {other:?}"),
         }
@@ -6514,9 +6514,9 @@ mod tests {
         // one lands in the sidecar, keyed by its NORMALIZED CAL-ADDRESS.
         let disco = MockDiscovery::new()
             .with_actor(
-                "example.com",
+                "example.org",
                 "aa".repeat(32).as_str(),
-                "https://example.com",
+                "https://example.org",
                 true,
             )
             .with_actor(
@@ -6526,7 +6526,7 @@ mod tests {
                 false,
             );
         let roster = vec![
-            "alice@example.com".to_string(),
+            "alice@example.org".to_string(),
             "MAILTO:Bob@CalOnly.Example".to_string(),
             "carol@example.net".to_string(),
         ];
@@ -6553,7 +6553,7 @@ mod tests {
             Some("https://calonly.example")
         );
         // An email-reachable attendee has no entry.
-        assert_eq!(ext.nest_url_for("alice@example.com"), None);
+        assert_eq!(ext.nest_url_for("alice@example.org"), None);
     }
 
     // ── Slice 5: the organizer dispatch fork ───────────────────────────────
@@ -6634,7 +6634,7 @@ mod tests {
             summary: "Sprint planning".into(),
             dtstart: "2026-06-20T09:00:00Z".into(),
             dtend: "2026-06-20T10:00:00Z".into(),
-            uid: "evt-disp@example.com".into(),
+            uid: "evt-disp@example.org".into(),
             status: "confirmed".into(),
             ..Default::default()
         }
@@ -6643,23 +6643,23 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn dispatch_forks_email_reachable_and_mailboxless() {
-        // organizer on example.com (mail-enabled); roster = an external addr, a
+        // organizer on example.org (mail-enabled); roster = an external addr, a
         // mail-enabled Fauna handle, and a mailbox-less Fauna handle on a foreign
         // (email-disabled) nest → ONE email to {external, mail-enabled-fauna} +
         // ONE WS-RPC delivery to the mailbox-less one (peer_domain = Some, foreign).
         let actor = "bb".repeat(32);
         let disco = MockDiscovery::new()
             .with_actor(
-                "example.com",
+                "example.org",
                 "aa".repeat(32).as_str(),
-                "https://example.com",
+                "https://example.org",
                 true,
             )
             .with_actor("calonly.example", &actor, "https://calonly.example", false);
         let dispatch = MockDispatch::default();
         let roster = dispatch_roster(&[
             "carol@example.net",
-            "alice@example.com",
+            "alice@example.org",
             "bob@calonly.example",
         ]);
         let report = block_on(dispatch_imip_request(
@@ -6667,7 +6667,7 @@ mod tests {
             &dispatch,
             &dispatch_fields(),
             &roster,
-            "org@example.com",
+            "org@example.org",
             1_700_000_000,
         ))
         .expect("dispatch");
@@ -6678,7 +6678,7 @@ mod tests {
         let (recipients, body) = &emails[0];
         assert_eq!(recipients.len(), 2);
         assert!(recipients.iter().any(|x| x == "carol@example.net"));
-        assert!(recipients.iter().any(|x| x == "alice@example.com"));
+        assert!(recipients.iter().any(|x| x == "alice@example.org"));
         assert!(!recipients.iter().any(|x| x == "bob@calonly.example"));
 
         // One WS-RPC delivery to the mailbox-less attendee; foreign nest → Some.
@@ -6736,9 +6736,9 @@ mod tests {
         // persisted), not raised; the email rail still fans.
         let disco = MockDiscovery::new()
             .with_actor(
-                "example.com",
+                "example.org",
                 "aa".repeat(32).as_str(),
-                "https://example.com",
+                "https://example.org",
                 true,
             )
             .with_actor(
@@ -6751,13 +6751,13 @@ mod tests {
             fail_mailboxless: true,
             ..MockDispatch::default()
         };
-        let roster = dispatch_roster(&["alice@example.com", "bob@calonly.example"]);
+        let roster = dispatch_roster(&["alice@example.org", "bob@calonly.example"]);
         let report = block_on(dispatch_imip_request(
             &disco,
             &dispatch,
             &dispatch_fields(),
             &roster,
-            "org@example.com",
+            "org@example.org",
             1_700_000_000,
         ))
         .expect("dispatch does not abort on a rail fault");
@@ -6777,13 +6777,13 @@ mod tests {
         // empty report, no rail touched.
         let disco = MockDiscovery::new();
         let dispatch = MockDispatch::default();
-        let roster = dispatch_roster(&["org@example.com"]);
+        let roster = dispatch_roster(&["org@example.org"]);
         let report = block_on(dispatch_imip_request(
             &disco,
             &dispatch,
             &dispatch_fields(),
             &roster,
-            "org@example.com",
+            "org@example.org",
             1_700_000_000,
         ))
         .expect("dispatch");
@@ -6802,13 +6802,13 @@ mod tests {
             ..MockDiscovery::new()
         };
         let dispatch = MockDispatch::default();
-        let roster = dispatch_roster(&["alice@example.com"]);
+        let roster = dispatch_roster(&["alice@example.org"]);
         match block_on(dispatch_imip_request(
             &disco,
             &dispatch,
             &dispatch_fields(),
             &roster,
-            "org@example.com",
+            "org@example.org",
             1_700_000_000,
         )) {
             Err(ResolveError::Discovery(e)) => assert_eq!(e, "discovery transport fault"),

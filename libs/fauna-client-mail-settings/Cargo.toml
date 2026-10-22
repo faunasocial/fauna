@@ -25,6 +25,11 @@ uniffi = ["dep:uniffi", "fauna-core/uniffi", "fauna-mail/uniffi", "dep:fauna-uni
 # needs the arm compiled in. A debug build gets it via `debug_assertions`.
 # Convention 15 rule (b): forwarded from a feature, NEVER named on a dep line.
 test-helpers = ["fauna-mail/test-helpers", "fauna-client-config/test-helpers"]
+# The submission-token clock's e2e offset (`token_refresh::OFFSET_ENV`) in a
+# release-profile e2e build; a debug build gets it via `debug_assertions`.
+# A consumer's own `e2e-agent` forwards this one — never default-on, never
+# named on a dep line (convention 15 rule (b)).
+e2e-agent = []
 # Shared WS-RPC seam glue (`rpc_glue`) — the `build_*_machine` constructors
 # `fauna-ffi` + linux (native) and `fauna-wasm` (web) call instead of hand-rolling
 # each machine's `…Nest` seam. Pulls the per-target transport (native
@@ -93,7 +98,9 @@ fauna-i18n = { path = "../fauna-i18n" }
 # a message — which § An unopenable record fails the session forbids.
 # `forward-config` is the pure address/limit validators the `forwarding` draft
 # parsers wrap (the nest runs the same two at its set doors). std only.
-fauna-mail ={ path = "../fauna-mail", default-features = false, features = ["aliases", "role-overrides", "spam-classifier", "segments-receive", "domain-rename", "imap-client", "mail-export-client", "body-ref-resolve", "forward-config"] }
+# `dmarc-report-view` is the admin reports page's window fold and archive
+# gunzip (`dmarc_reports`) — the receive half's parser and zip stay out.
+fauna-mail ={ path = "../fauna-mail", default-features = false, features = ["aliases", "role-overrides", "spam-classifier", "segments-receive", "domain-rename", "imap-client", "mail-export-client", "body-ref-resolve", "forward-config", "dmarc-report-view"] }
 serde = { workspace = true }
 # `serving_enablement::serving_enablement_json` — the one shared JSON shape of the
 # `fauna_e2e_agent::SERVING_ENABLEMENT_KEY` observable (wasm-safe).

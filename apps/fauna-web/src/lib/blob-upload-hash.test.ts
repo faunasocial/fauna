@@ -5,8 +5,8 @@
 // is not the blake3 of the bytes it just sent. Native's twin is
 // `fauna_client::media_upload::upload_prepared_blob`.
 //
-// Like `nests-grant-scope-labels.test.ts`, this does NOT import `$lib/api.ts`
-// or `$lib/wasm.ts` (their `$app/paths` import resolves only under the
+// Like `nests-grant-scope-labels.test.ts`, this does NOT import `#lib/api.ts`
+// or `#lib/wasm.ts` (their `$app/paths` import resolves only under the
 // SvelteKit/Vite build). The comparison lives in the dependency-free
 // `blob-upload-hash.ts`, which `uploadBlobMultipart` calls with the wasm
 // `blobContentHashHex` export; a source assertion pins that wiring.

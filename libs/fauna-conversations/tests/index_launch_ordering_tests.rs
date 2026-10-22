@@ -181,6 +181,7 @@ impl InboundMailSource for OneMessageMailbox {
                 mailbox: fauna_conversations::backend::MailFeed::Inbox,
                 suppress_from_view: false,
                 has_seen_flag: false,
+                warmup_hold: None,
             }],
             more: false,
         })

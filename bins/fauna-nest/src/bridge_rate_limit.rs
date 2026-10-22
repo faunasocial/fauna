@@ -37,7 +37,7 @@ pub const SPAM_TRAIN_LIMITER_CONFIG: LimiterConfig = LimiterConfig {
 };
 
 /// Per-(actor, channel) throttle on a **non-claimant** rostered member's MLS
-/// Commit into a **claimed** folder channel (`federation.md` § Cross-nest
+/// Commit into a **claimed** folder channel (`federation-shared-folders.md` § Cross-nest
 /// shared folders + channel append, residual (a) — the 2026-08-24
 /// roster-membership admission widening's named DoS follow-up: a hostile
 /// member can churn epochs with takeover commits, and every co-member
@@ -73,6 +73,73 @@ pub const RECORDS_DOOR_LIMITER_CONFIG: LimiterConfig = LimiterConfig {
     window: Duration::from_secs(60),
     max_events: 600,
 };
+
+/// Per-TARGET budget on the one-time MLS key packages federation peers take
+/// from one local user (`fauna.federation.keypackage.fetch`), summed over every
+/// originating nest and source — bucket key `(target actor, 0, "keypackage")`
+/// (`federation.md` § Key packages — privacy & exhaustion). Any fresh keypair
+/// passes the federation hello, so the per-nest throttle is keyed on an id the
+/// caller chooses and only this key is not; a fetch past the budget is served
+/// the reusable last-resort package without consuming it, so the target stays
+/// reachable and the pool is never drained. 10 per hour is above any user's
+/// rate of new cross-nest conversations and half the client's top-up target
+/// (`KEYPACKAGE_TARGET = 20`), so the pool outlasts a sustained drain between
+/// two of the client's top-ups. A constant (an abuse bound the binary sets, not
+/// an admin preference — the one-configuration-surface rule).
+pub const KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG: LimiterConfig = LimiterConfig {
+    window: Duration::from_secs(3600),
+    max_events: 10,
+};
+
+/// The window of the federation TARGET budgets — the per-target bounds on the
+/// open-federation kinds a stranger reaches without pairing, beside the
+/// key-package one (`federation.md` § Security → *Rate limiting is the primary
+/// DoS defense*). One limiter (`AppState::federation_target_budget`) holds every
+/// family, each under its own bucket key and the `*_TARGET_MAX` below
+/// ([`Limiter::check_with_max`]), so the sweep's cutoff is right for all of
+/// them. Each key names something this nest owns — a hosted account, the
+/// admin's queue, the whole store — never the self-minted origin `nest_id`, so a
+/// stranger minting fresh keypairs cannot multiply it. Hard constants (abuse
+/// bounds the binary sets, not admin preferences — the one-configuration-surface
+/// rule).
+pub const FEDERATION_TARGET_LIMITER_CONFIG: LimiterConfig = LimiterConfig {
+    window: Duration::from_secs(3600),
+    max_events: 0,
+};
+
+/// `fauna.federation.post.forward` under the `open` submission policy: posts a
+/// peer relays with no `post_forward` pairing for `(author, origin)` share one
+/// whole-nest budget, bucket key `(0, 0, "post_forward")`
+/// (`nest/private-mode.md` § Post Forwarding, step 2). The real producer — a
+/// private nest's outbox, whose author granted the relay `post_forward` — never
+/// spends it, and a refused forward stays in the sender's outbox for its next
+/// retry.
+pub const POST_FORWARD_UNPAIRED_TARGET_MAX: u32 = 60;
+
+/// `fauna.federation.follow.{subscribe,unsubscribe}`: intents from subscribers
+/// this nest has never seen for one hosted author, bucket key `(author, 0,
+/// "follow_intent")` (`federated-follow.md` § Decision 2). A subscriber already
+/// seen is free — it holds at most one pending request per tier.
+pub const FOLLOW_INTENT_TARGET_MAX: u32 = 30;
+
+/// `fauna.federation.abuse_report.deliver`, per hosted account reported:
+/// bucket key `(subject account, 0, "abuse_report")` (`moderation.md`
+/// § Routing). A re-delivery of a report already stored is free.
+pub const ABUSE_REPORT_SUBJECT_TARGET_MAX: u32 = 10;
+
+/// `fauna.federation.abuse_report.deliver`, over the whole nest — the admin's
+/// queue and doorbell: bucket key `(0, 0, "abuse_report")`.
+pub const ABUSE_REPORT_NEST_TARGET_MAX: u32 = 100;
+
+/// `fauna.federation.moderation.obligation.deliver`, per hosted author: bucket
+/// key `(author, 0, "obligation_deliver")` (`moderation.md` § Legal takedown →
+/// *The author homed on another nest*), summed over every origin. A
+/// re-delivery of a row already stored is free.
+pub const OBLIGATION_DELIVER_AUTHOR_TARGET_MAX: u32 = 10;
+
+/// `fauna.federation.moderation.obligation.deliver`, over the whole nest:
+/// bucket key `(0, 0, "obligation_deliver")`.
+pub const OBLIGATION_DELIVER_NEST_TARGET_MAX: u32 = 100;
 
 #[derive(Debug, Default)]
 struct Bucket {

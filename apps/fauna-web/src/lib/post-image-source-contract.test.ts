@@ -74,10 +74,14 @@ Deno.test("the post-image contract matcher still sees both render sites", () => 
 // And the positive half: the resolver both sites depend on must actually exist and
 // consult the shared manager. A `mediaUrl` that quietly became an alias for
 // `blobUrl` would satisfy the contract above while restoring the bug.
-Deno.test("the feed page's mediaUrl asks the shared manager whether the item is sealed", () => {
-  const code = stripComments(Deno.readTextFileSync(SOURCES[0]));
+// `mediaUrl` lives in the card host the feed page and the profile's Posts tab
+// share (`feed-post-host.svelte.ts`); the feed page's detail takes it from there.
+const CARD_HOST = new URL("./feed-post-host.svelte.ts", import.meta.url);
+
+Deno.test("the feed card host's mediaUrl asks the shared manager whether the item is sealed", () => {
+  const code = stripComments(Deno.readTextFileSync(CARD_HOST));
   if (!/function\s+mediaUrl\s*\(/.test(code)) {
-    throw new Error("the feed page no longer defines mediaUrl — the two post-image sites depend on it");
+    throw new Error("the feed card host no longer defines mediaUrl — the two post-image sites depend on it");
   }
   if (!/isSealedMedia\s*\(/.test(code)) {
     throw new Error(

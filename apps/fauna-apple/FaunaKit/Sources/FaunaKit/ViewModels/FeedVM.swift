@@ -229,6 +229,8 @@ public final class FeedVM {
         // the manager holds the box.
         observerBox?.target = nil
         observerBox = nil
+        storeChangeWatch?.cancel()
+        storeChangeWatch = nil
         manager = nil
         roomPostSession = nil
         roomPostObservedManager = nil
@@ -246,6 +248,7 @@ public final class FeedVM {
         creatingFeed = false
         searchText = ""
         pendingPostOpen = nil
+        pendingPostOpenHome = nil
         pendingAttachment = nil
         preManagerComposeError = nil
         composeGlueError = nil
@@ -300,6 +303,10 @@ public final class FeedVM {
             self.manager = mgr
             self.observerBox = box
             self.configuredSecret = secretHex
+            storeChangeWatch?.cancel()
+            storeChangeWatch = StoreChangeNotice.shared.watch { [weak self] in
+                await self?.resyncStore()
+            }
             managerGeneration &+= 1
             dropMediaCaches()
             draftsSaveTask?.cancel()
@@ -404,6 +411,15 @@ public final class FeedVM {
         return manager?.snapshot()
     }
     public var feeds: [FeedSummaryView] { snapshot?.feeds ?? [] }
+    /// Does `postId` match one of the user's muted words (the shared
+    /// `FeedManager::is_muted`)? Read through the observer tick like every
+    /// getter here: a mute lives in the manager's sealed scorers, not in the
+    /// post, so un-muting the last word re-pulls the very same posts and only
+    /// the manager's notification can tell a collapsed card to come back.
+    public func isMuted(postId: String) -> Bool {
+        _ = _observerTick
+        return manager?.isMuted(postId: postId) ?? false
+    }
     public var bridgeFeeds: [BridgeFeedView] { snapshot?.bridgeFeeds ?? [] }
     /// The bridges the nest can actually serve (`bridge-form-bridge-select`
     /// option set), from the server-filtered `fauna.bridges.list` via
@@ -431,10 +447,14 @@ public final class FeedVM {
     /// reveal (D3) and the lazy media / quoted-post fold — reach the detail
     /// view. `post` is a value snapshot captured at navigation and never
     /// updates on its own; `posts` is the observed live list (feed.md § read
-    /// from state). Falls back to `post` itself if it has left the current
-    /// feed. Shared by the macOS/iOS post-detail views.
+    /// from state). A post opened through the deep-link door (a search hit, a
+    /// room-search post hit, possibly relayed from another nest) lives in the
+    /// snapshot's `deepLinkedPost` slot, not the timeline, so the slot is read
+    /// too — else a gated unlock or a lazy fold on that post never repaints the
+    /// detail. Falls back to `post` itself if it has left both. Shared by the
+    /// macOS/iOS post-detail views.
     public func livePost(for post: PostSummary) -> PostSummary {
-        posts.first { $0.postId == post.postId } ?? post
+        findPost(postId: post.postId) ?? post
     }
     /// Find `postId` in what's already loaded — the timeline's own `posts`, or
     /// the deep-link slot [`FeedSnapshot.deepLinkedPost`] a prior [`resolvePost`]
@@ -457,6 +477,14 @@ public final class FeedVM {
     public func resolvePost(_ postId: String) async -> PostResolution {
         await manager?.resolvePost(postId: postId) ?? .unavailable
     }
+    /// The same door for a post homed on another nest (`resolve_post_from`): the
+    /// manager asks this nest to relay the read from `nestUrl`. `nil` is the
+    /// ordinary same-nest `resolvePost`.
+    @discardableResult
+    public func resolvePost(_ postId: String, from nestUrl: String?) async -> PostResolution {
+        guard let nestUrl else { return await resolvePost(postId) }
+        return await manager?.resolvePostFrom(postId: postId, nestUrl: nestUrl) ?? .unavailable
+    }
     /// A cross-page deep-link target (a search-result activation) asking the
     /// Feed detail surface to open this post id — consumed once by the surface,
     /// which resolves it (fast path via `findPost` if already loaded, else
@@ -464,6 +492,11 @@ public final class FeedVM {
     /// post-card tap sets its own local `selectedPost` directly instead, with
     /// no round trip and no need for this slot.
     public var pendingPostOpen: String?
+    /// The home nest URL `pendingPostOpen` is to be read from when the post is
+    /// homed on another nest (a room-search post hit on a foreign-homed room,
+    /// `room-search.md` § The surface → *Opening a hit*): consumed with it, and
+    /// `nil` for an ordinary same-nest open.
+    public var pendingPostOpenHome: String?
     public var isLoading: Bool { isReconfiguring ? true : ((snapshot?.status ?? .loading) == .loading) }
     /// Whether the page paints its loading spinner in place of the post list:
     /// only while a load is in flight AND there is nothing to show. A REFRESH
@@ -482,6 +515,23 @@ public final class FeedVM {
     }
     /// Whether a `rehydrate()` is running — the coalescing flag it keeps.
     @ObservationIgnored private var rehydrateInFlight = false
+
+    /// The store-change notice's subscription for the feed (account-runtime.md §
+    /// Multi-instance concurrency, the own-pump notice, part 4 — the feed's
+    /// sealed scorers). Armed when a manager is installed, dropped with it, so
+    /// both apple targets take it from here and neither adds its own.
+    @ObservationIgnored private var storeChangeWatch: StoreChangeWatch?
+
+    /// Re-pull the CURRENT selection so a mute, a trained topic or any other
+    /// sealed-scorer change another device or instance stored re-ranks the
+    /// open feed — through the same `refreshCurrentFeed` seam `rehydrate`
+    /// uses, never changing which feed is selected. Skipped while a rebuild or
+    /// a page-entry re-pull is already in flight (that read is at least as
+    /// fresh).
+    public func resyncStore() async {
+        guard let manager, !isReconfiguring, !rehydrateInFlight else { return }
+        await manager.refreshCurrentFeed()
+    }
     public var hasMore: Bool { snapshot?.hasMore ?? false }
     /// The composer text/tags live in the manager so `compose-error` /
     /// `compose-file-ready` render from snapshot fields (feed.md § Architectural
@@ -1024,11 +1074,25 @@ public final class FeedVM {
     /// longer carries stays locked (the archival path is a follow-on). Mirrors
     /// linux `client.rs::unlock_gated_post` (hash → `nest.get` → `unlock_gated_post`).
     public func unlockGatedPost(_ postId: String) async {
-        guard let manager, let api else { return }
-        guard let hash = await manager.gatedBlobHash(postId: postId) else { return }
+        guard let manager else { return }
+        guard let hash = await manager.gatedBlobHash(postId: postId) else {
+            logMessage(level: .debug, target: "fauna.feed.gated",
+                       message: "gated unlock: no sealed blob hash for the post (stays teased)")
+            return
+        }
+        // The sealed body is read from the post's own home through the shared
+        // plane, with the post's `postBlobHome` handed back unchanged — a post
+        // reached through the cross-nest relay is not on this nest's blob route.
+        let home = findPost(postId: postId).flatMap { postBlobHome(post: $0) }
         do {
-            let bytes = try await api.get(url: api.blobUrl(hash: hash))
+            guard let hosts = await postBlobHosts() else {
+                logMessage(level: .warn, target: "fauna.feed.gated",
+                           message: "gated unlock (post stays teased): no post-blob plane")
+                return
+            }
+            let bytes = try await hosts.get(home: home, hash: hash)
             try await manager.unlockGatedPost(postId: postId, blobBytes: bytes)
+            plainMediaFailed.removeAll()
         } catch {
             // Best-effort stays best-effort — the post keeps its teaser — but the
             // REASON is not the shell's to discard. Every sibling logs it
@@ -1132,47 +1196,75 @@ public final class FeedVM {
         api?.blobUrl(hash: hash)
     }
 
-    /// Decoded bytes for sealed post media, keyed by blob hash. Observed, so a
-    /// landing fetch repaints the card that read a ``PostImageSource/sealedPending``.
-    /// Dropped whenever the manager is rebuilt — see ``dropMediaCaches()``.
+    /// Decoded bytes for post media, keyed by blob hash. Observed, so a landing
+    /// fetch repaints the card that read a ``PostImageSource/pending``. Dropped
+    /// whenever the manager is rebuilt — see ``dropMediaCaches()``.
     private var sealedMediaImages: [String: FaunaPlatformImage] = [:]
     /// Completed `c2pa-badge` verdicts, keyed by blob hash — only ones that cost a
-    /// full-image fetch to reach (see ``hasC2pa(_:)``), so a card scrolling back
+    /// full-image fetch to reach (see ``hasC2pa(_:home:)``), so a card scrolling back
     /// into view does not download its image again. Deliberately NOT observed: the
-    /// badge receives its answer as ``hasC2pa(_:)``'s return value, and nothing
+    /// badge receives its answer as ``hasC2pa(_:home:)``'s return value, and nothing
     /// paints from this dictionary. Dropped with the manager, like the images.
     @ObservationIgnored private var c2paVerdicts: [String: Bool] = [:]
     /// Hashes with a fetch in flight. Deliberately NOT observed: it is mutated
-    /// from ``postImage(_:)``, which runs inside a SwiftUI `body`, and an observed
+    /// from ``postImage(_:home:)``, which runs inside a SwiftUI `body`, and an observed
     /// write there would invalidate the very view being evaluated.
     @ObservationIgnored private var sealedMediaPending: Set<String> = []
+    /// Hashes whose bytes came back but would not decode (a still-sealed item's
+    /// ciphertext, a truncated blob). Unobserved for the reason
+    /// ``sealedMediaPending`` is; cleared when a gated post unlocks, so the item
+    /// that just became openable is tried again.
+    @ObservationIgnored private var plainMediaFailed: Set<String> = []
+    /// The session's post-blob planes — this nest's and every foreign home's, the
+    /// shared `PostBlobHosts` over UniFFI (`feed.md` § The read model → *A post
+    /// homed on another nest*). One per manager generation, since a foreign
+    /// home's graduated pin lives as long as the handle. Every post byte leg (the
+    /// gated body, the image, the C2PA probe, the video) reads through it with the
+    /// post's `postBlobHome` handed back unchanged — never re-derived here.
+    @ObservationIgnored private var blobHosts: FfiPostBlobHosts?
 
-    /// What the `post-image` surfaces should paint for one media hash — the
-    /// two-shape branch `ui/media.md` § Encryption at rest declares for apple,
-    /// living in the view model and never in the post card, which paints whatever
-    /// source it is handed.
-    ///
-    /// A sealed item's bytes are fetched once per hash and opened through the
-    /// shared manager; until they land the caller gets ``PostImageSource/sealedPending``
-    /// and paints the placeholder, never the ciphertext. The cache contract is
-    /// the conversations-attachment one: an item that does not open is NOT
-    /// cached, so a later render retries (matching web's `mediaUrl`).
-    public func postImage(_ hash: String) -> PostImageSource {
-        let isSealed = manager?.isSealedMedia(blobHash: hash) ?? false
-        let source = PostImageSource.resolve(isSealed: isSealed,
-                                             blobURL: blobURL(hash),
-                                             opened: sealedMediaImages[hash])
-        if case .sealedPending = source { startSealedMediaFetch(hash) }
+    /// The handle above, built on first use; `nil` before the nest is reachable.
+    private func postBlobHosts() async -> FfiPostBlobHosts? {
+        if let blobHosts { return blobHosts }
+        guard let api, let hosts = try? await api.postBlobHosts() else { return nil }
+        if let blobHosts { return blobHosts }
+        blobHosts = hosts
+        return hosts
+    }
+
+    /// One post blob's bytes from `home` through the plane (capped and checked
+    /// against its content address by the plane itself); `nil` on any failure.
+    private func fetchPostBlob(_ hash: String, home: FfiPostBlobHome?) async -> Data? {
+        guard let hosts = await postBlobHosts() else { return nil }
+        return try? await hosts.get(home: home, hash: hash)
+    }
+
+    /// What the `post-image` surfaces should paint for one media hash. Every post
+    /// image is bytes from the post's own home through the shared plane, opened
+    /// through the shared manager (`open_media_bytes`: a sealed item opens under
+    /// its post's key, anything else comes back untouched) and decoded here —
+    /// the shape tui, linux, windows and android keep (`ui/media.md` §
+    /// Encryption at rest). Until the bytes land the caller gets
+    /// ``PostImageSource/pending`` and paints the placeholder, never ciphertext.
+    /// An item that does not open or decode is NOT cached, so a later render
+    /// retries (matching web's `mediaUrl`) — except a hash that already came
+    /// back undecodable, which waits for the next unlock.
+    public func postImage(_ hash: String, home: FfiPostBlobHome?) -> PostImageSource {
+        let source = PostImageSource.resolve(signedIn: api != nil, opened: sealedMediaImages[hash])
+        if case .pending = source, !plainMediaFailed.contains(hash) {
+            startPostMediaFetch(hash, home: home)
+        }
         return source
     }
 
     /// What one post's `post-image` slot paints, from its document: the blob
-    /// image first (``postImage(_:)``), else a bridged post's `ProxiedImage`
+    /// image first (``postImage(_:home:)``), else a bridged post's `ProxiedImage`
     /// (``proxiedPostImage(_:)``), else `nil` — the precedence tui's
     /// `proxied_post_image` keeps (`render-model.md` § D6c). The one pick the
-    /// list card and both post details share.
-    public func documentPostImage(_ document: RenderDocument) -> PostImageSource? {
-        if let hash = documentMediaImageHash(document) { return postImage(hash) }
+    /// list card and both post details share. `home` is the post's
+    /// `postBlobHome`, handed on unchanged.
+    public func documentPostImage(_ document: RenderDocument, home: FfiPostBlobHome?) -> PostImageSource? {
+        if let hash = documentMediaImageHash(document) { return postImage(hash, home: home) }
         if let path = documentMediaProxiedImagePath(document) { return proxiedPostImage(path) }
         return nil
     }
@@ -1213,12 +1305,12 @@ public final class FeedVM {
         }
     }
 
-    /// Fetch and open one sealed media item. Kicked from ``postImage(_:)`` rather
-    /// than a view's `.task(id:)`: a `.task` attached to a conditionally-absent
-    /// view does not reliably fire on apple (the same trap `PostImageC2paBadge`
-    /// works around with a zero-size anchor).
-    private func startSealedMediaFetch(_ hash: String) {
-        guard !sealedMediaPending.contains(hash), let api else { return }
+    /// Fetch one post media item from its home and open it. Kicked from
+    /// ``postImage(_:home:)`` rather than a view's `.task(id:)`: a `.task` attached
+    /// to a conditionally-absent view does not reliably fire on apple (the same
+    /// trap `PostImageC2paBadge` works around with a zero-size anchor).
+    private func startPostMediaFetch(_ hash: String, home: FfiPostBlobHome?) {
+        guard !sealedMediaPending.contains(hash), api != nil else { return }
         sealedMediaPending.insert(hash)
         // The manager the answer belongs to. An image opened under one actor's
         // per-post key must never land in the next actor's cache, so a fetch that
@@ -1227,18 +1319,17 @@ public final class FeedVM {
         let generation = managerGeneration
         Task { @MainActor [weak self] in
             defer { self?.sealedMediaPending.remove(hash) }
-            do {
-                let bytes = try await api.get(url: api.blobUrl(hash: hash))
-                guard let self, generation == self.managerGeneration, let manager = self.manager else { return }
-                // `nil` means the item did not open — leave it uncached and paint
-                // the placeholder, exactly as for bytes that will not decode.
-                // Never hand AEAD ciphertext to an image decoder.
-                guard let opened = manager.openMediaBytes(blobHash: hash, fetched: bytes),
-                      let image = FaunaImage.decode(opened) else { return }
-                self.sealedMediaImages[hash] = image
-            } catch {
-                // The card stays on its placeholder; a later render retries.
+            guard let bytes = await self?.fetchPostBlob(hash, home: home),
+                  let self, generation == self.managerGeneration, let manager = self.manager else { return }
+            // `nil` means the item did not open — leave it uncached and paint
+            // the placeholder, exactly as for bytes that will not decode.
+            // Never hand AEAD ciphertext to an image decoder.
+            guard let opened = manager.openMediaBytes(blobHash: hash, fetched: bytes),
+                  let image = FaunaImage.decode(opened) else {
+                self.plainMediaFailed.insert(hash)
+                return
             }
+            self.sealedMediaImages[hash] = image
         }
     }
 
@@ -1255,29 +1346,41 @@ public final class FeedVM {
     /// player needs no bearer), and a sealed item goes through the same fetch +
     /// `openMediaBytes` a sealed image does — the raw opened bytes, written to an
     /// owner-only temp file, since no URL can serve its plaintext.
-    public func videoPlaybackURL(_ hash: String) async -> URL? {
+    public func videoPlaybackURL(_ hash: String, home: FfiPostBlobHome?) async -> URL? {
         guard let manager, let api else { return nil }
         // The answer belongs to the manager that gave it (see
-        // ``startSealedMediaFetch(_:)``): one outliving its actor is dropped.
+        // ``startPostMediaFetch(_:home:)``): one outliving its actor is dropped.
         let generation = managerGeneration
         let source = await manager.playbackSource(block: .video(hash: hash, alt: ""))
         guard generation == managerGeneration else { return nil }
         switch VideoPlaybackPlan(source) {
         case .stream(let path):
-            return api.contentUrl(path: path)?.absoluteURL
+            // A post homed on another nest is never streamed: the player dials
+            // only this nest, so its bytes come through the shared plane (the
+            // post's own home, capped and content-address checked) and play from
+            // a file, like a sealed item.
+            guard home != nil else { return api.contentUrl(path: path)?.absoluteURL }
+            return await openedPlaybackFile(hash, home: home, generation: generation)
         case .openSealed(let sealedHash):
-            if let file = sealedPlaybackFiles[sealedHash] { return file }
-            // `nil` from the open means the item did not open: never hand AEAD
-            // ciphertext to a decoder.
-            guard let bytes = try? await api.get(url: api.blobUrl(hash: sealedHash)),
-                  generation == managerGeneration,
-                  let opened = manager.openMediaBytes(blobHash: sealedHash, fetched: bytes),
-                  let file = try? SealedPlaybackFile.write(opened) else { return nil }
-            sealedPlaybackFiles[sealedHash] = file
-            return file
+            return await openedPlaybackFile(sealedHash, home: home, generation: generation)
         case .unplayable:
             return nil
         }
+    }
+
+    /// The blob `hash` from `home` through the plane, opened under the post's key
+    /// when it is sealed (a plain item comes back untouched), written to an
+    /// owner-only temp file the player reads, and remembered so a second tap does
+    /// not fetch it again. `nil` from the open means the item did not open: never
+    /// hand AEAD ciphertext to a decoder.
+    private func openedPlaybackFile(_ hash: String, home: FfiPostBlobHome?, generation: Int) async -> URL? {
+        if let file = sealedPlaybackFiles[hash] { return file }
+        guard let bytes = await fetchPostBlob(hash, home: home),
+              generation == managerGeneration, let manager,
+              let opened = manager.openMediaBytes(blobHash: hash, fetched: bytes),
+              let file = try? SealedPlaybackFile.write(opened) else { return nil }
+        sealedPlaybackFiles[hash] = file
+        return file
     }
 
     /// Drop every opened sealed image and every remembered `c2pa-badge` verdict.
@@ -1292,36 +1395,37 @@ public final class FeedVM {
         proxiedMediaImages.removeAll()
         proxiedMediaPending.removeAll()
         c2paVerdicts.removeAll()
+        plainMediaFailed.removeAll()
+        blobHosts = nil
     }
 
     /// The `c2pa-badge` gate ``PostImageC2paBadge`` calls: the VIEWER's verdict
     /// over the blob's bytes, never the uploader's word (`ui/media.md` § C2PA
     /// provenance — the badge-correction rule). Two stages, as tui's
-    /// `Op::FetchC2pa`:
+    /// `Op::FetchC2pa`, both read from the post's own home through the shared
+    /// plane:
     ///
-    /// 1. ``APIClient/hasC2paAssertion(hash:)`` — a HEAD reading `x-c2pa`, which
-    ///    is only what the uploader claimed (the nest never inspects the bytes).
+    /// 1. `FfiPostBlobHosts.headHasC2pa` — a HEAD reading `x-c2pa`, which is
+    ///    only what the uploader claimed (the nest never inspects the bytes).
     ///    `false` ends the check with nothing fetched, which is the answer for
     ///    essentially every post.
-    /// 2. For the few that claim provenance, GET the blob and ask
+    /// 2. For the few that claim provenance, fetch the blob and ask
     ///    ``C2paBadgeVerdict/over(_:open:detect:)``, opening the bytes through the
-    ///    shared manager first. This is the extra full-image fetch `media.md`
-    ///    accepts for a shape-2 app, made solely for the badge — the image itself
-    ///    still renders from its URL (``postImage(_:)``), so the two-shape rule
-    ///    is untouched.
+    ///    shared manager first.
     ///
     /// Every failure — no `api` (pre-auth), a HEAD or GET that fails, a body the
     /// manager will not open, a manager rebuilt mid-flight — is "no badge", the
     /// same as a resolved `false`. Only a completed verdict is remembered, so a
     /// failure is retried by the next render rather than pinned.
-    public func hasC2pa(_ hash: String) async -> Bool {
+    public func hasC2pa(_ hash: String, home: FfiPostBlobHome?) async -> Bool {
         if let known = c2paVerdicts[hash] { return known }
-        guard let api, await api.hasC2paAssertion(hash: hash) else { return false }
+        guard let hosts = await postBlobHosts(),
+              (try? await hosts.headHasC2pa(home: home, hash: hash)) == true else { return false }
         // The manager the answer belongs to — an actor change rebuilds it, and the
         // previous actor's keys must not decide the next one's badge (the same
-        // guard `startSealedMediaFetch` keeps).
+        // guard `startPostMediaFetch` keeps).
         let generation = managerGeneration
-        guard let bytes = try? await api.get(url: api.blobUrl(hash: hash)),
+        guard let bytes = await fetchPostBlob(hash, home: home),
               generation == managerGeneration, let manager
         else { return false }
         // Off the main actor: the parse walks the whole image, and it runs once
@@ -1424,8 +1528,35 @@ public final class FeedVM {
     // timeline under the user's finger — feed.md § Implementation status
     // today). A refused reply (words under a restricted post) says so on
     // `error-message` (`runVerb`).
-    public func replyToPost(postId: String, body: String) async {
-        await runVerb { try await $0.reply(postId: postId, body: body) }
+    //
+    // The send is restricted-posts.md § Encryption at rest → *Ruling 5's build —
+    // the shape*, (c): a checked `feed-reply-public-confirm` sends through
+    // `replyPublicConfirmed`; otherwise `prepareSealedReply` decides — bytes go
+    // through the composer's own gated upload + `submitGatedPost` (an upload
+    // failure `abortGatedSubmit`s the staged submit and rethrows onto
+    // `error-message`), nothing to upload falls through to `reply` (public, or a
+    // stated refusal under a restricted post this reader cannot author under).
+    // The audience is the manager's answer, never decided here — mirrors tui
+    // `send_reply` and windows `FeedViewModel.SendReplyAsync`.
+    public func replyToPost(postId: String, body: String, publicConfirmed: Bool = false) async {
+        await runVerb { manager in
+            if publicConfirmed {
+                try await manager.replyPublicConfirmed(postId: postId, body: body)
+                return
+            }
+            guard let sealed = try await manager.prepareSealedReply(postId: postId, body: body) else {
+                try await manager.reply(postId: postId, body: body)
+                return
+            }
+            do {
+                guard let api = self.api else { throw APIError.ffiError(L.common.notConnected) }
+                let hash = try await api.uploadGatedPostBlob(sealed: sealed, sidecar: manager.gatedUploadSidecar())
+                try await manager.submitGatedPost(uploadedHash: hash)
+            } catch {
+                manager.abortGatedSubmit(message: DisplayError.message(error) ?? "")
+                throw error
+            }
+        }
     }
     /// Quote — a repost *with* commentary (`Reference::Quote`), composed via
     /// `FeedManager::quote`. `body` may be empty (§ Interaction bar's ratified

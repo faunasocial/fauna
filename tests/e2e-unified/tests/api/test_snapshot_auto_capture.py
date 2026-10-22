@@ -167,3 +167,55 @@ def test_a_changed_then_quiet_folder_snapshots_itself(nest_instance):
         "left alone by the same pass — otherwise the positive arm above only "
         "shows that the nest snapshots everything"
     )
+
+
+@pytest.mark.feature("snapshots")
+def test_a_conversation_with_new_messages_snapshots_itself(nest_instance):
+    """The scheduler's message-kind arm cuts a restore point for a
+    conversation, as its folder arm does for a folder
+    (``docs/goal/behavior/backup-restore.md`` § 5 → *Creators*, the automatic
+    creator: ``SnapshotScheduler::check_all_message_kinds``, run by the same
+    run-now pass).
+
+    Before the Backups page's kind entries existed this arm was the only
+    creator of a message-kind snapshot on a user's own nest, and it was pinned
+    only by in-process unit tests (``backup/scheduler.rs``). Conv is the kind
+    a tier_3 test can seed with a real message and nothing else: one
+    ``channel_send`` of a real MLS envelope puts the message in the channel's
+    segments and the sender on its roster.
+
+    Attribution is the discriminator, as in the folder test: this test never
+    calls ``create_message_kind``, so an unattributed conv row for the channel
+    after the pass can only be the scheduler's. A background tick of the
+    production scheduler capturing it first is the same arm, and passes for
+    the same reason.
+    """
+    import os
+
+    from tests.api import conv_api
+
+    member = create_actor_and_register(
+        nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
+    )
+    throwaway_kp = conv_api.mint_key_packages(os.urandom(32), 1)[0]
+    _, _, envelope = conv_api.mint_group_welcome_with_message(
+        bytes(member["signing_key"]), throwaway_kp, "a conversation the nest backs up"
+    )
+    channel_hex = secrets.token_bytes(32).hex()
+    seq = conv_api.channel_send(nest_instance["port"], member, channel_hex, envelope)
+    assert seq >= 1, f"the seeding send did not land: seq={seq!r}"
+
+    payload = _run_scheduler_pass(nest_instance)
+    assert "created_message_kinds" in payload, payload
+
+    with _ws(nest_instance, member) as ws:
+        rows = ws.call("fauna.filesync.snapshot.list", {"message_kind": "conv"})["rows"]
+    assert rows, (
+        "a conversation holding a new message must get a snapshot from the nest "
+        f"itself; the pass reported {payload!r} and the member's conv list is empty"
+    )
+    assert all(row["message_kind"] == "conv" for row in rows), rows
+    assert all(row["device_id"] is None for row in rows), (
+        "an automatic snapshot is unattributed — a device_id means a client path "
+        f"created the row instead of the scheduler: {rows!r}"
+    )

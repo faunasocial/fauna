@@ -61,13 +61,19 @@ _IN_HEADER = struct.Struct("<IIQQIIIHH")  # len opcode unique nodeid uid gid pid
 _OUT_HEADER = struct.Struct("<IiQ")       # len error unique
 
 
+# The module is imported (collected) on every platform; only linux runs it, and
+# Windows has no getuid — the skipif above keeps these zeros from ever being used.
+_UID = os.getuid() if hasattr(os, "getuid") else 0
+_GID = os.getgid() if hasattr(os, "getgid") else 0
+
+
 def _attr(ino: int, mode: int, size: int) -> bytes:
     # fuse_attr: ino size blocks atime mtime ctime (u64) · atimensec mtimensec
     # ctimensec mode nlink uid gid rdev blksize flags (u32).
     nlink = 2 if stat.S_ISDIR(mode) else 1
     return struct.pack(
         "<QQQQQQIIIIIIIIII", ino, size, 0, 0, 0, 0, 0, 0, 0, mode, nlink,
-        os.getuid(), os.getgid(), 0, 4096, 0,
+        _UID, _GID, 0, 4096, 0,
     )
 
 

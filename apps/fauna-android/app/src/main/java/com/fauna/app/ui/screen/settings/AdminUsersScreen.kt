@@ -118,7 +118,7 @@ fun AdminUsersScreen(
         onNextPage = vm::nextPage,
         onPrevPage = vm::prevPage,
         onSaveRegistration = vm::saveRegistration,
-        onAdmitUser = { actor, handle, tier, guardian -> vm.admitUser(actor, handle, tier, guardian, admitActorHint) },
+        onAdmitUser = { actor, handle, tier, guardian, band -> vm.admitUser(actor, handle, tier, guardian, band, admitActorHint) },
     )
 }
 
@@ -186,7 +186,7 @@ fun AdminUsersContent(
     // (actorHex, handle, tier, guardianActorId — null for "None"). Validation
     // (64-hex actor id) is a VM concern (mirrors tui/linux); this screen passes
     // through whatever was typed. No age band is sent from this section.
-    onAdmitUser: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?) -> Unit,
+    onAdmitUser: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?, ageBand: String?) -> Unit,
     // Shared `fauna_core::format::hex_full` display encoder (value-formatting.md
     // § Hex id display), injected FFI-free so the Robolectric harness stays off
     // the native path.
@@ -270,7 +270,7 @@ fun AdminUsersContent(
                 registrationMode, unknownRegistrationMode, maxFreeUsers, ageVerificationRequired, onSaveRegistration,
             )
             HorizontalDivider()
-            AdmitSection(tiers, allUsers, guardianOption, onAdmitUser)
+            AdmitSection(tiers, allUsers, guardianOption, bandSelect, onAdmitUser)
             HorizontalDivider()
             InviteSection(
                 inviteCodes, tiers, allUsers, mintedCode, onCreateCode, onDeleteCode, hexFull, guardianOption,
@@ -716,12 +716,14 @@ private fun AdmitSection(
     tiers: List<String>,
     allUsers: List<FfiAdminUser>,
     guardianOption: (FfiAdminUser) -> String,
-    onAdmit: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?) -> Unit,
+    bandSelect: AgeBandSelectSpec,
+    onAdmit: (actorHex: String, handle: String, tier: String, guardianActorId: ByteArray?, ageBand: String?) -> Unit,
 ) {
     var actorInput by remember { mutableStateOf("") }
     var handleInput by remember { mutableStateOf("") }
     var selectedTier by remember { mutableStateOf(tiers.firstOrNull() ?: "free") }
     var selectedGuardianActorId by remember { mutableStateOf<ByteArray?>(null) }
+    var selectedBand by remember { mutableStateOf(bandSelect.notSet) }
 
     Column(modifier = Modifier.testTag(Ids.ADMIN_USERS_ADMIT_SECTION)) {
         Text(
@@ -762,13 +764,30 @@ private fun AdmitSection(
             testId = Ids.ADMIN_USERS_ADMIT_GUARDIAN_SELECT,
             users = allUsers,
             selectedActorId = selectedGuardianActorId,
-            onSelect = { selectedGuardianActorId = it },
+            onSelect = {
+                selectedGuardianActorId = it
+                // A band presupposes a guardian: clearing one clears the other.
+                if (it == null) selectedBand = bandSelect.notSet
+            },
             modifier = Modifier.padding(top = 8.dp),
             guardianOption = guardianOption,
         )
+        AgeBandSelect(
+            testId = Ids.ADMIN_USERS_ADMIT_AGE_BAND_SELECT,
+            spec = bandSelect,
+            selected = selectedBand,
+            enabled = selectedGuardianActorId != null,
+            onSelect = { selectedBand = it },
+            modifier = Modifier.padding(top = 8.dp),
+        )
         val admitGate = faunaGate("fauna.admin.users.create")
         Button(
-            onClick = { onAdmit(actorInput, handleInput, selectedTier, selectedGuardianActorId) },
+            onClick = {
+                onAdmit(
+                    actorInput, handleInput, selectedTier, selectedGuardianActorId,
+                    bandSelect.wire(selectedBand),
+                )
+            },
             enabled = admitGate.enabled,
             modifier = Modifier
                 .padding(top = 8.dp)

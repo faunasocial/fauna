@@ -77,37 +77,6 @@ pub fn now_secs() -> u64 {
     real.saturating_add(clock_offset_secs()).max(0) as u64
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The offset moves the clock in both directions and zeroes back to the
-    /// real one. Serialized with the test below by running both assertions
-    /// here: the static is process-wide, so two tests racing it would flake.
-    #[test]
-    fn the_offset_moves_the_admission_clock_and_resets() {
-        let real = fauna_core::data::Timestamp::now_secs_or_zero() as u64;
-        assert!(
-            now_secs().abs_diff(real) <= 2,
-            "with no offset this is the wall clock"
-        );
-
-        set_clock_offset_secs(3600);
-        assert!(
-            now_secs() >= real + 3595,
-            "an hour of offset must move the admission clock an hour"
-        );
-
-        // A negative offset is legal and must not underflow the u64 — a test
-        // that moves the clock backwards past the epoch would otherwise wrap
-        // to a colossal `now` and admit everything for ever.
-        set_clock_offset_secs(-(real as i64) - 10_000);
-        assert_eq!(now_secs(), 0, "the clock floors at zero, never wraps");
-
-        set_clock_offset_secs(0);
-        assert!(
-            now_secs().abs_diff(real) <= 2,
-            "zero puts the real clock back"
-        );
-    }
-}
+// The offset's own test lives in `tests/ceremony_clock_moves_the_admission_clock.rs`,
+// alone in its binary: every `offline_share` seat test in this crate reads the
+// clock through `offline_share::now_fn`, so moving it here would skew them.

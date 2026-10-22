@@ -353,19 +353,26 @@ private fun ModerationQueueRow(row: QueueRow, onCorrect: () -> Unit, onAppeal: (
                 // the node's one string carrier. A local detection packs an
                 // empty `action`, which the bridge reads as not set — packing
                 // even then keeps a bare confidence from answering every name.
+                // A row another nest delivered also packs the deciding nest's
+                // domain as `issuer` (moderation.md § Legal takedown → *The
+                // author homed on another nest*), empty on this nest's own.
                 ContentLabelBadge(
                     label = row.category,
                     modifier = Modifier.semantics {
                         stateDescription = AutomationAttributePack.pack(
                             "confidence" to confidence,
                             "action" to actionText.orEmpty(),
+                            "issuer" to row.issuerNest.orEmpty(),
                         )
                     },
                 )
                 actionText?.let { text ->
                     Spacer(Modifier.width(8.dp))
+                    // The shared `issued_by` suffix names the issuer on the
+                    // action line — never derived here from `issuerNest`.
+                    val issuedBy = row.issuedBy?.let { localized(it) }
                     Text(
-                        text,
+                        if (issuedBy != null) "$text · $issuedBy" else text,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

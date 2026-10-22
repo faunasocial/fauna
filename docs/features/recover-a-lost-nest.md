@@ -41,10 +41,10 @@ Stamped 2026-10-01 at e129e78aa0.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |

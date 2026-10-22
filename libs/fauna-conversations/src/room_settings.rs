@@ -658,7 +658,9 @@ mod tests {
                 labelers: None,
                 awaiting_key: false,
                 moderation_unverified: false,
+                bridge_disconnected: false,
                 pending_invites: None,
+                search: None,
             }),
             participants,
         }

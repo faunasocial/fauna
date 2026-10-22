@@ -44,6 +44,7 @@ from actions.api_actor import ApiActor
 from common.auth import create_actor_and_register
 from helpers.app_surface import skip_unbuilt
 from helpers.e2e_session import login_as
+from helpers.waiting import wait_until
 from i18n.strings import S
 
 pytestmark = [pytest.mark.tier_3]
@@ -282,6 +283,47 @@ def test_provider_webhook_url_preview(app, payments_nest):
 
 
 @pytest.mark.feature("subscriptions-and-tiers")
+def test_provider_return_url_display(web_hosting_app, web_hosting_nest):
+    """Author journey: with a public web address the §4 form shows the exact
+    paywall return URL to paste into the provider's post-checkout redirect —
+    built on the creator's WEB-SITE origin (the subdomain the web-settings page
+    shows), not the nest URL the webhook display uses, and ending in the
+    selected provider's own placeholder (`{CHECKOUT_SESSION_ID}` for stripe,
+    `{REF}` otherwise). Compared as the full string per kind."""
+    app = web_hosting_app
+    _gate(app)
+    from conftest import WEB_HOSTING_DOMAIN
+
+    web = app.web_settings
+    web.navigate()
+    web.set_subdomain_enabled(True)
+    handle = web_hosting_nest["user"]["handle"]
+    origin = f"https://{handle}.{WEB_HOSTING_DOMAIN}"
+
+    subs = app.subscriptions
+    subs.navigate()
+    subs.open_tiers_tab()
+    for kind, placeholder in (("fake", "{REF}"), ("stripe", "{CHECKOUT_SESSION_ID}")):
+        subs.open_provider_form(kind)
+        # The origin hydrates asynchronously on form open — wait for the URL,
+        # never a fixed delay (convention 14).
+        expected = f"{origin}/api/v1/paywall/return/{kind}?ref={placeholder}"
+        shown = wait_until(
+            lambda: subs.provider_return_url() if subs.provider_return_url() == expected else None,
+            10,
+            diagnose=lambda: (
+                f"return URL for {kind!r} never became {expected!r}; "
+                f"got {subs.provider_return_url()!r}; error={app.error_text()!r}"
+            ),
+        )
+        assert shown == expected
+        assert subs.driver.is_visible("subscription-provider-form-return-url-copy-button"), (
+            "the return URL should be copyable"
+        )
+        subs.close_provider_form()
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
 def test_claim_redeem_via_ui(app, payments_nest):
     """Buyer journey: paste a post-payment claim code on the
     `subscription-settings` page → the queued entitlement renders exactly
@@ -422,4 +464,85 @@ def test_manual_claim_mint_and_list(app, payments_nest):
     subs.refresh()
     assert subs.claim_status(0) == S.subscriptions.claim_status_redeemed, (
         f"a redeemed claim should flip status, got {subs.claim_status(0)!r}"
+    )
+
+
+@pytest.mark.feature("subscriptions-and-tiers")
+def test_manual_claim_void(app, payments_nest):
+    """Author journey: void a minted code from its §5 row
+    (`subscription-claim-void-button`, `fauna.payments.claims.void` —
+    monetization.md § Pillar 3 → *Buyer↔actor binding (Q4)*). The first press
+    only arms the confirm in place — the same button now names the consequence
+    and the code still works; the second press voids. The row then reads
+    "voided" and carries no Void, and a buyer's redeem of the code is refused
+    (`fauna.payments.claim_voided`) — the proof the press reached the nest,
+    not just the paint. The redeem is raw WS-RPC because it is the refusal
+    under test, not a buyer journey (testing.md rule 8 citation:
+    test_claim_redeem_via_ui covers the buyer's UI redeem)."""
+    from clients.ws_rpc_admin_client import RpcCallError
+
+    _gate_new_ids(app)
+    if not (app.driver.is_tui() or app.driver.is_web() or app.driver.is_linux()):
+        skip_unbuilt(
+            app.driver,
+            surface="§5 claim Void verb (subscription-claim-void-button)",
+            detail="built on tui, web, linux; android landed unverified, macos, ios and windows follow",
+            tracked="monetization.md",
+        )
+    admin_sk = _as_signing_key(payments_nest["admin"]["signing_key"])
+    author = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+    buyer = create_actor_and_register(
+        payments_nest["port"], base_url=payments_nest["url"], admin_signing_key=admin_sk,
+    )
+
+    _login_as(app, payments_nest, author, handle="e2e-claim-void-author")
+    subs = app.subscriptions
+    tier = _unique("bronze")
+    subs.navigate()
+    subs.open_tiers_tab()
+    subs.create_tier(tier, rank=1, price_hint="$1/mo")
+    assert subs.wait_for_tier(tier), (
+        f"created tier {tier!r} should appear in §1; error={subs.error_text()!r}"
+    )
+    subs.mint_claim(tier)
+    assert subs.wait_for_claim_count(1), (
+        f"a minted claim should appear in §5; error={subs.error_text()!r}"
+    )
+    code = subs.claim_codes()[0]
+    assert code, f"§5 rendered an EMPTY claim code: {subs.claim_codes()!r}"
+    assert subs.claim_void_text(0) == S.subscriptions.void_claim, (
+        f"an unredeemed row should offer Void, got {subs.claim_void_text(0)!r}"
+    )
+
+    # ── First press arms in place: the consequence is named, nothing sent. ──
+    subs.arm_claim_void(0)
+    wait_until(
+        lambda: subs.claim_void_text(0) == S.subscriptions.void_claim_confirm_unredeemed,
+        10.0,
+        diagnose=lambda: f"the armed Void should name the consequence, "
+        f"got {subs.claim_void_text(0)!r}",
+    )
+    assert subs.claim_status(0) == S.subscriptions.claim_status_unredeemed, (
+        "the arming press must not void the code"
+    )
+
+    # ── Second press voids; the re-read paints the row voided, no Void. ─────
+    subs.confirm_claim_void(0)
+    assert subs.wait_for_claim_status(S.subscriptions.claim_status_voided, 0), (
+        f"the voided code should read voided, got {subs.claim_status(0)!r}; "
+        f"error={subs.error_text()!r}"
+    )
+    assert not subs.has_claim_void_button(0), "a voided row has nothing left to void"
+    assert subs.claim_codes()[0] == code
+
+    # ── The nest refuses the voided code to a buyer. ────────────────────────
+    buyer_actor = ApiActor(
+        payments_nest["url"], buyer["token"], buyer["actor_id_hex"], bytes(buyer["signing_key"]),
+    )
+    with pytest.raises(RpcCallError) as refused:
+        buyer_actor._ws_call("fauna.payments.claims.redeem", {"code": code})
+    assert refused.value.code == "fauna.payments.claim_voided", (
+        f"a voided code must be refused as voided, got {refused.value.code!r}"
     )

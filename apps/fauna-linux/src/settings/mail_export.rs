@@ -641,22 +641,42 @@ fn start_progress_tick(ctx: &Rc<ExportCtx>) {
     glib::timeout_add_local(
         std::time::Duration::from_millis(u64::from(super::mail_import::PROGRESS_TICK_MS)),
         move || {
-            let current = crate::actor_scope::poll_still_current(generation);
             let snap = ctx.machine.snapshot();
-            let keep_going = progress_tick_continues(current, snap.step);
-            // A retired tick paints nothing: the page and machine are the
-            // outgoing account's (`account-scoping.md` in-memory corollary).
-            if current {
+            let (flow, painted) = progress_tick_fire(
+                crate::actor_scope::poll_still_current,
+                generation,
+                &ctx.ticking,
+                snap.step,
+            );
+            if painted {
                 render(&ctx, &snap);
             }
-            if keep_going {
-                glib::ControlFlow::Continue
-            } else {
-                ctx.ticking.set(false);
-                glib::ControlFlow::Break
-            }
+            flow
         },
     );
+}
+
+/// One fire of the Progress tick, minus the GTK work: the closure above reads the
+/// snapshot, calls this, and paints only when it answers `painted`. The generation
+/// check is a parameter so a test drives it with a local counter
+/// (`actor_scope::poll_still_current_in`), not the process-global one.
+///
+/// A retired tick paints nothing: the page and machine are the outgoing
+/// account's (`account-scoping.md` in-memory corollary).
+fn progress_tick_fire(
+    still_current: impl FnOnce(u64) -> bool,
+    generation: u64,
+    ticking: &Cell<bool>,
+    step: ExportStep,
+) -> (glib::ControlFlow, bool) {
+    let current = still_current(generation);
+    let flow = if progress_tick_continues(current, step) {
+        glib::ControlFlow::Continue
+    } else {
+        ticking.set(false);
+        glib::ControlFlow::Break
+    };
+    (flow, current)
 }
 
 /// A failed export paints Dismiss as the Progress step's one control and none of
@@ -876,6 +896,49 @@ fn format_label(format: ExportFormat) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_progress_tick_arm_site_captures_the_generation_and_passes_the_real_check() {
+        super::super::mail_import::tests::assert_progress_tick_arm_site(
+            include_str!("mail_export.rs"),
+            "export",
+        );
+    }
+
+    /// Behavioural pin of the tick's canonical-drop retirement through the
+    /// lifted per-fire body, on a LOCAL generation counter: a live generation
+    /// keeps ticking and paints; after the drop a tick still on Progress (the
+    /// Paused/Errored case) breaks, clears `ticking` and paints nothing.
+    #[test]
+    fn the_progress_tick_fire_retires_on_the_canonical_drop() {
+        use crate::actor_scope::{bump_actor_generation_in, poll_still_current_in};
+        use std::sync::atomic::AtomicU64;
+        let counter = AtomicU64::new(0);
+        let armed = 0;
+        let ticking = Cell::new(true);
+        let (flow, painted) = progress_tick_fire(
+            |g| poll_still_current_in(&counter, g),
+            armed,
+            &ticking,
+            ExportStep::Progress,
+        );
+        assert_eq!(flow, glib::ControlFlow::Continue, "live generation");
+        assert!(
+            painted && ticking.get(),
+            "live generation paints, keeps ticking"
+        );
+
+        bump_actor_generation_in(&counter);
+        let (flow, painted) = progress_tick_fire(
+            |g| poll_still_current_in(&counter, g),
+            armed,
+            &ticking,
+            ExportStep::Progress,
+        );
+        assert_eq!(flow, glib::ControlFlow::Break, "dropped generation");
+        assert!(!painted, "a retired tick paints nothing");
+        assert!(!ticking.get(), "a retired tick clears ticking");
+    }
 
     use crate::testid::widget_names;
     use fauna_client_mail_settings::MailboxOption;

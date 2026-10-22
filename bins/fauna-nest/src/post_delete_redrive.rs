@@ -16,9 +16,12 @@
 //! This module is the chase that needs no retry:
 //!
 //! - **Bluesky** — an hourly pass over the write-through mappings whose post
-//!   is gone, re-attempting `deleteRecord` once each for the author the
-//!   post-delete witness names (the witness is the one row left that says
-//!   whose post it was; a gone post without one is left alone).
+//!   is gone or legally taken down (the delete leg's two triggers: the
+//!   author's delete, and `moderation_handlers::legal_takedown_core`, whose
+//!   withheld post stays on the box), re-attempting `deleteRecord` once each
+//!   for the author the `tombstone/post` witness names (both triggers write
+//!   it; for a gone post it is the one row left that says whose post it was,
+//!   and a post without one is left alone).
 //! - **Paired replica** — the same pass over `worker_replication` post markers
 //!   whose post is gone, while a worker is connected, and a replay at every
 //!   worker connect ([`spawn_replica_redrive`]) — the first moment a delete
@@ -43,7 +46,10 @@ const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 
 
 /// The most outward deletes one pass attempts per leg. A backlog larger than
 /// this (a long outage over a prolific author) drains over several passes
-/// instead of bursting at the remote end; the rows wait durably meanwhile.
+/// instead of bursting at the remote end; the rows wait durably meanwhile. The
+/// Bluesky leg rotates its walk ([`BlueskyRedriveCursor`]) so rows that can
+/// never succeed do not hold the window; the replica leg needs no rotation, as
+/// its rows fail only while no worker is connected, and then all fail alike.
 const MAX_REDRIVES_PER_PASS: usize = 256;
 
 /// What one pass over one leg did.
@@ -68,6 +74,17 @@ async fn post_is_gone(state: &AppState, post_id: &[u8; 32]) -> anyhow::Result<bo
     Ok(state.db.get_post_author(post_id).await?.is_none())
 }
 
+/// Whether a post's write-through cross-post is owed a delete: the post is
+/// gone, or it is withheld by a legal takedown — a takedown keeps the post on
+/// the box (tombstone, not delete), so "gone" alone would strand a takedown
+/// whose first attempt failed. A restore clears the flag, and the mapping then
+/// waits for the author's own delete.
+#[cfg(feature = "bluesky")]
+async fn crosspost_delete_owed(state: &AppState, post_id: &[u8; 32]) -> anyhow::Result<bool> {
+    Ok(post_is_gone(state, post_id).await?
+        || state.db.get_post_legal_takedown(post_id).await?.is_some())
+}
+
 /// A 32-byte id from its canonical lowercase hex spelling — anything else
 /// names no post `delete_post_core` could have written a row for.
 #[cfg(feature = "bluesky")]
@@ -76,20 +93,55 @@ fn decode_post_id(hex_id: &str) -> Option<[u8; 32]> {
     (hex::encode(id) == hex_id).then_some(id)
 }
 
-/// The Bluesky cross-posts stranded by a failed delete: `(author, post)` for
-/// each write-through mapping whose post is gone and whose post-delete witness
-/// names its author. At most [`MAX_REDRIVES_PER_PASS`].
+/// Where the Bluesky leg's next pass resumes: the post id (hex) of the last
+/// cross-post the previous pass re-attempted. A mapping whose delete can never
+/// succeed — its author unlinked Bluesky or revoked the agent, and the mapping
+/// is kept so a relink can still delete — stays a candidate for good; without
+/// the rotation the first [`MAX_REDRIVES_PER_PASS`] such rows would fill every
+/// pass and no other author's stranded cross-post would be reached again. In
+/// memory only: a restart begins the rotation afresh, which costs one pass's
+/// order, never a row.
 #[cfg(feature = "bluesky")]
-pub(crate) async fn bluesky_redrive_candidates(
+#[derive(Debug, Default)]
+pub(crate) struct BlueskyRedriveCursor(std::sync::Mutex<Option<String>>);
+
+#[cfg(feature = "bluesky")]
+impl BlueskyRedriveCursor {
+    fn get(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set(&self, after: String) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(after);
+    }
+}
+
+/// The Bluesky cross-posts stranded by a failed delete: `(author, post)` for
+/// each write-through mapping whose post is gone or taken down
+/// ([`crosspost_delete_owed`]) and whose `tombstone/post` witness names its
+/// author. At most [`MAX_REDRIVES_PER_PASS`], walking the mappings in
+/// post-id order from just after `after` (the [`BlueskyRedriveCursor`]) and
+/// wrapping round, so the cap is a per-pass fairness bound and every stranded
+/// cross-post is reached within a bounded number of passes.
+#[cfg(feature = "bluesky")]
+pub async fn bluesky_redrive_candidates(
     state: &AppState,
+    after: Option<&str>,
 ) -> anyhow::Result<Vec<([u8; 32], [u8; 32])>> {
     let ids = {
         let conn = state.db.conn().await;
         crate::bluesky::db_helpers::list_crosspost_post_ids(&conn)?
     };
+    // `ids` is sorted; resume just past `after`, then wrap to the start.
+    let split = after.map_or(0, |after| ids.partition_point(|id| id.as_str() <= after));
+    let (wrapped, resumed) = ids.split_at(split);
     let mut out = Vec::new();
-    for post_id in ids.iter().filter_map(|id| decode_post_id(id)) {
-        if !post_is_gone(state, &post_id).await? {
+    for post_id in resumed
+        .iter()
+        .chain(wrapped)
+        .filter_map(|id| decode_post_id(id))
+    {
+        if !crosspost_delete_owed(state, &post_id).await? {
             continue;
         }
         let Some(author) = state.db.post_delete_witness_author(&post_id).await? else {
@@ -104,15 +156,21 @@ pub(crate) async fn bluesky_redrive_candidates(
 }
 
 /// One re-drive pass over the Bluesky leg: one `deleteRecord` attempt per
-/// stranded cross-post ([`bluesky_redrive_candidates`]). A failure leaves the
-/// mapping for the next pass (`write_through_delete_inner` clears it only on
+/// stranded cross-post ([`bluesky_redrive_candidates`]), resuming after
+/// `cursor` and leaving it on the pass's last candidate. A failure leaves the
+/// mapping for a later pass (`write_through_delete_inner` clears it only on
 /// success).
 #[cfg(feature = "bluesky")]
 pub(crate) async fn redrive_bluesky_deletes(
     state: &Arc<AppState>,
+    cursor: &BlueskyRedriveCursor,
 ) -> anyhow::Result<RedriveReport> {
     let mut report = RedriveReport::default();
-    for (author, post_id) in bluesky_redrive_candidates(state).await? {
+    let candidates = bluesky_redrive_candidates(state, cursor.get().as_deref()).await?;
+    if let Some((_, last)) = candidates.last() {
+        cursor.set(hex::encode(last));
+    }
+    for (author, post_id) in candidates {
         report.attempted += 1;
         match crate::bluesky::write_through_delete_inner(state, author, post_id).await {
             Ok(_) => report.cleared += 1,
@@ -188,14 +246,18 @@ pub fn spawn_replica_redrive(state: Arc<AppState>, handle: Arc<WorkerHandle>) {
 /// chase as soon as it is back.
 pub fn spawn_post_delete_redrive_sweeper(state: Arc<AppState>) {
     let scope = state.clone();
+    #[cfg(feature = "bluesky")]
+    let cursor = Arc::new(BlueskyRedriveCursor::default());
     scope.scope_handle(crate::sweeper::spawn_periodic_sweeper(
         SWEEP_INTERVAL,
         false,
         move || {
             let state = state.clone();
+            #[cfg(feature = "bluesky")]
+            let cursor = Arc::clone(&cursor);
             async move {
                 #[cfg(feature = "bluesky")]
-                log_report("Bluesky", redrive_bluesky_deletes(&state).await);
+                log_report("Bluesky", redrive_bluesky_deletes(&state, &cursor).await);
                 if let Some(handle) = state.bridge.worker.get_handle().await {
                     log_report("replica", redrive_replica_deletes(&state, &handle).await);
                 }
@@ -298,14 +360,16 @@ mod tests {
         live_post(&state, AUTHOR, live).await;
 
         assert_eq!(
-            bluesky_redrive_candidates(&state).await.unwrap(),
+            bluesky_redrive_candidates(&state, None).await.unwrap(),
             vec![(AUTHOR, stranded)]
         );
 
         // The pass re-attempts it. Bluesky is unconfigured in this harness, so
         // the attempt fails at the agent step exactly as the outage did — and
         // the mapping stays for the next pass.
-        let report = redrive_bluesky_deletes(&state).await.unwrap();
+        let report = redrive_bluesky_deletes(&state, &BlueskyRedriveCursor::default())
+            .await
+            .unwrap();
         assert_eq!(
             report,
             RedriveReport {
@@ -319,6 +383,119 @@ mod tests {
                 .unwrap()
                 .is_some(),
             "a failed re-drive keeps the mapping for the next pass"
+        );
+    }
+
+    /// A legal takedown withholds a post without deleting it (tombstone, not
+    /// delete), so the post is never "gone" — yet its cross-post must still be
+    /// chased when the takedown's own attempt failed (`takedown-and-block.md`
+    /// § Legal takedown → *The linked Bluesky account's cross-post is retracted
+    /// too*). A restore lifts the takedown and with it the chase: a mapping
+    /// still present then waits for an author delete, as any live post's does.
+    #[cfg(feature = "bluesky")]
+    #[tokio::test]
+    async fn a_taken_down_crosspost_is_redriven_until_a_restore_returns_it_to_the_author() {
+        let state = test_state().await;
+        let taken_down = [0x25; 32];
+        live_post(&state, AUTHOR, taken_down).await;
+        {
+            let conn = state.db.conn().await;
+            map_crosspost(&conn, taken_down, "e");
+            conn.execute(
+                "INSERT OR IGNORE INTO content_meta (content_id) VALUES (?1)",
+                rusqlite::params![taken_down.as_slice()],
+            )
+            .unwrap();
+        }
+        let takedown = |reference| {
+            let state = &state;
+            async move {
+                state
+                    .db
+                    .post_legal_takedown_txn(
+                        &taken_down,
+                        &hex::encode(taken_down),
+                        reference,
+                        &AUTHOR,
+                        [0x2A; 32].as_slice(),
+                        "admin=… reference=…",
+                        1_720_000_000_000_000,
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+
+        assert!(
+            bluesky_redrive_candidates(&state, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a live cross-posted post is not stranded"
+        );
+
+        takedown(Some("EU-DSA-2026/1597")).await;
+        assert_eq!(
+            bluesky_redrive_candidates(&state, None).await.unwrap(),
+            vec![(AUTHOR, taken_down)],
+            "the takedown's witness names the author and the post is withheld"
+        );
+
+        takedown(None).await;
+        assert!(
+            bluesky_redrive_candidates(&state, None)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a restored post's mapping waits for its author's delete"
+        );
+    }
+
+    /// Finding: mappings whose delete can never succeed (here every one
+    /// fails at the agent step) must not hold the per-pass cap for good. With
+    /// one more stranded cross-post than a pass may attempt, the next pass
+    /// reaches the one the first pass could not.
+    #[cfg(feature = "bluesky")]
+    #[tokio::test]
+    async fn permanently_failing_crossposts_do_not_starve_the_rest() {
+        let state = test_state().await;
+        let ids: Vec<[u8; 32]> = (0..=MAX_REDRIVES_PER_PASS)
+            .map(|i| {
+                let mut id = [0x50; 32];
+                id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                id
+            })
+            .collect();
+        {
+            let conn = state.db.conn().await;
+            for (i, id) in ids.iter().enumerate() {
+                map_crosspost(&conn, *id, &format!("r{i}"));
+            }
+        }
+        for id in &ids {
+            witness_delete(&state, AUTHOR, *id).await;
+        }
+
+        let cursor = BlueskyRedriveCursor::default();
+        let mut reached = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let pass = bluesky_redrive_candidates(&state, cursor.get().as_deref())
+                .await
+                .unwrap();
+            reached.extend(pass.into_iter().map(|(_, id)| id));
+            let report = redrive_bluesky_deletes(&state, &cursor).await.unwrap();
+            assert_eq!(
+                report,
+                RedriveReport {
+                    attempted: MAX_REDRIVES_PER_PASS,
+                    cleared: 0
+                }
+            );
+        }
+        assert_eq!(
+            reached.len(),
+            ids.len(),
+            "two passes must reach every stranded cross-post"
         );
     }
 

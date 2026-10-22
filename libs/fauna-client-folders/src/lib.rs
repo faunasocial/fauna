@@ -85,6 +85,7 @@ pub mod set_lifecycle;
 pub use set_lifecycle::{
     ReseedTargetPrep, SetCustodyCut, SetLifecycleError, create_set, create_set_with_owner_root,
     delete_set, prepare_reseed_targets, prepare_reseed_targets_logged, record_nonce,
+    remint_owned_sets_once_listed,
 };
 // The real MLS-engine-backed `FolderGroupCrypto` adapter — gated behind the
 // optional `mls` feature so the base crate stays fauna-mls-free (wasm-light). It
@@ -132,8 +133,9 @@ pub use engine_keys::{
 pub mod key_reader;
 pub use key_reader::{
     ADOPTION_MARKERS_META_KEY, CustodyNotices, FolderKeyReader, FolderKeyStore,
-    MemoryFolderKeyStore, UnreadableFolderKeys, decode_adoption_markers, decode_refetch_request,
-    encode_adoption_markers, encode_refetch_request, refetch_request_meta_key,
+    MemoryFolderKeyStore, UnreadableFolderKeys, custody_not_ready, decode_adoption_markers,
+    decode_refetch_request, encode_adoption_markers, encode_refetch_request,
+    refetch_request_meta_key,
 };
 /// The custody seam's crossing of web's account port.
 pub mod port;
@@ -163,14 +165,11 @@ pub use custody_ingest::{
     FolderCustodyObserver, NestFolderCustodySink, NestFolderKeyResolver, record_signing,
 };
 // Leave a shared set: nest roster self-drop + local MLS-group forget. `mls`-gated
-// (needs `ConversationsSession` to forget the group locally) + native-gated (like
-// `launch_resume` above): `ConversationsSession::folder_home_url`/`leave_folder`
-// are themselves `not(target_arch = "wasm32")` in `fauna-conversations`, so this
-// module cannot build on wasm while `mls` is on regardless of its own generic
-// `RpcRequester` bound — no caller reaches it from web today (only linux/tui).
-#[cfg(all(feature = "mls", not(target_arch = "wasm32")))]
+// (drives `FaunaMlsBackend`'s home read and forget); builds on wasm too — web's
+// `foldersLeave` runs this same sequence (priority #2).
+#[cfg(feature = "mls")]
 pub mod leave;
-#[cfg(all(feature = "mls", not(target_arch = "wasm32")))]
+#[cfg(feature = "mls")]
 pub use leave::leave_share;
 // Assemble the owner-side shared-folder author (thin `fauna.folders.*` client +
 // identity + the conversations rail's shared `MlsEngine` as the
@@ -575,7 +574,7 @@ impl<R: RpcRequester> FoldersClient<R> {
     /// `fauna.folders.members.list_actors_remote` — the same actor roster for a
     /// **cross-nest** member's set: the caller's own nest relays the read to the
     /// set's home nest (`fauna.federation.folder.actors.fetch`), addressed by
-    /// channel, never by name (`federation.md` § Cross-nest…, *The cross-nest
+    /// channel, never by name (`federation-shared-folders.md` § Cross-nest…, *The cross-nest
     /// writer roster read*). Ids-only — every `handle` is empty — and stamped
     /// with the home nest's `caller_access`. A distinct kind, so an old nest
     /// fails `unknown_kind` rather than answering a same-named own set.

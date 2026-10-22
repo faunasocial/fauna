@@ -75,6 +75,10 @@ public struct ConnectedAppsView: View {
                 // 2. Connect an app.
                 connectSection
 
+                // The account's external-apps switch, above the roster at every
+                // integration level (`connected-apps.md` § Layout & flow, region 3).
+                externalAppsSwitch
+
                 // 3. The roster. The three-state list: nothing until THIS visit's
                 // roster read has returned, then either rows or the empty state
                 // (`ui/README.md` § List pages).
@@ -116,6 +120,31 @@ public struct ConnectedAppsView: View {
 
     private func sectionHeading(_ title: String) -> some View {
         Text(title).font(.headline)
+    }
+
+    // MARK: - External-apps switch
+
+    /// ON is the zero value of `externalAppsOff`, so the switch reads ON before
+    /// the first read. A dispatch-on-change toggle: flipping it IS the nest write.
+    private var externalAppsSwitch: some View {
+        let isOn = !(vm.snapshot?.externalAppsOff ?? false)
+        return VStack(alignment: .leading, spacing: 4) {
+            Toggle(L.atprotoSettings.externalAppsToggle, isOn: Binding(
+                get: { !(vm.snapshot?.externalAppsOff ?? false) },
+                set: { newVal in Task { await vm.setExternalAppsEnabled(newVal) } }
+            ))
+            .accessibilityIdentifier(Ids.atprotoExternalAppsEnable)
+            .automationActivate(
+                Ids.atprotoExternalAppsEnable,
+                value: { isOn ? "on" : "off" }
+            ) {
+                Task { await vm.setExternalAppsEnabled(!isOn) }
+            }
+            .faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
+            Text(L.atprotoSettings.externalAppsHint)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     // MARK: - Connect an app
@@ -180,9 +209,8 @@ public struct ConnectedAppsView: View {
         } ?? L.atprotoSettings.consentClientUnnamed(clientId: request.clientId)
         let asks = request.scopeDescriptions.map { "  • \($0)" }.joined(separator: "\n")
         let setLines = consentSetLines(request.sets)
-        let cardText = "\(L.atprotoSettings.consentHeading)\n\(who)\n"
-            + "\(L.atprotoSettings.consentScopesHeading)\n\(asks)"
-            + setLines.map { "\n\($0)" }.joined()
+        let endsLine = request.ends.map(renderLocalizedText)
+        let cardText = consentCardText(request)
         let codeText = L.atprotoSettings.consentCode(code: request.code)
         return VStack(alignment: .leading, spacing: 6) {
             Text(L.atprotoSettings.consentHeading).font(.headline)
@@ -197,6 +225,13 @@ public struct ConnectedAppsView: View {
             // (nothing paints) for the common set-less request.
             ForEach(Array(setLines.enumerated()), id: \.offset) { _, line in
                 Text(line).font(.caption2).foregroundStyle(.secondary)
+            }
+
+            // What approving ends: the key-replacement line, LAST in the card
+            // (the shared machine sets `ends` only when the attested key
+            // differs from the roster's for this client).
+            if let endsLine {
+                Text(endsLine).font(.caption)
             }
 
             Text(codeText)
@@ -491,7 +526,21 @@ public struct ConnectedAppsView: View {
 /// stray blank line. `title`/`details`/`memberDescriptions` arrive already
 /// control-stripped and worded by the shared machine's one composition pass —
 /// never re-word or re-fence here.
-private func consentSetLines(_ sets: [ConsentSetRow]) -> [String] {
+/// The request card's text in tui's shape: heading, who, scopes heading, scope
+/// lines, permission-set lines, then the key-replacement `ends` line last (when
+/// the snapshot row carries one).
+func consentCardText(_ request: ConsentCardRow) -> String {
+    let who = request.clientName.map {
+        L.atprotoSettings.consentClient(name: $0, clientId: request.clientId)
+    } ?? L.atprotoSettings.consentClientUnnamed(clientId: request.clientId)
+    let asks = request.scopeDescriptions.map { "  • \($0)" }.joined(separator: "\n")
+    let lines = consentSetLines(request.sets) + (request.ends.map { [renderLocalizedText($0)] } ?? [])
+    return "\(L.atprotoSettings.consentHeading)\n\(who)\n"
+        + "\(L.atprotoSettings.consentScopesHeading)\n\(asks)"
+        + lines.map { "\n\($0)" }.joined()
+}
+
+func consentSetLines(_ sets: [ConsentSetRow]) -> [String] {
     var lines: [String] = []
     for set in sets {
         lines.append(set.title.map {

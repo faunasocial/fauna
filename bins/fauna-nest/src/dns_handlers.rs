@@ -88,11 +88,15 @@ fn dmarc_body_for(domain: &MailDomain, primary_domain: &str, base: &DmarcPublish
 
 /// Build the wire-shaped record matrix for one domain, sourcing every expected
 /// value from the shared builders + the stored DKIM selector values.
+/// `dav_direct_listener` is the boot-read `AppState.dav_direct_listener` — only
+/// a declared direct listener withholds the DAV SRV rows; an undeclared one keeps
+/// them (`caldav-server.md` § Network exposure — SRV autodiscovery).
 fn build_domain_view(
     domain: &MailDomain,
     primary_domain: &str,
     dkim_selectors: Vec<DkimSelectorDns>,
     dmarc_base: &DmarcPublishPolicy,
+    dav_direct_listener: Option<bool>,
 ) -> DomainDns {
     let primary_mx_host = format!("mail.{primary_domain}");
     let dmarc_body = dmarc_body_for(domain, primary_domain, dmarc_base);
@@ -112,6 +116,7 @@ fn build_domain_view(
         dmarc_body: &dmarc_body,
         mta_sts_policy_body: &mta_sts_policy_body,
         dkim_selectors: &dkim_selectors,
+        dav_direct_listener: dav_direct_listener == Some(true),
     };
 
     let records = build_domain_dns_records(&input)
@@ -209,7 +214,13 @@ async fn assemble_domain_views(
                 public_dns_value: s.public_dns_value,
             })
             .collect();
-        let mut view = build_domain_view(&d, &primary.domain_name, dkim, &dmarc_base);
+        let mut view = build_domain_view(
+            &d,
+            &primary.domain_name,
+            dkim,
+            &dmarc_base,
+            state.dav_direct_listener,
+        );
         // The nest-host A/AAAA/PTR rows are deployment-host config (not per-domain
         // mail records), so they attach to the *primary* domain's matrix — and
         // only when the host address has been persisted (the
@@ -607,6 +618,24 @@ fn set_host_address_handler() -> RpcHandler {
     })
 }
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the DNS page's reads (the host address is sovereign and absent) — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 3] = [
+        ("fauna.dns.list_records", list_records_handler()),
+        ("fauna.dns.verify_records", verify_records_handler()),
+        ("fauna.dns.probe_txt_visible", probe_txt_visible_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 /// Register the `fauna.dns.*` kinds. Called from `lib.rs::build_app`.
 pub fn register_dns_handlers(b: &mut RpcRouterBuilder) {
     b.add(
@@ -661,6 +690,51 @@ mod tests {
 
     async fn fixture_state() -> Arc<AppState> {
         crate::test_support::fixture_state()
+    }
+
+    /// The two DAV SRV rows follow the boot-read listener shape: a direct
+    /// listener withholds them, a routed or undeclared one keeps them on
+    /// `mail.<primary>:443` (`caldav-server.md` § Network exposure — SRV
+    /// autodiscovery).
+    #[tokio::test]
+    async fn dav_srv_rows_follow_the_dav_listener_shape() {
+        for (direct, expect_srv) in [(Some(true), false), (Some(false), true), (None, true)] {
+            let mut state = fixture_state().await;
+            Arc::get_mut(&mut state).unwrap().dav_direct_listener = direct;
+            for (domain, primary) in [("fauna.example", true), ("second.example", false)] {
+                state
+                    .db
+                    .add_mail_domain(domain, primary, "enforce", "expand_primary", None, None)
+                    .await
+                    .unwrap();
+            }
+            let views = assemble_domain_views(&state, None).await.unwrap();
+            assert_eq!(views.len(), 2);
+            for v in &views {
+                let srv: Vec<_> = v
+                    .records
+                    .iter()
+                    .filter(|r| r.record_type == "SRV")
+                    .collect();
+                if expect_srv {
+                    let names: Vec<_> = srv.iter().map(|r| r.name.clone()).collect();
+                    assert_eq!(
+                        names,
+                        [
+                            format!("_caldavs._tcp.{}", v.domain),
+                            format!("_carddavs._tcp.{}", v.domain)
+                        ],
+                        "{direct:?}"
+                    );
+                    assert!(
+                        srv.iter()
+                            .all(|r| r.expected == "0 1 443 mail.fauna.example.")
+                    );
+                } else {
+                    assert!(srv.is_empty(), "{direct:?}: {srv:?}");
+                }
+            }
+        }
     }
 
     /// The `_dmarc` row is assembled from the deployment-wide catalog: the

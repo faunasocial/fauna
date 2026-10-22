@@ -191,12 +191,13 @@ class FleetDevice(_WsRpcClientBase):
             sslopt=self._ssl_opt(),
         )
 
-    def state_rows(self) -> list[dict]:
-        """One page of the owner's account-state feed, as the custodian nest
-        serves it — the rows verbatim, the sealed ``entry`` inline. Raises
+    def state_rows(self, scope: str = STATE_SCOPE) -> list[dict]:
+        """One page of the owner's account-state feed for ``scope`` (``state``,
+        or the fleet-only ``state-fleet``), as the custodian nest serves it —
+        the rows verbatim, the sealed ``entry`` inline. Raises
         ``RpcCallError`` on a refusal."""
         reply = self.call("fauna.sync.changes.list", {
-            "item_class": STATE_FEED, "scope": STATE_SCOPE, "frontier": {}})
+            "item_class": STATE_FEED, "scope": scope, "frontier": {}})
         return reply["changes"]
 
 

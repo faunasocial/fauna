@@ -56,6 +56,7 @@
 //! **merges** them with the server queue; it runs no classifier and reads no
 //! content.
 
+use fauna_core::localized::LocalizedText;
 use fauna_protocol::moderation::ObligationAction;
 
 /// The most-recent local detections retained for the moderation UI — matches web's
@@ -224,6 +225,10 @@ impl LocalDetectionStore {
     }
 }
 
+/// The i18n key of a delivered row's issuer suffix — `{nest}` is the issuing
+/// nest's handle domain ([`QueueRow::issued_by`]).
+pub const ISSUED_BY_KEY: &str = "moderation.queue.issued_by";
+
 /// Which source a [`QueueRow`] came from — the server obligation queue or a local
 /// post-decrypt detection. The UI branches on it only for the action column (server
 /// rows carry an enforcement `action`; local rows are blank).
@@ -253,10 +258,25 @@ pub struct QueueRow {
     pub action: Option<u8>,
     pub timestamp: i64,
     pub source: QueueRowSource,
+    /// The handle domain of the nest whose admin decided, on a server row
+    /// another nest delivered (`moderation.md` § Legal takedown → *The author
+    /// homed on another nest*); **`None`** for this nest's own decision and for
+    /// every local detection.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub issuer_nest: Option<String>,
+    /// The row text's suffix naming that nest (`moderation.queue.issued_by`,
+    /// `{nest}`), so every app says *where* the decision was made through the
+    /// one key; `Some` exactly when [`Self::issuer_nest`] is.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub issued_by: Option<LocalizedText>,
 }
 
 impl QueueRow {
     fn from_server(a: &ObligationAction) -> Self {
+        // An empty domain names no nest — the row reads as this nest's own.
+        let issuer_nest = a.issuer_nest.clone().filter(|nest| !nest.is_empty());
         Self {
             content_id: a.content_id.clone(),
             content_type: a.content_type.clone(),
@@ -265,6 +285,8 @@ impl QueueRow {
             action: Some(a.action),
             timestamp: a.timestamp,
             source: QueueRowSource::Server,
+            issuer_nest: issuer_nest.clone(),
+            issued_by: issuer_nest.map(|nest| LocalizedText::key_arg(ISSUED_BY_KEY, "nest", nest)),
         }
     }
 
@@ -277,6 +299,8 @@ impl QueueRow {
             action: None,
             timestamp: d.timestamp,
             source: QueueRowSource::Local,
+            issuer_nest: None,
+            issued_by: None,
         }
     }
 }
@@ -332,8 +356,51 @@ mod tests {
             confidence_per_mille: 900,
             action,
             timestamp: ts,
-            extra: Default::default(),
+            ..Default::default()
         }
+    }
+
+    // ── QueueRow issuer (the author homed on another nest) ──────────────────
+
+    #[test]
+    fn a_delivered_row_names_its_issuer_and_a_local_one_does_not() {
+        let delivered = ObligationAction {
+            issuer_nest: Some("issuer.example".into()),
+            ..action("p1", 7, 2)
+        };
+        let own = action("p2", 7, 1);
+        let rows = merge_queue(&[delivered, own], &[]);
+        assert_eq!(rows[0].issuer_nest.as_deref(), Some("issuer.example"));
+        assert_eq!(
+            rows[0].issued_by,
+            Some(LocalizedText::key_arg(
+                ISSUED_BY_KEY,
+                "nest",
+                "issuer.example"
+            ))
+        );
+        assert_eq!(rows[1].issuer_nest, None);
+        assert_eq!(rows[1].issued_by, None);
+    }
+
+    #[test]
+    fn an_empty_issuer_domain_names_no_nest() {
+        let blank = ObligationAction {
+            issuer_nest: Some(String::new()),
+            ..action("p1", 7, 1)
+        };
+        let rows = merge_queue(&[blank], &[]);
+        assert_eq!(rows[0].issuer_nest, None);
+        assert_eq!(rows[0].issued_by, None);
+    }
+
+    #[test]
+    fn a_local_detection_carries_no_issuer() {
+        let mut s = LocalDetectionStore::new();
+        s.observe("c1", "message", 1, &[label("spam", 800)]);
+        let rows = merge_queue(&[], s.detections());
+        assert_eq!(rows[0].issuer_nest, None);
+        assert_eq!(rows[0].issued_by, None);
     }
 
     // ── LocalDetectionStore::observe ────────────────────────────────────────

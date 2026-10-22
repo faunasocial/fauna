@@ -604,6 +604,15 @@ fn rule_the_guardian_family(
     Ok(moved)
 }
 
+/// Which rows [`rule_the_paying_readers_entitlements`] moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReaderScope {
+    /// The local ceremony: every row naming the reader.
+    Local,
+    /// A peer's learned succession: only rows naming a home nest.
+    RemoteHomed,
+}
+
 /// Re-point the **paying reader's** side of the entitlement plane at the
 /// ceremony.
 ///
@@ -641,12 +650,75 @@ fn rule_the_guardian_family(
 /// the author wraps classically — and the successor re-publishes its own ek on
 /// its next subscribe, which is exactly what that call's already-subscribed arm
 /// exists to do.
+///
+/// **Two doors, one leg ([`ReaderScope`]).** The local ceremony moves every
+/// row naming the reader. A peer that learns a *remote* subscriber's
+/// succession by push (`federated-follow.md` § Decision 5 → *Succession*)
+/// runs the same leg over the rows **with a home** only — a local reader's
+/// succession never arrives by push — and, unlike the ceremony, may meet the
+/// successor already holding a row at the same key (it followed again from its
+/// home before this nest learned of the succession). The successor's own row
+/// stands, carrying the ek it published itself; the predecessor's row goes,
+/// after lifting onto the survivor the longer paid window and a provider's
+/// payment vouch, which belong to the person rather than to the key.
 fn rule_the_paying_readers_entitlements(
     tx: &rusqlite::Transaction<'_>,
     old: &[u8],
     new: &[u8],
+    scope: ReaderScope,
 ) -> Result<usize> {
     let mut moved = 0usize;
+    let homed = match scope {
+        ReaderScope::Local => "",
+        ReaderScope::RemoteHomed => " AND home_nest_id IS NOT NULL",
+    };
+
+    // The peer door's collisions. The local successor is a fresh account and
+    // holds nothing to collide with, so the ceremony skips this.
+    let mut collapsed = 0usize;
+    if scope == ReaderScope::RemoteHomed {
+        tx.execute(
+            "UPDATE subscribers AS s
+                SET valid_until = CASE WHEN s.valid_until IS NULL OR p.valid_until IS NULL
+                                       THEN NULL ELSE MAX(s.valid_until, p.valid_until) END
+               FROM subscribers AS p
+              WHERE s.subscriber_id = ?2 AND p.subscriber_id = ?1
+                AND p.home_nest_id IS NOT NULL
+                AND p.author_id = s.author_id AND p.tier_name = s.tier_name",
+            rusqlite::params![old, new],
+        )
+        .context("lift the predecessor's paid window onto the successor's own row")?;
+        collapsed += tx
+            .execute(
+                "DELETE FROM subscribers
+                  WHERE subscriber_id = ?1 AND home_nest_id IS NOT NULL
+                    AND (author_id, tier_name) IN
+                        (SELECT author_id, tier_name FROM subscribers WHERE subscriber_id = ?2)",
+                rusqlite::params![old, new],
+            )
+            .context("drop the predecessor's roster row the successor already holds")?;
+        tx.execute(
+            "UPDATE subscribe_requests AS s
+                SET payment_entitled = MAX(s.payment_entitled, p.payment_entitled)
+               FROM subscribe_requests AS p
+              WHERE s.subscriber_id = ?2 AND p.subscriber_id = ?1
+                AND p.home_nest_id IS NOT NULL
+                AND p.author_id = s.author_id AND p.tier_name = s.tier_name
+                AND p.kind = s.kind",
+            rusqlite::params![old, new],
+        )
+        .context("lift the predecessor's payment vouch onto the successor's own request")?;
+        collapsed += tx
+            .execute(
+                "DELETE FROM subscribe_requests
+                  WHERE subscriber_id = ?1 AND home_nest_id IS NOT NULL
+                    AND (author_id, tier_name, kind) IN
+                        (SELECT author_id, tier_name, kind FROM subscribe_requests
+                          WHERE subscriber_id = ?2)",
+                rusqlite::params![old, new],
+            )
+            .context("drop the predecessor's request the successor already holds")?;
+    }
 
     // (a) The entitlement itself, with the stale post-quantum key dropped as it
     //     moves. The ek clear is not a tidy-up: it is what stops the author
@@ -654,8 +726,10 @@ fn rule_the_paying_readers_entitlements(
     //     two different identities.
     moved += tx
         .execute(
-            "UPDATE subscribers SET subscriber_id = ?2, mlkem_encaps_key = NULL \
-              WHERE subscriber_id = ?1",
+            &format!(
+                "UPDATE subscribers SET subscriber_id = ?2, mlkem_encaps_key = NULL \
+                  WHERE subscriber_id = ?1{homed}"
+            ),
             rusqlite::params![old, new],
         )
         .context("re-point the reader's paid subscriptions to the successor")?;
@@ -666,14 +740,22 @@ fn rule_the_paying_readers_entitlements(
     //     ceremony by being copied forward — hence the same clear.
     moved += tx
         .execute(
-            "UPDATE subscribe_requests SET subscriber_id = ?2, mlkem_encaps_key = NULL \
-              WHERE subscriber_id = ?1",
+            &format!(
+                "UPDATE subscribe_requests SET subscriber_id = ?2, mlkem_encaps_key = NULL \
+                  WHERE subscriber_id = ?1{homed}"
+            ),
             rusqlite::params![old, new],
         )
         .context("re-point the reader's pending subscribe requests to the successor")?;
 
     // (c) The redeemer pointer a refund resolves through — see this function's
-    //     doc comment.
+    //     doc comment. On the peer door it follows only an identity that held a
+    //     homed entitlement here: the coupling is to the roster row, and a
+    //     claim redeemed by a reader this door does not move stays with that
+    //     reader's rows.
+    if scope == ReaderScope::RemoteHomed && moved + collapsed == 0 {
+        return Ok(0);
+    }
     moved += tx
         .execute(
             "UPDATE payment_claim_codes SET redeemed_by = ?2 WHERE redeemed_by = ?1",
@@ -1277,6 +1359,13 @@ pub struct PeerSuccessionApplied {
     pub member_grants: usize,
     /// `contacts` rows whose `peer_id` now names the successor.
     pub contact_edges: usize,
+    /// `remote_follows` rows whose `author_id` now names the successor — a
+    /// local reader's follows of the superseded foreign author.
+    pub remote_follows: usize,
+    /// A remote subscriber's roster rows, pending requests and redeemed claims
+    /// now naming the successor (`rule_the_paying_readers_entitlements`'s
+    /// count, homed rows only).
+    pub reader_entitlements: usize,
 }
 
 /// What [`CacheDb::record_succession`] did, for the handler's log line and the
@@ -1737,7 +1826,8 @@ impl CacheDb {
         //     tables of the `subscription_tiers` coupled family and moved with
         //     the family executor above; these are the columns naming the reader
         //     who paid, which answer that reader's own ceremony.
-        corpus_rows_repointed += rule_the_paying_readers_entitlements(&tx, &old, &new)?;
+        corpus_rows_repointed +=
+            rule_the_paying_readers_entitlements(&tx, &old, &new, ReaderScope::Local)?;
 
         // 5f-quinquies-bis. The per-caller labeler publication quota.
         //     `labelers`' registry column
@@ -1962,7 +2052,7 @@ impl CacheDb {
         // the access this propagation exists to remove.
 
         // **A succession re-points the identity and never the binding**. The collapse of a collision IS a
-        // rebind of `home_nest_id`, and `federation.md` § Cross-nest shared
+        // rebind of `home_nest_id`, and `federation-shared-folders.md` § Cross-nest shared
         // folders + channel append enumerates every power that may perform one:
         // the claimant, or — while the grant is unconfirmed — a rostered actor.
         // A succession is neither, and its statement carries no home-nest field
@@ -2056,12 +2146,42 @@ impl CacheDb {
         let contact_edges =
             Self::collapse_contact_edges(&tx, &old, &new, ContactCollapseSide::Peer)?;
 
+        // The federated follow (`federated-follow.md` § Decision 5 →
+        // *Succession*), both of its directions. A local reader's follow of the
+        // superseded foreign author re-points, or the home's next delivery —
+        // authored by the successor — meets no approved follow and is refused.
+        // On a collision the reader's own row for the successor stands: only
+        // the reader's own subscribe writes these rows, so nobody else can
+        // plant one, and it carries the home's latest word about the successor.
+        let remote_follows = {
+            tx.execute(
+                "DELETE FROM remote_follows
+                  WHERE author_id = ?1
+                    AND (subscriber_id, tier) IN
+                        (SELECT subscriber_id, tier FROM remote_follows WHERE author_id = ?2)",
+                rusqlite::params![old, new],
+            )
+            .context("drop the follow the reader already holds of the successor")?;
+            tx.execute(
+                "UPDATE remote_follows SET author_id = ?2 WHERE author_id = ?1",
+                rusqlite::params![old, new],
+            )
+            .context("re-point follows of the superseded author")?
+        };
+        // A remote subscriber's own succession, reaching the author's nest: its
+        // roster rows, pending requests and redeemed claims move as the one
+        // coupled leg the local ceremony runs, over the homed rows only.
+        let reader_entitlements =
+            rule_the_paying_readers_entitlements(&tx, &old, &new, ReaderScope::RemoteHomed)?;
+
         tx.commit().context("commit peer succession")?;
 
         Ok(Ok(PeerSuccessionApplied {
             foreign_memberships,
             member_grants,
             contact_edges,
+            remote_follows,
+            reader_entitlements,
         }))
     }
 
@@ -8267,6 +8387,358 @@ mod tests {
         db.list_foreign_channel_members(channel).await.unwrap()
     }
 
+    const FOLLOW_HOME: [u8; 32] = [0x5E; 32];
+
+    async fn remote_follow(db: &CacheDb, subscriber: &[u8; 32], author: &[u8; 32], tier: &str) {
+        db.upsert_remote_follow(
+            subscriber,
+            author,
+            tier,
+            &FOLLOW_HOME,
+            "https://home.example",
+            crate::db::remote_follows::RemoteFollowState::Approved,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Who `subscriber`'s follows on this nest name as their author, sorted.
+    async fn followed_authors(db: &CacheDb, subscriber: &[u8; 32]) -> Vec<(Vec<u8>, String)> {
+        let conn = db.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT author_id, tier FROM remote_follows WHERE subscriber_id = ?1
+                  ORDER BY author_id, tier",
+            )
+            .unwrap();
+        stmt.query_map([subscriber.as_slice()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    /// Stamp every roster row and request `reader` holds with a home nest — the
+    /// shape `follow.subscribe` leaves for a remote subscriber.
+    async fn home_the_reader(db: &CacheDb, reader: &[u8; 32]) {
+        let conn = db.conn.lock().await;
+        for table in ["subscribers", "subscribe_requests"] {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET home_nest_id = ?2, home_nest_url = 'https://f.example'
+                      WHERE subscriber_id = ?1"
+                ),
+                rusqlite::params![reader.as_slice(), FOLLOW_HOME.as_slice()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// `federated-follow.md` § Decision 5 → *Succession*: a followed author's
+    /// succession reaches the follower's nest by the peer path, and the follow
+    /// re-points with it — or the home's next delivery, signed and authored by
+    /// the successor, meets no approved follow and is refused.
+    #[tokio::test]
+    async fn a_peer_succession_re_points_the_follows_of_its_author() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (bob, carol) = ([0x31; 32], [0x32; 32]);
+        seed_account(&db, &bob, "bob").await;
+        seed_account(&db, &carol, "carol").await;
+        remote_follow(&db, &bob, &OLD, "followers").await;
+        remote_follow(&db, &bob, &OLD, "gold").await;
+        // Carol already re-followed the successor at `followers` before this
+        // nest learned of the succession: her own later row stands.
+        remote_follow(&db, &carol, &OLD, "followers").await;
+        remote_follow(&db, &carol, &NEW, "followers").await;
+        remote_follow(&db, &carol, &THIRD, "followers").await;
+
+        let applied = db
+            .record_peer_succession(&OLD, &NEW, b"stmt", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            followed_authors(&db, &bob).await,
+            vec![
+                (NEW.to_vec(), "followers".to_string()),
+                (NEW.to_vec(), "gold".to_string())
+            ],
+            "every tier of the follow names the successor"
+        );
+        assert_eq!(
+            followed_authors(&db, &carol).await,
+            vec![
+                (NEW.to_vec(), "followers".to_string()),
+                (THIRD.to_vec(), "followers".to_string())
+            ],
+            "a collision collapses onto the successor's row and leaves an unrelated \
+             author's follow alone"
+        );
+        assert_eq!(applied.remote_follows, 2, "two predecessor rows moved");
+    }
+
+    /// The follower's own succession reaches the author's nest by push, and the
+    /// roster rows it re-points are the ones **with a home**: a local
+    /// subscriber's succession never arrives by push, so a NULL-home row naming
+    /// the identity is never this path's to move.
+    #[tokio::test]
+    async fn a_peer_succession_re_points_a_remote_subscribers_roster_rows_only() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (author, other_author) = ([0x71u8; 32], [0x74u8; 32]);
+        seed_account(&db, &author, "creator").await;
+        seed_account(&db, &other_author, "creator-two").await;
+        seed_paid_reader(&db, &author, &OLD).await;
+        home_the_reader(&db, &OLD).await;
+        // A NULL-home roster row under the same id on another author: the
+        // residue of a local reader this nest no longer hosts. A push is not
+        // the door that moves it.
+        seed_paid_reader(&db, &other_author, &OLD).await;
+        db.insert_payment_claim("CODE-R", &author, "gold", "stripe", "evt_r", None)
+            .await
+            .unwrap();
+        assert!(db.redeem_payment_claim("CODE-R", &OLD).await.unwrap());
+
+        let applied = db
+            .record_peer_succession(&OLD, &NEW, b"stmt", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(db.is_subscriber(&author, &NEW, "gold").await.unwrap());
+        assert!(!db.is_subscriber(&author, &OLD, "gold").await.unwrap());
+        assert_eq!(
+            stored_ek(&db, &author, &NEW).await,
+            Some(None),
+            "the moved row's post-quantum ek is cleared, as on the local leg: it \
+             derives from the predecessor's seed"
+        );
+        let mine: Vec<_> = db
+            .list_my_subscriptions(&NEW)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.tier_name, r.status))
+            .collect();
+        assert_eq!(
+            mine,
+            vec![
+                ("gold".to_string(), "active".to_string()),
+                ("silver".to_string(), "pending".to_string())
+            ],
+            "the pending request moves with the roster row"
+        );
+        assert!(
+            db.is_subscriber(&other_author, &OLD, "gold").await.unwrap(),
+            "a row with no home is untouched by a push"
+        );
+        assert_eq!(
+            stored_ek(&db, &other_author, &OLD).await,
+            Some(Some(vec![0x77u8; 8])),
+            "and keeps its ek"
+        );
+        let claim = db.get_payment_claim("CODE-R").await.unwrap().unwrap();
+        assert_eq!(
+            claim.redeemed_by.as_deref(),
+            Some(NEW.as_slice()),
+            "the redeemer pointer moves with the entitlement it bought, or a refund \
+             voids a window nobody holds"
+        );
+        assert_eq!(applied.reader_entitlements, 3);
+    }
+
+    /// The successor may already hold a roster row and a request of its own at
+    /// the same keys (it followed again from its home before this nest learned
+    /// of the succession). Its own rows stand — they carry the ek it published
+    /// — and a longer paid window the predecessor held is lifted onto them
+    /// rather than lost.
+    #[tokio::test]
+    async fn a_remote_subscribers_succession_collapses_onto_the_successors_own_rows() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let author = [0x71u8; 32];
+        seed_account(&db, &author, "creator").await;
+        seed_paid_reader(&db, &author, &OLD).await;
+        db.add_subscriber(&author, &NEW, "gold", Some(&[0x99u8; 8]))
+            .await
+            .unwrap();
+        db.insert_subscribe_request(&author, &NEW, "silver", "subscribe", None)
+            .await
+            .unwrap();
+        home_the_reader(&db, &OLD).await;
+        home_the_reader(&db, &NEW).await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "UPDATE subscribers SET valid_until = CASE subscriber_id WHEN ?1 THEN 9000 ELSE 5000 END",
+                [OLD.as_slice()],
+            )
+            .unwrap();
+        }
+
+        db.record_peer_succession(&OLD, &NEW, b"stmt", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!db.is_subscriber(&author, &OLD, "gold").await.unwrap());
+        assert_eq!(
+            stored_ek(&db, &author, &NEW).await,
+            Some(Some(vec![0x99u8; 8])),
+            "the successor's own row survives, with the ek it published"
+        );
+        let conn = db.conn.lock().await;
+        let until: Option<i64> = conn
+            .query_row(
+                "SELECT valid_until FROM subscribers WHERE subscriber_id = ?1",
+                [NEW.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(until, Some(9000), "the longer paid window is kept");
+        let requests: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM subscribe_requests WHERE author_id = ?1",
+                [author.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(requests, 1, "one pending request survives the collapse");
+    }
+
+    /// § Decision 5's push reach, both directions: an author's succession is
+    /// pushed to every follower home on the roster, and a follower's to the
+    /// home of every author it follows — each holds residue about the identity.
+    /// Read after the local ceremony committed, so the rows it already moved to
+    /// the successor still count.
+    #[tokio::test]
+    async fn a_succession_is_pushed_to_the_homes_across_a_follow() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (author, reader) = ([0x71u8; 32], [0x72u8; 32]);
+        let reader_home = [0x5Fu8; 32];
+        seed_account(&db, &author, "creator").await;
+        seed_paid_reader(&db, &author, &reader).await;
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "UPDATE subscribers SET home_nest_id = ?2 WHERE subscriber_id = ?1",
+                rusqlite::params![reader.as_slice(), reader_home.as_slice()],
+            )
+            .unwrap();
+        }
+        db.record_nest_address(&reader_home, "https://reader-home.example", true)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.succession_push_targets(&author).await.unwrap(),
+            vec!["https://reader-home.example".to_string()],
+            "the author's push reaches the follower home on the roster"
+        );
+
+        // The follower's side, after its own ceremony moved the follow.
+        seed_account(&db, &OLD, "bob").await;
+        remote_follow(&db, &OLD, &[0x73u8; 32], "followers").await;
+        db.record_nest_address(&FOLLOW_HOME, "https://home.example", true)
+            .await
+            .unwrap();
+        db.record_succession(&OLD, &NEW, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.succession_push_targets(&OLD).await.unwrap(),
+            vec!["https://home.example".to_string()],
+            "the follower's push reaches the followed author's home, read under the \
+             retired id after the ceremony moved the row"
+        );
+    }
+
+    /// A peer accepts a pushed succession only through an anchor — the home of
+    /// the oldest residue binding it holds. A follow is residue: on a
+    /// follower's nest the author's follow names the author's home, and on the
+    /// author's nest a remote subscriber's roster row names the subscriber's.
+    /// Without these the push wakes nothing on a nest whose only residue about
+    /// the identity is the follow.
+    #[tokio::test]
+    async fn a_follow_is_residue_the_succession_anchor_resolves_through() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let (bob, author) = ([0x31u8; 32], [0x71u8; 32]);
+        seed_account(&db, &bob, "bob").await;
+        remote_follow(&db, &bob, &OLD, "followers").await;
+        assert_eq!(
+            db.oldest_succession_residue_nest_id(&OLD).await.unwrap(),
+            Some(FOLLOW_HOME),
+            "the followed author's home is the anchor"
+        );
+
+        seed_account(&db, &author, "creator").await;
+        seed_paid_reader(&db, &author, &THIRD).await;
+        assert_eq!(
+            db.oldest_succession_residue_nest_id(&THIRD).await.unwrap(),
+            None,
+            "a local subscriber's roster row is no residue binding"
+        );
+        home_the_reader(&db, &THIRD).await;
+        assert_eq!(
+            db.oldest_succession_residue_nest_id(&THIRD).await.unwrap(),
+            Some(FOLLOW_HOME),
+            "a remote subscriber's roster row names the subscriber's home"
+        );
+
+        // An older channel binding still wins: the anchor is the oldest row.
+        let older_home = [0x60u8; 32];
+        db.register_foreign_channel_member(
+            &[0x10; 32],
+            &OLD,
+            &older_home,
+            None,
+            RebindPower::Standing,
+        )
+        .await
+        .unwrap();
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "UPDATE channel_foreign_members SET created_at = 0 WHERE actor_id = ?1",
+                [OLD.as_slice()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.oldest_succession_residue_nest_id(&OLD).await.unwrap(),
+            Some(older_home)
+        );
+
+        let mut actors = db.succession_residue_actors().await.unwrap();
+        actors.sort_unstable();
+        assert_eq!(
+            actors,
+            vec![OLD, THIRD],
+            "the pull's work list reaches the follow residue too"
+        );
+    }
+
+    /// The follower's own ceremony moves its follows (`Move(Plain)` on
+    /// `remote_follows.subscriber_id`); pinned here beside the peer arms.
+    #[tokio::test]
+    async fn the_followers_own_ceremony_moves_its_follows() {
+        let db = CacheDb::open_in_memory().unwrap();
+        seed_account(&db, &OLD, "bob").await;
+        let author = [0x71u8; 32];
+        remote_follow(&db, &OLD, &author, "followers").await;
+
+        db.record_succession(&OLD, &NEW, b"s", 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            followed_authors(&db, &NEW).await,
+            vec![(author.to_vec(), "followers".to_string())]
+        );
+        assert!(followed_authors(&db, &OLD).await.is_empty());
+    }
+
     #[tokio::test]
     async fn a_peer_succession_records_the_link_and_re_points_residue() {
         let db = CacheDb::open_in_memory().unwrap();
@@ -9478,8 +9950,6 @@ mod tests {
     /// it reds on any future mutation of these rows, not just this one.
     #[tokio::test]
     async fn the_ceremony_leaves_the_audit_chain_verifying() {
-        use sha2::Digest;
-
         let db = CacheDb::open_in_memory().unwrap();
         seed_account(&db, &OLD, "alice").await;
         db.audit(Some(&OLD), "a.one", Some("t1"), Some("d1"))
@@ -9534,7 +10004,7 @@ mod tests {
             "the ceremony's own audit rows are here too"
         );
 
-        let mut expected_prev = format!("{:x}", sha2::Sha256::digest(b"fauna-audit-genesis-v1"));
+        let mut expected_prev = fauna_core::chain_version::audit_genesis_prev_hash();
         for (id, ts, actor_id, action, target, detail, prev_hash, entry_hash, version) in &rows {
             assert_eq!(
                 prev_hash, &expected_prev,
@@ -9543,14 +10013,14 @@ mod tests {
                  column inside it does"
             );
             // The preimage comes from the version the row RECORDS — one format
-            // per row, no trying until one matches (`db::chain_version`).
-            let version = crate::db::chain_version::ChainVersion::from_recorded(*version)
+            // per row, no trying until one matches (`fauna_core::chain_version`).
+            let version = fauna_core::chain_version::ChainVersion::from_recorded(*version)
                 .unwrap_or_else(|| {
                     panic!("audit row {id} records a preimage version this binary cannot verify")
                 });
-            let recomputed = crate::db::chain_version::audit_entry_hash(
+            let recomputed = fauna_core::chain_version::audit_entry_hash(
                 version,
-                &crate::db::chain_version::AuditPreimage {
+                &fauna_core::chain_version::AuditPreimage {
                     id: *id,
                     ts: *ts,
                     actor_id: actor_id.as_deref(),

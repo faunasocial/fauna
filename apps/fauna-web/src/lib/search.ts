@@ -14,7 +14,7 @@
 // No foreign `SearchSnapshotObserver` callback crosses into JS: the browser
 // owns the loop, so the page `await`s each async manager method then calls
 // `refreshSearch()` to re-read the snapshot — the same snapshot-after-call
-// reactivity contract `$lib/feed.ts` uses.
+// reactivity contract `#lib/feed.ts` uses.
 
 import { get, writable, type Writable } from 'svelte/store';
 import { identity } from './store';
@@ -147,7 +147,10 @@ export function refreshSearch(): void {
 // shared-Rust lookup itself in its own `onMount`, exactly as `post` does not
 // carry a resolved post — `openPostDetail` resolves it.
 export type PendingSearchNav =
-  | { kind: 'post'; postId: string }
+  // `home` is the nest the post is homed at when it is NOT this nest (a
+  // room-search post hit on a foreign-homed room, `RoomSearchNav::Post`): the
+  // feed page opens it through `resolvePostFrom`, else `resolvePost`.
+  | { kind: 'post'; postId: string; home?: string | null }
   | { kind: 'thread'; threadId: string }
   | { kind: 'compose' }
   | { kind: 'contact'; uidHash: string }

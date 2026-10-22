@@ -58,7 +58,7 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+72d6a508 standalone |
+| web | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
 | linux | ✅ full | 0.1.2-dev+b3cb40c5 docker |
 | windows | ✅ full | 0.1.2-dev+c04c2468 standalone |
 | macos | ⚠ partial | 0.1.2-dev+b3cb40c5 docker |
@@ -71,7 +71,7 @@ Stamped 2026-10-01 at 308c995169.
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_publishing_a_post_from_the_feed_overflow_menu` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_published_post_management_section` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 1 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_web_link_actually_serves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_paywall_link_serves_the_full_body` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_a_copied_paywall_link_serves_the_full_body` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_user_subdomain_toggle_round_trip` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_the_subdomain_url_row_names_the_host_the_nest_serves_on` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_web_authoring.py::test_the_overflow_copy_verb_is_dead_without_a_serving_origin` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |

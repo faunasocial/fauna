@@ -49,27 +49,13 @@ public struct PostImage: View {
     @ViewBuilder
     private var pixels: some View {
         switch source {
-        case .url(let url):
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFit()
-                        .onAppear { paintedKey = .url(url) }
-                default:
-                    // Still loading, or bytes that will not decode — the same
-                    // spinner for both, as the `placeholder:` form this replaces
-                    // painted.
-                    ProgressView()
-                }
-            }
         case .decoded(let image):
             Image(platformImage: image)
                 .resizable()
                 .scaledToFit()
                 .onAppear { paintedKey = .decoded }
-        case .sealedPending:
-            // The bytes are being fetched and opened. The blob URL is never a
-            // fallback here — it serves AEAD ciphertext.
+        case .pending:
+            // The bytes are being fetched through the plane and opened.
             ProgressView()
         case .proxiedPending:
             // A bridged post's picture, its bearer fetch in flight (or failed —
@@ -85,14 +71,12 @@ public struct PostImage: View {
     /// for the same leaf repaints the same `Image` without a fresh `.onAppear`,
     /// and it is painted all the same.
     private enum PaintKey: Equatable {
-        case url(URL)
         case decoded
 
         init?(_ source: PostImageSource) {
             switch source {
-            case .url(let url): self = .url(url)
             case .decoded: self = .decoded
-            case .sealedPending, .proxiedPending, .unavailable: return nil
+            case .pending, .proxiedPending, .unavailable: return nil
             }
         }
     }

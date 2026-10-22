@@ -18,9 +18,10 @@ use std::sync::Arc;
 use fauna_client::NestClient;
 use fauna_client_email::EmailClient;
 use fauna_client_email::email::{
-    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs, SendEmailReply,
-    describe_filter_action, describe_filter_rule, encode_filter_action, encode_filter_rule,
-    filter_action_label, filter_is_editable_for,
+    EmailFilter, EmailFilterAction, EmailFilterRule, FilterActionInputs, FilterRuleInputs,
+    SendEmailReply, describe_filter_action, describe_filter_rule, describe_filter_rule_inputs,
+    encode_filter_action, encode_filter_rule, encode_filter_rule_inputs, filter_action_label,
+    filter_is_editable_for, filter_parts_are_editable,
 };
 use fauna_core::carried::CarriedValue;
 use fauna_core::localized::LocalizedText;
@@ -243,6 +244,11 @@ pub struct FfiEmailFilter {
     pub priority: i32,
     /// Creation epoch in milliseconds.
     pub created_at: i64,
+    /// The rule's `continue` flag — keep checking later rules after it
+    /// matches (`email-filters.md` § Email filter rules). Last and defaulted,
+    /// so a positional constructor built before it keeps compiling.
+    #[uniffi(default = false)]
+    pub continue_on_match: bool,
 }
 
 impl From<EmailFilter> for FfiEmailFilter {
@@ -255,6 +261,7 @@ impl From<EmailFilter> for FfiEmailFilter {
             action: f.action.into(),
             priority: f.priority,
             created_at: f.created_at,
+            continue_on_match: f.continue_on_match,
         }
     }
 }
@@ -294,7 +301,7 @@ impl FfiEmailClient {
         Arc::new(Self { nest })
     }
 
-    fn client(&self) -> EmailClient<Arc<NestClient>> {
+    pub(crate) fn client(&self) -> EmailClient<Arc<NestClient>> {
         EmailClient::new(Arc::clone(&self.nest))
     }
 }
@@ -307,7 +314,11 @@ impl FfiEmailClient {
         Ok(filters.into_iter().map(Into::into).collect())
     }
 
-    /// `fauna.email.filters.create` — returns the new row id.
+    /// `fauna.email.filters.create` — returns the new row id. `priority` is
+    /// the rule's order and `continue_on_match` its `continue` flag
+    /// (`email-filters.md` § Email filter rules); a caller that does not
+    /// collect the flag leaves it at its default, first-match-wins.
+    #[uniffi::method(default(continue_on_match = false))]
     pub async fn filters_create(
         &self,
         name: String,
@@ -315,13 +326,21 @@ impl FfiEmailClient {
         combination: String,
         action: FfiEmailFilterAction,
         priority: i32,
+        continue_on_match: bool,
     ) -> Result<i64, FfiError> {
         let rules = rules
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<EmailFilterRule>, _>>()?;
         self.client()
-            .filters_create(name, rules, combination, action.try_into()?, priority)
+            .filters_create(
+                name,
+                rules,
+                combination,
+                action.try_into()?,
+                priority,
+                continue_on_match,
+            )
             .await
             .map_err(stringify)
     }
@@ -332,7 +351,10 @@ impl FfiEmailClient {
         Ok(filter.into())
     }
 
-    /// `fauna.email.filters.update` — overwrite an existing rule.
+    /// `fauna.email.filters.update` — overwrite an existing rule, its order
+    /// and `continue` flag included (see [`Self::filters_create`]).
+    #[uniffi::method(default(continue_on_match = false))]
+    #[allow(clippy::too_many_arguments)] // UniFFI export — one argument per wire field
     pub async fn filters_update(
         &self,
         id: i64,
@@ -341,13 +363,22 @@ impl FfiEmailClient {
         combination: String,
         action: FfiEmailFilterAction,
         priority: i32,
+        continue_on_match: bool,
     ) -> Result<(), FfiError> {
         let rules = rules
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<EmailFilterRule>, _>>()?;
         self.client()
-            .filters_update(id, name, rules, combination, action.try_into()?, priority)
+            .filters_update(
+                id,
+                name,
+                rules,
+                combination,
+                action.try_into()?,
+                priority,
+                continue_on_match,
+            )
             .await
             .map_err(stringify)
     }
@@ -389,15 +420,34 @@ pub fn encode_email_filter_rule(
 }
 
 /// FFI mirror of [`fauna_protocol::email::FilterActionInputs`] — every input
-/// the shared filter form collects for its action.
+/// the shared filter form collects for its action. The inputs after
+/// `keep_local_copy` are defaulted, so a form built before it collected them
+/// keeps constructing the record.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiFilterActionInputs {
-    /// One of `SUPPORTED_ACTION_KINDS` (`Allow`/`Discard`/`Reject`/`Forward`).
+    /// One of the shared `SUPPORTED_ACTION_KINDS` (`Allow`, `Discard`,
+    /// `Reject`, `FileInto`, `Forward`, `AutoReply`, `AddLabel`).
     pub kind: String,
     pub reject_reason: String,
     pub forward_address: String,
     /// The "keep a local copy" checkbox; unchecked is `redirect`.
     pub keep_local_copy: bool,
+    /// `FileInto`'s mailbox (`filter-file-into-mailbox`).
+    #[uniffi(default = "")]
+    pub file_into_mailbox: String,
+    /// `AddLabel`'s label (`filter-add-label`).
+    #[uniffi(default = "")]
+    pub label: String,
+    /// `AutoReply`'s subject (`filter-auto-reply-subject`).
+    #[uniffi(default = "")]
+    pub auto_reply_subject: String,
+    /// `AutoReply`'s body (`filter-auto-reply-body`).
+    #[uniffi(default = "")]
+    pub auto_reply_body: String,
+    /// `AutoReply`'s interval in hours as typed
+    /// (`filter-auto-reply-interval-hours`); blank is the shared default.
+    #[uniffi(default = "")]
+    pub auto_reply_interval_hours: String,
 }
 
 impl From<FilterActionInputs> for FfiFilterActionInputs {
@@ -407,6 +457,11 @@ impl From<FilterActionInputs> for FfiFilterActionInputs {
             reject_reason: i.reject_reason,
             forward_address: i.forward_address,
             keep_local_copy: i.keep_local_copy,
+            file_into_mailbox: i.file_into_mailbox,
+            label: i.label,
+            auto_reply_subject: i.auto_reply_subject,
+            auto_reply_body: i.auto_reply_body,
+            auto_reply_interval_hours: i.auto_reply_interval_hours,
         }
     }
 }
@@ -418,6 +473,11 @@ impl From<FfiFilterActionInputs> for FilterActionInputs {
             reject_reason: i.reject_reason,
             forward_address: i.forward_address,
             keep_local_copy: i.keep_local_copy,
+            file_into_mailbox: i.file_into_mailbox,
+            label: i.label,
+            auto_reply_subject: i.auto_reply_subject,
+            auto_reply_body: i.auto_reply_body,
+            auto_reply_interval_hours: i.auto_reply_interval_hours,
         }
     }
 }
@@ -436,14 +496,92 @@ pub fn encode_email_filter_action_inputs(
 }
 
 /// The reverse of [`encode_email_filter_action_inputs`]: the form inputs that
-/// reproduce a stored [`FfiEmailFilterAction`] (a `Forward`'s destination and
-/// copy mode included), or `None` for the richer variants no form collects.
+/// reproduce a stored [`FfiEmailFilterAction`] (every action's own inputs), or
+/// `None` only for an action a newer build added.
 #[uniffi::export]
 pub fn describe_email_filter_action_inputs(
     action: FfiEmailFilterAction,
 ) -> Option<FfiFilterActionInputs> {
     let action = action_for_reading(action);
     describe_filter_action(&action).map(Into::into)
+}
+
+/// FFI mirror of [`fauna_protocol::email::FilterRuleInputs`] — every input the
+/// shared filter form collects for its condition: the `filter-rule-type` tag,
+/// the `filter-rule-value` field, a header-contains condition's
+/// `filter-rule-header-value` and a spam-score condition's
+/// `filter-rule-spam-score` (points as typed).
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiFilterRuleInputs {
+    pub kind: String,
+    pub value: String,
+    #[uniffi(default = "")]
+    pub header_value: String,
+    #[uniffi(default = "")]
+    pub spam_score: String,
+}
+
+impl From<FilterRuleInputs> for FfiFilterRuleInputs {
+    fn from(i: FilterRuleInputs) -> Self {
+        Self {
+            kind: i.kind,
+            value: i.value,
+            header_value: i.header_value,
+            spam_score: i.spam_score,
+        }
+    }
+}
+
+impl From<FfiFilterRuleInputs> for FilterRuleInputs {
+    fn from(i: FfiFilterRuleInputs) -> Self {
+        Self {
+            kind: i.kind,
+            value: i.value,
+            header_value: i.header_value,
+            spam_score: i.spam_score,
+        }
+    }
+}
+
+/// Build a typed [`FfiEmailFilterRule`] from the shared filter form's
+/// condition inputs — the UniFFI face of
+/// [`fauna_protocol::email::encode_filter_rule_inputs`]. An unknown tag or an
+/// unparseable spam score is `Err`.
+#[uniffi::export]
+pub fn encode_email_filter_rule_inputs(
+    inputs: FfiFilterRuleInputs,
+) -> Result<FfiEmailFilterRule, FfiError> {
+    encode_filter_rule_inputs(&inputs.into())
+        .map(Into::into)
+        .map_err(general_err)
+}
+
+/// The reverse of [`encode_email_filter_rule_inputs`]: the form inputs that
+/// reproduce a stored [`FfiEmailFilterRule`], or `None` only for a condition a
+/// newer build added.
+#[uniffi::export]
+pub fn describe_email_filter_rule_inputs(rule: FfiEmailFilterRule) -> Option<FfiFilterRuleInputs> {
+    let rule = rule_for_reading(rule);
+    describe_filter_rule_inputs(&rule).map(Into::into)
+}
+
+/// The `filter-priority-input` buffer → the rule's order — the UniFFI face of
+/// [`fauna_protocol::email::parse_filter_priority`] (blank is `0`; anything
+/// but a whole number is `Err`).
+#[uniffi::export]
+pub fn parse_email_filter_priority(text: String) -> Result<i32, FfiError> {
+    fauna_protocol::email::parse_filter_priority(&text).map_err(general_err)
+}
+
+/// Whether a stored filter can open in the full shared form — the UniFFI face
+/// of [`fauna_protocol::email::filter_is_editable`].
+#[uniffi::export]
+pub fn email_filter_is_editable(
+    rules: Vec<FfiEmailFilterRule>,
+    action: FfiEmailFilterAction,
+) -> bool {
+    let rules: Vec<EmailFilterRule> = rules.into_iter().map(rule_for_reading).collect();
+    filter_parts_are_editable(&rules, &action_for_reading(action))
 }
 
 /// Whether a stored filter can open in a form covering `action_kinds` — the
@@ -620,9 +758,9 @@ mod tests {
         FilterActionInputs::new(kind.to_string()).into()
     }
 
-    /// Every supported kind, as a form that collects the Forward inputs passes it.
+    /// The four kinds the single-value native forms collect, as they pass them.
     fn all_kinds() -> Vec<String> {
-        fauna_client_email::email::SUPPORTED_ACTION_KINDS
+        ["Allow", "Discard", "Reject", "Forward"]
             .iter()
             .map(|k| k.to_string())
             .collect()
@@ -672,14 +810,70 @@ mod tests {
         );
     }
 
+    /// Every action the full form collects round-trips through the inputs
+    /// exports, its own inputs included.
     #[test]
-    fn describe_email_filter_action_inputs_export_is_none_for_kinds_no_dialog_collects() {
+    fn inputs_exports_round_trip_every_action() {
+        for action in [
+            FfiEmailFilterAction::AddLabel {
+                label: "Newsletters".into(),
+            },
+            FfiEmailFilterAction::FileInto {
+                mailbox: "Reading".into(),
+            },
+            FfiEmailFilterAction::AutoReply {
+                subject: "Away".into(),
+                body: "Back Monday".into(),
+                interval_hours: 12,
+            },
+        ] {
+            let inputs = describe_email_filter_action_inputs(action.clone()).expect("describable");
+            assert_eq!(encode_email_filter_action_inputs(inputs).unwrap(), action);
+        }
+    }
+
+    /// Both two-input conditions round-trip through the rule inputs exports,
+    /// and the full-form gate opens them where the single-value one does not.
+    #[test]
+    fn rule_inputs_exports_round_trip_the_two_input_conditions() {
+        for rule in [
+            FfiEmailFilterRule::HeaderContains {
+                name: "List-Id".into(),
+                value: "dev".into(),
+            },
+            FfiEmailFilterRule::SpamScoreAtLeast { milli: 7500 },
+        ] {
+            let inputs = describe_email_filter_rule_inputs(rule.clone()).expect("describable");
+            assert_eq!(encode_email_filter_rule_inputs(inputs).unwrap(), rule);
+            assert!(email_filter_is_editable(
+                vec![rule.clone()],
+                FfiEmailFilterAction::Allow
+            ));
+            assert!(!email_filter_is_editable_for(
+                vec![rule],
+                FfiEmailFilterAction::Allow,
+                all_kinds()
+            ));
+        }
         assert_eq!(
-            describe_email_filter_action_inputs(FfiEmailFilterAction::AddLabel {
-                label: "Newsletters".into()
-            }),
-            None
+            describe_email_filter_rule_inputs(FfiEmailFilterRule::SpamScoreAtLeast { milli: 7500 })
+                .unwrap()
+                .spam_score,
+            "7.5"
         );
+        assert!(
+            encode_email_filter_rule_inputs(FfiFilterRuleInputs {
+                kind: "SpamScoreAtLeast".into(),
+                value: String::new(),
+                header_value: String::new(),
+                spam_score: "lots".into(),
+            })
+            .is_err()
+        );
+        assert!(!email_filter_is_editable(
+            vec![],
+            FfiEmailFilterAction::Allow
+        ));
     }
 
     #[test]

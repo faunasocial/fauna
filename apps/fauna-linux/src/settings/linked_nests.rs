@@ -44,7 +44,7 @@
 //! sends every app), matching the testids, i18n and page label.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -78,6 +78,10 @@ struct Widgets {
     /// Its content, rebuilt wholesale on every snapshot.
     forward_container: gtk::Box,
     forward_block: RefCell<Option<gtk::Box>>,
+    /// The restore-from-a-custodian block (`nests-custody-restore-*`,
+    /// `nests.md` § Trust facet — restore from a custodian nest): the reveal,
+    /// the inline form, and the last restore's notice.
+    restore: RestoreWidgets,
     /// The vertical box that holds the per-nest `nests-item` rows (home first,
     /// then pairings). Rebuilt wholesale on every snapshot.
     list_container: gtk::Box,
@@ -100,6 +104,21 @@ struct Ctx {
     /// badge's source (`AccountStoreHandle::escrow_holders`). Kept across an
     /// unreadable pass for the same reason.
     escrow_holders: RefCell<Vec<[u8; 32]>>,
+    /// A restore from a custodian nest is in flight — the submit stays
+    /// disabled until it answers.
+    restore_running: Cell<bool>,
+}
+
+/// The page-level restore block's widgets — tui's `push_custody_restore`.
+struct RestoreWidgets {
+    button: gtk::Button,
+    form: gtk::Box,
+    input: gtk::Entry,
+    submit: gtk::Button,
+    cancel: gtk::Button,
+    /// `nests-custody-restore-notice` — hidden until a restore ran this
+    /// session.
+    notice: gtk::Label,
 }
 
 /// One Nests hydrate's results: the machine snapshot, plus the custody fold
@@ -215,6 +234,13 @@ pub fn build_linked_nests_page() -> (adw::PreferencesPage, impl Fn() + 'static) 
     forward_group.add(&forward_container);
     page.add(&forward_group);
 
+    // --- Restore from a custodian nest (page-level): after the forward
+    // queue, before the nest rows, on every signed-in visit — the cold device
+    // has no custody rows, and it is who the button is for (`nests.md`
+    // § Trust facet — restore from a custodian nest).
+    let (restore_group, restore) = build_restore_block();
+    page.add(&restore_group);
+
     // --- List group: placeholder + a container of indexed nests-item rows ---
     let list_group = adw::PreferencesGroup::builder()
         .title(S::LIST_TITLE)
@@ -235,6 +261,7 @@ pub fn build_linked_nests_page() -> (adw::PreferencesPage, impl Fn() + 'static) 
         forward_group,
         forward_container,
         forward_block: RefCell::new(None),
+        restore,
         list_container,
         placeholder_row,
         rows: RefCell::new(Vec::new()),
@@ -280,6 +307,7 @@ fn wire_machine(widgets: Widgets) -> impl Fn() + 'static {
         w: widgets,
         custody_rows: RefCell::new(Vec::new()),
         escrow_holders: RefCell::new(Vec::new()),
+        restore_running: Cell::new(false),
     });
 
     // Hydrate on mount: list the owner's pairings + the home nest's trust facet.
@@ -335,8 +363,182 @@ fn wire_machine(widgets: Widgets) -> impl Fn() + 'static {
             .connect_activate(move |_| submit_link(&ctx));
     }
 
+    wire_restore(&ctx);
+
     // The on-visible re-hydrate: same full refresh as mount.
     Box::new(move || hydrate_and_render(&ctx)) as Box<dyn Fn()>
+}
+
+/// The page-level restore block (`nests-custody-restore-*`): the reveal, the
+/// inline form (the `nests-add-*` shape) and the notice — tui's
+/// `push_custody_restore`. The shell holds no dial, handshake or walk logic:
+/// the typed address goes to the shared runtime command verbatim.
+fn build_restore_block() -> (adw::PreferencesGroup, RestoreWidgets) {
+    let group = adw::PreferencesGroup::new();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    group.add(&content);
+
+    let button = gtk::Button::builder()
+        .label(S::CUSTODY_RESTORE_BUTTON)
+        .halign(gtk::Align::Start)
+        .build();
+    set_test_id(&button, ids::NESTS_CUSTODY_RESTORE_BUTTON);
+    content.append(&button);
+
+    let form = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .build();
+    let input_label = gtk::Label::builder()
+        .label(S::CUSTODY_RESTORE_INPUT_LABEL)
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["caption"])
+        .build();
+    form.append(&input_label);
+    let input = gtk::Entry::builder().hexpand(true).build();
+    set_test_id(&input, ids::NESTS_CUSTODY_RESTORE_INPUT);
+    form.append(&input);
+    let submit = gtk::Button::builder()
+        .label(S::CUSTODY_RESTORE_SUBMIT)
+        .css_classes(["suggested-action"])
+        .sensitive(false)
+        .build();
+    set_test_id(&submit, ids::NESTS_CUSTODY_RESTORE_SUBMIT_BUTTON);
+    let cancel = gtk::Button::with_label(S::CUSTODY_RESTORE_CANCEL);
+    set_test_id(&cancel, ids::NESTS_CUSTODY_RESTORE_CANCEL_BUTTON);
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::End)
+        .build();
+    buttons.append(&cancel);
+    buttons.append(&submit);
+    form.append(&buttons);
+    content.append(&form);
+
+    let notice = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .build();
+    notice.set_use_markup(false);
+    set_test_id(&notice, ids::NESTS_CUSTODY_RESTORE_NOTICE);
+    content.append(&notice);
+
+    (
+        group,
+        RestoreWidgets {
+            button,
+            form,
+            input,
+            submit,
+            cancel,
+            notice,
+        },
+    )
+}
+
+/// Wire the restore block: reveal, cancel, and submit (button or Enter).
+fn wire_restore(ctx: &Rc<Ctx>) {
+    let r = &ctx.w.restore;
+    {
+        let ctx = Rc::clone(ctx);
+        r.button.connect_clicked(move |_| {
+            ctx.w.restore.form.set_visible(true);
+            sync_restore_submit(&ctx);
+        });
+    }
+    {
+        let ctx = Rc::clone(ctx);
+        r.cancel.connect_clicked(move |_| {
+            ctx.w.restore.input.set_text("");
+            ctx.w.restore.form.set_visible(false);
+        });
+    }
+    {
+        let ctx = Rc::clone(ctx);
+        r.input.connect_changed(move |_| sync_restore_submit(&ctx));
+    }
+    {
+        let ctx = Rc::clone(ctx);
+        r.submit.connect_clicked(move |_| {
+            let url = ctx.w.restore.input.text().to_string();
+            restore_from_custodian(&ctx, url);
+        });
+    }
+    {
+        let ctx = Rc::clone(ctx);
+        r.input.connect_activate(move |entry| {
+            let url = entry.text().to_string();
+            restore_from_custodian(&ctx, url);
+        });
+    }
+}
+
+/// The submit is live once an address is typed and no restore is running.
+fn sync_restore_submit(ctx: &Rc<Ctx>) {
+    let r = &ctx.w.restore;
+    r.submit
+        .set_sensitive(!r.input.text().trim().is_empty() && !ctx.restore_running.get());
+}
+
+/// The restore gesture — both entries (the typed address and a custodian
+/// row's own) dispatch the shared runtime command
+/// `AccountStoreHandle::restore_from_custodian`, then re-hydrate so a
+/// restored custody row paints beside the notice. The notice paints the
+/// outcome's own `notice()` text; an `Err` (the gesture could not run at all)
+/// lands on `error-message`. The restore dials the custodian, never this
+/// session's own nest, so no own-nest wire kind gates it.
+fn restore_from_custodian(ctx: &Rc<Ctx>, url: String) {
+    use fauna_sync_engine::account_runtime::AccountStoreAccess as _;
+    let url = url.trim().to_string();
+    if url.is_empty() || ctx.restore_running.get() {
+        return;
+    }
+    ctx.restore_running.set(true);
+    sync_restore_submit(ctx);
+    let r = &ctx.w.restore;
+    r.notice.set_text(S::CUSTODY_RESTORE_RUNNING);
+    r.notice.set_visible(true);
+    let source = crate::account_runtime::handle_source();
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            match source.account_store("restore from a custodian nest").await {
+                Ok(store) => store
+                    .restore_from_custodian(url)
+                    .await
+                    .map_err(|e| format!("{e:#}")),
+                Err(e) => Err(format!("{e:#}")),
+            }
+        },
+        move |result| {
+            ctx_render.restore_running.set(false);
+            let r = &ctx_render.w.restore;
+            match result {
+                Ok(outcome) => {
+                    if outcome.closes_form() {
+                        r.input.set_text("");
+                        r.form.set_visible(false);
+                    }
+                    r.notice.set_text(&outcome.notice());
+                    r.notice.set_visible(true);
+                }
+                Err(reason) => {
+                    r.notice.set_text("");
+                    r.notice.set_visible(false);
+                    super::render_error_label(&ctx_render.w.error_label, Some(&reason));
+                }
+            }
+            sync_restore_submit(&ctx_render);
+            hydrate_and_render(&ctx_render);
+        },
+    );
 }
 
 /// Read the entered value and dispatch the link action it resolves to, with the
@@ -527,9 +729,12 @@ fn render(ctx: &Rc<Ctx>, snap: &LinkedNestsSnapshot) {
             .filter(|c| c.custodian_nest_url.is_some())
         {
             let ctx_revoke = Rc::clone(ctx);
-            let item = build_custody_nest_item(custody, move |grant_id, holder| {
-                revoke_custody_nest(&ctx_revoke, grant_id, holder)
-            });
+            let ctx_restore = Rc::clone(ctx);
+            let item = build_custody_nest_item(
+                custody,
+                move |grant_id, holder| revoke_custody_nest(&ctx_revoke, grant_id, holder),
+                move |url| restore_from_custodian(&ctx_restore, url),
+            );
             w.list_container.append(&item);
             rows.push(item);
         }
@@ -548,10 +753,12 @@ fn render(ctx: &Rc<Ctx>, snap: &LinkedNestsSnapshot) {
 /// `devices.custody_*` strings the Devices `custody-holder-card` paints
 /// (receipt three-state honesty, held bytes, revoke beside its REQUIRED
 /// honest-bound note); the scope line is trust vocabulary only. `on_revoke`
-/// receives the grant id + accept-bound custodian key, never an index.
+/// receives the grant id + accept-bound custodian key, never an index;
+/// `on_restore` the row's own address (`nest-trust-custody-restore-button`).
 fn build_custody_nest_item(
     row: &CustodyRowView,
     on_revoke: impl Fn(Vec<u8>, Option<[u8; 32]>) + 'static,
+    on_restore: impl Fn(String) + 'static,
 ) -> gtk::Box {
     use crate::i18n::strings::devices as D;
     use fauna_client_capabilities::view_model::ReceiptState;
@@ -628,6 +835,19 @@ fn build_custody_nest_item(
         revoke.connect_clicked(move |_| on_revoke(grant_id.clone(), holder));
     }
     custody.append(&revoke);
+
+    // The warm explicit restore gesture (`nests.md` § Trust facet — restore
+    // from a custodian nest): the same command as the page-level form, the
+    // row's own address pre-filled.
+    if let Some(url) = row.custodian_nest_url.clone() {
+        let restore = gtk::Button::builder()
+            .label(S::CUSTODY_RESTORE_ROW_BUTTON)
+            .halign(gtk::Align::Start)
+            .build();
+        set_test_id(&restore, ids::NEST_TRUST_CUSTODY_RESTORE_BUTTON);
+        restore.connect_clicked(move |_| on_restore(url.clone()));
+        custody.append(&restore);
+    }
 
     item.append(&custody);
     item
@@ -795,6 +1015,25 @@ fn holds_escrow(nest_id: &str, escrow_holders: &[[u8; 32]]) -> bool {
 /// last-action state (`nests.md` § Trust facet — generation recovery), not
 /// per-row — only the home row renders it, since generation rows only exist
 /// there.
+/// `nest-trust-holders-status` (home row only): the unreachable copy when the
+/// holder roster could not be read, EMPTY text otherwise.
+fn holders_status_label(row: &LinkedNestRow) -> Option<gtk::Label> {
+    row.is_home.then(|| {
+        let text = if row.trust_holders_unreachable {
+            S::HOLDERS_STATUS_UNREACHABLE
+        } else {
+            ""
+        };
+        field_label(ids::NEST_TRUST_HOLDERS_STATUS, text)
+    })
+}
+
+/// Whether `nest-trust-empty` renders: nothing to list AND the roster was
+/// readable (an unreadable roster is "could not ask", never "trusts nothing").
+fn shows_trust_empty(row: &LinkedNestRow) -> bool {
+    row.trust_grants.is_empty() && row.trust_backups.is_empty() && !row.trust_holders_unreachable
+}
+
 fn build_trust_facet(
     ctx: &Rc<Ctx>,
     row: &LinkedNestRow,
@@ -854,7 +1093,14 @@ fn build_trust_facet(
             // that seals and uploads your messages is plainly trusted, and
             // rendering "not trusted to read anything" directly above "Backs up
             // your messages for you" states the opposite of the row beneath it.
-            if row.trust_grants.is_empty() && row.trust_backups.is_empty() {
+            // A roster that could not be read is not an empty one
+            // (`nests.md:125`): the status says so on the home row and takes
+            // `nest-trust-empty`'s place below. Omitted-holder grants still
+            // list through the catch-all.
+            if let Some(status) = holders_status_label(row) {
+                facet.append(&status);
+            }
+            if shows_trust_empty(row) {
                 // The explicit "not trusted to read anything" empty state — a
                 // Now-lens affordance (honest, not a broken/blank facet).
                 let empty = field_label("nest-trust-empty", S::NOT_TRUSTED);
@@ -1632,7 +1878,7 @@ mod tests {
             // assertions below read the page's own intent (`reset_for_test`'s
             // reason — one GTK thread shared by every widget test).
             crate::offline_gate::reset_for_test("connected");
-            let item = build_custody_nest_item(&custody_nest_row(false), |_, _| {});
+            let item = build_custody_nest_item(&custody_nest_row(false), |_, _| {}, |_| {});
             assert!(
                 label_text(&item, ids::NESTS_ITEM_LABEL).contains(&S::custody_nest_label(
                     &fauna_core::format::short_id(&hex::encode([0xB2; 32]))
@@ -1656,7 +1902,7 @@ mod tests {
                     .expect("revoke renders");
             assert!(revoke.is_sensitive());
 
-            let pending = build_custody_nest_item(&custody_nest_row(true), |_, _| {});
+            let pending = build_custody_nest_item(&custody_nest_row(true), |_, _| {}, |_| {});
             let revoke =
                 crate::testid::find_by_test_id(&pending, ids::NEST_TRUST_CUSTODY_REVOKE_BUTTON)
                     .expect("revoke renders");
@@ -1664,6 +1910,57 @@ mod tests {
                 !revoke.is_sensitive(),
                 "a pending ceremony minted nothing to revoke"
             );
+        });
+    }
+
+    /// A custodian-NEST row carries the warm restore gesture, and clicking it
+    /// hands the row's own address to the one command (tui's
+    /// `a_custodian_nest_row_carries_the_restore_gesture_with_its_address`).
+    #[test]
+    fn a_custodian_nest_row_carries_the_restore_gesture_with_its_address() {
+        crate::testid::run_on_gtk_thread(|| {
+            let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+            let item = {
+                let seen = Rc::clone(&seen);
+                build_custody_nest_item(
+                    &custody_nest_row(false),
+                    |_, _| {},
+                    move |url| seen.borrow_mut().push(url),
+                )
+            };
+            crate::testid::find_by_test_id(&item, ids::NEST_TRUST_CUSTODY_RESTORE_BUTTON)
+                .expect("the warm gesture renders")
+                .downcast::<gtk::Button>()
+                .unwrap()
+                .emit_clicked();
+            assert_eq!(*seen.borrow(), vec!["wss://friend.example".to_string()]);
+        });
+    }
+
+    /// The restore block renders its reveal on every page (the cold device
+    /// has no custody rows), the form and notice hidden until used; the
+    /// submit is live only once an address is typed.
+    #[test]
+    fn the_restore_block_reveals_a_form_whose_submit_waits_for_an_address() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (group, r) = build_restore_block();
+            let found = |id| crate::testid::find_by_test_id(&group, id);
+            assert!(
+                found(ids::NESTS_CUSTODY_RESTORE_BUTTON)
+                    .unwrap()
+                    .is_visible()
+            );
+            assert!(!r.form.is_visible());
+            assert!(!r.notice.is_visible());
+            for id in [
+                ids::NESTS_CUSTODY_RESTORE_INPUT,
+                ids::NESTS_CUSTODY_RESTORE_SUBMIT_BUTTON,
+                ids::NESTS_CUSTODY_RESTORE_CANCEL_BUTTON,
+                ids::NESTS_CUSTODY_RESTORE_NOTICE,
+            ] {
+                assert!(found(id).is_some(), "{id} built");
+            }
+            assert!(!r.submit.is_sensitive(), "no address typed yet");
         });
     }
 
@@ -1908,6 +2205,32 @@ mod tests {
     fn unreachable_row_path_text_names_the_destination() {
         let row = generation_row(TrustGenerationStatus::Unreachable, None);
         assert_eq!(generation_path_text(&row), row.destination_label);
+    }
+
+    #[test]
+    fn an_unreadable_holder_roster_replaces_the_empty_state() {
+        crate::testid::run_on_gtk_thread(|| {
+            let mut row = home_row(false, fauna_client_pair::TrustGrantDuration::OneOff);
+            row.trust_holders_unreachable = true;
+            let status = holders_status_label(&row).expect("home row renders the status");
+            assert_eq!(status.text(), S::HOLDERS_STATUS_UNREACHABLE);
+            assert!(
+                !shows_trust_empty(&row),
+                "unreachable must not claim 'trusts nothing'"
+            );
+        });
+    }
+
+    #[test]
+    fn a_readable_holder_roster_keeps_the_empty_state() {
+        crate::testid::run_on_gtk_thread(|| {
+            let mut row = home_row(false, fauna_client_pair::TrustGrantDuration::OneOff);
+            let status = holders_status_label(&row).expect("home row renders the status");
+            assert_eq!(status.text(), "");
+            assert!(shows_trust_empty(&row));
+            row.is_home = false;
+            assert!(holders_status_label(&row).is_none(), "home row only");
+        });
     }
 
     // ── restore-outcome notice (`nest-trust-generation-notice`, ratified

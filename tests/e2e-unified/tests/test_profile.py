@@ -167,6 +167,123 @@ def test_profile_edit_sets_and_clears_avatar_and_banner(
     )
 
 
+@pytest.mark.feature("profile")
+def test_profile_header_paints_the_stored_avatar_and_banner(logged_in_app):
+    """`profile-avatar` / `profile-banner` (`profile.md` § Layout & flow, the
+    `user-header` component; IDs user-approved 2026-10-20): the header shows
+    the stored picture when the profile has one and renders nothing
+    otherwise. A same-nest profile's bytes come from this nest's blob route
+    (`profile.md` § Where logic lives → *The remote read*, *Bytes direct*);
+    the host pick between this nest and a relayed profile's home is pinned at
+    tier_1 (`apps/fauna-tui/src/profile/mod.rs`,
+    `the_pictures_come_from_the_nest_that_served_the_profile`).
+
+    The journey: no pictures → neither element; pick both in the edit form
+    and save → the refetched header paints both; clear both and save → both
+    elements are gone. Every wait polls the painted state (convention 14).
+    """
+    app = logged_in_app
+    app.profile.require_avatar_banner_upload_supported()
+    app.profile.require_header_pictures_supported()
+    if not TEST_IMAGE.exists():
+        pytest.skip(f"test fixture missing: {TEST_IMAGE}")
+
+    profile = app.profile
+    profile.navigate()
+    profile.open_edit_form()
+    profile.set_display_name("Ada Lovelace")
+    profile.save()
+    assert profile.wait_for_save(), f"text-only save failed: {profile.error_text()!r}"
+    assert profile.wait_for_handle("Ada Lovelace"), f"header={profile.handle_text()!r}"
+    for picture in ("profile-avatar", "profile-banner"):
+        assert profile.picture_state(picture) == "absent", (
+            f"{picture}: a profile without the picture renders no element"
+        )
+
+    profile.open_edit_form()
+    profile.set_avatar(str(TEST_IMAGE))
+    profile.set_banner(str(TEST_IMAGE))
+    profile.save()
+    assert profile.wait_for_save(), f"save with pictures failed: {profile.error_text()!r}"
+    for picture in ("profile-avatar", "profile-banner"):
+        state = profile.wait_for_picture_state(picture, "painted")
+        assert state == "painted", (
+            f"{picture}: the saved picture must paint in the header, got {state!r}; "
+            f"error-message={profile.error_text()!r}"
+        )
+    assert profile.error_text() == "", f"error-message={profile.error_text()!r}"
+
+    profile.open_edit_form()
+    profile.remove_avatar()
+    profile.remove_banner()
+    profile.save()
+    assert profile.wait_for_save(), f"save after clearing failed: {profile.error_text()!r}"
+    for picture in ("profile-avatar", "profile-banner"):
+        state = profile.wait_for_picture_state(picture, "absent")
+        assert state == "absent", f"{picture}: a cleared picture leaves the header, got {state!r}"
+
+
+@pytest.mark.feature("profile")
+def test_own_profile_posts_tab_lists_your_posts_newest_first(
+    logged_in_app, nest_instance, test_user, request
+):
+    """The Posts tab — `profile.md` § Layout & flow → *The Posts tab*: the
+    viewed actor's posts, newest first, painted as the feed's own cards, read
+    through the feed manager's author window over `fauna.feed.author.posts`.
+
+    The author posts twice through the composer, opens their own profile and
+    finds both cards, the second first. A second user on the same nest opens
+    the author's profile and finds the same two — the read is of the viewed
+    actor's posts, not the viewer's.
+    """
+    from helpers.app_surface import app_name
+    from helpers.room_seats import launch_seat, seat_app_path, teardown_seats
+
+    app = logged_in_app
+    app.profile.require_posts_tab_supported()
+
+    first = f"first post {uuid.uuid4().hex[:8]}"
+    second = f"second post {uuid.uuid4().hex[:8]}"
+    app.feed.navigate()
+    app.feed.create_post(first)
+    app.feed.create_post(second)
+
+    app.profile.navigate()
+    app.profile.open_posts_tab()
+    seen = app.profile.wait_for_post_cards([second, first])
+    assert len(seen) == 2 and second in seen[0] and first in seen[1], (
+        f"the own Posts tab should list exactly the two posts, newest first; "
+        f"got {seen!r}, error={app.profile.error_text()!r}"
+    )
+
+    # A row is the feed's card with every child — the ⋯ menu included
+    # (§ The Posts tab → *What a row is*): it opens here, on the profile, and
+    # answers for the author's own post with the delete verb.
+    app.feed.open_post_actions(0)
+    assert app.driver.is_visible("feed-post-delete-button"), (
+        "the own post's ⋯ menu on the Posts tab should offer delete: "
+        f"{app.driver.diagnose('feed-post-delete-button')}"
+    )
+    assert app.driver.is_visible("profile-posts-section"), (
+        "the ⋯ menu should open in place, on the profile: "
+        f"{app.driver.diagnose('profile-posts-section')}"
+    )
+
+    name = app_name(app.driver)
+    viewer = launch_seat(nest_instance, seat_app_path(request, name), name, request)
+    try:
+        viewer.app.profile.navigate_to_actor(test_user["actor_id_hex"])
+        viewer.app.profile.open_posts_tab()
+        theirs = viewer.app.profile.wait_for_post_cards([second, first])
+        assert len(theirs) == 2 and second in theirs[0] and first in theirs[1], (
+            f"another user opening the author's profile should see the same two "
+            f"posts, newest first; got {theirs!r}, "
+            f"error={viewer.app.profile.error_text()!r}"
+        )
+    finally:
+        teardown_seats([viewer])
+
+
 @pytest.mark.feature("subscriptions-and-tiers")
 def test_other_profile_offers_render_and_subscribe(
     logged_in_app, nest_instance, test_user
@@ -679,4 +796,72 @@ def test_state_protocol_actor_nav_opens_that_actor_then_normalizes_self(
     )
     assert not app.profile.is_follow_button_visible(), (
         "the SELF profile must not show profile-follow-button"
+    )
+
+
+@pytest.mark.feature("profile")
+def test_activating_a_post_author_opens_the_authors_profile(logged_in_app, test_user):
+    """Door (2) into a Profile (`feed.md` § User actions; ui.yaml `click
+    post-author → profile`): activating a card's author line opens that
+    author's `profile-view`. The viewer's own post is the witness here, and it
+    pins the non-obvious half too: an author line naming the viewer opens the
+    SELF page (`profile-edit-button`), never their own profile in OTHER shape —
+    the same normalization the nav patch applies. The carried home of a
+    relayed post's author is unit-pinned (`PostSummary.home_nest_url`); its
+    cross-nest witness is the two-nest journey's.
+    """
+    app = logged_in_app
+    app.feed.require_author_line_opens_profile()
+
+    body = f"author line {uuid.uuid4().hex[:8]}"
+    app.feed.navigate()
+    app.feed.create_post(body)
+    app.feed.open_post_author(0)
+
+    own = test_user["actor_id_hex"]
+    viewed = app.profile.wait_for_viewed_actor(own)
+    assert viewed == own, (
+        f"the author line should open its author's profile; profile.actor_id="
+        f"{viewed!r}, error={app.profile.error_text()!r}"
+    )
+    assert app.profile.wait_for_edit_button(), (
+        "the viewer's own author line must open the SELF page "
+        f"(profile-edit-button); follow_visible={app.profile.is_follow_button_visible()}"
+    )
+
+
+@pytest.mark.feature("profile")
+def test_state_protocol_actor_nav_carries_the_home(logged_in_app, nest_instance):
+    """The nav patch's profile entry carries the open target's optional
+    `home_nest_url` (`profile.md` § Layout & flow → *Reaching another actor's
+    profile*; ui.yaml `profile.home_nest_url`): the hint seeds the page's
+    actor-home slot — the one the follow and the knock read — and a hint
+    naming the viewer's own nest is this nest. No profile is stored for the
+    actor, so the header read gives no better answer and the hint stands.
+    """
+    app = logged_in_app
+    app.profile.require_state_protocol_actor_nav_supported()
+    app.feed.require_author_line_opens_profile()  # the same tui-first slice
+    other = create_actor_and_register(
+        nest_instance["port"],
+        base_url=nest_instance["url"],
+        admin_signing_key=nest_instance["admin"]["signing_key"],
+    )
+    other_id = other["actor_id_hex"]
+
+    hint = "https://peer.invalid:9443"
+    app.profile.navigate_to_actor(other_id, home_nest_url=hint)
+    assert app.profile.wait_for_viewed_actor(other_id) == other_id
+    assert app.profile.wait_for_follow_button()
+    home = app.profile.wait_for_home_nest_url(hint)
+    assert home == hint, (
+        f"the carried home should seed the actor-home slot; profile.home_nest_url={home!r}"
+    )
+
+    app.contacts.navigate()
+    app.profile.navigate_to_actor(other_id, home_nest_url=nest_instance["url"])
+    assert app.profile.wait_for_viewed_actor(other_id) == other_id
+    home = app.profile.wait_for_home_nest_url(None)
+    assert home is None, (
+        f"a hint naming the viewer's own nest is this nest; profile.home_nest_url={home!r}"
     )

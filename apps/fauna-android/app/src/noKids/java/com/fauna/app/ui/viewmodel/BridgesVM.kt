@@ -6,15 +6,22 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.R
 import com.fauna.app.core.ApiClient
 import com.fauna.app.core.FeedTriple
+import com.fauna.app.core.HexUtil
 import com.fauna.app.core.ShellLog
 import com.fauna.ffi.FfiBridgeFollow
+import com.fauna.ffi.FfiFollowRequestRow
 import com.fauna.ffi.FfiBridgeStatus
 import com.fauna.ffi.FfiCborEntry
 import com.fauna.ffi.FfiCborValue
 import com.fauna.ffi.FfiException
 import com.fauna.ffi.FfiFamilyFeedRequest
 import com.fauna.ffi.FfiFeedSourceOperation
+import com.fauna.ffi.FfiInstalledPlugin
+import com.fauna.ffi.FfiPluginCard
 import com.fauna.ffi.feedSourceOperationWire
+import com.fauna.app.ui.util.resolveLocalized
+import uniffi.fauna_client_connected_apps.ConnectedAppsMachine
+import uniffi.fauna_client_connected_apps.ConnectedAppsObserver
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -102,6 +109,9 @@ class BridgesVM @Inject constructor(
     private val _follows = MutableStateFlow<Map<String, List<FfiBridgeFollow>>>(emptyMap())
     val follows: StateFlow<Map<String, List<FfiBridgeFollow>>> = _follows
 
+    private val _followRequests = MutableStateFlow<Map<String, List<FfiFollowRequestRow>>>(emptyMap())
+    val followRequests: StateFlow<Map<String, List<FfiFollowRequestRow>>> = _followRequests
+
     private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading
 
@@ -119,6 +129,7 @@ class BridgesVM @Inject constructor(
                 val list = api.listBridges()
                 _bridges.value = list
                 val followsMap = mutableMapOf<String, List<FfiBridgeFollow>>()
+                val requestsMap = mutableMapOf<String, List<FfiFollowRequestRow>>()
                 for (b in list) {
                     if (b.linked && b.supportsFollows) {
                         try {
@@ -128,11 +139,157 @@ class BridgesVM @Inject constructor(
                         }
                     }
                 }
+                for (b in list) {
+                    if (b.linked && b.supportsFollowRequests) {
+                        try {
+                            requestsMap[b.id] = api.listBridgeFollowRequests(b.id)
+                        } catch (e: Exception) {
+                            ShellLog.w("BridgesVM", "list follow requests failed for ${b.id}: ${e.message}")
+                        }
+                    }
+                }
                 _follows.value = followsMap
+                _followRequests.value = requestsMap
             } catch (e: Exception) {
                 _error.value = e.message
             }
             _isLoading.value = false
+        }
+    }
+
+    // ── The admin's hosted plugins (`bridges.md` § Hosted plugins on this page) ──
+    //
+    // `null` until the read returned: nothing is painted, then rows or the empty
+    // line. Lifted from tui's `bridges::plugin_elements`; the page mounts the
+    // section only while the account is the nest's admin.
+    private val _plugins = MutableStateFlow<List<FfiInstalledPlugin>?>(null)
+    val plugins: StateFlow<List<FfiInstalledPlugin>?> = _plugins
+
+    private val _pluginInstallOpened = MutableStateFlow(false)
+    val pluginInstallOpened: StateFlow<Boolean> = _pluginInstallOpened
+
+    fun refreshPlugins() {
+        viewModelScope.launch {
+            try {
+                _plugins.value = api.listPlugins()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    /** `fauna.plugins.install` — the nest opens the install card in Connected apps → Requests. */
+    fun installPlugin(documentUrl: String, onOpened: () -> Unit) {
+        viewModelScope.launch {
+            _error.value = null
+            _pluginInstallOpened.value = false
+            try {
+                api.installPlugin(documentUrl.trim())
+                _pluginInstallOpened.value = true
+                onOpened()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    /** `fauna.plugins.uninstall`, then re-read the list. */
+    fun uninstallPlugin(principalIdHex: String) {
+        viewModelScope.launch {
+            _error.value = null
+            try {
+                api.uninstallPlugin(principalIdHex)
+                refreshPlugins()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    // ── Every account's plugin settings cards (`bridges.md` § Hosted plugins on
+    // this page; `third-party.md` § The principal model → *Hosted principals*) ──
+    //
+    // One more `bridge-card` per installed plugin, composed once in shared Rust
+    // (`plugin_card_text`). Connect and Disconnect are the connected-apps
+    // machine's `bindPlugin` / `revokePrincipal` — the bind card then waits in
+    // Connected apps → Requests, the one approve path. Lifted from tui's
+    // `bridges::plugin_card_elements`. `null` until the read returned.
+    private val _pluginCards = MutableStateFlow<List<FfiPluginCard>?>(null)
+    val pluginCards: StateFlow<List<FfiPluginCard>?> = _pluginCards
+
+    private val _pluginBindOpened = MutableStateFlow(false)
+    val pluginBindOpened: StateFlow<Boolean> = _pluginBindOpened
+
+    private var cardMachine: ConnectedAppsMachine? = null
+
+    private val noObserver = object : ConnectedAppsObserver {
+        override fun onChanged() {}
+    }
+
+    fun refreshPluginCards() {
+        viewModelScope.launch {
+            try {
+                _pluginCards.value = api.listPluginCards()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    /**
+     * *Connect* while the card is unbound (`bindPlugin` on the install row),
+     * *Disconnect* while bound (`revokePrincipal` on this account's binding
+     * row); the machine's page error, when it set one, is the failure.
+     */
+    fun pressPluginCard(card: FfiPluginCard) {
+        viewModelScope.launch {
+            _error.value = null
+            _pluginBindOpened.value = false
+            try {
+                val machine = cardMachine ?: api.buildConnectedAppsMachine(noObserver, null)
+                    ?.also { cardMachine = it }
+                    ?: return@launch
+                val binding = card.bindingPrincipalIdHex
+                if (card.bound && binding != null) {
+                    machine.revokePrincipal(HexUtil.hexToBytes(binding))
+                } else {
+                    machine.bindPlugin(HexUtil.hexToBytes(card.principalIdHex))
+                }
+                val failed = resolveLocalized(context, machine.snapshot().error)
+                if (failed != null) {
+                    _error.value = failed
+                    return@launch
+                }
+                if (!card.bound) _pluginBindOpened.value = true
+                refreshPluginCards()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
+        }
+    }
+
+    /** `fauna.plugins.set_settings` for one setting of a bound plugin, then re-read the cards. */
+    fun updatePluginSetting(principalIdHex: String, key: String, value: FfiCborValue) {
+        viewModelScope.launch {
+            _error.value = null
+            try {
+                api.setPluginSetting(principalIdHex, key, value)
+                refreshPluginCards()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
+            }
         }
     }
 
@@ -192,6 +349,23 @@ class BridgesVM @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 failed(e, FeedTriple(bridgeId, feedSourceOperationWire(FfiFeedSourceOperation.FOLLOW), id))
+            }
+        }
+    }
+
+    /** Approve or refuse a waiting follow request, then re-read — non-optimistic,
+     *  no confirm (bridges.md § Follow requests). */
+    fun resolveFollowRequest(bridgeId: String, id: String, approve: Boolean) {
+        viewModelScope.launch {
+            _error.value = null
+            try {
+                if (approve) api.approveBridgeFollowRequest(bridgeId, id)
+                else api.refuseBridgeFollowRequest(bridgeId, id)
+                refresh()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _error.value = e.message
             }
         }
     }

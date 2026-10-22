@@ -47,16 +47,17 @@ use crate::federation_handlers::{
     FedFolderPublicFetchRequest, FedFolderReadTokenMintReply, FedFolderReadTokenMintRequest,
     FedFolderWriteTokenMintReply, FedFolderWriteTokenMintRequest, FedInboxDeliverReply,
     FedInboxDeliverRequest, FedKeypackageFetchReply, FedKeypackageFetchRequest, FedMailAckReply,
-    FedMailAckRequest, FedMailPullReply, FedMailPullRequest, FedPostDeleteRequest,
-    FedPostForwardRequest, FedPostGetReply, FedPostGetRequest, FedReportsExchangeReply,
+    FedMailAckRequest, FedMailPullReply, FedMailPullRequest, FedPostDeleteReply,
+    FedPostDeleteRequest, FedPostForwardReply, FedPostForwardRequest, FedPostGetReply,
+    FedPostGetRequest, FedProfileGetReply, FedProfileGetRequest, FedReportsExchangeReply,
     FedReportsExchangeRequest, FedReportsExportReply, FedRoomAcceptReply, FedRoomAcceptRequest,
     FedRoomGenerationsReply, FedRoomGenerationsRequest, FedRoomInviteIssueReply,
     FedRoomInviteIssueRequest, FedRoomInviteReply, FedRoomInviteRequest, FedRoomLabelsReply,
     FedRoomLabelsRequest, FedRoomLeaveReply, FedRoomLeaveRequest, FedRoomRosterReply,
-    FedRoomRosterReportReply, FedRoomRosterReportRequest, FedRoomRosterRequest,
-    FedSuccessionPushReply, FedSuccessionPushRequest, FedSyncPullReply, FedSyncPullRequest,
-    FedSyncPushEntry, FedSyncPushReply, FedSyncPushRequest, FedTrendsExchangeReply,
-    FedTrendsExchangeRequest, FedTrendsExportReply, FedWelcomeDeliverReply,
+    FedRoomRosterReportReply, FedRoomRosterReportRequest, FedRoomRosterRequest, FedRoomSearchReply,
+    FedRoomSearchRequest, FedSuccessionPushReply, FedSuccessionPushRequest, FedSyncPullReply,
+    FedSyncPullRequest, FedSyncPushEntry, FedSyncPushReply, FedSyncPushRequest,
+    FedTrendsExchangeReply, FedTrendsExchangeRequest, FedTrendsExportReply, FedWelcomeDeliverReply,
     FedWelcomeDeliverRequest,
 };
 use crate::feed_routes::{RemoteQueryRequest, RemoteQueryResponse};
@@ -342,14 +343,17 @@ pub enum DiscoveryTrust {
     /// public relay over the LAN, a VPN or the docker bridge, where the
     /// relay's public-domain cert cannot match the private name it is dialed
     /// by (`deployment-home-with-public-relay.md`; the address carve-out
-    /// ruled). **Pinned:** once the private
+    /// ruled). **Pinned:** the private
     /// nest's pairing rows name the public nest's `nest_id`
-    /// ([`FederationChannelPool::set_pairing_targets`]), the answer admitted
-    /// here is refused as [`PoolError::PeerMismatch`] unless it is that id —
-    /// and the federation `hello` then binds the id to the served SPKI, so an
-    /// impostor on the private network cannot pass as the relay. Before the
-    /// first pairing row is seeded there is nothing to expect, and the private
-    /// network is the trust boundary for that window.
+    /// ([`FederationChannelPool::set_pairing_targets`]), and the answer
+    /// admitted here is refused as [`PoolError::PeerMismatch`] unless it is
+    /// that id — and the federation `hello` then binds the id to the served
+    /// SPKI, so an impostor on the private network cannot pass as the relay.
+    /// There is no unpinned pre-seed window: only a URL a live admin row names
+    /// reaches this arm, and that row records the id; the URL stays unpinned
+    /// while the live admin rows at it record several ids (with a warning) or
+    /// no 32-byte one, since `fauna.pair.add` stores the id's bytes unchecked
+    /// (`nest_sync_worker::pairing_target_table`).
     ConfiguredPrivate,
 }
 
@@ -568,17 +572,35 @@ impl FederationChannelPool {
     /// `conformance_discovery_tls_root.rs`). Same shape as
     /// `validate_peer_url`'s explicit
     /// [`PeerUrlOrigin`](crate::federation_channel::PeerUrlOrigin) parameter.
-    /// The dial resolves the host itself (no pinned address).
+    /// The dial resolves the host itself (no pinned address); use
+    /// [`Self::resolve_peer_nest_id_in_host`] to hand the dial an address.
     pub async fn resolve_peer_nest_id_in_class(
         &self,
         peer_url: &str,
         class: PeerHostClass,
     ) -> Result<[u8; 32], PoolError> {
+        self.resolve_peer_nest_id_in_host(
+            peer_url,
+            ClassifiedPeerHost {
+                class,
+                dial_addr: None,
+            },
+        )
+        .await
+    }
+
+    /// [`Self::resolve_peer_nest_id_in_class`] with the whole
+    /// [`ClassifiedPeerHost`], so the conformance suite can pin that the dial
+    /// connects to `host.dial_addr` — the address the class was judged from —
+    /// rather than re-resolving the name (the discovery trust rule's
+    /// same-answer clause; `conformance_discovery_tls_root.rs`). **Production
+    /// goes through `resolve_peer_nest_id`**, which classifies the host itself.
+    pub async fn resolve_peer_nest_id_in_host(
+        &self,
+        peer_url: &str,
+        host: ClassifiedPeerHost,
+    ) -> Result<[u8; 32], PoolError> {
         let key = peer_url.trim_end_matches('/').to_string();
-        let host = ClassifiedPeerHost {
-            class,
-            dial_addr: None,
-        };
         self.discover_nest_id(&key, host).await
     }
 
@@ -710,7 +732,7 @@ impl FederationChannelPool {
     /// to, **without dialing** — `None` on a cold (or failed) domain. The
     /// polled paths that must never be delayed by a name read this, and spawn
     /// the full binding on a miss so the next poll finds it warm
-    /// (`federation.md` § Cross-nest shared folders + channel append → *The
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The
     /// cross-nest owner label*, *When the binding runs*). Same key
     /// normalisation as the resolver.
     pub async fn cached_domain_nest_id(&self, domain: &str) -> Option<[u8; 32]> {
@@ -1163,7 +1185,7 @@ pub async fn originate_keypackage_fetch(
 ///
 /// `announce` is the requesting member's `(handle, domain)` as THIS nest — the
 /// member's home, the authority for handles at its domain — joins it from its
-/// own `users` row: the id→handle ruling's one mechanism (`federation.md`
+/// own `users` row: the id→handle ruling's one mechanism (`federation-shared-folders.md`
 /// § Cross-nest shared folders + channel append, the id→handle bullet). It
 /// rides every drain so a rename lands on the next one; `None` when the
 /// member has no usable handle, which announces nothing rather than an empty
@@ -1223,7 +1245,7 @@ pub async fn originate_channel_fetch(
 // client-visible "the home nest needs an update" — never a spurious auth
 // failure — and the append's `fauna.conversations.channel.stale` /
 // `permission_denied` refusals must ride back to the client untouched (S5;
-// `federation.md` § Cross-nest shared folders + channel append).
+// `federation-shared-folders.md` § Cross-nest shared folders + channel append).
 
 /// Decode a peer reply `Value` into a typed reply, preserving a typed peer
 /// error untouched; a reply that fails to decode surfaces as `malformed`.
@@ -1426,6 +1448,41 @@ pub async fn originate_room_labels(
         )
         .await?;
     Ok(decode_peer_reply::<FedRoomLabelsReply>(reply).map(|r| r.labels))
+}
+
+/// Originate `fauna.federation.conversation.room.search.fetch` (pure read).
+/// `Ok(Ok(reply))` ⇒ the room home's hits in the same-nest
+/// `RoomSearchReply` shape, so the relay forwards them unchanged; this nest
+/// stores none of them. The room home binds the requesting actor to this
+/// nest's verified identity and checks its floor seat itself.
+#[allow(clippy::too_many_arguments)]
+pub async fn originate_room_search(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    requesting_actor_hex: &str,
+    room_id_hex: &str,
+    query: &str,
+    limit: Option<u32>,
+    include_posts: bool,
+) -> Result<Result<fauna_protocol::conversations::RoomSearchReply, RpcError>, PoolError> {
+    let req = FedRoomSearchRequest {
+        requesting_actor_id: requesting_actor_hex.to_string(),
+        room_id: room_id_hex.to_string(),
+        query: query.to_string(),
+        limit,
+        include_posts,
+    };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.conversation.room.search.fetch",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedRoomSearchReply>(reply).map(|r| r.search))
 }
 
 /// Originate `fauna.federation.conversation.roster.report` (idempotent
@@ -1642,7 +1699,7 @@ pub async fn originate_folder_changes_fetch(
 
 /// Originate `fauna.federation.folder.public.fetch` (idempotent read) — the
 /// follower's own nest relaying a public-folder read to the folder's home nest
-/// (`federation.md` § The public folder read plane).
+/// (`federation-shared-folders.md` § The public folder read plane).
 ///
 /// ⚠ Note what is **not** in this signature: no requesting actor. There is no
 /// membership to check on the far side, so the follower's identity never leaves
@@ -2293,6 +2350,158 @@ pub async fn originate_post_delete(
     }
 }
 
+/// Originate one federated-follow kind to the author's home — or, for the
+/// state leg, to the subscriber's — pinned to the nest id the caller holds for
+/// it (`federated-follow.md` § Decision 2), so a URL that has come to answer
+/// for another nest is refused before the dial. `Ok(Err(peer_err))` ⇒ the
+/// peer's typed refusal, kept apart from a transport failure.
+async fn originate_follow<T: serde::de::DeserializeOwned>(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    peer_nest_id: &[u8; 32],
+    kind: &str,
+    payload: Value,
+) -> Result<Result<T, RpcError>, PoolError> {
+    let reply = pool
+        .originate_expecting(
+            state,
+            peer_url,
+            peer_nest_id,
+            kind,
+            fresh_idempotency_key(),
+            payload,
+        )
+        .await?;
+    Ok(decode_peer_reply::<T>(reply))
+}
+
+/// Originate `fauna.federation.follow.subscribe` — carry the subscriber's
+/// signed intent to the author's home and bring back its answer (idempotent:
+/// the home's subscribe body answers a repeat with the same row).
+pub async fn originate_follow_subscribe(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    home_nest_id: &[u8; 32],
+    req: crate::follow_federation::FedFollowIntentRequest,
+) -> Result<Result<fauna_protocol::subscriptions::SubscribeReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        home_nest_id,
+        crate::follow_federation::SUBSCRIBE_KIND,
+        to_value(&req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.follow.unsubscribe` — the leave's twin.
+pub async fn originate_follow_unsubscribe(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    home_nest_id: &[u8; 32],
+    req: crate::follow_federation::FedFollowIntentRequest,
+) -> Result<Result<fauna_protocol::subscriptions::UnsubscribeReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        home_nest_id,
+        crate::follow_federation::UNSUBSCRIBE_KIND,
+        to_value(&req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.follow.key_blob.fetch` (idempotent read) —
+/// the author's current `KeyBlob` for one subscriber homed here, relayed to
+/// that subscriber unstored.
+pub async fn originate_follow_key_blob_fetch(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    home_nest_id: &[u8; 32],
+    req: crate::follow_federation::FedFollowKeyBlobFetchRequest,
+) -> Result<Result<fauna_protocol::subscriptions::KeyBlobGetReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        home_nest_id,
+        crate::follow_federation::KEY_BLOB_FETCH_KIND,
+        to_value(&req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.follow.state` — the outbox's push of a
+/// request's fate to the subscriber's home (idempotent: the receiver sets the
+/// state it is told).
+pub async fn originate_follow_state(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    subscriber_nest_id: &[u8; 32],
+    req: &crate::follow_federation::FedFollowStateRequest,
+) -> Result<Result<crate::follow_federation::FedFollowStateReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        subscriber_nest_id,
+        crate::follow_federation::STATE_KIND,
+        to_value(req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.follow.deliver` — one stored post envelope to a
+/// follower's home nest (`federated-follow.md` § Decision 1), in
+/// `post.forward`'s request shape, pinned to that nest's id. Idempotent: the
+/// receiver stores under the content-addressed id and answers a replay `Ok`.
+pub async fn originate_follow_deliver(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    follower_nest_id: &[u8; 32],
+    req: &FedPostForwardRequest,
+) -> Result<Result<FedPostForwardReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        follower_nest_id,
+        crate::follow_delivery::DELIVER_KIND,
+        to_value(req),
+    )
+    .await
+}
+
+/// Originate `fauna.federation.post.delete` to a follower's home nest — the
+/// delete leg of a federated follow (`federated-follow.md` § Decision 5),
+/// pinned like every follow kind; the receiver's gate keys on the stored
+/// row's delivering home.
+pub async fn originate_follow_delete(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    follower_nest_id: &[u8; 32],
+    tombstone_body: Vec<u8>,
+) -> Result<Result<FedPostDeleteReply, RpcError>, PoolError> {
+    originate_follow(
+        pool,
+        state,
+        peer_url,
+        follower_nest_id,
+        "fauna.federation.post.delete",
+        to_value(&FedPostDeleteRequest { tombstone_body }),
+    )
+    .await
+}
+
 /// Originate `fauna.federation.reports.exchange` (idempotent: the
 /// peer's import is a latest-epoch-wins upsert per `(hash, factor, peer)`).
 /// Pushes this nest's local ≥k report aggregates (`report-sharing.md`
@@ -2357,6 +2566,31 @@ pub async fn originate_abuse_report_call(
                 .await
         }
     }
+}
+
+/// Originate `fauna.federation.moderation.appeal` — relay the author's appeal
+/// of a delivered obligation row to the nest that issued it, pinned to that
+/// nest's verified id (`moderation.md` § Legal takedown → *The author homed on
+/// another nest*). Idempotent on the issuer: a repeat while the appeal pends is
+/// `appeal_already_recorded`. `Ok(Err(peer_err))` ⇒ the issuer's typed refusal.
+pub async fn originate_moderation_appeal(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    issuer_nest_id: &[u8],
+    req: &fauna_protocol::moderation::ObligationAppealRelayRequest,
+) -> Result<Result<fauna_protocol::moderation::ModerationAppealReply, RpcError>, PoolError> {
+    let reply = pool
+        .originate_expecting(
+            state,
+            peer_url,
+            issuer_nest_id,
+            crate::moderation_federation::APPEAL_KIND,
+            fresh_idempotency_key(),
+            to_value(req),
+        )
+        .await?;
+    Ok(decode_peer_reply(reply))
 }
 
 /// Originate `fauna.federation.reports.export` (idempotent read).
@@ -2450,18 +2684,22 @@ pub async fn originate_trends_export(
 /// Originate `fauna.federation.post.get` (idempotent read). Fetches
 /// a single post's raw stored bytes from `peer_url` by content-id — the
 /// import-triggered fetch (`trending.md` § Import-triggered fetch) that surfaces
-/// a peer-only trending post so its ramp can land. The caller verifies the
-/// returned bytes (signature + content-address binding to `post_id`) before
-/// ingesting; a missing/withheld post surfaces as an error / empty body the
-/// caller drops.
+/// a peer-only trending post so its ramp can land, and the deep-link door's
+/// relay (`fauna.posts.get_remote`). The trend import verifies the returned
+/// bytes (signature + content-address binding to `post_id`) before ingesting;
+/// the relay forwards them unstored.
+///
+/// `Ok(Err(peer_err))` ⇒ the peer's typed refusal, kept apart from a transport
+/// failure so the relay can tell the reader "the home does not hold this post"
+/// (`fauna.federation.not_found`) from "the home could not be reached".
 pub async fn originate_post_get(
     pool: &FederationChannelPool,
     state: &Arc<AppState>,
     peer_url: &str,
     post_id: String,
-) -> Result<FedPostGetReply, PoolError> {
+) -> Result<Result<FedPostGetReply, RpcError>, PoolError> {
     let req = FedPostGetRequest { post_id };
-    match pool
+    let reply = pool
         .originate(
             state,
             peer_url,
@@ -2469,15 +2707,32 @@ pub async fn originate_post_get(
             fresh_idempotency_key(),
             to_value(&req),
         )
-        .await?
-    {
-        Ok(v) => {
-            let reply: FedPostGetReply =
-                value_to(&v).map_err(|()| PoolError::Dial("decode post.get reply".to_string()))?;
-            Ok(reply)
-        }
-        Err(e) => Err(PoolError::Dial(format!("peer post.get: {}", e.code))),
-    }
+        .await?;
+    Ok(decode_peer_reply::<FedPostGetReply>(reply))
+}
+
+/// Originate `fauna.federation.profile.get` (idempotent read). Fetches an
+/// actor's latest signed profile from its home for the reader nest's
+/// `fauna.profile.get_remote` relay, which forwards it unstored. `Ok(Err(e))`
+/// is the home's typed refusal — `fauna.federation.not_found` for every
+/// profile the home does not serve to other nests.
+pub async fn originate_profile_get(
+    pool: &FederationChannelPool,
+    state: &Arc<AppState>,
+    peer_url: &str,
+    actor_id: String,
+) -> Result<Result<FedProfileGetReply, RpcError>, PoolError> {
+    let req = FedProfileGetRequest { actor_id };
+    let reply = pool
+        .originate(
+            state,
+            peer_url,
+            "fauna.federation.profile.get",
+            fresh_idempotency_key(),
+            to_value(&req),
+        )
+        .await?;
+    Ok(decode_peer_reply::<FedProfileGetReply>(reply))
 }
 
 /// Originate `fauna.federation.feed.query` (idempotent read).

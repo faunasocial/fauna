@@ -1,4 +1,6 @@
 pub mod account_entry_crypto;
+/// The one AEAD shape the passphrase-rooted client stores seal with.
+pub mod aead_seal;
 pub mod api_error;
 /// The `fauna://` in-app routes an OS surface opens the app on (the Windows
 /// Explorer Share leaf's hand-off) — one grammar for the builder and the parser.
@@ -24,6 +26,10 @@ pub mod bluesky_web_url;
 pub mod byte_array;
 pub mod caltime;
 pub mod carried;
+/// Which preimage a tamper-evidence chain row was hashed under, and the one
+/// recomputation each recorded version selects — shared by the nest's writer
+/// and every admin app that verifies the served audit log.
+pub mod chain_version;
 pub mod chunk;
 pub mod chunk_crypto;
 pub mod chunk_seal;
@@ -34,6 +40,7 @@ pub mod compress;
 pub mod contact_overlay;
 pub mod content_category;
 pub mod content_line;
+pub mod content_policy;
 pub mod control_chars;
 pub mod counterparty_url;
 pub mod crypto;
@@ -55,6 +62,8 @@ pub mod delegation;
 pub mod deployment_seed_rows;
 pub mod device_endpoints;
 pub mod device_id;
+/// Length-framed, domain-separated hash-input framing.
+pub mod domain_hash;
 mod domain_key;
 pub mod encoding;
 pub mod error;
@@ -90,8 +99,13 @@ pub mod label_custody;
 pub(crate) mod latest_wins;
 pub mod load_cache;
 pub mod log_redact;
+/// The source scanner the crates' [`log_redact`] regression pins share.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod log_redact_scan;
 pub mod mail_aliases;
 pub mod mail_auth;
+pub mod mail_availability;
+pub mod mail_import_source;
 pub mod mail_rows;
 pub mod mail_scan;
 pub mod mailbox;
@@ -112,6 +126,7 @@ pub mod path_crypto;
 pub mod path_guard;
 pub mod peer_anchor_rows;
 pub mod platform_ids;
+pub mod post_blob;
 pub mod read_marker;
 pub mod recovery;
 pub mod refused_change_rows;
@@ -204,6 +219,13 @@ pub mod snapshot_lock;
 
 pub use maybe_send::MaybeSendSync;
 pub use snapshot_lock::clone_locked;
+
+/// The organisation's terms of use and content guidelines — the target of the
+/// Settings About row's `settings-terms-link` and of the onboarding notice's
+/// `onboarding-terms-link` on every app (`terms-and-content-guidelines.md`
+/// § The decisions, item 4 (d)). A constant nobody chooses: no app hard-codes
+/// the URL, and no setting moves it.
+pub const TERMS_URL: &str = "https://fauna.social/terms";
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!("fauna_core");

@@ -139,12 +139,22 @@ def test_the_ffi_floor_is_keyed_on_the_feature_and_reaches_every_render_face():
     ), "fauna-ffi's compiled floor must be KIDS_CONTENT_FLOOR exactly under `kids-floor`"
     # Every function that composes a render verdict resolves its guardian input
     # through `render_guardian_policy` — a face that converted the policy itself
-    # would render past the kids floor.
+    # would render past the kids floor. `render_sources` is the one shared
+    # helper that does it for the composed faces, so a face may go through it —
+    # provided its own body is where the policy is resolved.
+    sources = re.search(
+        r"\nfn render_sources\((.*?)\n\}\n",
+        (_FFI / "src" / "family.rs").read_text(encoding="utf-8"),
+        re.S,
+    )
+    assert sources and "render_guardian_policy(" in sources.group(1), (
+        "`render_sources` must resolve the guardian policy through `render_guardian_policy`"
+    )
     for path in sorted((_FFI / "src").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
         for body in re.split(r"\n\s*(?:pub(?:\([a-z]+\))? )?fn ", text)[1:]:
             if re.search(r"\brender_verdict_(?:composed|for_item)\(", body):
-                assert "render_guardian_policy(" in body, (
+                assert "render_guardian_policy(" in body or "render_sources(" in body, (
                     f"{path.name}: `fn {body.split('(', 1)[0]}` composes a render "
                     "verdict without `render_guardian_policy`, skipping the kids floor"
                 )
@@ -196,8 +206,9 @@ def test_the_android_kids_build_type_is_store_safe_under_its_own_identity():
     )
     assert 'buildConfigField("boolean", "KIDS", "true")' in kids
     assert "versionNameSuffix = null" in kids, (
-        "the kids build type must clear the `-storesafe` suffix initWith copied — "
-        "this artifact ships, on the train at the fleet version"
+        "the kids build type must state it carries no version-name suffix, not "
+        "inherit whatever storeSafe has — this artifact ships, on the train at the "
+        "fleet version"
     )
     assert "applicationIdSuffix" not in kids, (
         "the kids listing is a different registry unit, never a suffix of the main id"
@@ -250,7 +261,7 @@ def test_the_android_kids_ffi_is_the_named_complement_plus_the_floor():
 def test_the_android_kids_bindings_hold_the_shipping_seam_bar():
     """`kids` is a shipping flavor: no `*ForTest` export, production-tree witness."""
     bindgen = _recipe("_android-ffi-bindgen")
-    assert "*/src/release/*|*/src/storeSafe/*|*/src/foss/*|*/src/kids/*)" in bindgen
+    assert "*/src/release/*|*/src/storeSafe/*|*/src/storeNoPayments/*|*/src/foss/*|*/src/kids/*)" in bindgen
     assert re.search(r"\*/src/kids/\*\)\s+FLAVOR_FLAG=--production-tree; SIBLING=\"\";", bindgen), (
         "the kids bindings must be witnessed as a production tree with no sibling — "
         "kids vs debug differ by whole planes, not by `test-helpers` alone"
@@ -466,6 +477,105 @@ def test_every_shared_android_render_of_a_kids_excised_id_carries_the_condition(
     )
 
 
+def test_the_android_kids_build_never_renders_or_calls_the_remote_image_reveal():
+    """The Play kids data answers say the push distributor is the one other party the
+    kids build talks to; `load-remote-content-button` would have the device fetch from
+    whatever site hosts a message's picture (`dynamic-features.md`, the kids spine
+    paragraph). The button's render and the manager call both carry the condition."""
+    path = _ANDROID_MAIN / "com/fauna/app/ui/screen/conversations/ConversationDetailScreen.kt"
+    # Line comments only: the block-comment stripper would eat from a `image/*` MIME string.
+    code = re.sub(r"(?m)^\s*//[^\n]*\n", "", path.read_text(encoding="utf-8"))
+    button = re.search(
+        r"if \(([^\n{]*)\) \{\s*TextButton\([^)]*?onClick = onRevealRemoteImages,"
+        r"[^)]*?Ids\.LOAD_REMOTE_CONTENT_BUTTON",
+        code,
+        flags=re.DOTALL,
+    )
+    assert button, "the reveal button's `if (...)` guard was not found — the render pin is vacuous"
+    assert f"!{_KIDS_CONDITION}" in button.group(1), (
+        "the kids build renders `load-remote-content-button`: a child's tap makes the device "
+        "fetch an image from a third-party host"
+    )
+    assert f"if (!{_KIDS_CONDITION}) manager.revealRemoteImages(msgId)" in code, (
+        "the manager's `revealRemoteImages` call lost its `!BuildConfig.KIDS` guard"
+    )
+
+
+def test_the_ios_kids_build_never_renders_or_calls_the_remote_image_reveal():
+    """The iOS leg of the pin above: the shared bubble's `load-remote-content-button`
+    and the thread view's `revealRemoteImages` call sit behind `#if !FAUNA_KIDS`, and
+    the two feed files holding the other reveal buttons are compiled out wholesale."""
+    kits = _APPLE / "FaunaKit/Sources/FaunaKit/Views"
+
+    def code(path: Path) -> str:
+        return re.sub(r"(?m)^\s*//[^\n]*\n", "", path.read_text(encoding="utf-8"))
+
+    bubble = code(kits / "DmMessageBubble.swift")
+    guarded = re.search(
+        r"#if !FAUNA_KIDS\s*if hasBlockedRemote \{(.*?)\n        \}\n        #endif\n",
+        bubble,
+        flags=re.DOTALL,
+    )
+    assert guarded, "the bubble's reveal button lost its `#if !FAUNA_KIDS` guard"
+    assert "Ids.loadRemoteContentButton" in guarded.group(1)
+    assert bubble.count("Ids.loadRemoteContentButton") == 2 == guarded.group(1).count(
+        "Ids.loadRemoteContentButton"
+    ), "a `load-remote-content-button` reference sits outside the kids guard"
+
+    thread = code(kits / "ThreadDetailView.swift")
+    assert re.search(
+        r"onRevealRemoteImages: \{ mid in\s*#if !FAUNA_KIDS\s*vm\.revealRemoteImages\(mid\)\s*#endif",
+        thread,
+    ), "the thread view's `revealRemoteImages` call lost its `#if !FAUNA_KIDS` guard"
+    for whole_file in (kits / "PostCardBody.swift", _APPLE / "Fauna-iOS/Views/Feed/PostDetailView.swift"):
+        text = code(whole_file)
+        assert text.lstrip().startswith("#if !FAUNA_KIDS"), f"{whole_file.name} is no longer excised whole"
+        assert text.rstrip().rsplit("\n", 1)[-1].startswith("#endif"), (
+            f"{whole_file.name} is no longer excised whole"
+        )
+
+
+def test_the_android_kids_build_routes_into_no_nest_setup_or_nest_retirement():
+    """The Play kids data answers name no hosting or DNS provider: a child joins a
+    guardian's nest by invite, so the kids build registers no VPS/DNS/provisioning
+    route and offers no nest retirement (`dynamic-features.md`, the kids spine
+    paragraph). Each carries `!BuildConfig.KIDS`, which the release shrinker folds out of the kids APK."""
+    ui = _ANDROID_MAIN / "com/fauna/app/ui"
+    nav = _kotlin_code_only((ui / "navigation/FaunaNavHost.kt").read_text(encoding="utf-8"))
+    setup = re.search(
+        r"if \(!BuildConfig\.KIDS\) \{(.*?)\n        \}\n", nav, flags=re.DOTALL
+    )
+    assert setup, "the nest setup route block lost its `if (!BuildConfig.KIDS)` guard"
+    for route in ("onboarding/dns-config", "onboarding/vps-config", "onboarding/nest-provisioning"):
+        assert f'composable("{route}")' in setup.group(1), f"`{route}` is registered outside the kids guard"
+        assert nav.count(f'composable("{route}")') == 1
+    assert 'if (!BuildConfig.KIDS) composable("settings/admin-nest-retire")' in nav, (
+        "the admin nest-retire route is registered on the kids build"
+    )
+    assert "if (!BuildConfig.KIDS && retiring)" in nav, (
+        "the launch retry surface can host nest retirement on the kids build"
+    )
+    # The entry points: the wizard's step router and both retire buttons.
+    handle = _kotlin_code_only((ui / "screen/onboarding/HandleEntryScreen.kt").read_text(encoding="utf-8"))
+    for step, route in (
+        ("DNS_CONFIG", "onboarding/dns-config"),
+        ("VPS_CONFIG", "onboarding/vps-config"),
+        ("NEST_PROVISIONING", "onboarding/nest-provisioning"),
+    ):
+        assert re.search(
+            rf'OnboardingStep\.{step} ->\s*if \(BuildConfig\.KIDS\) "onboarding/handle-entry" else "{route}"',
+            handle,
+        ), f"routeForStep sends {step} to its provider screen on the kids build"
+    retry = _kotlin_code_only((ui / "screen/LaunchRetryScreen.kt").read_text(encoding="utf-8"))
+    assert re.search(r"if \(!BuildConfig\.KIDS\) \{\s*Spacer[^}]*?Ids\.LAUNCH_RETIRE_BUTTON", retry, re.S), (
+        "`launch-retire-button` is rendered on the kids build"
+    )
+    admin = _kotlin_code_only((ui / "screen/settings/AdminNestScreen.kt").read_text(encoding="utf-8"))
+    assert re.search(r"if \(!BuildConfig\.KIDS\) \{\s*RetireSection\(onRetire\)", admin), (
+        "the admin page renders the nest-retire section on the kids build"
+    )
+
+
 def test_the_android_kids_witness_checks_both_columns():
     body = _recipe("android-kids-check")
     assert '_android-ffi-flavor kids "kids-safe,kids-floor" arm64' in body
@@ -587,11 +697,19 @@ def test_both_kids_witnesses_grep_the_kind_strings_in_both_columns():
 def test_the_post_tip_resolver_twin_is_not_in_a_kids_compiled_directory():
     """`resolvePostTipsIfBuilt` extends the FEED manager, so its excised twin cannot
     live in `src/noPayments/` (which the kids build type also compiles and whose
-    bindings carry no feed at all): it is `storeSafe`'s own."""
+    bindings carry no feed at all): it is in `src/noKidsNoPayments/`, taken by the
+    two build types with a feed and no payments and never by `kids`."""
     built = _ANDROID_APP / "src/payments/java/com/fauna/app/payments/PostTipsGlue.kt"
-    excised = _ANDROID_APP / "src/storeSafe/java/com/fauna/app/payments/PostTipsGlue.kt"
+    excised = _ANDROID_APP / "src/noKidsNoPayments/java/com/fauna/app/payments/PostTipsGlue.kt"
     for path in (built, excised):
         assert "fun FfiFeedManager.resolvePostTipsIfBuilt(" in path.read_text(encoding="utf-8"), path
+    gradle = (_ANDROID_APP / "build.gradle.kts").read_text(encoding="utf-8")
+    for build_type, takes in (("storeSafe", True), ("storeNoPayments", True), ("kids", False)):
+        m = re.search(rf'getByName\("{build_type}"\)\s*\{{([^}}]*)\}}', gradle)
+        assert m, f"no sourceSets entry for {build_type}"
+        assert ('java.srcDir("src/noKidsNoPayments/java")' in m.group(1)) == takes, (
+            f"{build_type} {'must' if takes else 'must NOT'} take src/noKidsNoPayments/java"
+        )
     no_payments = _ANDROID_APP / "src/noPayments/java"
     for path in _hand_written(no_payments):
         assert "FfiFeedManager" not in _kotlin_code_only(path.read_text(encoding="utf-8")), (
@@ -635,6 +753,36 @@ def test_the_swift_id_table_puts_the_kids_prefixes_behind_the_kids_condition():
     leaked = re.findall(rf'"((?:{"|".join(map(re.escape, _KIDS_EXCISED_ID_PREFIXES))})[^"]*)"', shared)
     assert not leaked, f"kids-excised ids in the ungated Ids table: {leaked[:5]!r}"
     assert "#if !FAUNA_KIDS\nextension Ids {" in table
+
+
+def test_the_ios_kids_build_routes_into_no_nest_setup_and_gates_the_retire_ids():
+    """The iOS leg of the excision of nest setup and nest retirement (`dynamic-features.md`,
+    the kids spine paragraph): the wizard's DNS/VPS/provisioning steps stay on handle
+    entry under `FAUNA_KIDS`, the three provider views are compiled out whole, and the
+    retire ids sit in the kids-gated `Ids` extension so a future retirement render
+    cannot compile into the kids build."""
+    onboarding = _APPLE / "Fauna-iOS/Views/Onboarding"
+    welcome = (onboarding / "WelcomeView.swift").read_text(encoding="utf-8")
+    kids_arm, rest = welcome.split("#if FAUNA_KIDS", 1)[1].split("#else", 1)
+    assert "case .dnsConfig, .vpsConfig, .nestProvisioning:" in kids_arm and "HandleEntryView(vm: vm)" in kids_arm
+    full_arm = rest.split("#endif", 1)[0]
+    for view in ("DnsConfigView", "VpsConfigView", "NestProvisioningView"):
+        assert f"{view}(vm: vm)" in full_arm and f"{view}(vm: vm)" not in kids_arm, (
+            f"{view} is reachable from the kids router arm"
+        )
+        text = (onboarding / f"{view}.swift").read_text(encoding="utf-8")
+        assert text.startswith("#if !FAUNA_KIDS\n") and text.rstrip().endswith("#endif // !FAUNA_KIDS"), (
+            f"{view}.swift is no longer compiled out of the kids build whole"
+        )
+    generator = _UI_IDS_GENERATOR.read_text(encoding="utf-8")
+    m = re.search(r"SWIFT_KIDS_ONLY_ID_PREFIXES = \(([^)]*)\)", generator)
+    assert m and set(re.findall(r'"([^"]+)"', m.group(1))) == {"admin-nest-retire-", "launch-retire-button"}
+    table = _UI_IDS_SWIFT.read_text(encoding="utf-8")
+    shared = table.split("public enum Ids {", 1)[1].split("\n}\n", 1)[0]
+    gated = table.split("#if !FAUNA_KIDS\nextension Ids {", 1)[1]
+    for name in ("adminNestRetireSection", "adminNestRetireButton", "launchRetireButton"):
+        assert name not in shared, f"`{name}` is in the ungated Ids table"
+        assert name in gated, f"`{name}` is missing from the kids-gated Ids extension"
 
 
 def _pbx_target_configs(name: str) -> list[str]:

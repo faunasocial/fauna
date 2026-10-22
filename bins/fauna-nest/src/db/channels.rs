@@ -79,7 +79,7 @@ pub struct SeatCarried {
 /// hands [`CacheDb::register_foreign_channel_member`]'s conflict arm. The
 /// insert arm ignores it entirely: a first grant has nothing to move, and
 /// cross-nest DM initiation depends on it staying open to a caller on no
-/// roster (`federation.md` § Cross-nest shared folders + channel append, the
+/// roster (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the
 /// *inviter-asserted (TOFU)* bullet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebindPower {
@@ -213,6 +213,24 @@ impl CacheDb {
             }
             Err(e) => Err(e).context("take key package"),
         }
+    }
+
+    /// The actor's reusable **last-resort** key package, consuming nothing —
+    /// what a federation fetch past the per-target budget is served
+    /// (`federation_handlers::keypackage_fetch_handler`), so the actor stays
+    /// reachable while the one-time pool is spared. `None` when none is on file.
+    pub async fn last_resort_key_package(&self, actor_id: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+        let actor_id = *actor_id;
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT key_package_data FROM key_packages
+             WHERE actor_id = ?1 AND expires_at > ?2 AND last_resort = 1
+             ORDER BY published_at DESC LIMIT 1",
+            rusqlite::params![actor_id.as_slice(), now_epoch_secs()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("last-resort key package")
     }
 
     /// Move every key package of one actor — one-time and last-resort — back
@@ -544,7 +562,7 @@ impl CacheDb {
             // cascade, no admin surface, no migration cleanup. Once held, the
             // claim gate of that era refused every non-claimant `Commit` (so the
             // group's owner could no longer add, remove or rotate — that half is
-            // since discharged, `federation.md` § Cross-nest shared folders +
+            // since discharged, `federation-shared-folders.md` § Cross-nest shared folders +
             // channel append, 2026-08-24: Commit admission is now roster-
             // membership) and the claim-read gate suppresses the owner's roster
             // writes on later Welcomes, silently. The claimant could then abandon
@@ -773,7 +791,7 @@ impl CacheDb {
     /// strictly narrower question than being authorized to write.
     ///
     /// **`power` splits insert-if-absent from update-existing**
-    /// (`federation.md` § Cross-nest shared folders + channel append, the
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the
     /// *inviter-asserted (TOFU)* bullet). The row's `home_nest_id` IS an
     /// authorization: `require_foreign_member` serves `channel.fetch`,
     /// `channel.actors`, `channel.append`, `folder.changes.fetch` and
@@ -962,6 +980,14 @@ impl CacheDb {
     /// foreign member recorded there (this nest hosting the channel, the peer
     /// being their own home — a self-succession the peer must also learn).
     ///
+    /// The federated follow adds both of its directions (`federated-follow.md`
+    /// § Decision 5): every distinct home on `actor_id`'s roster as an author
+    /// (`subscribers`/`subscribe_requests`, home not NULL), and the home of
+    /// every author `actor_id` follows from here (`remote_follows`). These
+    /// legs read the successor's rows as well as the retired id's, because the
+    /// caller reads after the local ceremony committed and that ceremony
+    /// already moved both planes to the successor.
+    ///
     /// Rows with no recorded URL are skipped, not an error: an un-addressable
     /// peer is the declared residual (`identity-succession.md:103`), and the
     /// pull leg is what covers it.
@@ -991,7 +1017,10 @@ impl CacheDb {
         let actor_id = *actor_id;
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
-            "SELECT nest_url FROM (
+            "WITH moved(id) AS (
+                SELECT ?1 UNION SELECT new_actor_id FROM actor_successions WHERE old_actor_id = ?1
+             )
+             SELECT nest_url FROM (
                 SELECT a.nest_url AS nest_url,
                        (a.proven_at IS NULL) AS unproven,
                        a.first_seen AS first_seen,
@@ -1010,6 +1039,15 @@ impl CacheDb {
                                                   WHERE actor_id = ?1)
                              OR f.channel_id IN (SELECT channel_id FROM channel_foreign_members
                                                   WHERE actor_id = ?1)
+                         UNION
+                         SELECT home_nest_id FROM subscribers
+                          WHERE author_id IN moved AND home_nest_id IS NOT NULL
+                         UNION
+                         SELECT home_nest_id FROM subscribe_requests
+                          WHERE author_id IN moved AND home_nest_id IS NOT NULL
+                         UNION
+                         SELECT home_nest_id FROM remote_follows
+                          WHERE subscriber_id IN moved
                        )
              )
              ORDER BY addr_rank ASC, unproven ASC, first_seen ASC, arowid ASC
@@ -1091,6 +1129,79 @@ impl CacheDb {
                 .map_err(|_| anyhow::anyhow!("stored home_nest_id is not 32 bytes"))
         })
         .transpose()
+    }
+
+    /// The **succession anchor's** first-contact identity for one remote actor:
+    /// the home of its oldest residue binding across every plane that records
+    /// one — the foreign-channel roster ([`Self::oldest_foreign_member_nest_id`]'s
+    /// rows) and the federated follow (`federated-follow.md` § Decision 5): the
+    /// home a local reader's follow names for a foreign *author*
+    /// (`remote_follows`), and the home a remote *subscriber*'s roster row or
+    /// pending request names (`subscribers`/`subscribe_requests`, home not
+    /// NULL — a NULL home is a local reader, never a binding).
+    ///
+    /// The same rule as the channel arm, widened only in where a binding may
+    /// live: the oldest row overall, ties to the channel roster first, then
+    /// insertion order. Every one of these columns is written by a caller the
+    /// way a roster row is (a follow names the home its follower chose), so the
+    /// first-contact grade is the one `succession-propagation.md` § Propagation
+    /// already accepts — and the persisted anchor pin overrides this value once
+    /// the identity has ever been verified here.
+    pub async fn oldest_succession_residue_nest_id(
+        &self,
+        actor_id: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>> {
+        let actor_id = *actor_id;
+        let conn = self.conn.lock().await;
+        conn.query_row(
+            "SELECT home_nest_id FROM (
+                SELECT home_nest_id, created_at AS at, 0 AS src, rowid AS r
+                  FROM channel_foreign_members WHERE actor_id = ?1
+                UNION ALL
+                SELECT home_nest_id, created_at, 1, rowid
+                  FROM remote_follows WHERE author_id = ?1
+                UNION ALL
+                SELECT home_nest_id, approved_at, 2, rowid
+                  FROM subscribers WHERE subscriber_id = ?1 AND home_nest_id IS NOT NULL
+                UNION ALL
+                SELECT home_nest_id, created_at, 3, id
+                  FROM subscribe_requests WHERE subscriber_id = ?1 AND home_nest_id IS NOT NULL
+             )
+             ORDER BY at ASC, src ASC, r ASC
+             LIMIT 1",
+            rusqlite::params![actor_id.as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("oldest_succession_residue_nest_id")?
+        .map(|id| {
+            <[u8; 32]>::try_from(id.as_slice())
+                .map_err(|_| anyhow::anyhow!("stored home_nest_id is not 32 bytes"))
+        })
+        .transpose()
+    }
+
+    /// Every distinct remote actor this nest holds succession residue about —
+    /// the **pull** leg's work list: the foreign-channel roster's actors
+    /// ([`Self::distinct_foreign_member_actors`]) plus the federated follow's
+    /// remote identities, each one a row
+    /// [`Self::oldest_succession_residue_nest_id`] anchors.
+    pub async fn succession_residue_actors(&self) -> Result<Vec<[u8; 32]>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT actor_id FROM channel_foreign_members
+             UNION SELECT author_id FROM remote_follows
+             UNION SELECT subscriber_id FROM subscribers WHERE home_nest_id IS NOT NULL
+             UNION SELECT subscriber_id FROM subscribe_requests WHERE home_nest_id IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("succession_residue_actors")?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|id| <[u8; 32]>::try_from(id.as_slice()).ok())
+            .collect())
     }
 
     /// Resolve the **candidate** dialable URLs for a nest identity — every
@@ -1311,7 +1422,7 @@ impl CacheDb {
     }
 
     /// The `handle@domain` a foreign member's own home nest announced for it
-    /// and this nest verified (`federation.md` § Cross-nest shared folders +
+    /// and this nest verified (`federation-shared-folders.md` § Cross-nest shared folders +
     /// channel append, the id→handle bullet), or `None` when the member is
     /// not a recorded foreign member or no verified announce has landed yet.
     /// Display-only: the roster read joins it, nothing decides on it.
@@ -1714,7 +1825,7 @@ mod tests {
     /// gate suppresses the owner's roster writes and no client anywhere can
     /// release the claim (the channel-send gate's own half of that freeze —
     /// refusing every non-claimant `Commit`, so the owner could no longer add,
-    /// remove or rotate — is since discharged, `federation.md` § Cross-nest
+    /// remove or rotate — is since discharged, `federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append, 2026-08-24: Commit admission is now
     /// roster-membership). A member could do that to their own group and walk
     /// away — the client-causable unrecoverable nest state `nest/common.md`

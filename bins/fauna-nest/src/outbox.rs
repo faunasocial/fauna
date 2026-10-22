@@ -127,10 +127,16 @@ pub async fn run_outbox_worker(state: Arc<AppState>) {
 /// An entry whose author no longer has an account here also leaves at the
 /// ceiling, whatever the failure (`private-mode.md` § Post Forwarding).
 pub async fn drain_outbox_once(state: &Arc<AppState>) -> DrainOutcome {
-    if !crate::nest_sync_worker::is_private(state).await {
-        return DrainOutcome::NotPrivate;
-    }
-    let pending = match state.db.outbox_pending(BATCH).await {
+    // The paired forwards wait for a private nest; a follow-family entry
+    // (`federated-follow.md` § Decision 2) is due on every mode, so a public
+    // nest drains exactly those.
+    let private = crate::nest_sync_worker::is_private(state).await;
+    let pending = if private {
+        state.db.outbox_pending(BATCH).await
+    } else {
+        state.db.outbox_pending_follow(BATCH).await
+    };
+    let pending = match pending {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("outbox query failed: {e}");
@@ -138,33 +144,32 @@ pub async fn drain_outbox_once(state: &Arc<AppState>) -> DrainOutcome {
         }
     };
     if pending.is_empty() {
-        return DrainOutcome::Idle;
+        return if private {
+            DrainOutcome::Idle
+        } else {
+            DrainOutcome::NotPrivate
+        };
     }
 
     // Rebuild the pins and the address-guard exemption from the rows and the
     // admin roster as they stand for this pass's dials.
-    crate::nest_sync_worker::refresh_pairing_targets(state).await;
+    if private {
+        crate::nest_sync_worker::refresh_pairing_targets(state).await;
+    }
 
     // Each author's forwarding targets, read once per pass.
     let mut targets_by_author: HashMap<Option<Vec<u8>>, anyhow::Result<Vec<String>>> =
         HashMap::new();
     let (mut forwarded, mut failed) = (0usize, 0usize);
     for entry in pending {
-        if !targets_by_author.contains_key(&entry.author_id) {
-            let t = forwarding_targets(state, entry.author_id.as_deref()).await;
-            targets_by_author.insert(entry.author_id.clone(), t);
-        }
-        let targets = &targets_by_author[&entry.author_id];
-        let (undeliverable, result) = match (build_request(&entry), targets) {
-            (Err(e), _) => (true, Err(e)),
-            (Ok(_), Err(e)) => (false, Err(anyhow!("{e:#}"))),
-            (Ok(_), Ok(t)) if t.is_empty() => (
-                true,
-                Err(anyhow!(
-                    "the author holds no pairing row carrying post_forward with a nest_url"
-                )),
-            ),
-            (Ok(request), Ok(t)) => (false, send_to_all(state, t, request).await),
+        let (undeliverable, result) = if let Some(peer) = entry.peer_nest_id.as_deref() {
+            send_follow_entry(state, &entry, peer).await
+        } else {
+            if !targets_by_author.contains_key(&entry.author_id) {
+                let t = forwarding_targets(state, entry.author_id.as_deref()).await;
+                targets_by_author.insert(entry.author_id.clone(), t);
+            }
+            forward_entry(state, &entry, &targets_by_author[&entry.author_id]).await
         };
         match result {
             Ok(()) => {
@@ -204,6 +209,131 @@ pub async fn drain_outbox_once(state: &Arc<AppState>) -> DrainOutcome {
         }
     }
     DrainOutcome::Processed { forwarded, failed }
+}
+
+/// One paired forward: `(undeliverable, outcome)` for its author's targets.
+async fn forward_entry(
+    state: &Arc<AppState>,
+    entry: &OutboxEntry,
+    targets: &anyhow::Result<Vec<String>>,
+) -> (bool, anyhow::Result<()>) {
+    match (build_request(entry), targets) {
+        (Err(e), _) => (true, Err(e)),
+        (Ok(_), Err(e)) => (false, Err(anyhow!("{e:#}"))),
+        (Ok(_), Ok(t)) if t.is_empty() => (
+            true,
+            Err(anyhow!(
+                "the author holds no pairing row carrying post_forward with a nest_url"
+            )),
+        ),
+        (Ok(request), Ok(t)) => (false, send_to_all(state, t, request).await),
+    }
+}
+
+/// One follow-family entry, sent to the one nest its row names:
+/// `(undeliverable, outcome)`. The target URL is read from `nest_addresses` by
+/// the peer's id — a dial-proven address first — and the dial is pinned to that
+/// id. A payload that does not decode, a type this build cannot send, and a
+/// typed refusal from the peer (it holds no follow homed here for this author)
+/// are the entry's own and leave it at the retry ceiling; an unreachable peer
+/// or one with no known address is retried.
+async fn send_follow_entry(
+    state: &Arc<AppState>,
+    entry: &OutboxEntry,
+    peer: &[u8],
+) -> (bool, anyhow::Result<()>) {
+    use crate::follow_delivery::{ENTRY_TYPE_FOLLOW_DELETE, ENTRY_TYPE_FOLLOW_DELIVER};
+    use crate::follow_federation::{ENTRY_TYPE_FOLLOW_STATE, FedFollowStateRequest};
+    let Ok(peer) = <[u8; 32]>::try_from(peer) else {
+        return (true, Err(anyhow!("outbox peer_nest_id is not 32 bytes")));
+    };
+    // Built before any dial, so a failure here is the entry's own.
+    enum FollowSend {
+        State(FedFollowStateRequest),
+        Deliver(crate::federation_handlers::FedPostForwardRequest),
+        Delete(Vec<u8>),
+    }
+    let send = match entry.entry_type.as_str() {
+        ENTRY_TYPE_FOLLOW_STATE => match fauna_core::encoding::canonical_decode(&entry.payload) {
+            Ok(push) => FollowSend::State(push),
+            Err(e) => return (true, Err(anyhow!("outbox follow_state payload: {e}"))),
+        },
+        ENTRY_TYPE_FOLLOW_DELIVER => match split_stored_post(&entry.payload) {
+            Ok((post_bytes, post_envelope, signer_auth)) => {
+                FollowSend::Deliver(crate::federation_handlers::FedPostForwardRequest {
+                    post_bytes,
+                    post_envelope,
+                    signer_auth,
+                })
+            }
+            Err(e) => return (true, Err(e)),
+        },
+        ENTRY_TYPE_FOLLOW_DELETE => FollowSend::Delete(entry.payload.clone()),
+        other => {
+            return (
+                true,
+                Err(anyhow!("unknown follow outbox entry_type {other:?}")),
+            );
+        }
+    };
+    let url = match state.db.resolve_foreign_nest_urls(&peer, 1).await {
+        Ok(urls) => match urls.into_iter().next() {
+            Some(url) => url,
+            None => {
+                return (
+                    false,
+                    Err(anyhow!("no known address for the subscriber's nest")),
+                );
+            }
+        },
+        Err(e) => {
+            return (
+                false,
+                Err(anyhow!("read the subscriber nest's address: {e:#}")),
+            );
+        }
+    };
+    let pool = &state.federation_pool;
+    let refusal = match send {
+        FollowSend::State(push) => {
+            crate::federation_pool::originate_follow_state(pool, state, &url, &peer, &push)
+                .await
+                .map(|r| r.err())
+        }
+        FollowSend::Deliver(req) => {
+            crate::federation_pool::originate_follow_deliver(pool, state, &url, &peer, &req)
+                .await
+                .map(|r| r.err())
+        }
+        FollowSend::Delete(tombstone) => {
+            crate::federation_pool::originate_follow_delete(pool, state, &url, &peer, tombstone)
+                .await
+                .map(|r| r.err())
+        }
+    };
+    match refusal {
+        Ok(None) => (false, Ok(())),
+        Ok(Some(refusal)) => (true, Err(anyhow!("{url}: peer refused: {}", refusal.code))),
+        Err(e) => (false, Err(anyhow!("{url}: {e}"))),
+    }
+}
+
+/// Split a stored `EmbedAsBytes` post body back into the `(post_bytes,
+/// post_envelope, signer_auth)` the post-carrying federation kinds take — no
+/// re-encode and no re-sign, so the peer derives the same content-addressed
+/// `post_id` this nest did.
+fn split_stored_post(payload: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+    let wire: fauna_core::encoding::EmbedAsBytes = fauna_core::encoding::canonical_decode(payload)
+        .context("outbox payload is not a canonical embed-as-bytes post")?;
+    // Carry the delegated-authoring cert (D10), when present, so the peer
+    // verifies + re-stores the same wire — no split/drop.
+    let signer_auth = wire
+        .signer_auth
+        .as_deref()
+        .map(fauna_core::encoding::canonical_encode)
+        .transpose()
+        .context("re-encode signer_auth cert for forward")?;
+    Ok((wire.bytes, wire.envelope, signer_auth))
 }
 
 /// The `nest_url`s of `author`'s live local pairing rows carrying
@@ -273,20 +403,10 @@ enum ForwardRequest {
 fn build_request(entry: &OutboxEntry) -> anyhow::Result<ForwardRequest> {
     match entry.entry_type.as_str() {
         ENTRY_TYPE_FORWARDED_POST => {
-            let wire: fauna_core::encoding::EmbedAsBytes =
-                fauna_core::encoding::canonical_decode(&entry.payload)
-                    .context("outbox payload is not a canonical embed-as-bytes post")?;
-            // Carry the delegated-authoring cert (D10), when present, so the
-            // peer verifies + re-stores the same wire — no split/drop.
-            let signer_auth = wire
-                .signer_auth
-                .as_deref()
-                .map(fauna_core::encoding::canonical_encode)
-                .transpose()
-                .context("re-encode signer_auth cert for forward")?;
+            let (post_bytes, post_envelope, signer_auth) = split_stored_post(&entry.payload)?;
             Ok(ForwardRequest::Post {
-                post_bytes: wire.bytes,
-                post_envelope: wire.envelope,
+                post_bytes,
+                post_envelope,
                 signer_auth,
             })
         }

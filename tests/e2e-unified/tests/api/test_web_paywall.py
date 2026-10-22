@@ -49,7 +49,7 @@ import pytest
 
 import fauna_ffi
 from clients.ws_rpc_admin_client import RpcCallError, WsRpcAdminClient
-from common.auth import create_actor_and_register
+from common.auth import create_actor_and_register, no_redirect_opener
 from helpers.blob_upload import SEALED_MIME, upload_blob
 from tests.api import ws_api
 
@@ -267,22 +267,15 @@ def test_web_paywall_teaser_token_and_revoke(nest_instance):
             admin_ws.call("fauna.web.set_apex_actor", {"actor_id": None})
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Surface a 3xx as the response instead of following it — the door's
-    `303` and its `Location` are the assertion."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def _request(url: str, path: str, data: bytes | None = None) -> tuple[int, str, dict]:
-    """GET (or form-POST when `data` is given) without following redirects."""
+    """GET (or form-POST when `data` is given) without following redirects —
+    the door's `303` and its `Location` are the assertion."""
     req = urllib.request.Request(
         url.rstrip("/") + path, data=data, method="POST" if data is not None else "GET"
     )
     if data is not None:
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = no_redirect_opener()
     try:
         resp = opener.open(req)
         return resp.status, resp.read().decode("utf-8", "replace"), dict(resp.headers)

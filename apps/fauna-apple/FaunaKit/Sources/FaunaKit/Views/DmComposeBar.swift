@@ -38,6 +38,9 @@ public struct DmComposeBar: View {
     /// (index)` seam the caller routes to.
     public var onRemoveAttachment: (Int) -> Void
     public var onSend: () -> Void
+    /// Whether this send founds a community room (gated on
+    /// `fauna.conversations.room.create`); every plain send is ungated.
+    public var sendFoundsRoom: Bool
 
     public init(
         compose: ComposeState,
@@ -52,7 +55,8 @@ public struct DmComposeBar: View {
         onAttachFile: @escaping (URL) throws -> Void = { _ in },
         onAttachError: @escaping (String) -> Void = { _ in },
         onRemoveAttachment: @escaping (Int) -> Void = { _ in },
-        onSend: @escaping () -> Void = {}
+        onSend: @escaping () -> Void = {},
+        sendFoundsRoom: Bool = false
     ) {
         self.compose = compose
         self.capabilities = capabilities
@@ -67,6 +71,7 @@ public struct DmComposeBar: View {
         self.onAttachError = onAttachError
         self.onRemoveAttachment = onRemoveAttachment
         self.onSend = onSend
+        self.sendFoundsRoom = sendFoundsRoom
     }
 
     /// Bracket the security-scoped read of a user-picked file and route every
@@ -246,6 +251,10 @@ public struct DmComposeBar: View {
             )
             .onChange(of: body_) { _, newValue in onBodyChange(newValue) }
 
+            if let listSend = compose.listSend {
+                listSendTexts(listSend)
+            }
+
             // Toolbar row
             HStack(spacing: 8) {
                 Button(L.conversations.unified.topicToggleAdd) { onToggleTopic() }
@@ -298,15 +307,7 @@ public struct DmComposeBar: View {
 
                 Spacer()
 
-                Button(sending ? L.common.sending : L.common.send) { onSend() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier(Ids.dmSendButton)
-                    // Live re-read of the same predicate the `.disabled(...)` uses.
-                    .automationActivate(
-                        Ids.dmSendButton,
-                        isEnabled: { !(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
-                    ) { onSend() }
+                sendButton
             }
         }
         .onAppear {
@@ -317,6 +318,51 @@ public struct DmComposeBar: View {
         .onChange(of: compose.subjectDraft) { _, newValue in
             let s = newValue ?? ""
             if s != subject { subject = s }
+        }
+    }
+
+    /// The list-send texts, present only while the compose's one mail recipient
+    /// is one of the account's own mailing lists (`mail-mass-mailing.md` §
+    /// Composing a list message; ui.yaml `dm-compose-form` `optional_elements`).
+    /// Shared Rust derives every text (`fauna_conversations::list_send`); this
+    /// only paints them, beside Send — tui's `list_send_elements`.
+    @ViewBuilder private func listSendTexts(_ view: ListSendView) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            automationText(Ids.dmComposeListSendWarning, renderLocalizedText(view.sendWarning))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let warning = view.quotaWarning {
+                automationText(Ids.dmComposeListQuotaWarning, renderLocalizedText(warning))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let progress = view.progress {
+                automationText(Ids.dmComposeListSendProgress, renderLocalizedText(progress))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// `dm-send-button`. While `sendFoundsRoom` the send issues the online-only
+    /// `fauna.conversations.room.create` and is gated on it (the new-thread
+    /// composer sets it only while the send would found a community room, so the
+    /// declaration follows the paint both ways). The kind is spelled out at the
+    /// call site because `offline-gate-check` cannot check a computed one.
+    @ViewBuilder private var sendButton: some View {
+        let button = Button(sending ? L.common.sending : L.common.send) { onSend() }
+            .buttonStyle(.borderedProminent)
+            .disabled(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier(Ids.dmSendButton)
+            // Live re-read of the same predicate the `.disabled(...)` uses.
+            .automationActivate(
+                Ids.dmSendButton,
+                isEnabled: { !(sending || body_.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+            ) { onSend() }
+        if sendFoundsRoom {
+            button.faunaGate("fauna.conversations.room.create")
+        } else {
+            button
         }
     }
 

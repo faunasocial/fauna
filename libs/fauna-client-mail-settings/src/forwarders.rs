@@ -348,30 +348,30 @@ mod tests {
         let m = machine_with(
             vec![forwarder_row(
                 0xAB,
-                "example.com",
+                "example.net",
                 "info",
                 "oldaccount@example.com",
             )],
-            vec!["example.com", "other.test"],
+            vec!["example.net", "other.test"],
         );
         m.hydrate().await.unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.forwarders.len(), 1);
         let f = &snap.forwarders[0];
-        assert_eq!(f.address, "info@example.com");
+        assert_eq!(f.address, "info@example.net");
         assert_eq!(f.forward_target, "oldaccount@example.com");
         assert_eq!(f.alias_id_hex, hex::encode([0xABu8; 16]));
-        assert_eq!(snap.local_domains, vec!["example.com", "other.test"]);
+        assert_eq!(snap.local_domains, vec!["example.net", "other.test"]);
         assert_eq!(snap.status, ForwarderStatus::Idle);
         assert!(snap.error.is_none());
     }
 
     #[tokio::test]
     async fn create_adds_and_relists() {
-        let m = machine_with(vec![], vec!["example.com"]);
+        let m = machine_with(vec![], vec!["example.net"]);
         m.hydrate().await.unwrap();
         m.dispatch(ForwarderAction::Create {
-            local_domain: "example.com".into(),
+            local_domain: "example.net".into(),
             pattern: "sales".into(),
             forward_target: "team@offsite.example".into(),
         })
@@ -379,20 +379,20 @@ mod tests {
         .unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.forwarders.len(), 1);
-        assert_eq!(snap.forwarders[0].address, "sales@example.com");
+        assert_eq!(snap.forwarders[0].address, "sales@example.net");
         assert!(snap.error.is_none());
     }
 
     #[tokio::test]
     async fn create_collision_surfaces_error_and_keeps_list() {
         let m = machine_with(
-            vec![forwarder_row(0x01, "example.com", "info", "a@b.example")],
-            vec!["example.com"],
+            vec![forwarder_row(0x01, "example.net", "info", "a@b.example")],
+            vec!["example.net"],
         );
         m.hydrate().await.unwrap();
         let err = m
             .dispatch(ForwarderAction::Create {
-                local_domain: "example.com".into(),
+                local_domain: "example.net".into(),
                 pattern: "info".into(),
                 forward_target: "c@d.example".into(),
             })
@@ -415,8 +415,8 @@ mod tests {
     #[tokio::test]
     async fn delete_removes_from_list() {
         let m = machine_with(
-            vec![forwarder_row(0x22, "example.com", "info", "a@b.example")],
-            vec!["example.com"],
+            vec![forwarder_row(0x22, "example.net", "info", "a@b.example")],
+            vec!["example.net"],
         );
         m.hydrate().await.unwrap();
         let id_hex = m.snapshot().forwarders[0].alias_id_hex.clone();

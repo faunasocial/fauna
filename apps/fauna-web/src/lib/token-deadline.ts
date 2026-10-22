@@ -4,7 +4,7 @@
  *
  *  A mint reply's `expires_at` is on the **nest's** clock, but every deadline
  *  the SPA derives from it — `getAuthToken`'s spend rule, the own-session-id
- *  pruning — is compared against the device's own clock (`$lib/api`'s
+ *  pruning — is compared against the device's own clock (`#lib/api`'s
  *  `clientNowSecs()`). On a device whose clock is hours
  *  wrong the two disagree by hours: ahead re-mints on every request, behind
  *  serves a token the nest stopped honouring. So the reply also carries
@@ -21,6 +21,6 @@ export function deadlineOnOwnClock(nowSecs: number, expiresIn: number, _expiresA
   return nowSecs + expiresIn;
 }
 
-// The `now` it is handed is `$lib/api`'s `clientNowSecs()`, read right as the
+// The `now` it is handed is `#lib/api`'s `clientNowSecs()`, read right as the
 // reply arrives — the SPA's one client clock (which in a test build carries the
 // wrong-clock witness's offset), so no mint site reads `Date.now()` itself.

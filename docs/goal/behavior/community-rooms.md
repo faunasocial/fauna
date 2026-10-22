@@ -203,6 +203,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   the scheme's existing moves rather than new ones (reason 4). What the
   build *added* to the design is one ruling, above: the revoke is a
   rotation, not a roster removal.
+- **The room's search — its relay for a member homed elsewhere BUILT 2026-10-17, its client surface BUILT on tui 2026-10-19, the other six apps UNBUILT.** The five ids are in ui.yaml since 2026-10-19, and tui paints the shared manager's `ConversationsManager::room_search` on the room's thread view ([`room-search.md`](room-search.md) § Implementation status today names the pins); on the other six the `fauna.conversations.room.search` door below still serves API callers only. The door is same-nest — it resolves the room from this nest's own record — so a foreign member reaches it through its own nest: the relayed twin `fauna.conversations.room.search_remote` → `fauna.federation.conversation.room.search.fetch` (ruled 2026-10-16, built 2026-10-17) is owned by [`../architecture/federation.md`](../architecture/federation.md) § Federation residue surface (the *room search* row), and a room **post** hit is the discovery door a room post takes to a foreign member until the federated follow lands ([`../architecture/feed-read-model.md`](../architecture/feed-read-model.md) § The read model → *Opening a post the timeline never loaded* → *A post homed on another nest*); the client surface — the room's own search on its thread view — is specified since 2026-10-16 in [`room-search.md`](room-search.md) (its five element ids user-approved under rule A and in ui.yaml since 2026-10-19; [`../ui/conversations.md`](../ui/conversations.md) keeps the page's stub and § User actions rows) and is built tui first, the other six following in their trickle-down.
 - **The search index becomes readable — the first purpose of the read served
   end to end (2026-09-10, schema 58).**
   `fauna.conversations.room.search` is the door: a live floor member of any
@@ -892,7 +893,7 @@ The community class's entries, carried verbatim out of [`conversation-rooms.md`]
   journey `tests/e2e-unified/tests/test_conversation_room_community.py`
   (found, accept, key-in, a message each way, the nest's index finding the
   text for a member, and the read withdrawn from the editor emptying it).
-  The six others follow. **A waiting room says
+  The founding toggle (`recipient-picker-home-nest-toggle`) has since been painted on the six others too — web and linux 2026-10-09, windows and android 2026-10-10, macOS and iOS 2026-10-16 — so a group can choose to be a community room on all 7 apps (read against the code 2026-10-18 for the theme-1 public-texts package); the rest of the trickle-down is recorded with its row. **A waiting room says
   so** on tui (2026-09-26) through `thread-room-notice`'s `awaiting-key`
   state, shared with the unverified-moderation notice
   ([`../ui/conversations.md`](../ui/conversations.md) § Element IDs); the

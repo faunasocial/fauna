@@ -31,13 +31,16 @@ use axum::routing::post;
 use serde_json::json;
 
 use crate::api_error::ApiError;
+use crate::backup::message_kind::MessageKindStores;
 use crate::backup::scheduler::{CHECK_INTERVAL, DEFAULT_QUIET_SECS, SnapshotScheduler};
 use crate::routes::AppState;
 
 /// `POST /api/v1/test/snapshot_scheduler/run-now` — run exactly one
-/// `check_all_folders` pass and return how many automatic snapshots it cut.
+/// production pass (`check_all_folders`, then `check_all_message_kinds`) and
+/// return how many automatic snapshots each arm cut.
 ///
-/// Returns `{"ok": true, "created": N}`. `created == 0` is a meaningful
+/// Returns `{"ok": true, "created": N, "created_message_kinds": M}`
+/// (`created` counts folder snapshots only). `created == 0` is a meaningful
 /// negative signal for a test (no folder owed a snapshot), not an error.
 ///
 /// A nest with no blob dir configured has no [`BackupService`] and therefore no
@@ -54,9 +57,22 @@ async fn handle_run_now(State(state): State<Arc<AppState>>) -> impl IntoResponse
         )
         .into_response();
     };
-    let scheduler = SnapshotScheduler::new(svc, CHECK_INTERVAL, DEFAULT_QUIET_SECS);
-    match scheduler.check_all_folders().await {
-        Ok(created) => Json(json!({ "ok": true, "created": created })).into_response(),
+    let scheduler = SnapshotScheduler::new(svc, CHECK_INTERVAL, DEFAULT_QUIET_SECS)
+        .with_message_kinds(MessageKindStores::of(&state));
+    let created = match scheduler.check_all_folders().await {
+        Ok(created) => created,
+        Err(e) => {
+            return ApiError::internal(format!("snapshot scheduler run-now: {e:#}"))
+                .into_response();
+        }
+    };
+    match scheduler.check_all_message_kinds().await {
+        Ok(kinds) => Json(json!({
+            "ok": true,
+            "created": created,
+            "created_message_kinds": kinds,
+        }))
+        .into_response(),
         Err(e) => ApiError::internal(format!("snapshot scheduler run-now: {e:#}")).into_response(),
     }
 }

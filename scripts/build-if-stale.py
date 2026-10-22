@@ -40,6 +40,21 @@ Exits 0 silently if up-to-date. Otherwise runs <cmd> and exits with its rc.
     Spec: docs/goal/architecture/build-system.md § How the gate works →
     "Gating a cargo step".
 
+--content-key (with --stamp only): a stamp the mtimes call stale is still fresh
+    when the CONTENT it was built from is unchanged. Before the command runs,
+    the HEAD tree id of every --source is recorded in the stamp — only when
+    each one resolves in HEAD and `git status` shows nothing under them (no
+    edit, no untracked file). A later check that finds the same ids on a
+    clean tree, and no git-ignored, non-excluded file under a source newer
+    than the stamp (an ignored file has no tree id, so its mtime is still the
+    only signal), reports up-to-date. Anything else — a dirty tree, a source
+    outside the repository, git unavailable — leaves the mtime verdict
+    standing, so the key can only turn a false "stale" into "fresh". What it
+    buys: a rebase, checkout or seed that touches every file without changing
+    a byte no longer sends a cargo no-op into the build-slot queue.
+    Spec: docs/goal/architecture/build-system.md § How the gate works →
+    "Gating a cargo step".
+
 --check: report freshness via exit code (0 fresh / 1 stale-or-missing) WITHOUT
     running <cmd>. `cmd` and the `--` separator become optional — a probe has
     nothing to run. Lets a caller decide "is there ANY work?" across several
@@ -131,6 +146,69 @@ def commit_stamp(stamp: Path, instant: float, text: str) -> None:
     os.utime(stamp, (instant, instant))
 
 
+#: The stamp line carrying the content key (`--content-key`).
+CONTENT_KEY_PREFIX = "content-key: "
+
+
+def _git_out(*args: str) -> str | None:
+    try:
+        r = subprocess.run(["git", *args], capture_output=True, text=True)
+    except OSError:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def content_key(sources: list[Path]) -> str | None:
+    """The HEAD tree ids of `sources`, or None when the tree under them is not
+    exactly HEAD's (an edit, an untracked file) or a source is not in HEAD."""
+    paths = [s.as_posix() for s in sources]
+    status = _git_out("status", "--porcelain", "--", *paths)
+    if status is None or status.strip():
+        return None
+    ids = []
+    for p in paths:
+        out = _git_out("rev-parse", "--verify", "-q", f"HEAD:./{p}")
+        if out is None:
+            return None
+        ids.append(f"{p}={out.strip()}")
+    return " ".join(ids)
+
+
+def _ignored_newest(sources: list[Path], excludes: list[str]) -> float | None:
+    """Newest mtime over the git-ignored, non-excluded files under `sources`."""
+    out = _git_out("ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+                   "--", *(s.as_posix() for s in sources))
+    if out is None:
+        return None
+    newest = 0.0
+    for name in filter(None, out.split("\0")):
+        p = Path(name)
+        if not _excluded(p, excludes) and p.is_file():
+            newest = max(newest, p.stat().st_mtime)
+    return newest
+
+
+def _recorded_key(stamp: Path) -> str | None:
+    try:
+        lines = stamp.read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if line.startswith(CONTENT_KEY_PREFIX):
+            return line[len(CONTENT_KEY_PREFIX):]
+    return None
+
+
+def content_fresh(stamp: Path, sources: list[Path], excludes: list[str]) -> bool:
+    """`--content-key`'s verdict: same tree ids on a clean tree, and no ignored
+    source newer than the stamp."""
+    recorded = _recorded_key(stamp)
+    if not recorded or content_key(sources) != recorded:
+        return False
+    ignored = _ignored_newest(sources, excludes)
+    return ignored is not None and ignored <= stamp.stat().st_mtime
+
+
 def main() -> int:
     if "--" in sys.argv:
         sep = sys.argv.index("--")
@@ -159,7 +237,12 @@ def main() -> int:
     parser.add_argument("--check", action="store_true",
                         help="Report freshness via exit code without running <cmd> "
                              "(see module docstring)")
+    parser.add_argument("--content-key", action="store_true",
+                        help="With --stamp: a clean tree at the HEAD tree ids the stamp "
+                             "recorded is fresh whatever the mtimes (see module docstring)")
     args = parser.parse_args(parser_args)
+    if args.content_key and args.stamp is None:
+        parser.error("--content-key needs --stamp (the key is recorded in the stamp)")
 
     if not args.check and not cmd:
         print("build-if-stale: missing build command after --", file=sys.stderr)
@@ -175,10 +258,15 @@ def main() -> int:
     def run_and_commit() -> int:
         if args.stamp is None:
             return subprocess.call(cmd)
+        # Taken BEFORE the run, like the stamp's instant: an edit or commit
+        # landing while the build runs leaves a tree this key no longer names.
+        key = content_key(sources) if args.content_key else None
         rc, instant = run_for_stamp(cmd)
         if rc == 0:
-            commit_stamp(Path(args.stamp), instant,
-                         "build-if-stale freshness stamp; mtime = build start (slot grant)\n")
+            text = "build-if-stale freshness stamp; mtime = build start (slot grant)\n"
+            if key:
+                text += f"{CONTENT_KEY_PREFIX}{key}\n"
+            commit_stamp(Path(args.stamp), instant, text)
         return rc
 
     missing = [t for t in targets if not t.exists()]
@@ -199,6 +287,12 @@ def main() -> int:
     else:
         target_freshness = min(_target_freshness(t) for t in targets)
     source_newest = max(_source_newest(s, args.exclude) for s in sources)
+
+    if (source_newest > target_freshness and args.content_key
+            and content_fresh(Path(args.stamp), sources, args.exclude)):
+        if not args.quiet:
+            print(f"[build-if-stale] {label}: up-to-date (content key unchanged)", flush=True)
+        return 0
 
     if source_newest > target_freshness:
         if args.check:

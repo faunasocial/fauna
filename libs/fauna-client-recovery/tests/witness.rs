@@ -901,6 +901,7 @@ fn profile_of(
         load_hint: None,
         inbox_mode: fauna_core::data::InboxMode::Open,
         recovery_head: head,
+        audience: fauna_core::data::ProfileAudience::ThisNest,
         updated_at: Timestamp::now(),
     }
 }
@@ -947,7 +948,7 @@ impl fauna_protocol::RpcRequester for StubProfileNest {
         };
         let reply = fauna_protocol::profile::ProfileGetReply {
             body: fauna_protocol::ByteBuf::from(body.clone()),
-            extra: Default::default(),
+            ..Default::default()
         };
         let bytes = fauna_protocol::encode_canonical(&reply).unwrap();
         Ok(fauna_protocol::decode_strict(&bytes).unwrap())

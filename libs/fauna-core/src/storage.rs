@@ -202,6 +202,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         };
 

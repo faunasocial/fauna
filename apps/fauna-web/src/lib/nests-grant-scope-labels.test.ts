@@ -8,7 +8,7 @@
 // `resolveLocalized`. tui's twin is `apps/fauna-tui/src/settings/nests.rs`'s
 // `a_paywall_grant_and_its_revoke_name_the_folder`.
 //
-// Like `admin-picker-sentinels.test.ts`, this does NOT import `$lib/wasm.ts`
+// Like `admin-picker-sentinels.test.ts`, this does NOT import `#lib/wasm.ts`
 // (its `$app/paths` import resolves only under the SvelteKit/Vite build): it
 // loads the static wasm-pack bundle directly — the same file `wasm.ts` wraps —
 // and degrades to a skip when that gitignored build artifact is absent or

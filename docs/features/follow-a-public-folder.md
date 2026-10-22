@@ -44,8 +44,8 @@ Stamped 2026-09-22 at 963ffb408a.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+f3743cd5.dirty standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+e5506940 standalone |
 | ios | ⚠ partial | 0.1.2-dev+e5506940 standalone |

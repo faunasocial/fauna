@@ -21,7 +21,7 @@
 //!    (`fauna_sync_engine::reseed::ReseedDelivery`) opens a native sealed store
 //!    this wasm-clean crate cannot name, and because a *surviving nest
 //!    destination's* custody arrives by a second leg, the nest-held pull-back
-//!    (`fauna_sync_engine::reseed_pull::NestPullBack`) — the materialize half
+//!    (`fauna_client_sync::reseed_pull::NestPullBack`) — the materialize half
 //!    below is one shared design for both restore sources.
 //! 3. **Materialize behind the owner's gesture** — one
 //!    [`BackupClient::custody_materialize`] per delivered segment set (the
@@ -560,16 +560,21 @@ fn set_label(set: &DeliveredSet) -> String {
     }
 }
 
-/// How a reserved segment set is named to the owner, as an i18n key ("Mail",
-/// "Posts", "Calendar", "Contacts") — shared by the re-seed's and the
-/// recovery's result lines. Any other name shows as itself.
+/// How a segment set is named to the owner, as an i18n key ("Mail", "Posts",
+/// "Calendar", "Contacts") — shared by the re-seed's and the recovery's result
+/// lines, so it reads the kind off either the copy's reserved name or the
+/// landing name the re-seed delivers into. Any other name shows as itself.
 pub(crate) fn segment_set_label(set_name: &str) -> String {
-    match set_name {
-        "__mail" => "backups.reseed_set_mail",
-        "__post" => "backups.reseed_set_post",
-        "__calendar" => "backups.reseed_set_calendar",
-        "__card" => "backups.reseed_set_card",
-        other => return other.to_string(),
+    use fauna_protocol::segments::{parse_landing_set_name, parse_reserved_backup_set_name};
+    let kind = parse_reserved_backup_set_name(set_name)
+        .or_else(|| parse_landing_set_name(set_name))
+        .map(|(kind, _)| kind);
+    match kind {
+        Some("mail") => "backups.reseed_set_mail",
+        Some("post") => "backups.reseed_set_post",
+        Some("calendar") => "backups.reseed_set_calendar",
+        Some("card") => "backups.reseed_set_card",
+        _ => return set_name.to_string(),
     }
     .to_string()
 }
@@ -637,20 +642,39 @@ pub enum ReseedLeg {
     /// This device's own sealed custodian store: re-sealed and pushed from here.
     ThisDeviceStore,
     /// A surviving nest destination's custody, pulled back by the owner's app
-    /// (`segment-backup-protocol.md` § *The nest-held pull-back*). The leg is
-    /// built in shared Rust (`fauna_sync_engine::reseed_pull::NestPullBack`)
-    /// but no app hosts it yet, so it is not [`Self::is_built`] and no app
-    /// offers it.
+    /// (`segment-backup-protocol.md` § *The nest-held pull-back*): the leg is
+    /// `fauna_client_sync::reseed_pull::NestPullBack`, its native host
+    /// `fauna_sync_engine::reseed_pull::pull_back_from_destination`.
     NestHeldPullBack,
 }
 
+/// The delivery legs an app hosts — what it says about itself when it asks
+/// where the restore gesture paints. Every app hosts the custodian leg; the
+/// pull-back joins app by app as each one wires its host, so an app that has
+/// not never paints the button on a nest row with nothing behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostedLegs {
+    pub nest_pull_back: bool,
+}
+
+impl HostedLegs {
+    /// An app that runs only the custodian ceremony.
+    pub const CUSTODIAN_ONLY: Self = Self {
+        nest_pull_back: false,
+    };
+    /// An app that also runs the nest-held pull-back.
+    pub const WITH_PULL_BACK: Self = Self {
+        nest_pull_back: true,
+    };
+}
+
 impl ReseedLeg {
-    /// Whether an app can run the leg — what every app paints the restore
-    /// gesture by. The pull-back joins when a host runs it and its gesture's
-    /// place on a nest-kind row is settled (`ui/backups.md`): flipping this
-    /// alone would paint the button on a nest row with nothing behind it.
-    pub fn is_built(self) -> bool {
-        matches!(self, Self::ThisDeviceStore)
+    /// Whether an app hosting `hosted` can run the leg.
+    pub fn is_hosted(self, hosted: HostedLegs) -> bool {
+        match self {
+            Self::ThisDeviceStore => true,
+            Self::NestHeldPullBack => hosted.nest_pull_back,
+        }
     }
 }
 
@@ -702,6 +726,36 @@ pub fn reseed_sources(
         });
     }
     sources
+}
+
+/// Where `backup-destination-reseed-button` paints: `None` for the orphaned
+/// store's row, `Some(id)` for a destination row — the [`reseed_sources`]
+/// whose leg the calling app hosts. Every app paints by this one rule.
+pub fn reseed_rows(
+    rows: &[fauna_core::data::BackupDestination],
+    this_device_id: &str,
+    orphaned_store: bool,
+    hosted: HostedLegs,
+) -> Vec<Option<String>> {
+    reseed_sources(rows, this_device_id, orphaned_store)
+        .into_iter()
+        .filter(|s| s.leg.is_hosted(hosted))
+        .map(|s| s.destination_id)
+        .collect()
+}
+
+/// Whether the confirm armed on `destination_id`'s row runs the nest-held
+/// pull-back rather than the custodian ceremony — the leg [`reseed_sources`]
+/// types that row with, read at press time so no shell re-derives it from the
+/// row's kind. `false` for an unknown id and for every row that is not a
+/// pull-back source.
+pub fn reseed_runs_pull_back(
+    rows: &[fauna_core::data::BackupDestination],
+    destination_id: &str,
+) -> bool {
+    reseed_sources(rows, "", false).into_iter().any(|s| {
+        s.destination_id.as_deref() == Some(destination_id) && s.leg == ReseedLeg::NestHeldPullBack
+    })
 }
 
 #[cfg(test)]
@@ -822,7 +876,7 @@ mod tests {
                             fauna_protocol::encode_canonical(&CustodyMaterializeReply {
                                 segments: vec![1, 2],
                                 records,
-                                custody_redundant: true,
+                                landing_reclaimed: !folder_axis,
                                 remaining,
                                 ..Default::default()
                             })
@@ -912,6 +966,20 @@ mod tests {
 
     fn log(l: &Log) -> Vec<String> {
         l.lock().unwrap().clone()
+    }
+
+    /// The re-seed delivers into the landing name and the recovery names the
+    /// copy's own set: both read to the owner as the same kind.
+    #[test]
+    fn a_landing_set_and_its_copy_are_labelled_by_their_kind() {
+        for (name, key) in [
+            ("__mail", "backups.reseed_set_mail"),
+            ("__landing/mail", "backups.reseed_set_mail"),
+            ("__landing/card", "backups.reseed_set_card"),
+            ("__landing/bogus", "__landing/bogus"),
+        ] {
+            assert_eq!(segment_set_label(name), key, "{name}");
+        }
     }
 
     /// The contract in one assertion: grant, then deliver, then materialize —
@@ -1474,9 +1542,10 @@ mod shared_view_tests {
                 },
             ]
         );
-        // Only the custodian leg is built today.
-        assert!(ReseedLeg::ThisDeviceStore.is_built());
-        assert!(!ReseedLeg::NestHeldPullBack.is_built());
+        // Every app hosts the custodian leg; the pull-back only where hosted.
+        assert!(ReseedLeg::ThisDeviceStore.is_hosted(HostedLegs::CUSTODIAN_ONLY));
+        assert!(!ReseedLeg::NestHeldPullBack.is_hosted(HostedLegs::CUSTODIAN_ONLY));
+        assert!(ReseedLeg::NestHeldPullBack.is_hosted(HostedLegs::WITH_PULL_BACK));
         // A device that cannot name itself claims no client-device row.
         assert_eq!(
             reseed_sources(&rows, " ", false),
@@ -1485,6 +1554,36 @@ mod shared_view_tests {
                 leg: ReseedLeg::NestHeldPullBack
             }]
         );
+    }
+
+    /// The button's rows are the sources whose leg this app hosts: a nest row
+    /// joins only on an app that hosts the pull-back, never on the others.
+    #[test]
+    fn the_buttons_rows_are_the_sources_this_app_hosts() {
+        let rows = vec![custodian("mine", ME), nest("off-site")];
+        assert_eq!(
+            reseed_rows(&rows, ME, true, HostedLegs::CUSTODIAN_ONLY),
+            vec![None, Some("mine".to_string())]
+        );
+        assert_eq!(
+            reseed_rows(&rows, ME, true, HostedLegs::WITH_PULL_BACK),
+            vec![None, Some("mine".to_string()), Some("off-site".to_string())]
+        );
+    }
+
+    /// Web is never a custodian: it asks with no device id and no orphaned
+    /// store, so only a nest row carries the button, and its confirm runs the
+    /// pull-back.
+    #[test]
+    fn an_app_holding_no_store_paints_only_the_nest_rows_and_they_pull_back() {
+        let rows = vec![custodian("mine", ME), nest("off-site")];
+        assert_eq!(
+            reseed_rows(&rows, "", false, HostedLegs::WITH_PULL_BACK),
+            vec![Some("off-site".to_string())]
+        );
+        assert!(reseed_runs_pull_back(&rows, "off-site"));
+        assert!(!reseed_runs_pull_back(&rows, "mine"));
+        assert!(!reseed_runs_pull_back(&rows, "gone"));
     }
 
     #[test]

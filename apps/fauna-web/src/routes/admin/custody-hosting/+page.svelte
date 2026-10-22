@@ -20,15 +20,15 @@
   // `remove_custody_hosting` (second app), both calling the shared client
   // directly since they are native Rust.
   import { onMount } from 'svelte';
-  import { identity } from '$lib/store';
-  import { adminHostingList, adminHostingRemove } from '$lib/rpc';
-  import type { AdminHostingRow } from '$lib/rpc';
-  import { toBytes } from '$lib/hex';
-  import { byteSizeRaw } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
+  import { identity } from '#lib/store';
+  import { adminHostingList, adminHostingRemove } from '#lib/rpc';
+  import type { AdminHostingRow } from '#lib/rpc';
+  import { toBytes } from '#lib/hex';
+  import { byteSizeRaw } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
 
   // `null` = not hydrated yet — distinct from an answered empty list. A page
   // that paints "0 held" or the empty state before the read has answered

@@ -98,9 +98,9 @@ pub use recovery::{
 pub use rotate::{SeedRotation, seed_rotation_verdict};
 pub use store_seam::{
     BackupStateStore, CustodyCeremonyStore, DeploymentSeedStore, FolderCustodyCut, FollowsStore,
-    KindManifestStore, LEDGER_AWAITING_SIBLING, LEDGER_NOT_READY, LEDGER_READY_WAIT, MailStore,
-    NoLedgerStore, PreferenceStore, PublishedLedger, ResolvingLedgerStore, SharedPreferenceStore,
-    StoreError, SuccessionLedgerStore,
+    KindManifestStore, LEDGER_AWAITING_SIBLING, LEDGER_NOT_READY, LEDGER_READY_WAIT,
+    MailImportSourceStore, MailStore, NoLedgerStore, PreferenceStore, PublishedLedger,
+    ResolvingLedgerStore, SharedPreferenceStore, StoreError, SuccessionLedgerStore,
 };
 pub use succession_aftermath::{
     BackupRegrantError, BackupRegrantOutcome, BackupRegrantProgress, regrant_nest_backup_key,

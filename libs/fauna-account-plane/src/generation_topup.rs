@@ -416,8 +416,14 @@ async fn unkeyable_signals<B: StoreBackend>(
 /// The devices page's removal quartet is a local command served at any
 /// yield of a running pass (`account_runtime`'s `Cmd::is_local`), so a
 /// writer that read its targets before an await — a breath, a publish, an
-/// escrow deposit — must re-ask here before the wrap exists. Store calls are synchronous underneath, so the answer
-/// still holds at a write that follows it with no await between.
+/// escrow deposit — must re-ask here before the wrap exists. Native store calls are synchronous underneath, so there
+/// the answer holds at a write that follows it with no await between. On web
+/// the write's own IndexedDB reads (`AccountStore::put_state`'s entry and seq
+/// reads) are yields a removal can still land in — a window of a few
+/// transactions, accepted because the removal quartet writes `Removed` only
+/// after the nest deletion has already refused the device (`fleet_removal`
+/// module docs), so a wrap written inside it reaches nothing the device can
+/// still fetch.
 pub async fn no_longer_wrap_targets<B: StoreBackend>(
     store: &AccountStore<B>,
     root: &fauna_core::identity::ActorId,

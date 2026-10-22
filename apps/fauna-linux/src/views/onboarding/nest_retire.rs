@@ -1236,6 +1236,7 @@ impl RunningView {
 
         // The dangling-record warning, repeated where the choice is made.
         let force_warning = muted(t::FORCE_SERVER_WARNING);
+        set_test_id(&force_warning, ids::RETIRE_FORCE_SERVER_WARNING);
         force_warning.set_visible(false);
         root.append(&force_warning);
         let force = Button::with_label(t::FORCE_SERVER_BUTTON);

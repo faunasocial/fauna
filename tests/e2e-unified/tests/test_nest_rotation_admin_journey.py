@@ -69,7 +69,9 @@ linux's ``set_test_id(&label, &format!("…roster-item-{i}"))``) addresses each
 row by its own literal ``-{n}``-suffixed id with no scope at all, so the
 roster never resolved and the ceremony hung indefinitely at the arm step.
 Fixed by baking the index directly into the registered id, matching
-windows/linux and `ui.yaml`'s own documented ``-{n}`` shape. iOS mirrors
+windows/linux and `ui.yaml`'s then-documented ``-{n}`` shape — a shape the
+owner retired 2026-10-16 for convention 1's one repeated id read by index;
+the journey reads both forms (``helpers.indexed_rows``) while the apps move. iOS mirrors
 ``test_nest_identity_pin.py``'s ``ios_setup``/``udid`` branch, since
 ``make_launch_harness``'s direct-launch iOS leg needs both together. **Web got its own
 arm, not a bare list-append**,
@@ -116,6 +118,7 @@ import pytest
 
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from helpers.app_launch import app_launch_config
+from helpers.indexed_rows import row_count, row_present, row_text
 from conftest import _trust_seeder, get_available_apps
 
 pytestmark = [
@@ -127,8 +130,7 @@ _SUPPORTED_APPS = ("tui", "linux", "android", "web", "windows", "macos", "ios")
 
 # Element IDs (tests/e2e-unified/ui.yaml § admin_nest + § launch_identity_changed).
 ARM_BUTTON = "admin-nest-seed-rotate-button"
-ROSTER_ITEM_0 = "admin-nest-seed-rotate-roster-item-0"
-ROSTER_ITEM_1 = "admin-nest-seed-rotate-roster-item-1"
+ROSTER_ITEM = "admin-nest-seed-rotate-roster-item"
 ROSTER_REASON = "admin-nest-seed-rotate-roster-reason"
 CONFIRM_BUTTON = "admin-nest-seed-rotate-confirm-button"
 STATUS = "admin-nest-seed-rotate-status"
@@ -361,16 +363,16 @@ def test_the_admin_rotates_the_deployment_seed_through_the_app(journey_env, jour
         "arming must paint the confirm surface in the same frame "
         "(disabled while the roster is unknown, never absent)"
     )
-    _poll(lambda: driver.count(ROSTER_ITEM_0) > 0, _ROSTER_BUDGET_S,
+    _poll(lambda: row_present(driver, ROSTER_ITEM), _ROSTER_BUDGET_S,
           "the roster listing resolves")
 
     # The ordering rule as rendered state (`box-recovery.md` § Ordering
     # rule): the set that will inherit is named — this fixture's whole
     # roster is the one claiming admin — before the confirm is live.
-    assert driver.count(ROSTER_ITEM_1) == 0, (
+    assert row_count(driver, ROSTER_ITEM) == 1, (
         "a single-admin nest must list exactly one inheritor"
     )
-    assert driver.get_text(ROSTER_ITEM_0).strip(), (
+    assert row_text(driver, ROSTER_ITEM).strip(), (
         "the inheritor row must carry a label (name or short id — the "
         "shared fold never drops a row it cannot name)"
     )

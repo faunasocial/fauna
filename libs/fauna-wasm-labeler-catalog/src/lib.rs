@@ -2,9 +2,9 @@
 //! page-level `LabelerCatalogMachine` (browse / inspect-before-subscribe /
 //! (un)subscribe). The web labeler-catalog route (and the personalization
 //! home's subscribed-labelers facet, which reads the same snapshot) renders
-//! off the shared `LabelerCatalogMachine` via `$lib/wasm-labeler-catalog`,
+//! off the shared `LabelerCatalogMachine` via `#lib/wasm-labeler-catalog`,
 //! exactly as the Devices route renders off `DevicesMachine` via
-//! `$lib/wasm-folders` — one shared surface, all 7 apps (priority #1/#2;
+//! `#lib/wasm-folders` — one shared surface, all 7 apps (priority #1/#2;
 //! `docs/goal/architecture/content-moderation-and-ranking.md` § Tier-3).
 //! Mirrors the page-level wrapper half of `fauna-wasm-folders` /
 //! `fauna-wasm-media`.
@@ -41,7 +41,7 @@ pub struct LabelerCatalogMachine(Arc<InnerMachine>);
 #[wasm_bindgen]
 impl LabelerCatalogMachine {
     /// Build the page machine over the SPA core chunk's socket, lent as
-    /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`; the owner's
+    /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`; the owner's
     /// `requestRaw` runs every request this machine makes, so web keeps one
     /// WebSocket per actor). Throws on an object that is not a port. `secret`
     /// is the actor's 32-byte ed25519 seed: the machine is built **with its
@@ -52,7 +52,7 @@ impl LabelerCatalogMachine {
     /// through the account's succession ledger (`fauna.state.succession-ledger`,
     /// the succession-ledger seam), and mints it from the account's mail
     /// custody (`fauna.state.mail`, the MSEK, the mail seam). Both are read
-    /// through `account` — the tab's account port (`$lib/account-runtime`'s
+    /// through `account` — the tab's account port (`#lib/account-runtime`'s
     /// `sharedAccountPort`, minted for this secret's account), which reaches
     /// the core chunk's runtime. Throws on a secret that is not 32 bytes, or
     /// on an object that is not a port.

@@ -299,6 +299,12 @@ pub struct ConsentInstallRow {
     pub ingress_paths: Vec<String>,
     /// A development plugin (`third-party.md` § Developer loop).
     pub development: bool,
+    /// The section rides a user's bind card (`fauna.plugins.bind`), not an
+    /// admin's install card: the plugin is already installed, and approving
+    /// connects it to this account.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub bind: bool,
 }
 
 /// One field of the install card's settings summary.

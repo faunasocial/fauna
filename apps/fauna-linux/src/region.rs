@@ -184,17 +184,33 @@ pub fn verdict_for_item(
     )
 }
 
-/// The item's labels joined with the region scorers' factors.
+/// The item's labels joined with every bundled scorer's factors — the
+/// region's, then the session nest's keyword rules and labelers
+/// (`nest-rules.md` § The nest content policy — run post-decrypt on the
+/// device), then, on a supervised account, the guardian document's — the
+/// input the composed verdict folds. tui's `region::verdict_for` order.
 fn joined_labels(
     content_id_hex: &str,
     labels: &[ContentLabelEntry],
     input: impl FnOnce() -> LabelerPostInput,
 ) -> Vec<ContentLabelEntry> {
-    STATE.with(|s| {
-        let s = s.borrow();
-        let id = fauna_core::hex32::decode(content_id_hex).ok();
-        s.plane.join_labels(id.as_ref(), labels, input).into_owned()
-    })
+    // The scorer input is built at most once, for whichever source asks first.
+    let make = std::cell::Cell::new(Some(input));
+    let built = std::cell::OnceCell::new();
+    let input = || {
+        built
+            .get_or_init(|| (make.take().expect("the scorer input is built once"))())
+            .clone()
+    };
+    let id = fauna_core::hex32::decode(content_id_hex).ok();
+    let regioned = STATE.with(|s| {
+        s.borrow()
+            .plane
+            .join_labels(id.as_ref(), labels, input)
+            .into_owned()
+    });
+    let nested = crate::nest_rules::join_labels(id.as_ref(), &regioned, input);
+    crate::content_policy::join_guardian_labels(id.as_ref(), &nested, input).into_owned()
 }
 
 /// The region placeholder a composed verdict paints, when the region drove it.
@@ -268,18 +284,30 @@ pub fn placeholder_box(p: &RegionPlaceholder, on_reveal: impl Fn() + 'static) ->
     vbox
 }
 
+/// Which source's blocks a verdict-side walk counts — the region's
+/// (`region-block-never-silent`) or the nest's (`nest-block-never-silent`).
+pub type BlockPredicate<'a> = &'a dyn Fn(&ComposedVerdict) -> bool;
+
 /// One surface's verdict-side walk, live while its root widget is mapped.
-type BlockCounter = (glib::WeakRef<gtk::Widget>, Box<dyn Fn() -> usize>);
+type BlockCounter = (
+    glib::WeakRef<gtk::Widget>,
+    Box<dyn Fn(BlockPredicate<'_>) -> usize>,
+);
 
 thread_local! {
     static BLOCK_COUNTERS: RefCell<Vec<BlockCounter>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Register a surface's convention-17 verdict-side walk: `count` answers how
-/// many of the items the surface renders the region BLOCKS, re-deriving each
-/// verdict from the snapshot (never from the widgets). It counts only while
-/// `root` is mapped — on screen — which is the scope the painted side counts in.
-pub fn register_block_counter(root: &impl IsA<gtk::Widget>, count: impl Fn() -> usize + 'static) {
+/// many of the items the surface renders the given predicate BLOCKS,
+/// re-deriving each verdict from the snapshot (never from the widgets). One
+/// walk serves both witnesses — the region's here and the nest's
+/// (`crate::nest_rules::block_render_json`). It counts only while `root` is
+/// mapped — on screen — which is the scope the painted side counts in.
+pub fn register_block_counter(
+    root: &impl IsA<gtk::Widget>,
+    count: impl Fn(BlockPredicate<'_>) -> usize + 'static,
+) {
     let weak = root.upcast_ref::<gtk::Widget>().downgrade();
     BLOCK_COUNTERS.with(|c| c.borrow_mut().push((weak, Box::new(count))));
 }
@@ -291,31 +319,45 @@ pub fn register_block_counter(root: &impl IsA<gtk::Widget>, count: impl Fn() -> 
 /// `root` as painted. An arm that drops the placeholder (or the item) shows up
 /// as `placeholders < blocked`.
 pub fn block_render_json(root: &impl IsA<gtk::Widget>) -> serde_json::Value {
+    block_render_json_for(
+        root,
+        &is_region_blocked,
+        ids::REGION_BLOCKED_NOTICE,
+        &format!("test-attr-{VERDICT_ATTR}-{}", RegionVerb::Block.as_str()),
+    )
+}
+
+/// One witness's counts: `blocked` by `predicate` over the mapped surfaces'
+/// walks, `placeholders` as the mapped widgets named `notice_id` carrying the
+/// block attribute's class `class`.
+pub fn block_render_json_for(
+    root: &impl IsA<gtk::Widget>,
+    predicate: BlockPredicate<'_>,
+    notice_id: &str,
+    class: &str,
+) -> serde_json::Value {
     let blocked: usize = BLOCK_COUNTERS.with(|c| {
         let mut counters = c.borrow_mut();
         counters.retain(|(w, _)| w.upgrade().is_some());
         counters
             .iter()
             .filter(|(w, _)| w.upgrade().is_some_and(|w| w.is_mapped()))
-            .map(|(_, count)| count())
+            .map(|(_, count)| count(predicate))
             .sum()
     });
-    fn painted(w: &gtk::Widget, class: &str) -> usize {
+    fn painted(w: &gtk::Widget, notice_id: &str, class: &str) -> usize {
         if !w.is_mapped() {
             return 0;
         }
-        let own =
-            usize::from(w.widget_name() == ids::REGION_BLOCKED_NOTICE && w.has_css_class(class));
-        let mut n = own;
+        let mut n = usize::from(w.widget_name() == notice_id && w.has_css_class(class));
         let mut c = w.first_child();
         while let Some(child) = c {
-            n += painted(&child, class);
+            n += painted(&child, notice_id, class);
             c = child.next_sibling();
         }
         n
     }
-    let class = format!("test-attr-{VERDICT_ATTR}-{}", RegionVerb::Block.as_str());
-    let placeholders = painted(root.upcast_ref(), &class);
+    let placeholders = painted(root.upcast_ref(), notice_id, class);
     serde_json::json!({ "blocked": blocked, "placeholders": placeholders })
 }
 

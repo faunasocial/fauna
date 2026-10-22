@@ -1,0 +1,47 @@
+# The live state of every store submission — one [[submission]] table per
+# (store, version), the newest state replacing the previous one in place.
+# Owner and grammar: docs/goal/architecture/installers/store-review.md
+# § The record; pinned by tests/e2e-unified/tests/test_store_review_record.py.
+#
+# A store with no table has nothing built or uploaded. "Is anything in
+# review?" is answered by any table whose state is "in-review". Every state
+# rests on a dated console reading (`read`); nothing is written from a plan.
+# No secret, no address, no tester and no person is ever written here.
+#
+# Written ONLY by `just store-review` (scripts/store-review.py); never edit
+# by hand — the digest below covers every table, and the pin fails on a
+# hand edit.
+# written-by: just store-review sha256:bd621d68f81d048cb7dc397b6f46e01b16da7e4c8583abe4cf049ae63278e149
+
+[[submission]]
+store = "play"
+version = "0.1.2"
+build = "102"
+track = "internal-testing"
+flavour = "release"
+state = "withdrawn"
+since = 2026-10-09
+read = 2026-10-21
+note = "Uploaded 2026-10-07 as a draft from the public first-push commit; Play refused the rollout under its API 36 target floor; the draft was discarded 2026-10-09. The string is spent. Owner's Play Console reading 2026-10-21: bundle 102 stays in the App bundle explorer, Inactive."
+
+[[submission]]
+store = "play"
+version = "0.1.3"
+build = "103"
+track = "internal-testing"
+flavour = "release"
+state = "serving"
+since = 2026-10-09
+read = 2026-10-21
+note = "Published to internal testing 2026-10-09 to the invited testers list (full rollout 14:51); this track passes no review. Automatic protection off. Owner's Play Console reading 2026-10-21: still the latest release on the track, bundle 103 Active; no 0.1.4 bundle on any track; nothing in review at Google."
+
+[[submission]]
+store = "microsoft-store"
+version = "0.1.3"
+build = "0.1.3.0"
+track = "private-audience"
+flavour = "release"
+state = "withdrawn"
+since = 2026-10-14
+read = 2026-10-21
+note = "The arm64 and x64 packages were built and graded 2026-10-10 from the 0.1.3 public commit and never uploaded; the first Store upload is the version the acceptance nest serves, in the store-safe flavour (owner ruling 2026-10-14). Owner's Partner Center reading 2026-10-21: no submission, nothing in review."

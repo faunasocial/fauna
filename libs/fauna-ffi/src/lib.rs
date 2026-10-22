@@ -43,6 +43,12 @@ mod spam;
 // crosses the boundary, so no `value-format`-style feature gate.
 mod handle;
 
+// localized: the shared single-pass `{name}` placeholder fill
+// (`fauna_core::localized::fill_placeholders`) the apps call after their own
+// catalog lookup. Built-in-typed `HashMap<String, String>` only — no custom
+// `fauna_core` type crosses the boundary, so no `value-format`-style feature gate.
+mod localized;
+
 // nostr_relay: the shared Nostr relay-URL validation and list-add rule
 // (`fauna_protocol::nostr_relay`). Like `version`, its `#[uniffi::export]` fns
 // are built-in-typed — only `relay_url_error`, which returns a `LocalizedText`,
@@ -123,6 +129,13 @@ pub use feed_rules::*;
 mod feed_manager;
 #[cfg(feature = "feed-manager")]
 pub use feed_manager::*;
+// The post-blob plane's face takes the cross-crate `fauna_feed::PostSummary`
+// (`post_blob_home`), so it rides the same `feed-manager` gate. See
+// src/post_blob.rs.
+#[cfg(feature = "feed-manager")]
+mod post_blob;
+#[cfg(feature = "feed-manager")]
+pub use post_blob::*;
 // The Search-page façade returns cross-crate `fauna_client_search` snapshot types
 // + the SearchSnapshotObserver foreign trait, which uniffi-bindgen-go can't emit,
 // so it's gated `search-manager` (default-on; off in the Go mail-bridge
@@ -632,6 +645,14 @@ mod family;
 pub use admin::*;
 pub use family::*;
 
+// The store-consent gate's face (account-age-band.md § The account age band →
+// the store-law developer duties bullet) — android + iOS only. Gated on
+// `value-format` for its LocalizedText message lines, like `features` below.
+#[cfg(feature = "value-format")]
+mod store_consent;
+#[cfg(feature = "value-format")]
+pub use store_consent::*;
+
 // The controversial-class feature plane's transparency read. Gated on
 // `value-format` for its LocalizedText returns (the bare-`fauna_core`-import
 // footgun below), NOT on `payments`/`zaps`: the plane gates three members, so
@@ -788,6 +809,12 @@ pub use nostr_npub_confirm::*;
 mod mail_forwarding;
 #[cfg(feature = "mail-admin")]
 pub use mail_forwarding::*;
+// The `mail-settings` page's account switches, quota readout and auto-respond
+// setting (mail-policy-config.md § Tier 3) — the same gate and shape.
+#[cfg(feature = "mail-admin")]
+mod mail_account_settings;
+#[cfg(feature = "mail-admin")]
+pub use mail_account_settings::*;
 
 #[cfg(feature = "spam-threshold-override")]
 mod spam_threshold_override;
@@ -809,7 +836,20 @@ mod moderation_client;
 // console's reason (bare `LocalizedText` in the views).
 #[cfg(feature = "moderation-badge")]
 mod abuse_report;
+// The shared rule editor's face (`nest-rules.md` § The shared rule editor) —
+// gated for the bare `LocalizedText` its view embeds.
+#[cfg(feature = "rule-editor")]
+mod rule_editor;
+// The member's nest-rules book (`nest-rules.md` § Acceptance at joining, and a
+// change of rules) — gated `nest-rules` (in `kids-safe`), for the
+// `LocalizedText` its summary embeds.
+#[cfg(feature = "nest-rules")]
+mod nest_rules;
 pub use moderation_client::*;
+#[cfg(feature = "nest-rules")]
+pub use nest_rules::*;
+#[cfg(feature = "rule-editor")]
+pub use rule_editor::*;
 
 // The encrypted-CalDAV Events seam (FfiCaldavClient) — the Events page reads/writes
 // the encrypted `bridge_caldav_*` store via `fauna.bridges.*` + client-side
@@ -1192,7 +1232,7 @@ pub(crate) fn general_err(e: impl std::fmt::Display) -> FfiError {
         feature = "pairing",
         feature = "mail-admin",
         feature = "labeler-catalog",
-        feature = "recovery-aftermath"
+        feature = "conversations-session"
     )),
     allow(dead_code)
 )]

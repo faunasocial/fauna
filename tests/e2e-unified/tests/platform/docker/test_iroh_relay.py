@@ -211,11 +211,12 @@ def relay_nest(docker_image):
     enables the relay: the image runs it, and the claim alone brings it all the way
     to `serving`. Yields {name, http_port, router_port, served_before_claim}. Module-scoped so the three relay tests
     share one (expensive) bring-up."""
-    http_port, router_port, discovery_port = find_free_ports(3)
+    http_port, discovery_port = find_free_ports(2)
+    router_port = http_port
     name = f"fauna-nest-relay-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, 443: router_port},
+        {443: http_port},
         udp_port_map={DISCOVERY_PORT: discovery_port},
         env={
             # No FAUNA_DOMAIN — the box boots domainless and learns its domain at
@@ -876,7 +877,7 @@ def relay_seats(relay_nest):
                 os.chmod(home / "tmp", 0o777)
                 side_env = {**env, "HOME": f"/out/home-{side}",
                             "TMPDIR": f"/out/home-{side}/tmp"}
-                cmd = _seat_cmd(f"https://{nest_ips[side]}:3000", seed, side)
+                cmd = _seat_cmd(f"https://{nest_ips[side]}:443", seed, side)
                 subprocess.run(
                     ["docker", "exec", "-d",
                      *[a for k, v in side_env.items() for a in ("-e", f"{k}={v}")],

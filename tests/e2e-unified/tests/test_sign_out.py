@@ -210,18 +210,20 @@ def _undeletable_scope(scope, client: str):
 
     * **windows: a held SQLite lock on one file inside the scope**
       (`_held_open_no_share`). Lifting it must leave the scope directory exactly
-      as the sign-out recorded it, because the re-sweep leaves alone any path
-      whose modification time moved since (`fauna_client_accounts::
-      sign_out_residue`, rule 3 — a later sign-in re-creating the store) and
-      would then drop the scope from the record untouched. It does: the store is
-      on the rollback journal, and an `BEGIN EXCLUSIVE` that never writes never
-      creates the journal file, so neither taking nor releasing the lock adds or
-      removes a directory entry.
+      as the sign-out recorded it, because the re-sweep leaves alone any scope
+      whose fingerprint — every entry's name, length and mtime, the whole tree
+      down — moved since (`fauna_client_accounts::sign_out_residue`, rule 3 — a
+      later sign-in re-creating or adopting the store) and would then drop the
+      scope from the record untouched. It does: the store is on the rollback
+      journal, and an `BEGIN EXCLUSIVE` that never writes never creates the
+      journal file, so neither taking nor releasing the lock adds or removes an
+      entry or writes to a file anywhere under the scope.
     * **POSIX: a read-only scope DIRECTORY.** Probes the injection
       non-destructively and skips as an ENVIRONMENT fact when this process
       writes through mode 0o555 (root), because a test that silently proves
       nothing is worse than none. Restores the mode on exit (a mode change moves
-      the directory's ctime, never its mtime).
+      the directory's ctime, never its mtime — and the fingerprint reads no
+      ctime).
     """
     if client == "windows":
         held = _sqlite_file_to_hold(scope)

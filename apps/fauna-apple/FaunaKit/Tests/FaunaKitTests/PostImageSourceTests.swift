@@ -2,65 +2,40 @@ import Testing
 import Foundation
 @testable import FaunaKit
 
-// The `post-image` two-shape rule (`docs/goal/ui/media.md` § Encryption at rest).
+// The `post-image` decision (`docs/goal/ui/media.md` § Encryption at rest; `feed.md`
+// § The read model → *A post homed on another nest*).
 //
-// apple's image path is a URL SwiftUI fetches and decodes itself, so — like web's
-// `<img src>`, and unlike the five apps that hold the bytes — it has to ask
-// `FeedManager::is_sealed_media(hash)` BEFORE rendering. The whole security half
-// of that is one branch: a sealed item must never resolve to the blob URL,
-// because the URL serves AEAD ciphertext. These pin the branch itself, which is
-// the mechanism; the eye is only needed for "does the photo appear".
+// Every post image is bytes the app fetched from the post's own home through the
+// shared post-blob plane and the shared manager opened (`open_media_bytes`), then
+// decoded locally — there is no platform-fetched URL, so a post homed on another
+// nest reaches the same path as a same-nest one and ciphertext can never reach a
+// decoder by a URL. These pin the decision itself, which is the mechanism; the eye
+// is only needed for "does the photo appear".
 //
 // The shared half is covered tier_1 in `libs/fauna-feed` (`open_media_bytes`,
 // `is_sealed_media_marks_only_an_unlocked_posts_own_items`,
-// `unlock_gated_post_opens_its_media_items`).
+// `unlock_gated_post_opens_its_media_items`) and `libs/fauna-client` (`post_blob`).
 
-private let blobURL = URL(string: "https://nest.example/api/v1/blob/abc123")!
-
-@Test func unsealedMediaPaintsThePlainBlobUrl() {
-    let source = PostImageSource.resolve(isSealed: false, blobURL: blobURL, opened: nil)
-    guard case .url(let url) = source else {
-        Issue.record("a public post's image is the URL itself, got \(source)")
-        return
-    }
-    #expect(url == blobURL)
-}
-
-@Test func sealedMediaNeverResolvesToTheBlobUrl() {
-    // The load-bearing one. `opened: nil` is every render before the fetch lands,
-    // and the URL is right there — handing it back would `GET` ciphertext into an
-    // image decoder.
-    let source = PostImageSource.resolve(isSealed: true, blobURL: blobURL, opened: nil)
-    guard case .sealedPending = source else {
-        Issue.record("a sealed item with no opened bytes must wait, got \(source)")
+@Test func aPostImageWithNoBytesYetWaitsOnItsFetch() {
+    let source = PostImageSource.resolve(signedIn: true, opened: nil)
+    guard case .pending = source else {
+        Issue.record("an image whose bytes have not landed waits, got \(source)")
         return
     }
 }
 
-@Test func sealedMediaPaintsTheOpenedBytesOnceTheyLand() {
-    let opened = FaunaPlatformImage()
-    let source = PostImageSource.resolve(isSealed: true, blobURL: blobURL, opened: opened)
+@Test func aPostImagePaintsTheOpenedBytesOnceTheyLand() {
+    let source = PostImageSource.resolve(signedIn: true, opened: FaunaPlatformImage())
     guard case .decoded = source else {
-        Issue.record("opened bytes are what a sealed item paints, got \(source)")
+        Issue.record("opened bytes are what a post image paints, got \(source)")
         return
     }
 }
 
-@Test func noBlobUrlPaintsNothing() {
-    // Pre-auth: `FeedVM.blobURL` is nil because there is no `APIClient` yet. The
-    // call sites skip the whole media block, as they did before the seal branch.
-    #expect(PostImageSource.resolve(isSealed: false, blobURL: nil, opened: nil).isUnavailable)
-}
-
-@Test func alreadyOpenedBytesDoNotOverrideAnUnsealedItem() {
-    // A hash the manager does not call sealed keeps the URL path — including its
-    // `?thumb=1` variant, which only a nest-served blob has — even if bytes for
-    // it happen to be cached. `is_sealed_media` is the single decider.
-    let source = PostImageSource.resolve(isSealed: false, blobURL: blobURL, opened: FaunaPlatformImage())
-    guard case .url = source else {
-        Issue.record("is_sealed_media decides the shape, not the cache, got \(source)")
-        return
-    }
+@Test func noSessionPaintsNothing() {
+    // Pre-auth: there is no `APIClient` to fetch with. The call sites skip the
+    // whole media block.
+    #expect(PostImageSource.resolve(signedIn: false, opened: nil).isUnavailable)
 }
 
 // A bridged post's picture (`docs/goal/architecture/render-model.md` § D6c): a
@@ -97,8 +72,8 @@ private let proxiedPath = "/api/v1/bluesky/media?url=https%3A%2F%2Fcdn.bsky.app%
 @Test func onlyAProxiedPlaceholderCarriesAnAddressLabel() {
     // A blob image's slot keeps its `painted`/`placeholder` state read alone —
     // its URL is never the label.
-    #expect(PostImageSource.resolve(isSealed: false, blobURL: blobURL, opened: nil).placeholderText == nil)
-    #expect(PostImageSource.sealedPending.placeholderText == nil)
+    #expect(PostImageSource.resolve(signedIn: true, opened: nil).placeholderText == nil)
+    #expect(PostImageSource.pending.placeholderText == nil)
 }
 
 @Test func theProxiedPathIsTakenOnlyWhenThePostHasNoBlobImage() {

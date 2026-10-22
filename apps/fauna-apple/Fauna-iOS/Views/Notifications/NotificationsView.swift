@@ -13,8 +13,28 @@ struct NotificationsView: View {
 
     var body: some View {
         NavigationStack {
-            List(vm.notifications) { notif in
-                row(notif)
+            // Eager, not a `List` (apple-e2e-automation.md rule 6): a reveal swaps
+            // a row's content in place, and a pooled list cell keeps the collapsed
+            // placeholder's registration alive after it is gone.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(vm.notifications) { notif in
+                        // A row a muted word collapses paints the shared placeholder
+                        // leaf instead (`notifications.md` § Muted words); its reveal
+                        // swaps the full row in at the same index.
+                        Group {
+                            if vm.isCollapsed(notif) {
+                                NotificationMutedRow(item: notif) { vm.revealMuted(notif) }
+                            } else {
+                                row(notif)
+                            }
+                        }
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider()
+                    }
+                }
+                .padding(.horizontal)
             }
             .pageTitle(L.common.notifications)
             .toolbar {

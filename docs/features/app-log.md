@@ -18,7 +18,7 @@ before a crash or a restart is not lost with the page.
 
 ## Coverage contract
 
-Stamped 2026-09-26 at 7cd27fc591.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] The page shows the app's activity, filters by severity, and copies or clears — `docs/goal/architecture/apps/observability.md` § 3. Surfaces
    - `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_renders`
@@ -32,17 +32,17 @@ Stamped 2026-09-26 at 7cd27fc591.
    - `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info`
 4. [app] Something the app printed where you could not see it, or a failure it quietly swallowed, is in the log — `docs/goal/architecture/apps/observability.md` § What must be logged
    - `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring`
-5. [app] The log never carries your message text, keys, tokens or claim codes — only what happened — `docs/goal/architecture/apps/observability.md` § 2. Persistence & privacy
+5. [app] The app is written never to record your message text, keys, tokens or claim codes in the log — only what happened — `docs/goal/architecture/apps/observability.md` § 2. Persistence & privacy
    - `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log`
 6. [app] The log is also kept in a file on your device, so what the app did before a crash or a restart is still there to hand over — `docs/goal/architecture/apps/observability.md` § 2. Persistence & privacy
-   - (none)
+   - `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+d2b9791b standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+5893bba8 standalone |
@@ -58,9 +58,9 @@ Stamped 2026-09-26 at 7cd27fc591.
 | 1 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_logs_page_heading_is_visible` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_settings_error_is_captured` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_displayed_banner_reaches_ring` | web (linux): passed, linux (linux): skipped, windows (windows): skipped, macos (macos): failed, ios (macos): failed, tui (linux): skipped |
-| 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_copied_notice_reaches_the_ring_at_info` | web (linux): failed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_what_the_app_printed_or_swallowed_reaches_the_ring` | web (linux): failed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 5 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_message_text_never_reaches_the_log` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 6 | app | (none) | — |
+| 6 | app | `tests/e2e-unified/tests/test_settings_logs.py::test_a_relaunch_finds_the_previous_launchs_line_in_the_on_device_file` | linux (linux): passed, tui (linux): passed |
 | 6 | app | absent by design on web | — |
 <!-- features-render:end -->

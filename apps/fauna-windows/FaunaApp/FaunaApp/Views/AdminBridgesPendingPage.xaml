@@ -36,7 +36,8 @@
 
             <!-- Pending section (admin.md § Approved-bridges roster: the pending
                  cards above, the approved roster below, in one scroll). -->
-            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesPendingSection}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
                        Text="{loc:Localize Key=admin/bridges_pending/pending_section}" />
 
             <!-- Empty state -->
@@ -134,7 +135,8 @@
                  list_service_users(status="approved") through the shared machine's
                  snapshot.approved; each card carries the rotate-service-user-key
                  affordance. Mirrors linux build_approved_bridge_card. -->
-            <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+            <TextBlock AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminBridgesApprovedSection}"
+                       Style="{StaticResource SubtitleTextBlockStyle}"
                        Text="{loc:Localize Key=admin/bridges_pending/approved_section}" />
             <TextBlock x:Name="ApprovedEmptyText" Visibility="Collapsed" Opacity="0.5" TextWrapping="Wrap"
                        Text="{loc:Localize Key=admin/bridges_pending/approved_empty}" />

@@ -22,8 +22,9 @@ use crate::backend::{
     InboundBucket, MailFeed, ProviderPersist, RailBackend, RailInboundMessage, ResolveResult,
     RoomCeremonyRpc, RoomGenerationReader, RoomPolicyEdit, RoomPolicyRebuild, RoomPrincipalKind,
     RoomRosterEntry, RoomRosterRead, RoomRosterReader, RoomRosterReport, RoomRosterReportOutcome,
-    RoomRosterReporter, RoomSeams, SchedulingSink, SelfAddress, SendOutcome, ShareEndpointsSink,
-    SiblingGroupAdopter, SuccessionWitness, WelcomeChannelKind, classify_foreign_non_answer,
+    RoomRosterReporter, RoomSeams, RoomSearchPostReader, SchedulingSink, SelfAddress, SendOutcome,
+    ShareEndpointsSink, SiblingGroupAdopter, SuccessionWitness, WelcomeChannelKind,
+    classify_foreign_non_answer,
 };
 use crate::capabilities::{ThreadCapabilities, derive_capabilities};
 use crate::compose::ComposeState;
@@ -392,7 +393,22 @@ pub(crate) enum ChannelHome {
     SameNest,
     /// The channel's log lives on the named **foreign** nest; the drain relays
     /// its `channel.fetch` there and sends route via `channel.send_remote`.
-    Foreign(String),
+    /// `nest_actor_id` is that home's identity (hex) as this member's own nest
+    /// verified it on the Welcome's channel — the root the room-attachment
+    /// read graduates its pin against (`transport-trust.md` § The post arm);
+    /// `None` keeps that read on the WebPKI floor.
+    Foreign {
+        url: String,
+        nest_actor_id: Option<String>,
+    },
+}
+
+/// A home identity worth recording: present and not blank.
+fn non_blank(home_nest_actor_id: Option<&str>) -> Option<String> {
+    home_nest_actor_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 pub struct FaunaMlsBackend {
@@ -532,7 +548,7 @@ pub struct FaunaMlsBackend {
     /// channel was merely absent, so every ordinary local DM and group was a
     /// hole the pre-guard would fill. The **absent** state remains only for
     /// channels persisted by a binary before the marker existed (the declared,
-    /// bounded residual — `federation.md` § Cross-nest → route (a)); the
+    /// bounded residual — `federation-shared-folders.md` § Cross-nest → route (a)); the
     /// nest-side verified-origin resolution (`federation_handlers.rs`) bounds
     /// even that plant to the sender's own verified nest — a bound on a URL,
     /// which is why a peer declaring **no** origin is refused earlier instead:
@@ -656,6 +672,10 @@ pub struct FaunaMlsBackend {
     /// by name — a room founded on a device that cannot key it would be a
     /// room nobody, its founder included, could ever send into.
     room_ceremony: OnceLock<Arc<dyn RoomCeremonyRpc>>,
+    /// The **post-read** seam behind the room's search
+    /// ([`RoomSearchPostReader`]). **Unset** ⇒ a post hit's row stays
+    /// word-less; the search itself is the ceremony's.
+    room_search_posts: OnceLock<Arc<dyn RoomSearchPostReader>>,
     /// Opened room generation keys, per channel, keyed by generation id — the
     /// result of one `read_generations` + unwrap pass.
     ///
@@ -857,7 +877,7 @@ pub struct FaunaMlsBackend {
     parked_successions: Mutex<HashMap<ActorId, HashMap<ThreadId, ParkedSlot>>>,
     /// The **folder rail's** park store — witness-refused statements a FOLDER
     /// channel carried ([`route_folder_succession`]), keyed by `old_actor_id`
-    /// then channel (a folder channel has no thread; `federation.md` § Cross-nest
+    /// then channel (a folder channel has no thread; `federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append → *The marker follows the owner's
     /// verified succession*). Admitted **only where the statement's
     /// `old_actor_id` IS the channel's recorded folder owner** — the one marker
@@ -870,7 +890,7 @@ pub struct FaunaMlsBackend {
     /// folder park (`MlsEngine::park_folder_succession`), drained into this map
     /// by each launch's first walk over the channel
     /// ([`Self::load_rested_folder_park`]), so the folder commit walk's hold
-    /// behind a parked statement survives the session (`federation.md`
+    /// behind a parked statement survives the session (`federation-shared-folders.md`
     /// § Cross-nest shared folders + channel append → *The folder commit walk
     /// inherits the harvest wait*). The conversations rail keeps its park
     /// session-lifetime (`identity-succession.md` § The succession statement →
@@ -987,7 +1007,7 @@ pub struct SuccessionStatementCounts {
     pub not_in_this_group: u64,
     /// Folder commit records the walk **held** — stopped before, undecrypted,
     /// unmemoized — because a parked statement naming the channel's recorded
-    /// owner was still waiting on the harvest (`federation.md` § Cross-nest
+    /// owner was still waiting on the harvest (`federation-shared-folders.md` § Cross-nest
     /// shared folders + channel append → *The marker follows the owner's
     /// verified succession*). One bump per held record per pass, so a count
     /// that climbs while `parked` stays up reads as "the set's commit rail is
@@ -1281,6 +1301,7 @@ impl FaunaMlsBackend {
             room_roster_reader: OnceLock::new(),
             room_generation_reader: OnceLock::new(),
             room_ceremony: OnceLock::new(),
+            room_search_posts: OnceLock::new(),
             group_reception_keys: OnceLock::new(),
             room_generations: Mutex::new(HashMap::new()),
             awaiting_key_rooms: Mutex::new(HashSet::new()),
@@ -1749,7 +1770,13 @@ impl FaunaMlsBackend {
         let _ = self.room_ceremony.set(ceremony);
     }
 
-    /// Register all four nest-backed room seams at once ([`RoomSeams`]) —
+    /// Register the post-read seam behind the room's search
+    /// ([`RoomSearchPostReader`]). Idempotent like the other room seams.
+    pub fn set_room_search_post_reader(&self, posts: Arc<dyn RoomSearchPostReader>) {
+        let _ = self.room_search_posts.set(posts);
+    }
+
+    /// Register all five nest-backed room seams at once ([`RoomSeams`]) —
     /// the one call every glue site makes, so none can wire a subset.
     pub fn set_room_seams(&self, seams: RoomSeams) {
         let RoomSeams {
@@ -1757,11 +1784,13 @@ impl FaunaMlsBackend {
             reader,
             generations,
             ceremony,
+            posts,
         } = seams;
         self.set_room_roster_reporter(reporter);
         self.set_room_roster_reader(reader);
         self.set_room_generation_reader(generations);
         self.set_room_ceremony(ceremony);
+        self.set_room_search_post_reader(posts);
     }
 
     /// Found a **community room** and bind it to `thread_id` — the class's
@@ -4890,7 +4919,7 @@ impl FaunaMlsBackend {
     /// takeover (`devices.md` § Cross-device MLS group-state sync) — a
     /// self-`Update` **Commit**. That takeover is ADMITTED on a claimed folder
     /// channel since the 2026-08-24 roster-membership commit admission
-    /// (`federation.md` § Cross-nest shared folders + channel append; a nest
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append; a nest
     /// refuses the Commit of a member it has not admitted, so this send can
     /// fail on a pass — retrying is correct for any failure).
     /// Pinned by
@@ -4965,13 +4994,9 @@ impl FaunaMlsBackend {
             && !self.harvest_spoken_for.lock().unwrap().contains(owner)
     }
 
-    /// The registered custody sink, if any — for the session's leave path to
-    /// drop a foreign-set custody record alongside the local forget. Only
-    /// consumed by `ConversationsSession`'s native-only leave/home-url methods
-    /// (`#[cfg(not(target_arch = "wasm32"))]` in `session.rs`) — wasm's own
-    /// `leave_folder` free-fn path doesn't route through here, so this
-    /// getter is genuinely unused on wasm32.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The registered custody sink, if any — for the leave path
+    /// ([`Self::folder_home_url`], [`Self::leave_folder`]) to read the set's
+    /// durable home and drop its foreign-set record alongside the local forget.
     pub(crate) fn folder_custody_sink(&self) -> Option<Arc<dyn FolderCustodySink>> {
         self.folder_custody.get().cloned()
     }
@@ -5302,13 +5327,31 @@ impl FaunaMlsBackend {
     /// keeps draining locally ([`Self::channel_home_url`] still reports `None`),
     /// but it is now KNOWN local rather than merely absent, so the
     /// unauthenticated pre-guard cannot later re-home it.
-    /// A non-blank URL records [`ChannelHome::Foreign`]. Idempotent for equal
-    /// inputs.
+    /// A non-blank URL records [`ChannelHome::Foreign`] with no identity
+    /// ([`Self::record_channel_home_with_identity`] records one). Idempotent for
+    /// equal inputs.
     pub fn record_channel_home(&self, channel_id: ChannelId, home_nest_url: &str) {
+        self.record_channel_home_with_identity(channel_id, home_nest_url, None);
+    }
+
+    /// [`Self::record_channel_home`] with the home's identity beside its URL —
+    /// the `home_nest_actor_id` this member's own nest stamped on the Welcome
+    /// from the channel it verified (`conversations_handlers` /
+    /// `federation_handlers`' Welcome relay), or a restored slice's copy of it.
+    /// Ignored for a blank URL (a same-nest channel has no foreign home).
+    pub fn record_channel_home_with_identity(
+        &self,
+        channel_id: ChannelId,
+        home_nest_url: &str,
+        home_nest_actor_id: Option<&str>,
+    ) {
         let home = if home_nest_url.is_empty() {
             ChannelHome::SameNest
         } else {
-            ChannelHome::Foreign(home_nest_url.to_string())
+            ChannelHome::Foreign {
+                url: home_nest_url.to_string(),
+                nest_actor_id: non_blank(home_nest_actor_id),
+            }
         };
         self.channel_home.lock().unwrap().insert(channel_id, home);
     }
@@ -5356,7 +5399,7 @@ impl FaunaMlsBackend {
     /// ⚠ **The trade, stated rather than silently taken.** A *local*
     /// channel whose marker is still absent is not upgraded absent → `SameNest`
     /// by a genuine same-nest re-delivery: it stays absent, hence still fillable by a later **non-blank**
-    /// pre-guard write — the declared, bounded residual `federation.md` § Cross-nest
+    /// pre-guard write — the declared, bounded residual `federation-shared-folders.md` § Cross-nest
     /// already accepts, and one the nest-side verified-origin resolution really
     /// does cap. That is the deliberate exchange: a residual that is bounded and
     /// recoverable, in place of an unbounded write that was neither.
@@ -5369,7 +5412,15 @@ impl FaunaMlsBackend {
     /// route sends locally), which `nest/common.md` § Client-state
     /// recoverability → *Per-object remedies* accepts as the standing frame
     /// for exactly this shape of unrepairable per-object state.
-    pub fn record_channel_home_if_absent(&self, channel_id: ChannelId, home_nest_url: &str) {
+    ///
+    /// `home_nest_actor_id` rides with the URL it was stamped beside, under the
+    /// same `if_absent`: a recorded home keeps its own identity.
+    pub fn record_channel_home_if_absent(
+        &self,
+        channel_id: ChannelId,
+        home_nest_url: &str,
+        home_nest_actor_id: Option<&str>,
+    ) {
         if home_nest_url.is_empty() {
             return;
         }
@@ -5377,12 +5428,15 @@ impl FaunaMlsBackend {
             .lock()
             .unwrap()
             .entry(channel_id)
-            .or_insert_with(|| ChannelHome::Foreign(home_nest_url.to_string()));
+            .or_insert_with(|| ChannelHome::Foreign {
+                url: home_nest_url.to_string(),
+                nest_actor_id: non_blank(home_nest_actor_id),
+            });
     }
 
     /// Seed `channel_home` from this member's own durable **foreign-set
     /// records** — the launch recovery for every cross-nest *folder* channel
-    /// (`federation.md` § Cross-nest shared folders + channel
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel
     /// append).
     ///
     /// The map's other writers cannot restore a folder channel's home after a
@@ -5406,7 +5460,7 @@ impl FaunaMlsBackend {
     /// verify against. Accepted as the inviter-binding TOFU residual — the
     /// record exists only where this user explicitly accepted the share, and a
     /// re-accept mints a fresh, verified-origin-resolved value
-    /// (`federation.md` § Cross-nest shared folders + channel append; the
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append; the
     /// declared-residual prose in the § Status bullet).
     ///
     /// `if_absent`, and called AFTER the restore's own slice loop: a channel's
@@ -5432,7 +5486,10 @@ impl FaunaMlsBackend {
             if let std::collections::hash_map::Entry::Vacant(slot) =
                 map.entry(ChannelId(channel_id))
             {
-                slot.insert(ChannelHome::Foreign(home_nest_url));
+                slot.insert(ChannelHome::Foreign {
+                    url: home_nest_url,
+                    nest_actor_id: None,
+                });
                 filled += 1;
             }
         }
@@ -5447,9 +5504,63 @@ impl FaunaMlsBackend {
     /// them — `SameNest` and absent both report `None` (a local fetch).
     pub fn channel_home_url(&self, channel_id: &ChannelId) -> Option<String> {
         match self.channel_home.lock().unwrap().get(channel_id) {
-            Some(ChannelHome::Foreign(url)) => Some(url.clone()),
+            Some(ChannelHome::Foreign { url, .. }) => Some(url.clone()),
             Some(ChannelHome::SameNest) | None => None,
         }
+    }
+
+    /// The identity (hex `nest_actor_id`) recorded beside a **foreign** home's
+    /// URL ([`Self::channel_home_url`]) — `None` for a same-nest or unknown
+    /// channel, and for a foreign one whose Welcome carried none. The
+    /// room-attachment read hands it to the byte plane with the URL
+    /// (`ConversationsRpc::blob_get`); the history slice persists it.
+    pub fn channel_home_actor_id(&self, channel_id: &ChannelId) -> Option<String> {
+        match self.channel_home.lock().unwrap().get(channel_id) {
+            Some(ChannelHome::Foreign { nest_actor_id, .. }) => nest_actor_id.clone(),
+            Some(ChannelHome::SameNest) | None => None,
+        }
+    }
+
+    /// The home-nest URL to route a leave for the folder set bound to
+    /// `group_id_hex`, when it is a **foreign** (cross-nest) membership: the
+    /// RAM `channel_home` (recorded at this session's join, or seeded from
+    /// custody at launch) first, else the durable foreign-set record via the
+    /// custody sink — so a relaunched client, or one whose launch seed could
+    /// not read custody, still resolves it (`docs/goal/ui/folders.md`
+    /// § Sharing → Leave). `Ok(None)` ⇒ same-nest set (or no record): the
+    /// plain local path. `Err` ⇒ the custody record could not be read, so
+    /// whether the set is foreign is **unknown**: the caller must stop before
+    /// any mutation, never fall back to the same-nest path.
+    pub async fn folder_home_url(&self, group_id_hex: &str) -> Result<Option<String>, String> {
+        let Some(raw) = hex::decode(group_id_hex.trim())
+            .ok()
+            .filter(|b| !b.is_empty())
+        else {
+            return Ok(None);
+        };
+        let channel_id = ChannelId::from_group_id(&raw);
+        if let Some(url) = self.channel_home_url(&channel_id) {
+            return Ok((!url.is_empty()).then_some(url));
+        }
+        let Some(sink) = self.folder_custody_sink() else {
+            return Ok(None);
+        };
+        sink.foreign_home_url(&channel_id.0).await
+    }
+
+    /// **Leave** a joined cross-user shared folder locally: forget its MLS
+    /// group ([`leave_folder`]) and, cross-nest, drop the foreign-set record
+    /// too, so a left foreign set stops appearing in the member-visible list
+    /// (the foreign twin of the roster self-drop the caller pairs this with —
+    /// `fauna_client_folders::leave_share` owns the sequence). The record drop
+    /// is best-effort and a no-op for a same-nest set (no record exists).
+    /// Idempotent. Returns the forgotten `ChannelId`.
+    pub async fn leave_folder(&self, group_id_hex: &str) -> Result<ChannelId, BackendError> {
+        let channel = leave_folder(self, group_id_hex)?;
+        if let Some(sink) = self.folder_custody_sink() {
+            sink.forget_foreign_set(&channel.0).await;
+        }
+        Ok(channel)
     }
 
     /// Whether this device **explicitly knows** the channel is same-nest — the
@@ -6207,7 +6318,7 @@ impl FaunaMlsBackend {
     /// takeover (`devices.md` § Cross-device MLS group-state sync) — a
     /// self-`Update` **Commit**. That takeover is ADMITTED on a claimed folder
     /// channel since the 2026-08-24 roster-membership commit admission
-    /// (`federation.md` § Cross-nest shared folders + channel append; a nest
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append; a nest
     /// refuses the Commit of a member it has not admitted, so this send can
     /// fail on a pass — retrying is correct for any failure).
     /// Pinned by
@@ -6239,7 +6350,7 @@ impl FaunaMlsBackend {
     /// takeover (`devices.md` § Cross-device MLS group-state sync) — a
     /// self-`Update` **Commit**. That takeover is ADMITTED on a claimed folder
     /// channel since the 2026-08-24 roster-membership commit admission
-    /// (`federation.md` § Cross-nest shared folders + channel append; a nest
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append; a nest
     /// refuses the Commit of a member it has not admitted, so this send can
     /// fail on a pass — retrying is correct for any failure).
     /// Pinned by
@@ -6472,6 +6583,7 @@ impl FaunaMlsBackend {
             .blob_put(
                 channel_id.to_string(),
                 self.channel_home_url(channel_id),
+                self.channel_home_actor_id(channel_id),
                 sealed_cid_hex.clone(),
                 sealed,
             )
@@ -6518,7 +6630,7 @@ impl FaunaMlsBackend {
     /// that routes `channel.fetch`/`send` relays) therefore rides its home URL
     /// through the seam, which relays the read to the channel's home via the
     /// distinct kind `channel.actors_remote` →
-    /// `fauna.federation.channel.actors` (`federation.md` § Cross-nest). A
+    /// `fauna.federation.channel.actors` (`federation-shared-folders.md` § Cross-nest). A
     /// nest too old for the relay — on either side — degrades to `None`, the
     /// refuse arm, never a partial-roster answer (the reason it is a distinct
     /// kind, not an additive field).
@@ -6662,6 +6774,16 @@ impl RailBackend for FaunaMlsBackend {
         Rail::FaunaMls
     }
 
+    /// The author's queue rows for withheld conversation records, read
+    /// through the home nest (`moderation.md` § Legal takedown → *App
+    /// render*).
+    async fn own_withheld_records(&self) -> Result<Vec<crate::message::WithheldRecord>, String> {
+        self.rpc
+            .own_withheld_records()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// The recorded owner of every folder channel this seat holds
     /// ([`Self::folder_poll_channels`] × `MlsEngine::folder_channel_owner`),
     /// this account's own identity excluded — a set this seat owns has no peer
@@ -6784,6 +6906,8 @@ impl RailBackend for FaunaMlsBackend {
             moderation_unverified: self
                 .channel_for(&thread.thread_id)
                 .is_some_and(|channel| self.moderation_unverified(&channel)),
+            // A bridged room's fact: no FaunaMls room rides a bridge.
+            bridge_disconnected: false,
             // Off its own read, beside the floor's: only a community room's
             // floor holds invitations, and only a list the nest served is
             // painted. Named by the handle the nest joined, else the elided id
@@ -6817,6 +6941,8 @@ impl RailBackend for FaunaMlsBackend {
                         })
                         .collect()
                 }),
+            // View state: the manager projects the open strip on every emit.
+            search: None,
             members,
         })
     }
@@ -7630,6 +7756,46 @@ impl RailBackend for FaunaMlsBackend {
         self.revoke_room_invite(&channel_id, invitee).await
     }
 
+    async fn room_search(
+        &self,
+        thread_id: ThreadId,
+        query: String,
+    ) -> Result<crate::backend::RoomSearchAnswer, BackendError> {
+        let channel_id = self
+            .channel_for(&thread_id)
+            .ok_or_else(|| BackendError::Internal("cannot search an unbound thread".to_string()))?;
+        let ceremony = self.room_ceremony.get().ok_or_else(|| {
+            BackendError::Internal(
+                "this app cannot search a room — it has no room-ceremony seam".to_string(),
+            )
+        })?;
+        // The one `ChannelHome` signal every room relay is picked by.
+        let home = self.channel_home_url(&channel_id);
+        let hits = ceremony
+            .room_search(channel_id.to_string(), query, home.clone())
+            .await?;
+        Ok(crate::backend::RoomSearchAnswer {
+            channel_hex: channel_id.to_string(),
+            hits,
+            home_nest_url: home,
+        })
+    }
+
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Result<crate::backend::RoomSearchPostEnvelope, BackendError> {
+        let posts = self.room_search_posts.get().ok_or_else(|| {
+            BackendError::Internal(
+                "this app cannot read a room search's post — it has no post-read seam".to_string(),
+            )
+        })?;
+        Ok(posts
+            .read_room_search_post(post_id_hex, home_nest_url)
+            .await?)
+    }
+
     async fn leave_room(&self, thread: &ThreadDetail) -> Result<(), BackendError> {
         use crate::room::RoomClass;
         let channel_id = self
@@ -8285,7 +8451,7 @@ async fn redrive_after_harvest(
 
 /// The folder rail's arm for an in-group succession statement
 /// (`GroupMetaMessage::Succession`) — the member side of *The marker follows
-/// the owner's verified succession* (`federation.md` § Cross-nest shared
+/// the owner's verified succession* (`federation-shared-folders.md` § Cross-nest shared
 /// folders + channel append). Returns whether `cm` was
 /// such a statement (every other body is not this arm's business).
 ///
@@ -8571,6 +8737,7 @@ pub async fn poll_inbound_conv(
             seq,
             envelope,
             legal_takedown_ref,
+            admin_block_reason,
             labels: server_labels,
             // The nest-attested author is the scheduling drain's alone: a
             // conversation authenticates its sender by the MLS credential.
@@ -8606,6 +8773,30 @@ pub async fn poll_inbound_conv(
                 }
                 continue;
             }
+            // Admin-block notice (moderation.md § Admin block of a reported
+            // item): the relay withheld the envelope, so — as for the takedown
+            // above — ingest a notice carrying only the report's reason instead
+            // of skipping an empty envelope as undecodable. The same dedup
+            // boundary: a copy this device synced first stands. A NON-empty
+            // envelope beside the reason is the author's own record (decision
+            // 4: the nest serves the attested author the body) — it decodes
+            // below, and the reason rides on the message so the notice paints
+            // beside the bubble.
+            if admin_block_reason.is_some() && envelope.is_empty() {
+                let notice =
+                    admin_block_inbound(&channel_hex, seq, admin_block_reason.unwrap_or_default());
+                if manager
+                    .ingest_inbound_to_thread(thread_id.clone(), notice)
+                    .is_ok()
+                {
+                    ingested += 1;
+                }
+                continue;
+            }
+            let block_beside = |mut msg: RailInboundMessage| {
+                msg.admin_block_reason = admin_block_reason.clone();
+                msg
+            };
             // The record's account-data-plane identity: the content hash of the
             // envelope the nest filed, derived through the nest's own mint
             // (`crate::plane`). Computed HERE, once per record, because this is
@@ -8782,7 +8973,11 @@ pub async fn poll_inbound_conv(
                     // home nest does with its read*, purpose 2) — merged into
                     // this device's own by the superset rule.
                     if manager
-                        .ingest_inbound_with_server_labels(thread_id.clone(), msg, &server_labels)
+                        .ingest_inbound_with_server_labels(
+                            thread_id.clone(),
+                            block_beside(msg),
+                            &server_labels,
+                        )
                         .is_ok()
                     {
                         ingested += 1;
@@ -9117,7 +9312,7 @@ pub async fn poll_inbound_conv(
                         )
                         .await
                             && manager
-                                .ingest_inbound_to_thread(thread_id.clone(), msg)
+                                .ingest_inbound_to_thread(thread_id.clone(), block_beside(msg))
                                 .is_ok()
                         {
                             ingested += 1;
@@ -9129,7 +9324,7 @@ pub async fn poll_inbound_conv(
                         continue; // other non-text body — richer bodies are a follow-on
                     };
                     if manager
-                        .ingest_inbound_to_thread(thread_id.clone(), msg)
+                        .ingest_inbound_to_thread(thread_id.clone(), block_beside(msg))
                         .is_ok()
                     {
                         ingested += 1;
@@ -9575,7 +9770,7 @@ async fn classify_inbound_commit(
             CommitApplyOutcome::Skipped
         }
         // The folder commit policy's refusal (owner-managed roster,
-        // `federation.md` § Cross-nest shared folders + channel append): a
+        // `federation-shared-folders.md` § Cross-nest shared folders + channel append): a
         // proposal-carrying commit from a non-owner member. Deterministic for
         // every honest member holding the same owner marker — the canonical
         // group state never advances past it, so the cursor consumes it like
@@ -9841,7 +10036,11 @@ fn notice_superseded_own_offer(
 /// spent). `home_nest_url` is the cross-nest Welcome envelope's `nest_url` (the
 /// channel's home nest, where its log lives) — recorded so a later
 /// [`poll_inbound_conv`] of this channel relays its `channel.fetch` there; blank
-/// for a same-nest Welcome (drains locally). Returns the new-or-existing thread id
+/// for a same-nest Welcome (drains locally). `home_nest_actor_id` is that home's
+/// identity as this member's own nest verified it on the relay
+/// (`WelcomePayload.home_nest_actor_id`), recorded beside the URL for the
+/// room-attachment read's pin (`transport-trust.md` § The post arm); `None`
+/// keeps that read on the WebPKI floor. Returns the new-or-existing thread id
 /// (`docs/goal/ui/conversations.md` § MLS Welcome at-rest, § Architectural
 /// rules #2).
 pub async fn ingest_welcome(
@@ -9850,6 +10049,7 @@ pub async fn ingest_welcome(
     channel_id_hex: &str,
     welcome_bytes: &[u8],
     home_nest_url: &str,
+    home_nest_actor_id: Option<&str>,
 ) -> Result<ThreadId, BackendError> {
     // Learn the home BEFORE the guards below, not after them. Both of them
     // return on a channel this device is already in — which, after a relaunch,
@@ -9860,7 +10060,7 @@ pub async fn ingest_welcome(
     // exist to skip the init-key-consuming *join*; re-recording a home the
     // caller already handed us is free.
     if let Some(channel) = parse_channel_hex(channel_id_hex) {
-        backend.record_channel_home_if_absent(channel, home_nest_url);
+        backend.record_channel_home_if_absent(channel, home_nest_url, home_nest_actor_id);
     }
 
     // Idempotency: if we already joined+bound this channel, skip the join.
@@ -9889,7 +10089,7 @@ pub async fn ingest_welcome(
     // race guard for the same reason as the pre-guard record: a push whose hex
     // this build could not parse reaches the home only here, and the guard
     // below would swallow it.
-    backend.record_channel_home(channel_id, home_nest_url);
+    backend.record_channel_home_with_identity(channel_id, home_nest_url, home_nest_actor_id);
 
     // A duplicate could have raced in between the check and the join.
     if let Some(existing) = backend.thread_for_channel(&channel_id) {
@@ -9967,7 +10167,7 @@ pub async fn ingest_scheduling_welcome(
     // this path needs it just as much: `is_scheduling_channel` ORs in the
     // engine's **durable** marker, so the guard fires after a relaunch too.
     if let Some(channel) = parse_channel_hex(channel_id_hex) {
-        backend.record_channel_home_if_absent(channel, home_nest_url);
+        backend.record_channel_home_if_absent(channel, home_nest_url, None);
     }
 
     // Idempotency: a re-delivered scheduling welcome for an already-joined
@@ -10050,7 +10250,7 @@ pub async fn join_folder_welcome(
     // record either. Learning the home first is what makes the re-delivery
     // useful on all three paths alike.
     if let Some(channel) = parse_channel_hex(channel_id_hex) {
-        backend.record_channel_home_if_absent(channel, home_nest_url);
+        backend.record_channel_home_if_absent(channel, home_nest_url, home_nest_actor_id);
     }
 
     // Idempotency: a re-delivered folder welcome for an already-joined channel
@@ -10068,7 +10268,7 @@ pub async fn join_folder_welcome(
     backend.mark_folder_channel(channel_id);
     // Arm the owner-managed-roster commit policy: a folder Welcome's
     // MLS-authenticated sender is the set's owner (the owner-only-Adds
-    // invariant that same policy preserves — `federation.md` § Cross-nest
+    // invariant that same policy preserves — `federation-shared-folders.md` § Cross-nest
     // shared folders + channel append), so stamp them as the channel's durable
     // folder owner. Crypto-anchored (leaf-verified at join) and works
     // cross-nest, where the nest-asserted `shared_by` is absent. A join whose
@@ -10086,7 +10286,7 @@ pub async fn join_folder_welcome(
     }
     // Cross-nest: remember the channel's home nest so a later content fetch relays
     // its request there (same-nest ⇒ blank ⇒ local fetch).
-    backend.record_channel_home(channel_id, home_nest_url);
+    backend.record_channel_home_with_identity(channel_id, home_nest_url, home_nest_actor_id);
     // Cross-nest: durably record the foreign-set membership in this member's own
     // folder-key custody (`ForeignFolder` — identity + home-nest routing + display name;
     // Phase 2 client read-side). The member's own nest holds NO row for a
@@ -10111,7 +10311,7 @@ pub async fn join_folder_welcome(
                 // Advisory-only, nest-resolved on the set's HOME nest and
                 // carried on the Welcome relay — what lets this client decide
                 // whether to OFFER a folder binding. Never an authz input
-                // (`federation.md` § Cross-nest → Recipient-side access
+                // (`federation-shared-folders.md` § Cross-nest → Recipient-side access
                 // discovery); `None` from a non-conforming relay ⇒ reader.
                 access: access.map(str::to_string),
                 // The home nest's deployment identity (byte-plane SPKI-pin trust
@@ -10133,7 +10333,7 @@ pub async fn join_folder_welcome(
                     stamped_at: 0,
                 }),
                 // The cross-nest owner label, recorded only as the verified
-                // pair this member's own nest forwarded (`federation.md`
+                // pair this member's own nest forwarded (`federation-shared-folders.md`
                 // § … *The cross-nest owner label*, join rule) — a bare handle
                 // is a local user and never names a foreign set's owner.
                 owner_handle: owner_label.as_ref().map(|(h, _)| h.clone()),
@@ -10491,7 +10691,7 @@ pub async fn poll_inbound_folder(
                 Ok(ChannelEnvelope::Commit(cb)) => {
                     // The hold behind a parked succession statement — the
                     // folder commit walk inherits the harvest wait
-                    // (`federation.md` § Cross-nest shared folders + channel
+                    // (`federation-shared-folders.md` § Cross-nest shared folders + channel
                     // append → *The marker follows the owner's verified
                     // succession*). A statement the witness refused for now
                     // names this channel's recorded owner, and the commit in
@@ -11018,6 +11218,7 @@ async fn fetch_and_open_attachment(
         .blob_get(
             channel_hex.to_string(),
             backend.channel_home_url(channel_id),
+            backend.channel_home_actor_id(channel_id),
             sealed_cid_hex.to_string(),
         )
         .await
@@ -11217,17 +11418,19 @@ async fn attachments_to_inbound(
         attachments: snaps,
         badges: MessageBadges::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref,
     })
 }
 
 /// Build a **legal-takedown tombstone** inbound for a withheld record
 /// (`moderation.md` § Categories & enforcement item 1). The nest withheld the
-/// sealed envelope (empty) under a legal obligation, so there is no plaintext and
-/// **no attributable sender** (conv records persist none — the nest cannot
-/// attribute a sealed E2E message to an author post-hoc, `moderation.md`
-/// § Implementation status today), hence the zero [`ActorId`] and empty body: the
-/// message carries only `legal_takedown_ref`, and every app renders the shared
+/// sealed envelope (empty) under a legal obligation, so there is no plaintext,
+/// and the tombstone names **no sender** — the zero [`ActorId`] and empty body:
+/// the author's signal is their moderation-queue row, not the thread (their own
+/// devices keep the real copy and never fetch this tombstone; `moderation.md`
+/// § Legal takedown → *Conversations*). The message carries only
+/// `legal_takedown_ref`, and every app renders the shared
 /// `legalTakedownTombstone(reference)` in place of the bubble. It keeps its `seq`
 /// slot via the `conv:<channel>:<seq>` id (the store append/dedup preserves order
 /// and drops it if the real message was already synced).
@@ -11248,11 +11451,27 @@ fn legal_takedown_inbound(channel_hex: &str, seq: i64, reference: String) -> Rai
         attachments: Vec::new(),
         badges: MessageBadges::default(),
         legal_takedown_ref: Some(reference),
+        admin_block_reason: None,
         // No plane ref, and not for want of one: the nest withheld the sealed
         // envelope, so this record has no body to hand to a visible view. A
         // tombstone must never report a T1 observation — there is nothing
         // observed.
         plane_ref: None,
+    }
+}
+
+/// Build an **admin-block notice** inbound for a record this nest's admin
+/// blocked after a report (`moderation.md` § Admin block of a reported item) —
+/// [`legal_takedown_inbound`]'s twin with the second ground: no plaintext, no
+/// sender named (the author's signal is their queue row), the
+/// `conv:<channel>:<seq>` slot kept, and only the
+/// report reason's token carried, from which every app renders the shared
+/// `adminBlockNotice(reason)` in place of the bubble.
+fn admin_block_inbound(channel_hex: &str, seq: i64, reason: String) -> RailInboundMessage {
+    RailInboundMessage {
+        admin_block_reason: Some(reason),
+        legal_takedown_ref: None,
+        ..legal_takedown_inbound(channel_hex, seq, String::new())
     }
 }
 
@@ -11302,6 +11521,7 @@ fn channel_message_to_inbound(
         attachments: Vec::new(),
         badges: MessageBadges::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref,
     })
 }
@@ -11449,6 +11669,7 @@ fn room_message_to_inbound(
         attachments,
         badges: MessageBadges::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref,
     })
 }

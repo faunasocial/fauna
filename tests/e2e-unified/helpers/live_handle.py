@@ -4,10 +4,10 @@
 ``FAUNA_LIVE_SECRET_HEX`` and drives the real app UI — and then demanded the
 same account's *handle* a second time, as ``FAUNA_LIVE_HANDLE`` (or
 ``FAUNA_LIVE_MAIL_ADDRESS``). That value lives in no artifact in the repo or on
-any dev machine: every docstring and the `justfile` carry ``test@example.com`` as
+any dev machine: every docstring and the `justfile` carry ``test@example.net`` as
 an *example*, so a session asked to "run the live suite" had to interrupt a
 human for a value the box already knows. On 2026-08-16 that alone blocked the
-post-release ActivityPub journey against example.com — everything else (the built
+post-release ActivityPub journey against the live nest — everything else (the built
 linux binary, the located secret, a verified-clean box) was in place. The user's
 ruling: *"this detail needs to be a part of the test."*
 

@@ -37,11 +37,14 @@ import secrets
 
 import pytest
 
+from helpers.app_surface import app_name, declared_absence, skip_unbuilt
+from helpers.labeler_publish import FIXTURES, publish_wasm_labeler
 from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture adopted by import
     MEMBERSHIP_BUDGET_S,
     MESSAGE_BUDGET_S,
     WELCOME_BUDGET_S,
     Seat,
+    found_community_room,
     launch_seat,
     room_app,
     seat_app_path,
@@ -50,8 +53,10 @@ from helpers.room_seats import (  # noqa: F401 — room_app is a pytest fixture 
     seat_story,
     teardown_seats,
     thread_by_channel,
+    thread_by_id,
     wait_for,
 )
+from i18n.strings import S
 from tests.api import conv_api
 
 pytestmark = [
@@ -62,6 +67,10 @@ pytestmark = [
     # each arriving with its own marker AND a `helpers.room_seats.ROOM_APPS`
     # entry.
     pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 CROSSING_BUDGET_S = WELCOME_BUDGET_S
@@ -199,4 +208,198 @@ def test_a_member_of_another_nest_joins_a_community_room_through_the_relay(
     )
     assert (thread_by_channel(member.app, room_id).room or {}).get("class") == "Community", (
         "the newcomer's projection states the class it joined"
+    )
+
+
+@pytest.mark.feature("group-conversations")
+@pytest.mark.feature("room-restricted-posts")
+def test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay(
+    cross_nest_room_seats, cross_nest_foreign, cross_nest_foreign_ephemeral, run_seal_helper
+):
+    """The room's search from the member's seat on ANOTHER nest
+    (``room-search.md`` § The surface), and a post hit opening the room post
+    the member's own nest does not hold (``ui/feed.md`` § The read model →
+    *Opening a post the timeline never loaded* → *A post homed on another
+    nest*).
+
+    The founder on ``home`` addresses a room post to the room through the
+    feed composer — its sealed words carry this run's marker, its teaser
+    does not. The member on ``away`` follows nobody, so nothing brings the
+    post to their nest: the strip's submit rides ``away``'s
+    ``room.search_remote`` relay to the room's home, the post hit's row is
+    painted from the envelope ``away`` relays from ``home``
+    (``posts.get_remote``), and opening the hit lands on the feed's
+    ``post_detail`` showing the teaser, resolved through the same relay.
+
+    Then the detail **unseals the sealed words**: the sealed body rests on
+    ``home``, which serves the self-signed floor, so the member's app fetches
+    it over the foreign byte plane pinned against the identity ``away``
+    stamped on the relay reply (``transport-trust.md`` § Mechanism for the
+    federation-granted row → *The post arm*). No harness CA and no trust
+    seed: the two nests' unchanged floor IS the production self-signed-home
+    branch — with the stamp withheld the fetch fails at TLS and the detail
+    stays on the teaser.
+
+    The room's labels on that post (``docs/features/room-restricted-posts.md``
+    outcome 21): the founder publishes the fixture labeler on ``home`` and
+    names it in the room's settings before the post, whose sealed words carry
+    its trigger ("cat") and whose teaser does not. The shared manager folds the
+    room's relayed verdicts, read by ``home`` and relayed by ``away``, onto the
+    opened post when it unseals, so the detail's ``content-label-badge`` reads
+    the room labeler's ``commercial`` verdict — a post opened through the
+    deep-link door has no ``post-card``, so the detail is where the member
+    sees it.
+
+    Latency-independent (convention 14): every wait is a deadline poll over
+    a painted row, the detail body or ``error-message``."""
+    founder, member = cross_nest_room_seats
+    if app_name(member.app.driver) == "windows":
+        skip_unbuilt(
+            member.app.driver,
+            surface="room-search-button (the room's search strip)",
+            detail="windows follows in its trickle-down",
+            tracked="behavior/room-search.md § Implementation status today",
+        )
+    away = cross_nest_foreign_ephemeral
+    labeler = publish_wasm_labeler(
+        run_seal_helper, cross_nest_foreign, FIXTURES / "room_commercial_labeler.wat"
+    ).hex()
+    marker = f"whiskers{secrets.token_hex(4)}"
+    preview = f"A post for the room {secrets.token_hex(3)}"
+    full_body = f"Only the room reads this: my cat says {marker}"
+
+    room_id, founder_thread, member_thread = found_community_room(
+        founder,
+        member,
+        f"hello {secrets.token_hex(4)}",
+        address=f"{member.handle}@{away['authority']}",
+    )
+
+    # ── The founder names the labeler in the room's settings. ─────────────
+    founder_conv = founder.app.conversations
+    founder_conv.open_thread_by_id(founder_thread)
+    founder_conv.open_room_settings()
+    row = founder_conv.room_labeler_index(labeler)
+    assert row is not None, seat_element(founder, "room-labeler-toggle")
+    founder_conv.toggle_room_labeler(row)
+    founder_conv.save_room_settings(timeout_s=MEMBERSHIP_BUDGET_S)
+    assert not founder.app.has_error(), founder.app.error_text()
+    wait_for(
+        "the room's verified labeler set naming the fixture",
+        lambda: thread_by_channel(founder.app, room_id),
+        lambda t: t is not None and (t.room or {}).get("labelers") == [labeler],
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: f"{seat_story(founder)}\n{seat_log(founder, 'labeler')}",
+    )
+
+    # ── The founder addresses a post to the room, through the composer. ──
+    option = S.feed.post.gate_room(room=thread_by_id(founder.app, founder_thread).label)
+    founder.app.feed.navigate()
+    assert founder.app.feed.wait_for_audience_option(option, MESSAGE_BUDGET_S), (
+        f"error-message={founder.app.error_text()!r}\n{seat_story(founder)}"
+    )
+    founder.app.feed.create_gated_post(full_body, preview, option)
+
+    # ── The member searches the room for words only the sealed body holds. ─
+    conv = member.app.conversations
+    conv.open_thread_by_id(member_thread)
+    # The door is painted off the room's FLOOR (class and this seat's rank),
+    # which the member's device reads through its own nest's relay on a later
+    # poll than the key-in — until then the room projects from its
+    # participants alone and offers no search.
+    wait_for(
+        "the member's device reading the room's floor and offering its search",
+        conv.room_search_offered,
+        lambda offered: offered,
+        MEMBERSHIP_BUDGET_S,
+        diagnose=lambda: (
+            f"room={(thread_by_id(member.app, member_thread).room or {})!r}\n"
+            f"{seat_element(member, 'room-search-button')}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'floor', 'roster', 'relay')}"
+        ),
+    )
+
+    def post_hit():
+        # Re-submitted each pass: the home indexes the post on its own
+        # reception pass, so an early search may truly answer nothing.
+        conv.search_room(marker)
+        rows = conv.room_search_results()
+        return next((i for i, (kind, _) in enumerate(rows) if kind == "post"), None)
+
+    at = wait_for(
+        "the room's search on the home nest answering the room post",
+        post_hit,
+        lambda i: i is not None,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"error-message={member.app.error_text()!r}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'search', 'relay', 'get_remote')}"
+        ),
+    )
+    _, words = conv.room_search_results()[at]
+    assert preview in words, (
+        f"the post row is painted from the envelope relayed from the room's home: {words!r}"
+    )
+    assert not member.app.has_error(), member.app.error_text()
+
+    # ── The hit opens the post the member's nest does not hold. ───────────
+    conv.open_room_search_result(at)
+    member.app.driver.wait_for("feed-post-detail-body", timeout=MESSAGE_BUDGET_S)
+    wait_for(
+        "the post detail showing the relayed room post",
+        member.app.feed.post_detail_body,
+        # The teaser — or already the sealed words, if the unseal below won
+        # the race to the first read.
+        lambda text: preview in text or marker in text,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"room={room_id} error-message={member.app.error_text()!r}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'get_remote', 'resolve', 'blob')}"
+        ),
+    )
+
+    # ── The sealed words open, fetched from the room's home over the pin. ─
+    if app_name(member.app.driver) == "web":
+        # A browser's fetch is WebPKI-only and holds no pin; these fixtures'
+        # home serves the self-signed floor, so web's byte leg is the declared
+        # browser residual — never a silent pass (the surface above ran).
+        declared_absence(
+            member.app.driver,
+            capability="a pinned byte plane for a self-signed foreign home",
+            doc="architecture/transport-trust.md § The post arm → Implementation status today",
+        )
+    wait_for(
+        "the post detail unsealing the room post's words from its home nest",
+        member.app.feed.post_detail_body,
+        lambda text: marker in text,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"room={room_id} error-message={member.app.error_text()!r}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'graduate', 'pin', 'blob', 'unlock', 'tls')}"
+        ),
+    )
+    assert not member.app.has_error(), (
+        f"a foreign home's byte leg never surfaces a page error: {member.app.error_text()!r}"
+    )
+
+    # ── The room's verdict paints on the opened post's detail. ────────────
+    def detail_badge():
+        driver = member.app.driver
+        if driver.count("content-label-badge") == 0:
+            return None
+        return driver.get_text("content-label-badge")
+
+    badge = wait_for(
+        "the room's verdict painting a label on the opened post's detail",
+        detail_badge,
+        lambda text: text is not None,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"room={room_id} error-message={member.app.error_text()!r}\n{seat_story(member)}\n"
+            f"{seat_log(member, 'room_labels', 'label', 'relay')}"
+        ),
+    )
+    assert S.moderation.category.commercial in badge, (
+        f"the detail names the room labeler's verdict "
+        f"({S.moderation.category.commercial!r}); got {badge!r}"
     )

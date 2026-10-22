@@ -66,6 +66,13 @@ public record ContactInfo(string ActorId, string? Handle, ContactStatus Status, 
     /// § Where logic lives → Contact roster filter). Init-only.</summary>
     public string? Domain { get; init; }
 
+    /// <summary>The peer nest's URL a Find User lookup answered for a contact on
+    /// ANOTHER nest (<c>find_user</c>'s <c>nest_url</c>, empty/null for a home-nest
+    /// actor) — carried into the knock send as <c>recipient_nest_url</c>, never
+    /// re-derived (federation.md § Client-side peer discovery for a cross-nest knock).
+    /// Init-only; only the Find User result sets it.</summary>
+    public string? NestUrl { get; init; }
+
     /// <summary>
     /// Localized status badge text (pending/accepted/confirmed/blocked) off the
     /// shared <c>fauna_core::format::contact_status_label</c> via the value-format

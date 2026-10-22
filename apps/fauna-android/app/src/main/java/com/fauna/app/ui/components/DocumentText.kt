@@ -189,19 +189,18 @@ fun documentMediaVideoHash(document: RenderDocument): String? =
     com.fauna.ffi.renderDocumentFirstVideoHash(document)
 
 /** The nest-relative path `post-image` paints when the post is a bridged picture — the
- *  first `ProxiedImage` of a document with no blob image (render-model.md § D6c; the
- *  precedence of the shared `RenderDocument::proxied_post_image`), or `null`. Read over
- *  the shared `render_document_proxied_images` UniFFI face. */
+ *  first `ProxiedImage` of a document with no blob image (render-model.md § D6c), or `null`.
+ *  The slot precedence is Rust's: read over the shared `render_document_proxied_post_image`
+ *  UniFFI face (`RenderDocument::proxied_post_image_ref`), nothing composed app-side. */
 fun documentProxiedPostImagePath(document: RenderDocument): String? =
-    if (documentMediaImageHash(document) != null) null
-    else com.fauna.ffi.renderDocumentProxiedImages(document).firstOrNull()?.path
+    com.fauna.ffi.renderDocumentProxiedPostImage(document)?.path
 
 /** The nest-relative path `video-thumbnail` paints when the post is a bridged video —
  *  [documentProxiedPostImagePath]'s precedence applied to the video slot
- *  (render-model.md § D6c → *Proxied video*). */
+ *  (render-model.md § D6c → *Proxied video*), over the shared
+ *  `render_document_proxied_post_video` UniFFI face. */
 fun documentProxiedPostVideoPath(document: RenderDocument): String? =
-    if (documentMediaVideoHash(document) != null) null
-    else com.fauna.ffi.renderDocumentProxiedVideos(document).firstOrNull()?.path
+    com.fauna.ffi.renderDocumentProxiedPostVideo(document)?.path
 
 /** The Resolved link previews in `document`, in body order (render-model.md § D4) — the feed
  *  screen paints one card per entry. The og:image (`imageHash`) is blocked-by-default like a

@@ -145,6 +145,12 @@ class ApiActor:
         reply = self._ws_call("fauna.bridges.list", {})
         return reply.get("bridges", [])
 
+    def bridges_list_follows(self, bridge_id: str) -> list:
+        """`fauna.bridges.list_follows` — each entry is a `BridgeFollow` dict
+        (id, petname, created_at, extra)."""
+        reply = self._ws_call("fauna.bridges.list_follows", {"bridge_id": bridge_id})
+        return reply.get("follows", [])
+
     # --- Contacts ---
 
     def accept_knock(self, peer_id_hex: str) -> dict:

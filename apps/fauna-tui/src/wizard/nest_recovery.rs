@@ -51,10 +51,11 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
         ));
     } else {
         out.push(Element::label(ids::RECOVER_BOX_LIST, t::BOX_LIST_LABEL));
-        for (i, id) in boxes.iter().enumerate() {
+        // One repeated id per row, addressed by index (convention 1).
+        for id in boxes.iter() {
             out.push(
                 Element::checkbox(
-                    format!("recover-box-item-{i}"),
+                    ids::RECOVER_BOX_ITEM,
                     // The short id is the row's label; the row's *value* to a
                     // driver is that same text. `BOX_ITEM_HINT` is chrome, so it
                     // rides the paint-only label rather than the registry text.

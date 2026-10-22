@@ -128,10 +128,30 @@ pub fn cert_health_state(
 /// resolver swaps on ACME renewal, so disk and served cert can momentarily
 /// disagree).
 pub trait ServedCertSpki: Send + Sync {
-    /// SHA-256 SPKI fingerprint of the served **default/apex** cert, so the
-    /// `fauna.auth.handshake` handler can sign the live SPKI. `None` while the
-    /// resolver is pending (no cert issued yet).
+    /// SHA-256 SPKI fingerprint of the cert a **no-SNI** dial is served — the
+    /// § B-IP bridge while one is installed, else the default/apex cert.
+    /// `None` while the resolver is pending (no cert issued yet). The
+    /// channel-binding producers read it only through
+    /// [`Self::spki_for_served_name`].
     fn current_spki_sha256(&self) -> Option<[u8; 32]>;
+
+    /// The SPKI of the cert this resolver served a connection accepted under
+    /// `served_name` — [`Self::served_cert_spki_sha256`] for a named dial,
+    /// [`Self::current_spki_sha256`] (the no-SNI cert) for one that carried no
+    /// name. The one read every channel-binding producer makes
+    /// (`auth_handlers::served_spki`, the federation listener's hello compare):
+    /// the nest signs the SPKI of the cert it served *this* connection, which
+    /// is what the client received and compares against
+    /// (`transport-trust.md` § Two independent axes → Axis 1, *the cert it
+    /// served this connection*; the name comes from the nest's own TLS layer,
+    /// `served_name.rs`). Provided, so a double implementing the two reads
+    /// answers it for free.
+    fn spki_for_served_name(&self, served_name: Option<&str>) -> Option<[u8; 32]> {
+        match served_name {
+            Some(name) => self.served_cert_spki_sha256(name),
+            None => self.current_spki_sha256(),
+        }
+    }
 
     /// Validity facts for the cert that would be served for `sni` (per-SNI on
     /// [`MultiDomainCertResolver`]; the single served cert on
@@ -659,6 +679,35 @@ impl MultiDomainCertResolver {
         self.domains.load().keys().cloned().collect()
     }
 
+    /// Does this nest serve HTTPS for `host` — a name (or address) one of its
+    /// installed certificates carries? True for a custom domain with a
+    /// per-domain cert, a DNS name in the default cert's SANs (the apex,
+    /// `mail.`, `relay.`, `pds.`), and an IP literal (bare or bracketed) in
+    /// the default or IP bridge cert's SANs. Validity is not consulted: a
+    /// lapsed cert's name is still one the nest serves, behind its floor.
+    /// The port-80 listener's redirect allow-list (`acme_http01::
+    /// start_http01_listener`) — `deployment-threat-model.md` § Concern 1a,
+    /// finding M2.
+    pub fn serves_host(&self, host: &str) -> bool {
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+            return [self.default.load_full(), self.ip_cert.load_full()]
+                .into_iter()
+                .flatten()
+                .any(|cert| cert_names_ip(&cert, ip));
+        }
+        let host = host.to_ascii_lowercase();
+        if self.domains.load().contains_key(&host) {
+            return true;
+        }
+        self.default
+            .load_full()
+            .is_some_and(|cert| cert_names_dns(&cert, &host))
+    }
+
     /// Select the cert for an SNI hostname: a per-custom-domain cert if one is
     /// registered for `sni`, else the nest's default (apex) cert, else `None`
     /// while still pending (no default issued yet). This is the pure lookup
@@ -830,6 +879,46 @@ fn cert_valid_and_covers(cert: &CertifiedKey, name: &str) -> bool {
     }
 }
 
+/// Does any SAN general name on the leaf satisfy `matches`? False when the
+/// leaf does not parse.
+fn leaf_san_names(
+    cert: &CertifiedKey,
+    matches: impl FnMut(&x509_parser::extensions::GeneralName<'_>) -> bool,
+) -> bool {
+    let Ok(leaf) = cert.end_entity_cert() else {
+        return false;
+    };
+    let Ok((_, parsed)) = x509_parser::parse_x509_certificate(leaf.as_ref()) else {
+        return false;
+    };
+    match parsed.subject_alternative_name() {
+        Ok(Some(san)) => san.value.general_names.iter().any(matches),
+        _ => false,
+    }
+}
+
+/// Does the leaf carry `name` as a DNS SAN (wildcards per [`dns_name_matches`])?
+/// Validity is not consulted — [`MultiDomainCertResolver::serves_host`].
+fn cert_names_dns(cert: &CertifiedKey, name: &str) -> bool {
+    leaf_san_names(
+        cert,
+        |gn| matches!(gn, x509_parser::extensions::GeneralName::DNSName(dns) if dns_name_matches(dns, name)),
+    )
+}
+
+/// Does the leaf carry `ip` as an IP SAN (4 octets for v4, 16 for v6)?
+fn cert_names_ip(cert: &CertifiedKey, ip: std::net::IpAddr) -> bool {
+    leaf_san_names(cert, |gn| match (gn, ip) {
+        (x509_parser::extensions::GeneralName::IPAddress(raw), std::net::IpAddr::V4(v4)) => {
+            *raw == v4.octets()
+        }
+        (x509_parser::extensions::GeneralName::IPAddress(raw), std::net::IpAddr::V6(v6)) => {
+            *raw == v6.octets()
+        }
+        _ => false,
+    })
+}
+
 /// Is `parsed`'s `notBefore..notAfter` window open right now? The time half of
 /// [`cert_valid_and_covers`], factored out because the **IP bridge cert** needs
 /// exactly this and nothing else: a no-SNI dial carries no name to cover, so
@@ -927,14 +1016,18 @@ fn dns_name_matches(pattern: &str, name: &str) -> bool {
     false
 }
 
-/// Channel binding always signs the SPKI of the nest's **default** (apex) cert —
-/// the cert a Fauna *client* connects to the nest with. Per-custom-domain certs
-/// (added via [`add_domain`](MultiDomainCertResolver::add_domain)) serve *web
-/// visitors* hitting `alice.com`, who do no Fauna channel binding, so selecting
-/// one for a visitor's SNI never changes what `fauna.auth.handshake` signs.
-/// Returns `None` while the default is still pending — binding is simply omitted
-/// until the first apex cert lands. (See `security.md` § Transport trust, Axis 1
-/// and `web-content-hosting.md` § Per-domain TLS.)
+/// The channel binding signs the SPKI of the cert this resolver served **the
+/// connection being bound** — every producer reads
+/// [`ServedCertSpki::spki_for_served_name`] for the server name the accept
+/// loop recorded (`served_name.rs`): [`cert_for_sni`](MultiDomainCertResolver::cert_for_sni)'s
+/// own selection for a named dial (a valid covering per-domain cert, else the
+/// per-SNI floor, else the default) and the no-SNI cert for an IP dial. So a
+/// per-domain cert added via [`add_domain`](MultiDomainCertResolver::add_domain)
+/// *is* what a Fauna client dialling that domain is bound to, and the § B-IP
+/// bridge is what a no-SNI dial is bound to. Either read returns `None` while
+/// the cert it needs is still pending — the binding is simply omitted until it
+/// lands. (`transport-trust.md` § Two independent axes → Axis 1, *the cert it
+/// served this connection*; `web-content-hosting.md` § Per-domain TLS.)
 impl ServedCertSpki for MultiDomainCertResolver {
     fn current_spki_sha256(&self) -> Option<[u8; 32]> {
         // `cert_for_sni(None)`, NOT `current_default()`: the channel binding
@@ -949,13 +1042,12 @@ impl ServedCertSpki for MultiDomainCertResolver {
         // to the default, so this is behaviour-identical to what it replaced on
         // every box that is not bridging.
         //
-        // Residual, stated rather than hidden: a **named**-SNI dial served
-        // something other than the no-SNI cert (a registered domain whose
-        // trusted cert has lapsed onto its per-SNI floor) still receives a
-        // binding over a different cert. That is the single-SPKI binding's own
-        // limitation — `build_cert_binding` has no connection context, so the
-        // nest can sign exactly one SPKI — and it predates the bridge; closing
-        // it needs an SNI-scoped binding, captured as its own track.
+        // This is the **no-SNI** read only. A named dial is bound through
+        // `served_cert_spki_sha256(name)` — `spki_for_served_name` picks by the
+        // connection's served name (the SNI-scoped binding, built 2026-10-18), which closed the residual this
+        // read used to carry: a named dial served something other than the
+        // no-SNI cert (the bridge while installed, a lapsed domain on its
+        // per-SNI floor) received a binding over a different cert.
         let key = self.cert_for_sni(None)?;
         let leaf = key.end_entity_cert().ok()?;
         spki_sha256_of_cert_der(leaf.as_ref())
@@ -978,6 +1070,23 @@ impl ServedCertSpki for MultiDomainCertResolver {
         let key = self.cert_for_sni(Some(sni))?;
         let leaf = key.end_entity_cert().ok()?;
         spki_sha256_of_cert_der(leaf.as_ref())
+    }
+}
+
+/// Whether the leaf in `cert_path` is not the default cert the resolver serves
+/// (no default loaded counts as different). `false` when the file is absent or
+/// unreadable — there is nothing on disk to catch up on.
+fn disk_differs_from_served_default(resolver: &MultiDomainCertResolver, cert_path: &Path) -> bool {
+    use rustls::pki_types::pem::PemObject;
+    let Ok(pem) = std::fs::read(cert_path) else {
+        return false;
+    };
+    let Some(Ok(on_disk)) = rustls::pki_types::CertificateDer::pem_slice_iter(&pem).next() else {
+        return false;
+    };
+    match resolver.current_default() {
+        Some(served) => served.cert.first().map(|c| c.as_ref()) != Some(on_disk.as_ref()),
+        None => true,
     }
 }
 
@@ -1007,6 +1116,7 @@ pub async fn cert_watcher_task(
     let key_path = acme_dir.join(KEY_FILENAME);
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+    let catch_up = tx.clone();
 
     let mut watcher = match notify::recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(event) = res
@@ -1028,6 +1138,13 @@ pub async fn cert_watcher_task(
     }
 
     tracing::info!("Watching {} for cert changes", acme_dir.display());
+
+    // A write that landed between the boot load and the watch being armed
+    // raised no event — the floor renew task, spawned beside this one, renews a
+    // near-expiry floor on its first tick. Catch it up with one ordinary reload.
+    if disk_differs_from_served_default(&resolver, &cert_path) {
+        let _ = catch_up.try_send(());
+    }
 
     while rx.recv().await.is_some() {
         // Debounce: wait 2 s then drain any queued events.
@@ -1153,6 +1270,30 @@ mod tests {
     /// Like [`gen_real_cert`] but with a caller-chosen DNS SAN and validity window
     /// (`days` until `notAfter`; `notBefore` = 1 day ago) — for the per-SNI
     /// validity/coverage tests (`days < 0` makes an already-expired cert).
+    #[test]
+    fn a_cert_written_before_the_watch_is_armed_is_seen_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join(CERT_FILENAME);
+        let write = |domain: &str| {
+            let key = rcgen::KeyPair::generate().expect("keygen");
+            let params =
+                rcgen::CertificateParams::new(vec![domain.to_string()]).expect("cert params");
+            let cert = params.self_signed(&key).expect("self-sign");
+            std::fs::write(&cert_path, cert.pem()).unwrap();
+            load_certified_key_from_pem(cert.pem().as_bytes(), key.serialize_pem().as_bytes())
+                .expect("load certified key")
+        };
+        let served = write("boot.test");
+        let resolver = MultiDomainCertResolver::new(served);
+        assert!(!disk_differs_from_served_default(&resolver, &cert_path));
+        // The floor renew task rewrites the file before the watcher arms.
+        write("renewed.test");
+        assert!(disk_differs_from_served_default(&resolver, &cert_path));
+        // Nothing on disk: nothing to catch up on.
+        std::fs::remove_file(&cert_path).unwrap();
+        assert!(!disk_differs_from_served_default(&resolver, &cert_path));
+    }
+
     fn gen_real_cert_for(domain: &str, days: i64) -> (Vec<u8>, CertifiedKey) {
         let key = rcgen::KeyPair::generate().expect("keygen");
         let mut params =
@@ -1189,6 +1330,43 @@ mod tests {
             .expect("ca-sign leaf");
         load_certified_key_from_pem(leaf.pem().as_bytes(), leaf_key.serialize_pem().as_bytes())
             .expect("load certified key")
+    }
+
+    #[test]
+    fn serves_host_names_only_the_hosts_a_certificate_carries() {
+        // The port-80 redirect allow-list (finding M2): a DNS SAN of the
+        // default cert (any case), an expired one included; a per-domain
+        // cert's domain; an IP SAN of the default or IP bridge cert, bare or
+        // bracketed. Nothing else.
+        let (_der, apex) = gen_real_cert_for("nest.example", -1);
+        let resolver = MultiDomainCertResolver::new(apex);
+        let (_der, custom) = gen_real_cert_for("blog.custom.test", 90);
+        resolver.add_domain("blog.custom.test", custom);
+        let (ip_pem, ip_key) =
+            fauna_acme_http01::test_support::make_multi_san_cert_and_key_pem(&["2001:db8::7"]);
+        resolver.set_ip_cert(load_certified_key_from_pem(&ip_pem, &ip_key).expect("ip cert"));
+
+        for host in [
+            "nest.example",
+            "NEST.example",
+            "blog.custom.test",
+            "[2001:db8::7]",
+            "2001:db8::7",
+        ] {
+            assert!(resolver.serves_host(host), "{host} is served");
+        }
+        for host in [
+            "evil.test",
+            "mail.nest.example",
+            "[2001:db8::8]",
+            "203.0.113.7",
+        ] {
+            assert!(!resolver.serves_host(host), "{host} is not served");
+        }
+        assert!(
+            !MultiDomainCertResolver::pending().serves_host("nest.example"),
+            "a pending resolver serves nothing"
+        );
     }
 
     #[test]

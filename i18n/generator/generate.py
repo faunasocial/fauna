@@ -410,8 +410,13 @@ def _emit_python_classes(tree: dict) -> str:
                 escaped = _py_escape(text)
                 lines.append(f'    {safe_key} = "{escaped}"')
             else:
-                param_list = ", ".join(f"{p}: str" for p in params)
+                param_list = ", ".join(f"{_py_safe_name(p)}: str" for p in params)
                 escaped = _py_escape(text)
+                # A keyword placeholder (`{pass}`) is escaped like a keyword
+                # key, in the f-string as in the signature.
+                for p in params:
+                    if _py_safe_name(p) != p:
+                        escaped = escaped.replace("{" + p + "}", "{" + _py_safe_name(p) + "}")
                 # Convert {name} to Python f-string {name}
                 lines.append("    @staticmethod")
                 lines.append(f"    def {safe_key}(*, {param_list}) -> str:")

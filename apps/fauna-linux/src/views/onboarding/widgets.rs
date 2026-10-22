@@ -66,6 +66,42 @@ pub fn nav_row(back: &gtk::Button, primary: &[&gtk::Button]) -> gtk::Box {
     row
 }
 
+/// The by-continuing terms notice — one sentence with the link beside it,
+/// appended above a wizard page's bottom row on `invite_request`,
+/// `claim_code` and `nest_provisioning` (always) and `handle_entry` (while the
+/// shared `terms_notice_visible` is true; the caller toggles the returned
+/// box's visibility). The link opens `fauna_core::TERMS_URL` through the one
+/// URL opener; nothing is persisted (`terms-and-content-guidelines.md`
+/// § The decisions, item 3).
+///
+/// ui.yaml IDs: `onboarding-terms-notice` (the sentence), `onboarding-terms-link`.
+pub fn terms_notice() -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::Start);
+    row.set_margin_top(8);
+
+    let notice = gtk::Label::new(Some(crate::i18n::strings::onboarding::terms::NOTICE));
+    notice.set_wrap(true);
+    notice.add_css_class("dim-label");
+    crate::testid::set_test_id(&notice, fauna_ui_ids::ONBOARDING_TERMS_NOTICE);
+    row.append(&notice);
+
+    row.append(&terms_link_button(fauna_ui_ids::ONBOARDING_TERMS_LINK));
+    row
+}
+
+/// The terms link button — label `settings.terms_link`, opens
+/// `fauna_core::TERMS_URL` in the browser. Shared by the onboarding notice and
+/// the Settings About row (`settings-terms-link`).
+pub fn terms_link_button(testid: &str) -> gtk::Button {
+    let link = gtk::Button::with_label(crate::i18n::strings::settings::TERMS_LINK);
+    link.add_css_class("flat");
+    link.add_css_class("link");
+    crate::testid::set_test_id(&link, testid);
+    link.connect_clicked(|_| crate::url_opener::open(fauna_core::TERMS_URL));
+    link
+}
+
 /// Build a wizard-page outer container that matches identity_choice:
 /// vertical box, halign=Center, 32px top/bottom margin, 48px left/right
 /// margin. Returns (outer, content) — outer goes into the GTK Stack;

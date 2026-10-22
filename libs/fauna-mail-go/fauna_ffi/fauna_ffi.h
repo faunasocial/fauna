@@ -616,6 +616,11 @@ uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_status(uint64_t ptr
 uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_tiers_create(uint64_t ptr, RustBuffer name, int64_t max_inbox_bytes, int64_t max_storage_bytes, int64_t max_devices, int64_t max_blob_size, int64_t max_feeds
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_TIERS_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_TIERS_DELETE
+uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_tiers_delete(uint64_t ptr, RustBuffer name
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_TIERS_LIST
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIADMINCLIENT_TIERS_LIST
 uint64_t uniffi_fauna_ffi_fn_method_ffiadminclient_tiers_list(uint64_t ptr
@@ -676,6 +681,11 @@ void uniffi_fauna_ffi_fn_free_ffibridgesclient(uint64_t handle, RustCallStatus *
 uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_add_follow(uint64_t ptr, RustBuffer bridge_id, RustBuffer id, RustBuffer petname, RustBuffer extra
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_APPROVE_FOLLOW_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_APPROVE_FOLLOW_REQUEST
+uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_approve_follow_request(uint64_t ptr, RustBuffer bridge_id, RustBuffer id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_FEEDS_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_FEEDS_CREATE
 uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_feeds_create(uint64_t ptr, RustBuffer bridge, RustBuffer feed_uri, RustBuffer name
@@ -701,9 +711,19 @@ uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_link(uint64_t ptr, RustBuff
 uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_list(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOW_REQUESTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOW_REQUESTS
+uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_list_follow_requests(uint64_t ptr, RustBuffer bridge_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOWS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOWS
 uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_list_follows(uint64_t ptr, RustBuffer bridge_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_REFUSE_FOLLOW_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_REFUSE_FOLLOW_REQUEST
+uint64_t uniffi_fauna_ffi_fn_method_ffibridgesclient_refuse_follow_request(uint64_t ptr, RustBuffer bridge_id, RustBuffer id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIBRIDGESCLIENT_REMOVE_FOLLOW
@@ -978,7 +998,7 @@ void uniffi_fauna_ffi_fn_free_ffiemailclient(uint64_t handle, RustCallStatus *ou
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_CREATE
-uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_create(uint64_t ptr, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority
+uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_create(uint64_t ptr, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority, int8_t continue_on_match
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_DELETE
@@ -998,7 +1018,7 @@ uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_list(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_UPDATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_FILTERS_UPDATE
-uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_update(uint64_t ptr, int64_t id, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority
+uint64_t uniffi_fauna_ffi_fn_method_ffiemailclient_filters_update(uint64_t ptr, int64_t id, RustBuffer name, RustBuffer rules, RustBuffer combination, RustBuffer action, int32_t priority, int8_t continue_on_match
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFIEMAILCLIENT_SEND
@@ -1551,9 +1571,19 @@ uint64_t uniffi_fauna_ffi_fn_clone_ffinotificationsclient(uint64_t handle, RustC
 void uniffi_fauna_ffi_fn_free_ffinotificationsclient(uint64_t handle, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_CLEAR
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_CLEAR
+uint64_t uniffi_fauna_ffi_fn_method_ffinotificationsclient_clear(uint64_t ptr, RustBuffer up_to
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_COUNT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_COUNT
 uint64_t uniffi_fauna_ffi_fn_method_ffinotificationsclient_count(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_DISMISS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_DISMISS
+uint64_t uniffi_fauna_ffi_fn_method_ffinotificationsclient_dismiss(uint64_t ptr, int64_t id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_METHOD_FFINOTIFICATIONSCLIENT_LIST
@@ -2016,6 +2046,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_follow_display(RustBuffer id, RustBuffer pet
 int8_t uniffi_fauna_ffi_fn_func_is_unified_bridges_page_bridge(RustBuffer id, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SETTING_CONTROL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_SETTING_CONTROL
+RustBuffer uniffi_fauna_ffi_fn_func_setting_control(RustBuffer setting_type, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_STEP
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_CALENDAR_PAN_STEP
 RustBuffer uniffi_fauna_ffi_fn_func_calendar_pan_step(RustBuffer mode, RustCallStatus *out_status
@@ -2169,9 +2204,19 @@ RustBuffer uniffi_fauna_ffi_fn_func_describe_email_filter_action_inputs(RustBuff
 RustBuffer uniffi_fauna_ffi_fn_func_describe_email_filter_rule(RustBuffer rule, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_EMAIL_FILTER_RULE_INPUTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DESCRIBE_EMAIL_FILTER_RULE_INPUTS
+RustBuffer uniffi_fauna_ffi_fn_func_describe_email_filter_rule_inputs(RustBuffer rule, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_EMAIL_FILTER_ACTION_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_EMAIL_FILTER_ACTION_LABEL
 RustBuffer uniffi_fauna_ffi_fn_func_email_filter_action_label(RustBuffer action, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_EMAIL_FILTER_IS_EDITABLE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_EMAIL_FILTER_IS_EDITABLE
+int8_t uniffi_fauna_ffi_fn_func_email_filter_is_editable(RustBuffer rules, RustBuffer action, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_EMAIL_FILTER_IS_EDITABLE_FOR
@@ -2187,6 +2232,16 @@ RustBuffer uniffi_fauna_ffi_fn_func_encode_email_filter_action_inputs(RustBuffer
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_EMAIL_FILTER_RULE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_EMAIL_FILTER_RULE
 RustBuffer uniffi_fauna_ffi_fn_func_encode_email_filter_rule(RustBuffer kind, RustBuffer value, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_EMAIL_FILTER_RULE_INPUTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ENCODE_EMAIL_FILTER_RULE_INPUTS
+RustBuffer uniffi_fauna_ffi_fn_func_encode_email_filter_rule_inputs(RustBuffer inputs, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PARSE_EMAIL_FILTER_PRIORITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PARSE_EMAIL_FILTER_PRIORITY
+int32_t uniffi_fauna_ffi_fn_func_parse_email_filter_priority(RustBuffer text, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_AGE_BAND_FROM_AGE_RANGE
@@ -2229,6 +2284,11 @@ int8_t uniffi_fauna_ffi_fn_func_ward_contact_ask_pending(RustBuffer asks, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_FEED_REQUEST_STATE
 RustBuffer uniffi_fauna_ffi_fn_func_ward_feed_request_state(RustBuffer asks, RustBuffer bridge_id, RustBuffer operation, RustBuffer target, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
+int8_t uniffi_fauna_ffi_fn_func_ward_knocks_await_guardian(RustBuffer own_policy, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DEFAULT_RESCAN_INTERVAL_SECS
@@ -2318,6 +2378,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_mail_to_labeler_input_bare(RustBuffer raw_rf
 int64_t uniffi_fauna_ffi_fn_func_run_wasm_labeler_score(RustBuffer metadata_blob, RustBuffer wasm_bytes, RustBuffer expected_labeler_id, RustBuffer input_bare, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FILL_PLACEHOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FILL_PLACEHOLDERS
+RustBuffer uniffi_fauna_ffi_fn_func_fill_placeholders(RustBuffer template, RustBuffer args, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_AGGREGATE_SPAM_MODEL_COPIES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_AGGREGATE_SPAM_MODEL_COPIES
 RustBuffer uniffi_fauna_ffi_fn_func_aggregate_spam_model_copies(RustBuffer copies, RustBuffer holder_x25519_secret, RustBuffer holder_mlkem_dk, RustCallStatus *out_status
@@ -2376,6 +2441,11 @@ int8_t uniffi_fauna_ffi_fn_func_forward_self_already_forwarded(RustBuffer forwar
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FORWARD_STAMP_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FORWARD_STAMP_VALUE
 RustBuffer uniffi_fauna_ffi_fn_func_forward_stamp_value(RustBuffer actor_id, int64_t unix_time, RustBuffer rule, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FORWARD_UNAUTHENTICATED_LOCAL_FROM
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FORWARD_UNAUTHENTICATED_LOCAL_FROM
+int8_t uniffi_fauna_ffi_fn_func_forward_unauthenticated_local_from(RustBuffer raw, RustBuffer local_domains, RustBuffer primary_domain, RustBuffer dmarc, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_GENERATE_X25519_KEYPAIR
@@ -2540,6 +2610,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_process_and_seal_upload(RustBuffer raw, Rust
 RustBuffer uniffi_fauna_ffi_fn_func_strip_media_metadata(RustBuffer raw, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_VERIFY_BLOB_UPLOAD_ECHO
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_VERIFY_BLOB_UPLOAD_ECHO
+RustBuffer uniffi_fauna_ffi_fn_func_verify_blob_upload_echo(RustBuffer echoed, RustBuffer bytes, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RELAY_LIST_APPENDING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_RELAY_LIST_APPENDING
 RustBuffer uniffi_fauna_ffi_fn_func_relay_list_appending(RustBuffer existing, RustBuffer url, RustCallStatus *out_status
@@ -2553,6 +2628,11 @@ RustBuffer uniffi_fauna_ffi_fn_func_trimmed_relay_input(RustBuffer input, RustCa
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NOTIFICATION_DESTINATION_FOR
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NOTIFICATION_DESTINATION_FOR
 RustBuffer uniffi_fauna_ffi_fn_func_notification_destination_for(RustBuffer item, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NOTIFICATION_RETAINED_FOR
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NOTIFICATION_RETAINED_FOR
+int8_t uniffi_fauna_ffi_fn_func_notification_retained_for(RustBuffer item, int64_t now_micros, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_NOTIFICATION_TEXT_FOR
@@ -2590,14 +2670,24 @@ int8_t uniffi_fauna_ffi_fn_func_decode_post(RustBuffer data, RustCallStatus *out
 RustBuffer uniffi_fauna_ffi_fn_func_decode_post_full(RustBuffer data, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ACTOR_HOME
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_ACTOR_HOME
+RustBuffer uniffi_fauna_ffi_fn_func_actor_home(RustBuffer carried, RustBuffer actor_id, RustBuffer profile_body, RustBuffer own_nest_url, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_EDITED_PROFILE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_EDITED_PROFILE
-RustBuffer uniffi_fauna_ffi_fn_func_build_edited_profile(RustBuffer secret, RustBuffer base_body, RustBuffer predecessors, RustBuffer display_name, RustBuffer bio, RustBuffer links, RustCallStatus *out_status
+RustBuffer uniffi_fauna_ffi_fn_func_build_edited_profile(RustBuffer secret, RustBuffer base_body, RustBuffer last_direct_body, RustBuffer predecessors, RustBuffer display_name, RustBuffer bio, RustBuffer links, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_EDITED_PROFILE_WITH_IMAGES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_BUILD_EDITED_PROFILE_WITH_IMAGES
-RustBuffer uniffi_fauna_ffi_fn_func_build_edited_profile_with_images(RustBuffer secret, RustBuffer base_body, RustBuffer predecessors, RustBuffer display_name, RustBuffer bio, RustBuffer links, RustBuffer avatar, RustBuffer banner, RustCallStatus *out_status
+RustBuffer uniffi_fauna_ffi_fn_func_build_edited_profile_with_images(RustBuffer secret, RustBuffer base_body, RustBuffer last_direct_body, RustBuffer predecessors, RustBuffer display_name, RustBuffer bio, RustBuffer links, RustBuffer avatar, RustBuffer banner, RustBuffer audience_everyone, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DECODE_OWN_PROFILE_DISPLAY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DECODE_OWN_PROFILE_DISPLAY
+RustBuffer uniffi_fauna_ffi_fn_func_decode_own_profile_display(RustBuffer own_actor_id_hex, RustBuffer body, RustBuffer last_direct_body, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_DECODE_PROFILE_DISPLAY
@@ -2643,6 +2733,11 @@ void uniffi_fauna_ffi_fn_func_push_clear_opt_in(RustBuffer intent_path, RustCall
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_INTENT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_INTENT
 RustBuffer uniffi_fauna_ffi_fn_func_push_intent(RustBuffer intent_path, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_PAYLOAD_PARSE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_PAYLOAD_PARSE
+RustBuffer uniffi_fauna_ffi_fn_func_push_payload_parse(RustBuffer content, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_PUSH_STANDING_FAILURE
@@ -2734,6 +2829,12 @@ uint64_t uniffi_fauna_ffi_fn_func_check_for_newer_release(RustBuffer feed_origin
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FAUNA_FFI_BUILD_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FAUNA_FFI_BUILD_VERSION
 RustBuffer uniffi_fauna_ffi_fn_func_fauna_ffi_build_version(RustCallStatus *out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FAUNA_FFI_TERMS_URL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_FN_FUNC_FAUNA_FFI_TERMS_URL
+RustBuffer uniffi_fauna_ffi_fn_func_fauna_ffi_terms_url(RustCallStatus *out_status
     
 );
 #endif
@@ -3145,6 +3246,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_is_unified_bridges_page_bridge(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SETTING_CONTROL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_SETTING_CONTROL
+uint16_t uniffi_fauna_ffi_checksum_func_setting_control(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_STEP
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_CALENDAR_PAN_STEP
 uint16_t uniffi_fauna_ffi_checksum_func_calendar_pan_step(void
@@ -3325,9 +3432,21 @@ uint16_t uniffi_fauna_ffi_checksum_func_describe_email_filter_rule(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DESCRIBE_EMAIL_FILTER_RULE_INPUTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DESCRIBE_EMAIL_FILTER_RULE_INPUTS
+uint16_t uniffi_fauna_ffi_checksum_func_describe_email_filter_rule_inputs(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_EMAIL_FILTER_ACTION_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_EMAIL_FILTER_ACTION_LABEL
 uint16_t uniffi_fauna_ffi_checksum_func_email_filter_action_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_EMAIL_FILTER_IS_EDITABLE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_EMAIL_FILTER_IS_EDITABLE
+uint16_t uniffi_fauna_ffi_checksum_func_email_filter_is_editable(void
     
 );
 #endif
@@ -3346,6 +3465,18 @@ uint16_t uniffi_fauna_ffi_checksum_func_encode_email_filter_action_inputs(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_EMAIL_FILTER_RULE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_EMAIL_FILTER_RULE
 uint16_t uniffi_fauna_ffi_checksum_func_encode_email_filter_rule(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_EMAIL_FILTER_RULE_INPUTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ENCODE_EMAIL_FILTER_RULE_INPUTS
+uint16_t uniffi_fauna_ffi_checksum_func_encode_email_filter_rule_inputs(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PARSE_EMAIL_FILTER_PRIORITY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PARSE_EMAIL_FILTER_PRIORITY
+uint16_t uniffi_fauna_ffi_checksum_func_parse_email_filter_priority(void
     
 );
 #endif
@@ -3394,6 +3525,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_ward_contact_ask_pending(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_FEED_REQUEST_STATE
 uint16_t uniffi_fauna_ffi_checksum_func_ward_feed_request_state(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_WARD_KNOCKS_AWAIT_GUARDIAN
+uint16_t uniffi_fauna_ffi_checksum_func_ward_knocks_await_guardian(void
     
 );
 #endif
@@ -3499,6 +3636,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_run_wasm_labeler_score(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FILL_PLACEHOLDERS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FILL_PLACEHOLDERS
+uint16_t uniffi_fauna_ffi_checksum_func_fill_placeholders(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_AGGREGATE_SPAM_MODEL_COPIES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_AGGREGATE_SPAM_MODEL_COPIES
 uint16_t uniffi_fauna_ffi_checksum_func_aggregate_spam_model_copies(void
@@ -3568,6 +3711,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_forward_self_already_forwarded(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FORWARD_STAMP_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FORWARD_STAMP_VALUE
 uint16_t uniffi_fauna_ffi_checksum_func_forward_stamp_value(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FORWARD_UNAUTHENTICATED_LOCAL_FROM
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FORWARD_UNAUTHENTICATED_LOCAL_FROM
+uint16_t uniffi_fauna_ffi_checksum_func_forward_unauthenticated_local_from(void
     
 );
 #endif
@@ -3763,6 +3912,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_strip_media_metadata(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_VERIFY_BLOB_UPLOAD_ECHO
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_VERIFY_BLOB_UPLOAD_ECHO
+uint16_t uniffi_fauna_ffi_checksum_func_verify_blob_upload_echo(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_RELAY_LIST_APPENDING
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_RELAY_LIST_APPENDING
 uint16_t uniffi_fauna_ffi_checksum_func_relay_list_appending(void
@@ -3778,6 +3933,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_trimmed_relay_input(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NOTIFICATION_DESTINATION_FOR
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NOTIFICATION_DESTINATION_FOR
 uint16_t uniffi_fauna_ffi_checksum_func_notification_destination_for(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NOTIFICATION_RETAINED_FOR
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_NOTIFICATION_RETAINED_FOR
+uint16_t uniffi_fauna_ffi_checksum_func_notification_retained_for(void
     
 );
 #endif
@@ -3823,6 +3984,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_decode_post_full(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ACTOR_HOME
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_ACTOR_HOME
+uint16_t uniffi_fauna_ffi_checksum_func_actor_home(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BUILD_EDITED_PROFILE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BUILD_EDITED_PROFILE
 uint16_t uniffi_fauna_ffi_checksum_func_build_edited_profile(void
@@ -3832,6 +3999,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_build_edited_profile(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BUILD_EDITED_PROFILE_WITH_IMAGES
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_BUILD_EDITED_PROFILE_WITH_IMAGES
 uint16_t uniffi_fauna_ffi_checksum_func_build_edited_profile_with_images(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DECODE_OWN_PROFILE_DISPLAY
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_DECODE_OWN_PROFILE_DISPLAY
+uint16_t uniffi_fauna_ffi_checksum_func_decode_own_profile_display(void
     
 );
 #endif
@@ -3886,6 +4059,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_push_clear_opt_in(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_INTENT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_INTENT
 uint16_t uniffi_fauna_ffi_checksum_func_push_intent(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_PAYLOAD_PARSE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_PUSH_PAYLOAD_PARSE
+uint16_t uniffi_fauna_ffi_checksum_func_push_payload_parse(void
     
 );
 #endif
@@ -3994,6 +4173,12 @@ uint16_t uniffi_fauna_ffi_checksum_func_check_for_newer_release(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FAUNA_FFI_BUILD_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FAUNA_FFI_BUILD_VERSION
 uint16_t uniffi_fauna_ffi_checksum_func_fauna_ffi_build_version(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FAUNA_FFI_TERMS_URL
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_FUNC_FAUNA_FFI_TERMS_URL
+uint16_t uniffi_fauna_ffi_checksum_func_fauna_ffi_terms_url(void
     
 );
 #endif
@@ -4213,6 +4398,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_tiers_create(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_TIERS_DELETE
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_TIERS_DELETE
+uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_tiers_delete(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_TIERS_LIST
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIADMINCLIENT_TIERS_LIST
 uint16_t uniffi_fauna_ffi_checksum_method_ffiadminclient_tiers_list(void
@@ -4273,6 +4464,12 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_add_follow(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_APPROVE_FOLLOW_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_APPROVE_FOLLOW_REQUEST
+uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_approve_follow_request(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_FEEDS_CREATE
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_FEEDS_CREATE
 uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_feeds_create(void
@@ -4303,9 +4500,21 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_list(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOW_REQUESTS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOW_REQUESTS
+uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_list_follow_requests(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOWS
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_LIST_FOLLOWS
 uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_list_follows(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_REFUSE_FOLLOW_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFIBRIDGESCLIENT_REFUSE_FOLLOW_REQUEST
+uint16_t uniffi_fauna_ffi_checksum_method_ffibridgesclient_refuse_follow_request(void
     
 );
 #endif
@@ -5071,9 +5280,21 @@ uint16_t uniffi_fauna_ffi_checksum_method_ffinostrbunkerclient_set_label(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_CLEAR
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_CLEAR
+uint16_t uniffi_fauna_ffi_checksum_method_ffinotificationsclient_clear(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_COUNT
 #define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_COUNT
 uint16_t uniffi_fauna_ffi_checksum_method_ffinotificationsclient_count(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_DISMISS
+#define UNIFFI_FFIDEF_UNIFFI_FAUNA_FFI_CHECKSUM_METHOD_FFINOTIFICATIONSCLIENT_DISMISS
+uint16_t uniffi_fauna_ffi_checksum_method_ffinotificationsclient_dismiss(void
     
 );
 #endif

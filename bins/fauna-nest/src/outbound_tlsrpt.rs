@@ -34,6 +34,34 @@ use crate::routes::AppState;
 /// doesn't burst every report out at the same instant.
 pub const TLSRPT_JITTER_WINDOW_SECS: u32 = 3600;
 
+/// The production `https:` rua poster. The URI comes from the `_smtp._tls` TXT
+/// record of a **remote** domain — any domain this nest ever delivered mail to —
+/// so it is a remote-chosen target and goes through the nest's SSRF guard
+/// ([`crate::ssrf::ssrf_safe_https_client`]: https only, every resolved address
+/// global and pinned, no redirect followed). A refused target is an `Err`, which
+/// the dispatch logs and skips like any failed POST.
+pub struct GuardedTlsrptPoster;
+
+/// RFC 8460 gives no deadline; 30 s bounds a stalled report endpoint.
+const TLSRPT_POST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[async_trait::async_trait]
+impl TlsrptHttpPoster for GuardedTlsrptPoster {
+    async fn post_tlsrpt(&self, uri: &str, gzipped_body: Vec<u8>) -> anyhow::Result<u16> {
+        let (client, url) = crate::ssrf::ssrf_safe_https_client(uri, TLSRPT_POST_TIMEOUT, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("TLSRPT rua target refused ({e}): {uri}"))?;
+        let resp = client
+            .post(url)
+            .header("Content-Type", "application/tlsrpt+gzip")
+            .header("Content-Encoding", "gzip")
+            .body(gzipped_body)
+            .send()
+            .await?;
+        Ok(resp.status().as_u16())
+    }
+}
+
 /// One TLSRPT dispatch pass for a single recipient `domain`. The caller has
 /// already built `envelope` via `aggregator.emit_report(...)` and resolved
 /// `rua_uris` from the recipient's `_smtp._tls.<domain>` policy. Populates the
@@ -292,6 +320,25 @@ mod tests {
     };
 
     const NOW: i64 = 1_779_840_000; // 2026-05-27 00:00:00 UTC
+
+    /// A remote domain's `rua=https:` cannot aim the report POST at this
+    /// box's loopback or at the cloud metadata service: refused before any
+    /// dial.
+    #[tokio::test]
+    async fn guarded_poster_refuses_loopback_and_imds() {
+        for uri in [
+            "https://127.0.0.1/tlsrpt",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://localhost/tlsrpt",
+            "http://8.8.8.8/tlsrpt",
+        ] {
+            let err = GuardedTlsrptPoster
+                .post_tlsrpt(uri, b"gz".to_vec())
+                .await
+                .expect_err("a non-global rua target is refused");
+            assert!(err.to_string().contains("refused"), "{uri}: {err}");
+        }
+    }
 
     fn envelope_for(domain: &str, report_id: &str) -> ReportEnvelope {
         let mut agg = TlsrptAggregator::default();

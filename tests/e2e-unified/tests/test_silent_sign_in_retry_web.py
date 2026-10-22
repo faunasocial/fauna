@@ -4,7 +4,7 @@
 succession* makes the successor's first authenticated session show the kit
 unbidden, and web spells that session's ``attach_session`` gate as
 ``identity.registered`` — which only a COMPLETED background silent sign-in sets
-(``$lib/store`` ``refreshFromServer``). ``security.md`` § Transport trust →
+(``#lib/store`` ``refreshFromServer``). ``security.md`` § Transport trust →
 § Post-auth surfacing keeps every non-terminal failure of that refresh silent;
 silent must not mean abandoned. Before the retry, one transient failure (a
 dropped anonymous connect, a timeout) was logged and swallowed, the single-flight
@@ -12,7 +12,7 @@ guard stayed sticky for the identity, and ``registered`` stayed false for the
 whole document: a successor tab showed no kit and no error until a reload.
 
 **The fault is a real one, not a stub.** The test-only nest dial override
-(``$lib/api`` ``nestDialOverride`` — a ``sessionStorage`` slot ``nodeUrl()``
+(``#lib/api`` ``nestDialOverride`` — a ``sessionStorage`` slot ``nodeUrl()``
 re-reads on every call, compiled out of release builds) is aimed at a loopback
 port nothing listens on for the boot, so the production refresh meets a genuine
 connection refusal, which the wasm classifies as ``transient:``. Clearing the
@@ -46,16 +46,16 @@ from helpers.waiting import wait_until
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
 
-#: `$lib/api`'s test-only nest dial override slot.
+#: `#lib/api`'s test-only nest dial override slot.
 DIAL_OVERRIDE_KEY = "fauna_e2e_nest_dial_override"
 
-#: The refresh's own failure line (`$lib/store`) — the evidence the fault fired.
+#: The refresh's own failure line (`#lib/store`) — the evidence the fault fired.
 REFRESH_FAILED = "[identity] silentSignIn refresh failed"
 
 #: A page boot plus one refused connect. Generous: a green run pays nothing.
 FAULT_S = 60.0
 
-#: The retry schedule's cap (`$lib/silent-sign-in-retry`) is 30 s, so the next
+#: The retry schedule's cap (`#lib/silent-sign-in-retry`) is 30 s, so the next
 #: attempt after the nest comes back lands within that — plus one challenge
 #: round trip. Sized far above both (convention 14).
 RECOVER_S = 120.0
@@ -94,7 +94,8 @@ def test_web_a_transient_first_silent_sign_in_recovers_without_a_reload(nest_ins
     tab.launch({"url": spa_url + "/app/"})
     try:
         # The profile (one account, booted from the store) and the fault, both
-        # in place before the one boot under test.
+        # in place before the one boot under test — so not the launch's
+        # `seed_credentials` hook, whose boot would run before the fault exists.
         tab.eval_js(
             ";".join(
                 f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})"

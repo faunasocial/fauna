@@ -1054,6 +1054,22 @@ impl FfiAdminClient {
             .map_err(stringify)
     }
 
+    /// `fauna.admin.tiers.delete` — remove a tier nobody is on. A missing tier
+    /// is `fauna.admin.not_found`; one still named by a member, an invite code
+    /// or a membership link — or the nest's default `free` — is
+    /// `fauna.admin.conflict`.
+    /// The in-use refusal arrives already worded (`tier_delete_refusal`).
+    pub async fn tiers_delete(&self, name: String) -> Result<(), FfiError> {
+        self.client().tiers_delete(name).await.map_err(|e| {
+            match fauna_client_admin::tier_delete_refusal(&e) {
+                Some(msg) => FfiError::General {
+                    msg: msg.to_string(),
+                },
+                None => stringify(e),
+            }
+        })
+    }
+
     /// `fauna.admin.invite_codes.list` — every closed-registration invite code.
     pub async fn invite_codes_list(&self) -> Result<Vec<FfiAdminInviteCode>, FfiError> {
         let reply = self.client().invite_codes_list().await.map_err(stringify)?;
@@ -1214,6 +1230,138 @@ impl FfiAdminClient {
             .iter()
             .map(fauna_client_admin::log_entry_from_wire)
             .collect())
+    }
+}
+
+// ── The admin audit log section on `admin-logs` ────────────────────────
+//
+// The UniFFI face of `fauna_client_admin::AuditLog` + `audit_log_page`
+// (`admin.md` § The admin audit log on `admin-logs`): the entries fetched so
+// far stay in Rust behind the object, and each read hands back the folded
+// section — row texts, the chain check's line, the more cursor — so no native
+// app holds a hash or re-derives the check. Gated on `value-format` for the
+// `LocalizedText` reason the pickers below carry.
+
+/// FFI mirror of [`fauna_client_admin::AuditLogRow`] — one `admin-audit-entry`.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiAuditLogRow {
+    pub id: i64,
+    /// Epoch ms; painted with the app's absolute local-timestamp door.
+    pub ts_ms: i64,
+    pub text: LocalizedText,
+}
+
+/// FFI mirror of [`fauna_client_admin::AuditIntegrity`].
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+pub enum FfiAuditIntegrity {
+    Empty,
+    Verified { checked: u32 },
+    Uncheckable { checked: u32, uncheckable: u32 },
+    Broken { entry_id: i64 },
+}
+
+/// FFI mirror of [`fauna_client_admin::AuditLogView`].
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiAuditLogView {
+    pub rows: Vec<FfiAuditLogRow>,
+    pub integrity: FfiAuditIntegrity,
+    /// The `admin-audit-integrity-status` line.
+    pub integrity_text: LocalizedText,
+    /// `None` once the whole record is shown — `admin-audit-more-button` is
+    /// then disabled.
+    pub more_before_id: Option<i64>,
+}
+
+#[cfg(feature = "value-format")]
+impl From<fauna_client_admin::AuditLogView> for FfiAuditLogView {
+    fn from(v: fauna_client_admin::AuditLogView) -> Self {
+        use fauna_client_admin::AuditIntegrity as I;
+        FfiAuditLogView {
+            rows: v
+                .rows
+                .into_iter()
+                .map(|r| FfiAuditLogRow {
+                    id: r.id,
+                    ts_ms: r.ts_ms,
+                    text: r.text,
+                })
+                .collect(),
+            integrity: match v.integrity {
+                I::Empty => FfiAuditIntegrity::Empty,
+                I::Verified { checked } => FfiAuditIntegrity::Verified { checked },
+                I::Uncheckable {
+                    checked,
+                    uncheckable,
+                } => FfiAuditIntegrity::Uncheckable {
+                    checked,
+                    uncheckable,
+                },
+                I::Broken { entry_id } => FfiAuditIntegrity::Broken { entry_id },
+            },
+            integrity_text: v.integrity_text,
+            more_before_id: v.more_before_id,
+        }
+    }
+}
+
+/// The section's state: every entry fetched so far, held in Rust.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Object)]
+pub struct FfiAuditLog {
+    nest: Arc<NestClient>,
+    log: std::sync::Mutex<fauna_client_admin::AuditLog>,
+}
+
+#[cfg(feature = "value-format")]
+impl FfiAuditLog {
+    async fn read(&self, before_id: Option<i64>) -> Result<FfiAuditLogView, FfiError> {
+        let client = AdminClient::new(Arc::clone(&self.nest));
+        let page = fauna_client_admin::audit_log_page(&client, before_id)
+            .await
+            .map_err(stringify)?;
+        let mut log = self.log.lock().unwrap_or_else(|p| p.into_inner());
+        log.absorb(page);
+        Ok(log.view().into())
+    }
+}
+
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+impl FfiAuditLog {
+    /// Read the newest page (entering the page, or a refresh), replacing what
+    /// was held.
+    pub async fn load(&self) -> Result<FfiAuditLogView, FfiError> {
+        self.read(None).await
+    }
+
+    /// `admin-audit-more-button` — read the page older than the oldest entry
+    /// held. With the whole record already shown it re-reads nothing and
+    /// returns the held view.
+    pub async fn more(&self) -> Result<FfiAuditLogView, FfiError> {
+        let cursor = {
+            let log = self.log.lock().unwrap_or_else(|p| p.into_inner());
+            match log.view().more_before_id {
+                Some(id) => id,
+                None => return Ok(log.view().into()),
+            }
+        };
+        self.read(Some(cursor)).await
+    }
+}
+
+#[cfg(feature = "value-format")]
+#[uniffi::export]
+impl FfiAdminClient {
+    /// A fresh, empty audit-log section over this client's nest; call
+    /// [`FfiAuditLog::load`] to fill it.
+    pub fn audit_log(&self) -> Arc<FfiAuditLog> {
+        Arc::new(FfiAuditLog {
+            nest: Arc::clone(&self.nest),
+            log: Default::default(),
+        })
     }
 }
 
@@ -1707,6 +1855,91 @@ pub async fn admin_set_web_app_origin(
     Ok(fauna_client_admin::admin_web_app_origin_view(Some(&reply)).into())
 }
 
+// ── Update channel (`admin-nest-update-channel-*`) ─────────────────────────
+//
+// The native (windows/apple/android) face of the shared read + fold + write
+// (`nest/update-channel.md` § The UI); tui and linux call
+// `AdminClient::update_channel`/`set_update_channel` directly. The channel is
+// `fauna_provisioning`'s own UniFFI enum (the wizard's), so no mirror. Free
+// functions, `value-format` gated, for the region block's reason.
+
+/// FFI mirror of [`fauna_client_admin::UpdateChannelOption`] — one radio.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiUpdateChannelOption {
+    pub channel: fauna_client_admin::UpdateChannel,
+    pub label: LocalizedText,
+    pub description: LocalizedText,
+}
+
+/// FFI mirror of [`fauna_client_admin::AdminUpdateChannelView`] — every
+/// rendering decision the section needs, already made. Do NOT compute a
+/// channel sentence in app code.
+#[cfg(feature = "value-format")]
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct FfiAdminUpdateChannelView {
+    /// The radio to pre-select; `None` marks none (a pinned box, a nest
+    /// predating the choice, or a channel this build cannot name).
+    pub selected: Option<fauna_client_admin::UpdateChannel>,
+    /// `admin-nest-update-channel-status`.
+    pub status: LocalizedText,
+    /// Whether the radios and `admin-nest-update-channel-save-button` are live.
+    pub can_set: bool,
+    /// The three radios, in the wizard's order.
+    pub options: Vec<FfiUpdateChannelOption>,
+}
+
+#[cfg(feature = "value-format")]
+impl From<fauna_client_admin::AdminUpdateChannelView> for FfiAdminUpdateChannelView {
+    fn from(v: fauna_client_admin::AdminUpdateChannelView) -> Self {
+        FfiAdminUpdateChannelView {
+            selected: v.selected,
+            status: v.status,
+            can_set: v.can_set,
+            options: v
+                .options
+                .into_iter()
+                .map(|o| FfiUpdateChannelOption {
+                    channel: o.channel,
+                    label: o.label,
+                    description: o.description,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `fauna.admin.update_channel.get` folded through
+/// [`fauna_client_admin::admin_update_channel_view`] — an older nest's
+/// unknown-kind answer is the view's "predates the choice" state, not an error.
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+pub async fn admin_update_channel_status(
+    nest: Arc<crate::nest_client::FfiNestClient>,
+) -> Result<FfiAdminUpdateChannelView, FfiError> {
+    let client = AdminClient::new(nest.nest_arc());
+    let reply = client.update_channel().await.map_err(stringify)?;
+    Ok(fauna_client_admin::admin_update_channel_view(reply.as_ref()).into())
+}
+
+/// `fauna.admin.update_channel.set` — `admin-nest-update-channel-save-button`.
+/// The set's reply carries no projection, so this re-reads and answers the
+/// fold of the fresh read.
+#[cfg(feature = "value-format")]
+#[fauna_uniffi_async::export]
+pub async fn admin_set_update_channel(
+    nest: Arc<crate::nest_client::FfiNestClient>,
+    channel: fauna_client_admin::UpdateChannel,
+) -> Result<FfiAdminUpdateChannelView, FfiError> {
+    let client = AdminClient::new(nest.nest_arc());
+    client
+        .set_update_channel(channel)
+        .await
+        .map_err(stringify)?;
+    let reply = client.update_channel().await.map_err(stringify)?;
+    Ok(fauna_client_admin::admin_update_channel_view(reply.as_ref()).into())
+}
+
 // ── Outside-app sign-in keys (`admin-nest-oauth-*`) ──────────────────────
 //
 // The native (windows/apple/android) face of the issuer key controls
@@ -1764,8 +1997,8 @@ impl From<FfiIssuerKeyRow> for fauna_client_admin::IssuerKeyRow {
 }
 
 /// FFI mirror of [`fauna_client_admin::IssuerKeyView`] — what
-/// `admin-nest-oauth-section` paints from. Paint `admin-nest-oauth-key-item-{n}`
-/// ONLY from a view [`admin_issuer_key_status`] returned: a failed read is the
+/// `admin-nest-oauth-section` paints from. Paint the `admin-nest-oauth-key-item`
+/// rows ONLY from a view [`admin_issuer_key_status`] returned: a failed read is the
 /// `admin-nest-oauth-key-reason` line, never an empty list.
 #[cfg(feature = "value-format")]
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -1854,7 +2087,7 @@ pub async fn admin_issuer_key_status(
         .into())
 }
 
-/// One `admin-nest-oauth-key-item-{n}` line — `now_secs` is the app's clock
+/// One `admin-nest-oauth-key-item` line — `now_secs` is the app's clock
 /// at paint (epoch seconds), because a retired key's countdown is the point
 /// of its line.
 #[cfg(feature = "value-format")]

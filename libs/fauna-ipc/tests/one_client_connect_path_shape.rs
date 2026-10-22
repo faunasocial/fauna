@@ -1,8 +1,9 @@
-//! **One client-connect-path claim, mechanically enforced.** `sync-agent.md`
-//! § Transports (`:60`) states, of the per-SID windows sync pipe, that
+//! **One client-connect-path claim, mechanically enforced.**
+//! `docs/goal/architecture/apps/sync-agent.md` § Transports (*The client
+//! verifies WHO is serving*) states, of the per-SID windows sync pipe, that
 //! `sync_pipe_client::connect_pipe_to` is *"the one place every consumer
-//! passes through"*; § Implementation status today S1 (`:231`) restates it
-//! post-fix: *"Every in-tree consumer of the per-SID pipe goes through it."*
+//! passes through"*; § Implementation status today S1 restates it post-fix:
+//! *"Every in-tree consumer of the per-SID pipe goes through it."*
 //! That claim is prose, and it rotted once already: the fourth consumer
 //! (a since-removed diagnostic tool's sync client, a raw
 //! `tokio::net::windows::named_pipe::ClientOptions::new().open`) was invisible to both greps an earlier
@@ -27,8 +28,9 @@
 //!    pipe-name prefix (i.e. preceded by `pipe` — not the bare substring,
 //!    which also names unrelated things: `fauna-sync.service`,
 //!    `fauna-sync.exe`, `fauna-sync.stdout.log`) outside those same four
-//!    files, plus one named exception that holds it only as an inert STRING,
-//!    never a raw open ([`PIPE_LITERAL_ALLOWLIST`]).
+//!    files ([`PIPE_LITERAL_ALLOWLIST`]), plus one named LINE, exempted by
+//!    its content rather than its file, that holds it only as an inert
+//!    STRING, never a raw open ([`PIPE_LITERAL_LINE_EXEMPTIONS`]).
 //!
 //! **What this does NOT cover, stated so it is not read as more than it is:**
 //! a raw open that builds the pipe name some other way than the literal
@@ -201,7 +203,7 @@ fn the_tree_has_one_current_user_pipe_name_caller_set() {
     assert!(
         violations.is_empty(),
         "a new caller of current_user_pipe_name outside the allowlist: {violations:?}\n\
-         `sync-agent.md` § Transports (\"the one place every consumer passes through\") means \
+         `apps/sync-agent.md` § Transports (\"the one place every consumer passes through\") means \
          every consumer resolves the pipe name through `AgentEndpoint::default_for_user` + \
          `AgentEndpoint::connect` (or, off windows, the unix socket path), never by calling \
          current_user_pipe_name and opening it raw — a raw open skips the server-identity \
@@ -255,7 +257,8 @@ fn the_tree_has_one_pipe_qualified_prefix_owner_set() {
          Building this literal outside the files that own the pipe name is how a raw open \
          (skipping the server-identity check) gets reintroduced without ever calling \
          current_user_pipe_name. If this is a legitimate owner, add it to \
-         PIPE_LITERAL_ALLOWLIST in this test; if it is a display/test string like the \
-         named exception there, document why in the same place."
+         PIPE_LITERAL_ALLOWLIST in this test; if it is one inert display/test string like the \
+         named exception, exempt that LINE in PIPE_LITERAL_LINE_EXEMPTIONS and document why \
+         there — never the whole file."
     );
 }

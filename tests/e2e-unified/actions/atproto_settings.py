@@ -15,7 +15,8 @@ class AtprotoSettingsActions:
     (docs/goal/behavior/atproto-pds-full.md § App surface).
 
     F1 scope: app credentials (mint/reveal/revoke) + connected-app sessions
-    (revoke) + the per-account external-apps kill-switch. Mint collects no
+    (revoke). The per-account external-apps kill-switch moved to the Connected
+    apps page (`ConnectedAppsActions.set_external_apps_enabled`). Mint collects no
     label/dm_allowed input in F1 (no such IDs were approved) — the client
     auto-labels and defaults dm_allowed to false. Plus, since F4 slice 6c,
     the **OAuth consent approval card** (`atproto-consent-*`) at the bottom.
@@ -55,9 +56,35 @@ class AtprotoSettingsActions:
         return self.driver.is_visible("atproto-depth-selector")
 
     def mint_credential(self) -> None:
-        """Mint a new app credential (auto-labeled; F1 has no label input)."""
+        """Mint a new app credential (auto-labeled; there is no label input).
+        Whether it carries direct-message access is whatever
+        `atproto-app-credential-dm-access` reads at this moment (off by
+        default)."""
         self.driver.wait_for("atproto-app-credential-mint", timeout=10.0)
         self.driver.click("atproto-app-credential-mint")
+
+    def dm_access_checked(self) -> bool:
+        """The mint-time direct-message toggle's state
+        (`atproto-app-credential-dm-access`, `checked` attr)."""
+        return (self.driver.get_attr("atproto-app-credential-dm-access", "checked") or "") == "true"
+
+    def set_dm_access(self, on: bool, timeout: float = 8.0) -> bool:
+        """Set the mint-time direct-message toggle to `on`; True once it reads
+        so. Clicks only when it differs, so it is safe to call repeatedly."""
+        self.driver.wait_for("atproto-app-credential-dm-access", timeout=timeout)
+        if self.dm_access_checked() != on:
+            self.driver.click("atproto-app-credential-dm-access")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.dm_access_checked() == on:
+                return True
+            time.sleep(0.25)
+        return self.dm_access_checked() == on
+
+    def credential_row_text(self, index: int) -> str:
+        """The joined text of credential row `index` (label — created · used,
+        plus the direct-message line on a credential that carries it)."""
+        return self.driver.get_text("atproto-app-credential-item", index)
 
     def credential_count(self) -> int:
         """How many rows the app-credentials list currently renders."""
@@ -107,28 +134,6 @@ class AtprotoSettingsActions:
 
     def revoke_credential(self, index: int = 0) -> None:
         self.driver.click("atproto-app-credential-revoke", index)
-
-    # `atproto-external-apps-enable`'s own on/off, carried via the `state`
-    # attr — same idiom as mail-settings-enabled-toggle.
-    EXTERNAL_APPS_TOGGLE_ID = "atproto-external-apps-enable"
-
-    def external_apps_state(self) -> str:
-        return self.driver.get_attr(self.EXTERNAL_APPS_TOGGLE_ID, "state") or ""
-
-    def wait_for_external_apps_state(self, expected: str, timeout: float = 10.0) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if self.external_apps_state() == expected:
-                return True
-            time.sleep(0.3)
-        return self.external_apps_state() == expected
-
-    def set_external_apps_enabled(self, enabled: bool) -> None:
-        """Drive the kill-switch to `enabled`, idempotently."""
-        self.driver.wait_for(self.EXTERNAL_APPS_TOGGLE_ID, timeout=10.0)
-        want = "on" if enabled else "off"
-        if self.external_apps_state() != want:
-            self.driver.click(self.EXTERNAL_APPS_TOGGLE_ID)
 
     def page_error_text(self, timeout: float = 5.0) -> str:
         """Return the page's `error-message` text once it appears, or "" on

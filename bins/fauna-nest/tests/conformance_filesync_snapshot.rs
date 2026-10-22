@@ -2027,3 +2027,172 @@ async fn snapshot_diff_withholds_both_label_pairs_from_a_q5_admin() {
         "and no set-name salt, which is the set-name axis reopened by this plane"
     );
 }
+
+// ── Kind entries (`ui/backups.md` § Snapshot-list shape → *Kind entries*) ──
+
+async fn create_kind(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    kind: &str,
+) -> fauna_protocol::filesync::SnapshotCreateMessageKindReply {
+    decode(
+        &dispatch(
+            router,
+            state.clone(),
+            ACTOR_A,
+            "fauna.filesync.snapshot.create_message_kind",
+            encode(
+                &fauna_protocol::filesync::SnapshotCreateMessageKindRequest {
+                    kind: kind.into(),
+                    actor_id: None,
+                    extra: Default::default(),
+                },
+            ),
+        )
+        .await
+        .expect("create_message_kind ok"),
+    )
+    .unwrap()
+}
+
+async fn check_kind(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    kind: &str,
+) -> fauna_protocol::filesync::SnapshotCheckReply {
+    decode(
+        &dispatch(
+            router,
+            state.clone(),
+            ACTOR_A,
+            "fauna.filesync.snapshot.check",
+            encode(&SnapshotCheckRequest {
+                message_kind: Some(kind.into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("check ok"),
+    )
+    .unwrap()
+}
+
+/// A conv row is keyed by its channel, so the bearer-keyed list never saw one:
+/// the Conversations entry lists every channel the bearer belongs to.
+#[tokio::test]
+async fn list_conv_lists_the_rows_of_every_channel_the_bearer_belongs_to() {
+    let (router, state) = router_and_state().await;
+    let channel = [0x71u8; 32];
+    state
+        .db
+        .register_actor_channel(&ACTOR_A, &channel)
+        .await
+        .unwrap();
+    fauna_nest::segments::conv::append(
+        &state.conv_segments,
+        &state.db,
+        &channel,
+        b"sealed-conv-body",
+        1_715_000_000_000,
+    )
+    .await
+    .unwrap();
+    let created = create_kind(&router, &state, "conv").await;
+    assert_eq!(created.snapshot_ids.len(), 1);
+
+    let list = |actor: [u8; 32]| {
+        let (router, state) = (&router, state.clone());
+        async move {
+            let reply: SnapshotListReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    actor,
+                    "fauna.filesync.snapshot.list",
+                    encode(&SnapshotListRequest {
+                        message_kind: Some("conv".into()),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("list ok"),
+            )
+            .unwrap();
+            reply.rows
+        }
+    };
+    let rows = list(ACTOR_A).await;
+    assert_eq!(rows.len(), 1, "the member sees the channel's row");
+    assert_eq!(rows[0].id, created.snapshot_ids[0]);
+    assert_eq!(rows[0].message_kind.as_deref(), Some("conv"));
+    assert!(
+        list([0x72u8; 32]).await.is_empty(),
+        "a non-member sees none of it"
+    );
+}
+
+/// An unset kind row resolves to the kind default — `applied`, never `not_set`.
+#[tokio::test]
+async fn prune_set_policy_on_a_kind_applies_the_kind_default() {
+    let (router, state) = router_and_state().await;
+    create_kind(&router, &state, "mail").await;
+    let reply: SnapshotPruneSetPolicyReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            ACTOR_A,
+            "fauna.filesync.snapshot.prune_set_policy",
+            encode(&SnapshotPruneSetPolicyRequest {
+                message_kind: Some("mail".into()),
+                dry_run: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("prune_set_policy ok"),
+    )
+    .unwrap();
+    assert_eq!(reply.policy_state, "applied");
+    assert_eq!(reply.remaining, 1);
+    assert_eq!(reply.pruned, 0);
+}
+
+/// `check` on a kind verifies each active row's pinned segments are on disk —
+/// a healthy store passes; a pinned segment gone from disk is reported.
+#[tokio::test]
+async fn check_on_a_kind_verifies_the_pinned_segments_are_on_disk() {
+    let (router, state) = router_and_state().await;
+    create_kind(&router, &state, "mail").await;
+    let mail = check_kind(&router, &state, "mail").await;
+    assert!(mail.is_ok(), "{mail:?}");
+    assert_eq!(mail.snapshots_checked, 1);
+
+    let channel = [0x73u8; 32];
+    state
+        .db
+        .register_actor_channel(&ACTOR_A, &channel)
+        .await
+        .unwrap();
+    let outcome = fauna_nest::segments::conv::append(
+        &state.conv_segments,
+        &state.db,
+        &channel,
+        b"sealed-conv-body",
+        1_715_000_000_000,
+    )
+    .await
+    .unwrap();
+    create_kind(&router, &state, "conv").await;
+    let healthy = check_kind(&router, &state, "conv").await;
+    assert!(healthy.is_ok(), "{healthy:?}");
+    assert_eq!(healthy.manifests_checked, 1);
+
+    let seg = state
+        .conv_segments
+        .scope_dir(&channel)
+        .join(format!("seg-{:08}.dat", outcome.seg_id));
+    std::fs::remove_file(&seg).unwrap();
+    let broken = check_kind(&router, &state, "conv").await;
+    assert!(!broken.is_ok());
+    assert_eq!(broken.structured_errors[0].kind, "missing_segment");
+}

@@ -89,9 +89,21 @@ class MailAliasesVM @Inject constructor(
 
     fun enable(aliasIdHex: String) = dispatch(MailAliasesAction.Enable(aliasIdHex = aliasIdHex))
 
+    /** Push a disposable's expiry out (mail-aliases.md § Don't do these); the
+     *  shared machine builds the full-overwrite update from the row, so "now"
+     *  is the only thing this shell supplies. */
+    fun extend(aliasIdHex: String) =
+        dispatch(MailAliasesAction.Extend(aliasIdHex = aliasIdHex, nowMs = System.currentTimeMillis()))
+
     fun delete(aliasIdHex: String) = dispatch(MailAliasesAction.Delete(aliasIdHex = aliasIdHex))
 
     fun import(lines: List<String>) = dispatch(MailAliasesAction.Import(lines = lines))
+
+    /** Open one address's history (`mail-aliases-list-item-show-audit`). */
+    fun showAudit(aliasIdHex: String) = dispatch(MailAliasesAction.ShowAudit(aliasIdHex = aliasIdHex))
+
+    /** Close the open history. */
+    fun hideAudit() = dispatch(MailAliasesAction.HideAudit)
 
     private fun dispatch(action: MailAliasesAction) {
         val m = machine ?: return

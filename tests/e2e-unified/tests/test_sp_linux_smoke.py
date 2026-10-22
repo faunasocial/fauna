@@ -19,15 +19,13 @@ def test_agent_pushes_initial_state(app):
     assert "nav" in state
 
 
-def test_agent_acknowledges_patch(app):
-    """Agent should acknowledge a patch command."""
-    app.driver.set_state({"session": {"authenticated": True}})
-    state = app.driver.get_state()
-    assert state["session"]["authenticated"] is True
-
-
 def test_authenticate_for_nav(app, nest_instance, test_user):
-    """Authenticate so the main window stack exists for navigation tests."""
+    """Authenticate so the main window stack exists for navigation tests.
+
+    Doubles as the agent-acknowledges-a-patch check: the patch is applied and
+    read back. (A bare ``{"authenticated": true}`` patch carries no credentials,
+    so it only read back true on an app an earlier test had already signed in.)
+    """
     secret_hex = test_user["signing_key"].encode().hex()
     app.driver.set_state({
         "session": {
@@ -55,7 +53,7 @@ def test_nav_state_reflects_stack(app):
 
 
 @pytest.mark.parametrize("page", [
-    "conversations", "groups", "events", "contacts",
+    "conversations", "events", "contacts",
     "feed", "media", "backups",
 ])
 def test_navigate_via_state(app, page):

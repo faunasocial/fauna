@@ -26,9 +26,10 @@
 //! **Re-enable** is wired: `revoke` sets `disabled=true` and `enable`
 //! (`fauna.bridges.enable_account_alias`) sets it back to `false`, so the
 //! disabled-toggle is two-way — disable is no longer a one-way trap
-//! (`mail-aliases.md:156`). One slice lands later (UI is forward-compatible):
-//! the per-alias **audit** disclosure (`mail-aliases-list-item-show-audit` →
-//! `list_account_alias_hits`).
+//! (`mail-aliases.md:156`). The per-alias **history** disclosure
+//! (`mail-aliases-list-item-show-audit` → `list_account_alias_hits`,
+//! `mail-aliases.md` § Per-alias-hit audit list) is [`MailAliasesAction::ShowAudit`]
+//! / [`MailAliasesAction::HideAudit`] over the snapshot's `audit`.
 
 use std::sync::{Arc, Mutex};
 
@@ -40,7 +41,7 @@ use fauna_mail::aliases::{
 };
 use fauna_protocol::MaybeSendSync;
 use fauna_protocol::bridge_routing::{
-    AliasControls, AliasRow, ImportAliasOutcome, ImportAliasStatus,
+    AliasControls, AliasHitRow, AliasRow, ImportAliasOutcome, ImportAliasStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +144,52 @@ pub fn alias_hits_label(hit_count: u64, last_hit_date: Option<String>) -> Locali
         }
         None => LocalizedText::key_arg("mail_aliases.hits", "count", hit_count.to_string()),
     }
+}
+
+/// How far one tap of `mail-aliases-list-item-extend-button` pushes a
+/// disposable's expiry: the disposable default TTL (`mail-aliases.md`
+/// § Don't do these — "the user can extend (edit) before expiry").
+pub const ALIAS_EXTEND_MS: i64 =
+    fauna_mail::aliases::DISPOSABLE_DEFAULT_TTL_DAYS as i64 * 86_400_000;
+
+/// Whether an alias is a disposable that still accepts mail — the only kind
+/// `update_account_alias` lets the user extend (`alias_not_extendable`
+/// otherwise): not past its expiry, and uses left (`None` = unlimited).
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn alias_is_extendable(
+    kind: AliasKind,
+    expires_at_ms: Option<i64>,
+    uses_remaining: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    kind == AliasKind::Disposable
+        && expires_at_ms.is_some_and(|at| at > now_ms)
+        && uses_remaining.is_none_or(|left| left > 0)
+}
+
+/// The expiry an extend sends: [`ALIAS_EXTEND_MS`] past the later of now and
+/// the current expiry, so a tap never shortens the address's life.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn extended_expiry_ms(expires_at_ms: Option<i64>, now_ms: i64) -> u64 {
+    (expires_at_ms.unwrap_or(now_ms).max(now_ms) + ALIAS_EXTEND_MS).max(0) as u64
+}
+
+/// The `mail-aliases-list-item-expires-at` text: when a disposable stops
+/// accepting mail, or that it already has; `None` for an alias with no expiry.
+/// `expiry_date` is the expiry pre-formatted in the viewer's local timezone,
+/// the [`alias_hits_label`] split.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn alias_expiry_label(
+    expires_at_ms: Option<i64>,
+    now_ms: i64,
+    expiry_date: String,
+) -> Option<LocalizedText> {
+    let at = expires_at_ms?;
+    Some(if at > now_ms {
+        LocalizedText::key_arg("mail_aliases.expires_on", "date", expiry_date)
+    } else {
+        LocalizedText::key("mail_aliases.expired")
+    })
 }
 
 /// One alias row as `mail-aliases-list` renders it. Projected from the wire
@@ -318,6 +365,45 @@ impl From<Vec<ImportAliasOutcome>> for ImportResultView {
     }
 }
 
+/// How many of an address's most recent hits its history disclosure shows
+/// (`mail-aliases.md` § Per-alias-hit audit list: "the last 100 hits").
+pub const ALIAS_AUDIT_LIMIT: u32 = 100;
+
+/// One received message in an address's history — a `mail-aliases-audit-item`
+/// row: the address it arrived on (a wildcard's or a disposable's concrete
+/// address), the sending domain, and when. The time is epoch-millis; each app
+/// formats it in the viewer's own timezone, like the last-hit date.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AliasHitView {
+    pub hit_id_hex: String,
+    pub matched_address: String,
+    /// Empty when the sending server gave none.
+    pub sender_domain: String,
+    pub received_at_ms: i64,
+}
+
+impl From<AliasHitRow> for AliasHitView {
+    fn from(r: AliasHitRow) -> Self {
+        Self {
+            hit_id_hex: hex::encode(&r.hit_id),
+            matched_address: r.matched_address,
+            sender_domain: r.sender_domain,
+            received_at_ms: r.received_at,
+        }
+    }
+}
+
+/// The open history disclosure: which address's, and its newest
+/// [`ALIAS_AUDIT_LIMIT`] hits, newest first. Empty `hits` is the
+/// `mail-aliases-audit-empty` state — nothing has arrived on it yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct AliasAuditView {
+    pub alias_id_hex: String,
+    pub hits: Vec<AliasHitView>,
+}
+
 /// Coarse machine status for spinner / disabled-control rendering. Mirrors
 /// `ForwarderStatus`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,6 +442,12 @@ pub struct MailAliasesSnapshot {
     /// (`conflicts_with_existing_alias` / `reserved_local_part` / validation
     /// failures, etc.). Cleared at the start of the next dispatch.
     pub error: Option<String>,
+    /// The one address whose history disclosure is open, with its hits — set by
+    /// [`MailAliasesAction::ShowAudit`], cleared by
+    /// [`MailAliasesAction::HideAudit`] or when that address leaves the list.
+    /// Other actions leave it open.
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub audit: Option<AliasAuditView>,
 }
 
 impl MailAliasesSnapshot {
@@ -367,6 +459,7 @@ impl MailAliasesSnapshot {
             last_import_result: None,
             status: AliasesStatus::Idle,
             error: None,
+            audit: None,
         }
     }
 }
@@ -417,12 +510,25 @@ pub enum MailAliasesAction {
     /// disabled-toggle's enable direction so disable is no longer a one-way trap
     /// (`mail-aliases.md:156`).
     Enable { alias_id_hex: String },
+    /// Push a still-alive disposable's expiry out by [`ALIAS_EXTEND_MS`]
+    /// (`mail-aliases-list-item-extend-button`; `mail-aliases.md` § Don't do
+    /// these). The row's pattern + controls ride along unchanged (the update is
+    /// a full overwrite); the new expiry is [`extended_expiry_ms`] at `now_ms`.
+    /// A row that is not extendable ([`alias_is_extendable`]) is refused before
+    /// any round trip.
+    Extend { alias_id_hex: String, now_ms: i64 },
     /// Destructive irreversible remove (overflow-menu Delete).
     Delete { alias_id_hex: String },
     /// Bulk-import exact aliases from pasted lines (`mail-aliases.md` § Bulk
     /// import). Best-effort per line; the per-line outcomes land in the
     /// snapshot's `last_import_result` and the list refreshes.
     Import { lines: Vec<String> },
+    /// Open one address's history (`mail-aliases-list-item-show-audit`): its
+    /// newest [`ALIAS_AUDIT_LIMIT`] hits land in the snapshot's `audit`,
+    /// replacing any other address's open history.
+    ShowAudit { alias_id_hex: String },
+    /// Close the open history disclosure.
+    HideAudit,
 }
 
 /// WS-RPC seam to nest. Per-app glue implements this over the User-class
@@ -449,6 +555,15 @@ pub trait MailAliasesNest: MaybeSendSync {
         pattern: String,
         controls: AliasControls,
     ) -> Result<(), NestError>;
+    /// `fauna.bridges.update_account_alias` carrying a new `expires_at_ms` —
+    /// the disposable extend (`MailAccountClient::extend_disposable_alias`).
+    async fn extend_disposable_alias(
+        &self,
+        alias_id: Vec<u8>,
+        pattern: String,
+        controls: AliasControls,
+        expires_at_ms: u64,
+    ) -> Result<(), NestError>;
     /// `fauna.bridges.revoke_account_alias` — flip `disabled = true`.
     async fn revoke_account_alias(&self, alias_id: Vec<u8>) -> Result<(), NestError>;
     /// `fauna.bridges.enable_account_alias` — flip `disabled = false` (reverse of revoke).
@@ -469,6 +584,13 @@ pub trait MailAliasesNest: MaybeSendSync {
         &self,
         lines: Vec<String>,
     ) -> Result<Vec<ImportAliasOutcome>, NestError>;
+    /// `fauna.bridges.list_account_alias_hits` — the newest `limit` hits on one
+    /// of the caller's own aliases, newest first.
+    async fn list_account_alias_hits(
+        &self,
+        alias_id: Vec<u8>,
+        limit: u32,
+    ) -> Result<Vec<AliasHitRow>, NestError>;
 }
 
 /// Decode a row's hex alias id to the 16-byte wire form. A corrupted snapshot
@@ -528,8 +650,32 @@ impl MailAliasesMachine {
         let aliases: Vec<AliasView> = rows.into_iter().map(AliasView::from).collect();
         let default_domain = derive_default_domain(&aliases);
         let mut snap = self.inner.lock().expect("snapshot mutex");
+        // A deleted address takes its open history with it.
+        if snap
+            .audit
+            .as_ref()
+            .is_some_and(|a| !aliases.iter().any(|v| v.alias_id_hex == a.alias_id_hex))
+        {
+            snap.audit = None;
+        }
         snap.aliases = aliases;
         snap.default_domain = default_domain;
+        snap.status = AliasesStatus::Idle;
+        Ok(())
+    }
+
+    async fn show_audit(&self, alias_id_hex: String) -> Result<(), DispatchError> {
+        let alias_id = decode_alias_id(&alias_id_hex)?;
+        self.set_status(AliasesStatus::Loading);
+        let hits = self
+            .nest
+            .list_account_alias_hits(alias_id, ALIAS_AUDIT_LIMIT)
+            .await?;
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.audit = Some(AliasAuditView {
+            alias_id_hex,
+            hits: hits.into_iter().map(AliasHitView::from).collect(),
+        });
         snap.status = AliasesStatus::Idle;
         Ok(())
     }
@@ -652,6 +798,40 @@ impl MailAliasesMachine {
         self.refresh().await
     }
 
+    async fn extend(&self, alias_id_hex: String, now_ms: i64) -> Result<(), DispatchError> {
+        let alias_id = decode_alias_id(&alias_id_hex)?;
+        let view = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .aliases
+            .iter()
+            .find(|a| a.alias_id_hex == alias_id_hex)
+            .cloned()
+            .ok_or_else(|| DispatchError::InvalidState("unknown alias".into()))?;
+        if !alias_is_extendable(view.kind, view.expires_at_ms, view.uses_remaining, now_ms) {
+            return Err(DispatchError::Nest(NestError::Rejected(
+                "fauna.bridges.alias_not_extendable".into(),
+            )));
+        }
+        self.set_status(AliasesStatus::Working);
+        let controls = AliasControls {
+            label: view.label,
+            spam_threshold_override: view.spam_threshold_override,
+            rate_limit_per_hour: view.rate_limit_per_hour,
+            rate_limit_per_day: view.rate_limit_per_day,
+        };
+        self.nest
+            .extend_disposable_alias(
+                alias_id,
+                view.pattern,
+                controls,
+                extended_expiry_ms(view.expires_at_ms, now_ms),
+            )
+            .await?;
+        self.refresh().await
+    }
+
     async fn revoke(&self, alias_id_hex: String) -> Result<(), DispatchError> {
         let alias_id = decode_alias_id(&alias_id_hex)?;
         self.set_status(AliasesStatus::Working);
@@ -737,8 +917,17 @@ impl MailAliasesMachine {
             }
             MailAliasesAction::Revoke { alias_id_hex } => self.revoke(alias_id_hex).await,
             MailAliasesAction::Enable { alias_id_hex } => self.enable(alias_id_hex).await,
+            MailAliasesAction::Extend {
+                alias_id_hex,
+                now_ms,
+            } => self.extend(alias_id_hex, now_ms).await,
             MailAliasesAction::Delete { alias_id_hex } => self.delete(alias_id_hex).await,
             MailAliasesAction::Import { lines } => self.import(lines).await,
+            MailAliasesAction::ShowAudit { alias_id_hex } => self.show_audit(alias_id_hex).await,
+            MailAliasesAction::HideAudit => {
+                self.inner.lock().expect("snapshot mutex").audit = None;
+                Ok(())
+            }
         };
         if let Err(ref e) = result {
             let mut snap = self.inner.lock().expect("snapshot mutex");
@@ -763,6 +952,11 @@ mod tests {
     struct FakeNest {
         rows: StdMutex<Vec<AliasRow>>,
         next_id: StdMutex<u8>,
+        /// `(alias_id, hit)` — the hits `list_account_alias_hits` returns,
+        /// newest first.
+        hits: StdMutex<Vec<(Vec<u8>, AliasHitRow)>>,
+        /// The `limit` the last hits read asked for.
+        hits_limit: StdMutex<Option<u32>>,
     }
 
     fn row(id: u8, domain: &str, kind: &str, pattern: &str) -> AliasRow {
@@ -830,6 +1024,24 @@ mod tests {
             r.spam_threshold_override = controls.spam_threshold_override;
             r.rate_limit_per_hour = controls.rate_limit_per_hour;
             r.rate_limit_per_day = controls.rate_limit_per_day;
+            Ok(())
+        }
+
+        async fn extend_disposable_alias(
+            &self,
+            alias_id: Vec<u8>,
+            pattern: String,
+            controls: AliasControls,
+            expires_at_ms: u64,
+        ) -> Result<(), NestError> {
+            self.update_account_alias(alias_id.clone(), pattern, controls)
+                .await?;
+            let mut rows = self.rows.lock().unwrap();
+            let r = rows
+                .iter_mut()
+                .find(|r| r.alias_id.as_ref() == alias_id.as_slice())
+                .expect("updated above");
+            r.expires_at = Some(expires_at_ms as i64);
             Ok(())
         }
 
@@ -936,30 +1148,162 @@ mod tests {
             }
             Ok(outcomes)
         }
+
+        async fn list_account_alias_hits(
+            &self,
+            alias_id: Vec<u8>,
+            limit: u32,
+        ) -> Result<Vec<AliasHitRow>, NestError> {
+            if !self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.alias_id.as_ref() == alias_id.as_slice())
+            {
+                return Err(NestError::Rejected("fauna.bridges.not_found".into()));
+            }
+            *self.hits_limit.lock().unwrap() = Some(limit);
+            Ok(self
+                .hits
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == &alias_id)
+                .map(|(_, hit)| hit.clone())
+                .collect())
+        }
     }
 
     fn machine_with(rows: Vec<AliasRow>) -> MailAliasesMachine {
         MailAliasesMachine::new(Arc::new(FakeNest {
             rows: StdMutex::new(rows),
             next_id: StdMutex::new(0x10),
+            ..Default::default()
         }))
+    }
+
+    fn hit(id: u8, matched: &str, sender_domain: &str, at: i64) -> AliasHitRow {
+        AliasHitRow {
+            hit_id: ByteBuf::from(vec![id; 16]),
+            matched_address: matched.into(),
+            sender_domain: sender_domain.into(),
+            received_at: at,
+        }
+    }
+
+    #[tokio::test]
+    async fn show_audit_opens_one_addresses_newest_hits_and_hide_closes_it() {
+        let shop = format!("bob-shop@{}", "mail.test");
+        let nest = Arc::new(FakeNest {
+            rows: StdMutex::new(vec![
+                row(0x01, "mail.test", "exact", "bob"),
+                row(0x02, "mail.test", "wildcard_prefix", "bob-"),
+            ]),
+            next_id: StdMutex::new(0x10),
+            hits: StdMutex::new(vec![
+                (vec![0x02; 16], hit(0x31, &shop, "spammer.test", 2_000)),
+                (vec![0x02; 16], hit(0x30, &shop, "shop.test", 1_000)),
+            ]),
+            ..Default::default()
+        });
+        let m = MailAliasesMachine::new(nest.clone());
+        m.hydrate().await.unwrap();
+        let wildcard = hex::encode([0x02u8; 16]);
+        m.dispatch(MailAliasesAction::ShowAudit {
+            alias_id_hex: wildcard.clone(),
+        })
+        .await
+        .unwrap();
+        let audit = m.snapshot().audit.expect("history open");
+        assert_eq!(audit.alias_id_hex, wildcard);
+        assert_eq!(
+            audit.hits,
+            vec![
+                AliasHitView {
+                    hit_id_hex: hex::encode([0x31u8; 16]),
+                    matched_address: shop.clone(),
+                    sender_domain: "spammer.test".into(),
+                    received_at_ms: 2_000,
+                },
+                AliasHitView {
+                    hit_id_hex: hex::encode([0x30u8; 16]),
+                    matched_address: shop.clone(),
+                    sender_domain: "shop.test".into(),
+                    received_at_ms: 1_000,
+                },
+            ]
+        );
+        assert_eq!(*nest.hits_limit.lock().unwrap(), Some(ALIAS_AUDIT_LIMIT));
+
+        // Another action leaves it open; another address replaces it with its
+        // own (empty) history; Hide closes it.
+        m.dispatch(MailAliasesAction::Refresh).await.unwrap();
+        assert!(m.snapshot().audit.is_some());
+        m.dispatch(MailAliasesAction::ShowAudit {
+            alias_id_hex: hex::encode([0x01u8; 16]),
+        })
+        .await
+        .unwrap();
+        let audit = m.snapshot().audit.expect("history open");
+        assert_eq!(audit.alias_id_hex, hex::encode([0x01u8; 16]));
+        assert!(audit.hits.is_empty());
+        m.dispatch(MailAliasesAction::HideAudit).await.unwrap();
+        assert!(m.snapshot().audit.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_the_address_closes_its_history() {
+        let m = machine_with(vec![
+            row(0x01, "mail.test", "exact", "bob"),
+            row(0x02, "mail.test", "wildcard_prefix", "bob-"),
+        ]);
+        m.hydrate().await.unwrap();
+        let wildcard = hex::encode([0x02u8; 16]);
+        m.dispatch(MailAliasesAction::ShowAudit {
+            alias_id_hex: wildcard.clone(),
+        })
+        .await
+        .unwrap();
+        m.dispatch(MailAliasesAction::Delete {
+            alias_id_hex: wildcard,
+        })
+        .await
+        .unwrap();
+        assert!(m.snapshot().audit.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refused_history_read_shows_the_error_and_opens_nothing() {
+        let m = machine_with(vec![row(0x01, "mail.test", "exact", "bob")]);
+        m.hydrate().await.unwrap();
+        let err = m
+            .dispatch(MailAliasesAction::ShowAudit {
+                alias_id_hex: hex::encode([0x09u8; 16]),
+            })
+            .await;
+        assert!(err.is_err());
+        let snap = m.snapshot();
+        assert!(snap.audit.is_none());
+        assert!(snap.error.is_some());
+        assert_eq!(snap.status, AliasesStatus::Idle);
     }
 
     #[tokio::test]
     async fn refresh_projects_rows_and_default_domain() {
         let m = machine_with(vec![
-            row(0x01, "example.com", "exact", "bob"),
-            row(0x02, "example.com", "wildcard_prefix", "bob-"),
+            row(0x01, "example.net", "exact", "bob"),
+            row(0x02, "example.net", "wildcard_prefix", "bob-"),
         ]);
         m.hydrate().await.unwrap();
         let snap = m.snapshot();
         assert_eq!(snap.aliases.len(), 2);
         assert_eq!(snap.aliases[0].kind, AliasKind::Exact);
-        assert_eq!(snap.aliases[0].address, "bob@example.com");
+        assert_eq!(snap.aliases[0].address, "bob@example.net");
         assert_eq!(snap.aliases[1].kind, AliasKind::Wildcard);
-        assert_eq!(snap.aliases[1].address, "bob-*@example.com");
+        assert_eq!(snap.aliases[1].address, "bob-*@example.net");
         // Default domain comes from the (only) exact alias.
-        assert_eq!(snap.default_domain.as_deref(), Some("example.com"));
+        assert_eq!(snap.default_domain.as_deref(), Some("example.net"));
         assert_eq!(snap.status, AliasesStatus::Idle);
         assert!(snap.error.is_none());
     }
@@ -970,7 +1314,7 @@ mod tests {
     /// mail_aliases.rs`) — not time-sortable — so a min-by-hex heuristic picks
     /// an effectively random domain once a user has exact aliases on more
     /// than one domain (own-domain handle + a locally-registered
-    /// `bob.smith@example.com`-style extra). Reproduces the reported bug:
+    /// `bob.smith@example.net`-style extra). Reproduces the reported bug:
     /// the canonical row here (`0x02`) has a LEXICOGRAPHICALLY LARGER id hex
     /// than the non-canonical row (`0x01`), so a hex-min heuristic would pick
     /// the wrong domain even though the canonical row lists second.
@@ -995,16 +1339,16 @@ mod tests {
     /// `AliasView` the UI renders read-only (`mail-aliases.md` § Aliases UX).
     #[test]
     fn alias_view_projects_is_canonical() {
-        let mut canonical = row(0x01, "example.com", "exact", "bob");
+        let mut canonical = row(0x01, "example.net", "exact", "bob");
         canonical.is_canonical = true;
-        let ordinary = row(0x02, "example.com", "exact", "bob.smith");
+        let ordinary = row(0x02, "example.net", "exact", "bob.smith");
         assert!(AliasView::from(canonical).is_canonical);
         assert!(!AliasView::from(ordinary).is_canonical);
     }
 
     #[tokio::test]
     async fn create_exact_validates_and_relists() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         m.dispatch(MailAliasesAction::Create {
             kind: AliasKind::Exact,
@@ -1022,7 +1366,7 @@ mod tests {
             .iter()
             .find(|a| a.pattern == "bob.smith")
             .unwrap();
-        assert_eq!(added.address, "bob.smith@example.com");
+        assert_eq!(added.address, "bob.smith@example.net");
         assert_eq!(added.label, "work");
         assert_eq!(added.spam_threshold_override, Some(8));
         assert!(snap.error.is_none());
@@ -1030,7 +1374,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_reserved_local_part_rejected_client_side() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         // `postmaster` is reserved — the shared validator refuses before any RPC.
         let err = m
@@ -1051,7 +1395,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_wildcard_strips_star_and_validates_lead() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         // User typed `news-*`; the machine strips `*`, validates the `news-`
         // prefix, and stores the literal prefix.
@@ -1071,12 +1415,12 @@ mod tests {
             .find(|a| a.kind == AliasKind::Wildcard)
             .unwrap();
         assert_eq!(added.pattern, "news-");
-        assert_eq!(added.address, "news-*@example.com");
+        assert_eq!(added.address, "news-*@example.net");
     }
 
     #[tokio::test]
     async fn create_wildcard_too_short_rejected_client_side() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         // `a-` has only one lead char (< MIN_WILDCARD_PREFIX_LEAD).
         let err = m
@@ -1114,8 +1458,8 @@ mod tests {
     #[tokio::test]
     async fn create_collision_surfaces_error_and_keeps_list() {
         let m = machine_with(vec![
-            row(0x01, "example.com", "exact", "bob"),
-            row(0x02, "example.com", "exact", "bob.smith"),
+            row(0x01, "example.net", "exact", "bob"),
+            row(0x02, "example.net", "exact", "bob.smith"),
         ]);
         m.hydrate().await.unwrap();
         let err = m
@@ -1144,7 +1488,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_disposable_sets_minted_address_and_adds_row() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         m.dispatch(MailAliasesAction::GenerateDisposable {
             ttl_days: None,
@@ -1156,7 +1500,7 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(
             snap.last_minted_address.as_deref(),
-            Some("bob-temp-a2b3c4@example.com")
+            Some("bob-temp-a2b3c4@example.net")
         );
         let disp = snap
             .aliases
@@ -1172,8 +1516,8 @@ mod tests {
     async fn revoke_then_enable_round_trips_disabled() {
         // The reported disable-trap: disabling an alias must be reversible.
         let m = machine_with(vec![
-            row(0x01, "example.com", "exact", "bob"),
-            row(0x02, "example.com", "wildcard_prefix", "bob-"),
+            row(0x01, "example.net", "exact", "bob"),
+            row(0x02, "example.net", "wildcard_prefix", "bob-"),
         ]);
         m.hydrate().await.unwrap();
         let id_hex = m.snapshot().aliases[1].alias_id_hex.clone();
@@ -1199,7 +1543,7 @@ mod tests {
 
     #[tokio::test]
     async fn next_dispatch_clears_minted_address() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         m.dispatch(MailAliasesAction::GenerateDisposable {
             ttl_days: None,
@@ -1213,9 +1557,105 @@ mod tests {
         assert!(m.snapshot().last_minted_address.is_none());
     }
 
+    const NOW: i64 = 1_800_000_000_000;
+
+    #[test]
+    fn only_a_live_disposable_is_extendable() {
+        let later = Some(NOW + 1);
+        assert!(alias_is_extendable(
+            AliasKind::Disposable,
+            later,
+            Some(1),
+            NOW
+        ));
+        assert!(alias_is_extendable(AliasKind::Disposable, later, None, NOW));
+        assert!(!alias_is_extendable(
+            AliasKind::Disposable,
+            Some(NOW),
+            Some(1),
+            NOW
+        ));
+        assert!(!alias_is_extendable(
+            AliasKind::Disposable,
+            later,
+            Some(0),
+            NOW
+        ));
+        assert!(!alias_is_extendable(AliasKind::Exact, later, None, NOW));
+    }
+
+    #[test]
+    fn an_extend_never_shortens_the_expiry() {
+        assert_eq!(
+            extended_expiry_ms(Some(NOW + 5), NOW),
+            (NOW + 5 + ALIAS_EXTEND_MS) as u64
+        );
+        assert_eq!(
+            extended_expiry_ms(Some(NOW - 5), NOW),
+            (NOW + ALIAS_EXTEND_MS) as u64
+        );
+    }
+
+    #[test]
+    fn the_expiry_label_says_when_or_that_it_has_passed() {
+        assert_eq!(alias_expiry_label(None, NOW, "x".into()), None);
+        assert_eq!(
+            alias_expiry_label(Some(NOW + 1), NOW, "2027-01-15".into()),
+            Some(LocalizedText::key_arg(
+                "mail_aliases.expires_on",
+                "date",
+                "2027-01-15".to_string()
+            ))
+        );
+        assert_eq!(
+            alias_expiry_label(Some(NOW), NOW, "x".into()),
+            Some(LocalizedText::key("mail_aliases.expired"))
+        );
+    }
+
+    #[tokio::test]
+    async fn extend_moves_the_expiry_and_keeps_the_controls() {
+        let mut seed = row(0x07, "example.net", ALIAS_KIND_DISPOSABLE, "abcdef");
+        seed.label = "shop".into();
+        seed.rate_limit_per_day = Some(9);
+        seed.expires_at = Some(NOW + 1000);
+        seed.uses_remaining = Some(1);
+        let m = machine_with(vec![seed]);
+        m.hydrate().await.unwrap();
+        let id_hex = m.snapshot().aliases[0].alias_id_hex.clone();
+        m.dispatch(MailAliasesAction::Extend {
+            alias_id_hex: id_hex,
+            now_ms: NOW,
+        })
+        .await
+        .unwrap();
+        let row = &m.snapshot().aliases[0];
+        assert_eq!(row.expires_at_ms, Some(NOW + 1000 + ALIAS_EXTEND_MS));
+        assert_eq!(row.label, "shop");
+        assert_eq!(row.rate_limit_per_day, Some(9));
+    }
+
+    #[tokio::test]
+    async fn extend_refuses_an_expired_disposable_without_a_round_trip() {
+        let mut seed = row(0x08, "example.net", ALIAS_KIND_DISPOSABLE, "abcdef");
+        seed.expires_at = Some(NOW - 1);
+        let m = machine_with(vec![seed]);
+        m.hydrate().await.unwrap();
+        let id_hex = m.snapshot().aliases[0].alias_id_hex.clone();
+        let err = m
+            .dispatch(MailAliasesAction::Extend {
+                alias_id_hex: id_hex,
+                now_ms: NOW,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("alias_not_extendable"), "{err}");
+        assert_eq!(m.snapshot().aliases[0].expires_at_ms, Some(NOW - 1));
+    }
+
     #[tokio::test]
     async fn update_preserves_unexposed_per_day_cap() {
-        let mut seed = row(0x05, "example.com", "exact", "bob");
+        let mut seed = row(0x05, "example.net", "exact", "bob");
         seed.rate_limit_per_day = Some(500);
         let m = machine_with(vec![seed]);
         m.hydrate().await.unwrap();
@@ -1239,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_sets_disabled_and_keeps_row() {
-        let m = machine_with(vec![row(0x07, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x07, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         let id_hex = m.snapshot().aliases[0].alias_id_hex.clone();
         m.dispatch(MailAliasesAction::Revoke {
@@ -1254,7 +1694,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_row() {
-        let m = machine_with(vec![row(0x09, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x09, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         let id_hex = m.snapshot().aliases[0].alias_id_hex.clone();
         m.dispatch(MailAliasesAction::Delete {
@@ -1267,7 +1707,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_malformed_hex_surfaces_wrap_without_calling_nest() {
-        let m = machine_with(vec![row(0x01, "example.com", "exact", "bob")]);
+        let m = machine_with(vec![row(0x01, "example.net", "exact", "bob")]);
         m.hydrate().await.unwrap();
         let err = m
             .dispatch(MailAliasesAction::Delete {

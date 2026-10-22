@@ -20,13 +20,13 @@
   // post-dispatch snapshot. Errors surface via the snapshot's `error` →
   // `error-message` (MessageBanner), never faked green.
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-files` page.
-  import { identity } from '$lib/store';
-  import { webdavPolicyMachine } from '$lib/rpc';
-  import { ensureWasm } from '$lib/wasm';
+  import { identity } from '#lib/store';
+  import { webdavPolicyMachine } from '#lib/rpc';
+  import { ensureWasm } from '#lib/wasm';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Mirrors the shared serde JSON (snake_case across serde_wasm_bindgen; the status
   // enum serializes as its variant-name string).

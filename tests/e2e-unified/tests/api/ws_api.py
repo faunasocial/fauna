@@ -25,6 +25,8 @@ Wire contracts (verified against `bins/fauna-nest/src/{posts,feed}_handlers.rs`
 * ``fauna.feed.list``     — ``{}`` → ``{"feeds": [FeedSummary]}``.
 * ``fauna.feed.posts``    — ``{"feed_id", "limit"?, ...}`` → ``{"posts": [FeedPostItem], ...}``.
 * ``fauna.feed.local.posts`` — ``{"limit"?, ...}`` → ``{"posts": [...], ...}``.
+* ``fauna.feed.author.posts`` — ``{"author": hex, "cursor"?, "limit"?}`` →
+  ``{"posts": [...], "cursor"?}``.
 * ``fauna.feed.delete``   — ``{"feed_id"}`` → ``{}``.
 * ``fauna.bridges.list``  — ``{}`` → ``{"bridges": [WireBridgeStatus]}``; plus
   ``link`` / ``unlink`` / ``set_settings`` — the unified bridge control plane
@@ -487,6 +489,25 @@ def trending_feed_posts(port: int, actor: dict, limit: Optional[int] = None) -> 
     client = _client_for(_base_url(port), actor)
     reply = client.call("fauna.feed.trending.posts", payload)
     return reply.get("posts", [])
+
+
+def author_feed_posts(port: int, actor: dict, author: str,
+                      cursor: Optional[int] = None,
+                      limit: Optional[int] = None) -> dict:
+    """``fauna.feed.author.posts`` — one author's posts, the profile page's Posts
+    tab read (``feed.md`` § The read model → *The author read*).
+
+    Returns the whole reply (``posts`` + the trailing ``created_at`` ``cursor``,
+    absent on an empty page) so a caller can page. Always chronological; no
+    rules, no search. ``author`` is the hex actor id. ``User``-class kind.
+    """
+    payload: dict[str, Any] = {"author": author}
+    if cursor is not None:
+        payload["cursor"] = cursor
+    if limit is not None:
+        payload["limit"] = limit
+    client = _client_for(_base_url(port), actor)
+    return client.call("fauna.feed.author.posts", payload)
 
 
 def delete_feed(port: int, actor: dict, feed_id: str) -> None:

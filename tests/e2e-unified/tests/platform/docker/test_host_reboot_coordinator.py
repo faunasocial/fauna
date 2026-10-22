@@ -31,6 +31,7 @@ import pytest
 
 from .helpers import (
     SCANNER_SIDECAR_IMAGE,
+    cloud_init_write_files,
     ensure_image,
     fence_cpuset_args,
     remove_container,
@@ -56,30 +57,6 @@ CEILING_SECS = 86400
 HOST_IMAGE = SCANNER_SIDECAR_IMAGE
 
 
-def _write_files(user_data: str) -> dict[str, str]:
-    """``{path: content}`` for every ``write_files`` entry of the rendered
-    user-data. `build_cloud_init` emits each as ``  - path: P`` /
-    ``    content: |`` / the body indented six spaces / ``    permissions:``,
-    so the block scalar is read back by that indent."""
-    files: dict[str, str] = {}
-    lines = user_data.splitlines()
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.startswith("  - path: ") and i + 1 < len(lines) \
-                and lines[i + 1] == "    content: |":
-            path = line[len("  - path: "):].strip()
-            body = []
-            i += 2
-            while i < len(lines) and (lines[i].startswith("      ") or lines[i] == ""):
-                body.append(lines[i][6:])
-                i += 1
-            files[path] = "\n".join(body).rstrip("\n") + "\n"
-            continue
-        i += 1
-    return files
-
-
 @pytest.fixture(scope="module")
 def user_data(render_cloud_init_binary) -> str:
     r = subprocess.run([render_cloud_init_binary], capture_output=True, text=True,
@@ -90,7 +67,7 @@ def user_data(render_cloud_init_binary) -> str:
 
 @pytest.fixture(scope="module")
 def shipped_files(user_data) -> dict[str, str]:
-    return _write_files(user_data)
+    return cloud_init_write_files(user_data)
 
 
 @pytest.fixture(scope="module")

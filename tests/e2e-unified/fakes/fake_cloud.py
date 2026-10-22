@@ -52,8 +52,27 @@ except ImportError:  # top-level import from within fakes/
 _CORS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    # OVH signs with its own four headers (vps/ovh.rs).
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, X-Ovh-Application, X-Ovh-Consumer, "
+        "X-Ovh-Timestamp, X-Ovh-Signature"
+    ),
 }
+
+
+def _ovh_flavor(name: str, vcpus: int, ram_gb: int, disk_gb: int) -> dict:
+    """One linux, available OVH flavor whose monthly plan code the fake
+    catalogue prices (`OvhHandlers.catalogue_prices`)."""
+    return {
+        "id": f"flavor-{name}",
+        "name": name,
+        "osType": "linux",
+        "available": True,
+        "vcpus": vcpus,
+        "ram": ram_gb,
+        "disk": disk_gb,
+        "planCodes": {"monthly": f"{name}.monthly.postpaid", "hourly": name},
+    }
 
 
 @pytest.fixture(scope="session")
@@ -225,13 +244,21 @@ class HetznerCloudHandlers:
         # GET /datacenters until the real API removed that endpoint.)
         self._h.expect_request(f"{p}/locations", method="GET").respond_with_json(
             {
+                # Two locations, so a location change has somewhere to go;
+                # the first stays the default every other test relies on.
                 "locations": [
                     {
                         "name": "fsn1",
                         "description": "Falkenstein DC Park 1",
                         "city": "Falkenstein",
                         "country": "DE",
-                    }
+                    },
+                    {
+                        "name": "hel1",
+                        "description": "Helsinki DC Park 1",
+                        "city": "Helsinki",
+                        "country": "FI",
+                    },
                 ]
             },
             headers=_CORS,
@@ -250,7 +277,9 @@ class HetznerCloudHandlers:
         # GET /server_types — names MUST be in Hetzner's curated_offers
         # (providers_generated.rs: ["cx23","cx33","cx43","ccx13","ccx23"]);
         # list_server_types() drops any type not on that list, so a
-        # non-curated name (e.g. "cax11") would yield zero radios.
+        # non-curated name (e.g. "cax11") would yield zero radios. Each type
+        # is priced per location, differently, so a location change shows
+        # in the radios (registry.md § Server offers follow the location).
         self._h.expect_request(f"{p}/server_types", method="GET").respond_with_json(
             {
                 "server_types": [
@@ -259,21 +288,30 @@ class HetznerCloudHandlers:
                         "cores": 2,
                         "memory": 4.0,
                         "disk": 40,
-                        "prices": [{"location": "fsn1", "price_monthly": {"gross": "4.51"}}],
+                        "prices": [
+                            {"location": "fsn1", "price_monthly": {"gross": "4.51"}},
+                            {"location": "hel1", "price_monthly": {"gross": "5.17"}},
+                        ],
                     },
                     {
                         "name": "cx33",
                         "cores": 4,
                         "memory": 8.0,
                         "disk": 80,
-                        "prices": [{"location": "fsn1", "price_monthly": {"gross": "8.49"}}],
+                        "prices": [
+                            {"location": "fsn1", "price_monthly": {"gross": "8.49"}},
+                            {"location": "hel1", "price_monthly": {"gross": "9.73"}},
+                        ],
                     },
                     {
                         "name": "cx43",
                         "cores": 8,
                         "memory": 16.0,
                         "disk": 160,
-                        "prices": [{"location": "fsn1", "price_monthly": {"gross": "16.99"}}],
+                        "prices": [
+                            {"location": "fsn1", "price_monthly": {"gross": "16.99"}},
+                            {"location": "hel1", "price_monthly": {"gross": "19.47"}},
+                        ],
                     },
                 ]
             },
@@ -417,25 +455,74 @@ class HetznerCloudHandlers:
 
 
 class OvhHandlers:
-    """Stubs for the OVH Cloud API the retire view reads
-    (libs/fauna-provisioning/src/vps/ovh.rs): the signing clock, the project
-    list, each project's instance list, the instance delete, and the reverse
-    (PTR) read the attribution makes. Signatures are not checked — only that a
-    signed request carries one.
+    """Stubs for the OVH Cloud API (libs/fauna-provisioning/src/vps/ovh.rs).
+
+    The retire view's reads: the signing clock, the project list, each
+    project's instance list, the instance delete, and the reverse (PTR) read
+    the attribution makes. The wizard's flow (registry.md § Server offers
+    follow the location → OVH): `/me` (the subsidiary), each project's detail,
+    its regions and their detail (verify → `<project>/<region>` locations),
+    the region's flavors and the public order catalogue (the priced offers),
+    the region's linux images and the instance create. Signatures are not
+    checked — only that a signed request carries one; the catalogue is public
+    and unsigned.
 
     OVH instance-create has no label field, so nothing here is marked: every
     instance a project holds is listed, and the retire view shows each behind
-    the unmarked note (nest-retirement.md § Layout & flow)."""
+    the unmarked note (nest-retirement.md § Layout & flow). A wizard test
+    seeds a project first (`seed_project`) — an account with none verifies to
+    no locations."""
 
     def __init__(self, httpserver: HTTPServer, prefix: str) -> None:
         self._h = httpserver
         self._prefix = prefix
         # project id → the instances `GET .../instance` answers.
         self.projects: dict[str, list[dict]] = {}
+        # project id → its description (`GET /cloud/project/{p}`).
+        self.descriptions: dict[str, str] = {}
         # (project, instance id) per DELETE, in order.
         self.deleted: list[tuple[str, str]] = []
         # ipv4 → the reverse name; an address absent here answers 404 (unset).
         self.reverse: dict[str, str] = {}
+        # Every project carries these regions. A localzone sits beside the
+        # two real regions so verify's exclusion is exercised end to end;
+        # SBG5 lacks d2-4, so a location change shows in the offers.
+        self.regions: list[dict] = [
+            {"name": "GRA11", "type": "region", "status": "UP",
+             "datacenterLocation": "Gravelines", "countryCode": "fr"},
+            {"name": "SBG5", "type": "region", "status": "UP",
+             "datacenterLocation": "Strasbourg", "countryCode": "fr"},
+            {"name": "BRU1LZ", "type": "localzone", "status": "UP",
+             "datacenterLocation": "Brussels", "countryCode": "be"},
+        ]
+        # region → the linux flavors `GET .../flavor?region=` answers. Names
+        # are OVH's curated_offers (providers.yaml).
+        self.flavors: dict[str, list[dict]] = {
+            "GRA11": [_ovh_flavor("d2-2", 1, 2, 25), _ovh_flavor("d2-4", 2, 4, 50)],
+            "SBG5": [_ovh_flavor("d2-2", 1, 2, 25)],
+        }
+        # The public catalogue's monthly prices: plan code → (price, tax), in
+        # micro-cents (10⁻⁸ EUR).
+        self.catalogue_prices: dict[str, tuple[int, int]] = {
+            "d2-2.monthly.postpaid": (571_000_000, 131_330_000),
+            "d2-4.monthly.postpaid": (1_142_000_000, 262_660_000),
+        }
+        # The image name create looks for (vps/ovh.rs::OVH_UBUNTU_IMAGE_NAME);
+        # a test empties `images` to drive the no-26.04 error.
+        self.images: list[dict] = [
+            {"id": "img-2404", "name": "Ubuntu 24.04"},
+            {"id": "img-2604", "name": "Ubuntu 26.04"},
+        ]
+        # (project, create body) per POST, in order.
+        self.created: list[tuple[str, dict]] = []
+
+    def base_url(self) -> str:
+        return self._h.url_for("").rstrip("/") + self._prefix
+
+    def seed_project(self, project: str, description: str = "") -> None:
+        self.projects.setdefault(project, [])
+        if description:
+            self.descriptions[project] = description
 
     def base_url(self) -> str:
         return self._h.url_for("").rstrip("/") + self._prefix
@@ -495,11 +582,112 @@ class OvhHandlers:
             return self._json({"message": "no reverse"}, 404)
         return self._json({"ipReverse": ip, "reverse": name})
 
+    def _me(self, request):
+        if not self._signed(request):
+            return self._json({"message": "unsigned"}, 401)
+        return self._json({"ovhSubsidiary": "IE"})
+
+    def _known_project(self, request, index: int):
+        """The project named at path segment `index`, or None."""
+        project = request.path.split("/")[index]
+        return project if project in self.projects else None
+
+    def _project_detail(self, request):
+        if not self._signed(request):
+            return self._json({"message": "unsigned"}, 401)
+        project = self._known_project(request, -1)
+        if project is None:
+            return self._json({"message": "no such project"}, 404)
+        return self._json(
+            {"project_id": project, "description": self.descriptions.get(project, "")}
+        )
+
+    def _region_list(self, request):
+        if not self._signed(request) or self._known_project(request, -2) is None:
+            return self._json({"message": "no such project"}, 404)
+        return self._json([r["name"] for r in self.regions])
+
+    def _region_detail(self, request):
+        name = request.path.split("/")[-1]
+        region = next((r for r in self.regions if r["name"] == name), None)
+        if not self._signed(request) or region is None:
+            return self._json({"message": "no such region"}, 404)
+        return self._json(region)
+
+    def _flavors(self, request):
+        if not self._signed(request) or self._known_project(request, -2) is None:
+            return self._json({"message": "no such project"}, 404)
+        return self._json(self.flavors.get(request.args.get("region", ""), []))
+
+    def _images(self, request):
+        if not self._signed(request) or self._known_project(request, -2) is None:
+            return self._json({"message": "no such project"}, 404)
+        region = request.args.get("region", "")
+        return self._json([{**i, "region": region} for i in self.images])
+
+    def _catalogue(self, request):
+        return self._json(
+            {
+                "locale": {"currencyCode": "EUR", "subsidiary": "IE"},
+                "plans": [],
+                "addons": [
+                    {
+                        "planCode": code,
+                        "pricings": [
+                            {"interval": 1, "intervalUnit": "month",
+                             "price": price, "tax": tax}
+                        ],
+                    }
+                    for code, (price, tax) in self.catalogue_prices.items()
+                ],
+            }
+        )
+
+    def _create(self, request):
+        if not self._signed(request):
+            return self._json({"message": "unsigned"}, 401)
+        project = self._known_project(request, -2)
+        if project is None:
+            return self._json({"message": "no such project"}, 404)
+        body = json.loads(request.get_data() or b"{}")
+        self.created.append((project, body))
+        instance = self.seed_instance(
+            project,
+            f"ovh-inst-{len(self.created)}",
+            body.get("name", ""),
+            "203.0.113.7",
+        )
+        return self._json(instance, 201)
+
     def install_defaults(self) -> None:
         p = re.escape(self._prefix)
         self._h.expect_request(f"{self._prefix}/1.0/auth/time", method="GET").respond_with_data(
             "1700000000", headers=_CORS
         )
+        self._h.expect_request(f"{self._prefix}/1.0/me", method="GET").respond_with_handler(
+            self._me
+        )
+        self._h.expect_request(
+            f"{self._prefix}/1.0/order/catalog/public/cloud", method="GET"
+        ).respond_with_handler(self._catalogue)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+$"), method="GET"
+        ).respond_with_handler(self._project_detail)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/region$"), method="GET"
+        ).respond_with_handler(self._region_list)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/region/[^/]+$"), method="GET"
+        ).respond_with_handler(self._region_detail)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/flavor$"), method="GET"
+        ).respond_with_handler(self._flavors)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/image$"), method="GET"
+        ).respond_with_handler(self._images)
+        self._h.expect_request(
+            re.compile(rf"^{p}/1\.0/cloud/project/[^/]+/instance$"), method="POST"
+        ).respond_with_handler(self._create)
         self._h.expect_request(
             f"{self._prefix}/1.0/cloud/project", method="GET"
         ).respond_with_handler(self._project_list)

@@ -45,11 +45,11 @@ Stamped 2026-10-01 at d8cb0887cb.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+4ca6f9ab standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
@@ -66,6 +66,6 @@ Stamped 2026-10-01 at d8cb0887cb.
 | 6 | nest | `tests/e2e-unified/tests/api/test_conversation_reach_policy.py::test_a_closed_inbox_holds_against_a_sender_on_another_nest` | nest (linux): passed |
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_opening_the_privacy_page_never_writes_the_inbox_mode_back` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_settings.py::test_spam_threshold_reads_back_in_band_words` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message` | linux (linux): passed, tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_collapses_flagged_conversation_message` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_family.py::test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 <!-- features-render:end -->

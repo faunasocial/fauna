@@ -48,12 +48,14 @@ notifier.
 
 from __future__ import annotations
 
+import datetime
 import ipaddress
 
 import pytest
 import requests
 
 from common.auth import _authed_call, mint_token_via_handshake
+from helpers.audit_time import AUDIT_TIME_FORMAT
 from helpers.budgets import PUSH_REFRESH_S
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -139,11 +141,16 @@ def test_pending_action_notice_shows_in_the_list_with_its_full_detail(
 
     # ── The notice, as the list shows it: the whole catalog sentence, with the
     # action's id and deadline — the detail a user needs to find and cancel it
-    # under Settings → Pending actions.
+    # under Settings → Pending actions. The nest sends the deadline as Unix
+    # seconds; a native app shows it as the reader's local date and time
+    # (`value-formatting.md` § Absolute local timestamp display).
+    deadline = datetime.datetime.fromtimestamp(int(queued["execute_after"])).strftime(
+        AUDIT_TIME_FORMAT
+    )
     sentence = S.notifications.row_security_pending_action_queued(
         action_type="handle.change",
         action_id=str(queued["pending_action_id"]),
-        execute_after=str(queued["execute_after"]),
+        execute_after=deadline,
     )
     wait_until(
         lambda: _row_containing(app, sentence),

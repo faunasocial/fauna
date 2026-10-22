@@ -7,16 +7,18 @@
   // Mint covers the no-API providers (bank transfer, cash) the creator settles
   // out-of-band; the list is the audit surface for BOTH manually- and
   // webhook-minted codes — for the latter, the webhook HTTP response body is the
-  // only other delivery channel. No void action in v1 (the nest exposes only
-  // mint + list), so a voided row appears only if the nest voided it server-side.
-  import { t } from '$lib/i18n/strings';
+  // only other delivery channel. Void withdraws one of the author's own codes
+  // (`claims.void`): the first press on a row arms it in place, the second press
+  // on the same button confirms.
+  import { t } from '#lib/i18n/strings';
   import {
     paymentsClaimsMint,
     paymentsClaimsList,
+    paymentsClaimsVoid,
     claimStatusLabel,
     type PaymentClaim,
-  } from '$lib/payments';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  } from '#lib/payments';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     /** The logged-in actor's secret, or null before identity resolves. */
@@ -32,6 +34,9 @@
 
   let claims = $state<PaymentClaim[]>([]);
   let claimTier = $state('');
+  // The claim CODE whose Void is armed — keyed by code, not row index, so a
+  // re-read that reorders or removes rows cannot leave the wrong row armed.
+  let armedCode = $state<string | null>(null);
 
   $effect(() => {
     const s = secretHex;
@@ -50,6 +55,7 @@
   async function load(s: string): Promise<void> {
     try {
       claims = await paymentsClaimsList(s);
+      armedCode = null;
     } catch (e) {
       onerror(e instanceof Error ? e.message : String(e));
     }
@@ -67,6 +73,35 @@
     } catch (e) {
       onerror(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  // The consequence the second press has: a redeemed code's void also ends its
+  // redeemer's entitlement to the tier.
+  function voidLabel(claim: PaymentClaim): string {
+    if (armedCode !== claim.code) return t.subscriptions.void_claim;
+    return claim.redeemed_by !== null
+      ? t.subscriptions.void_claim_confirm_redeemed({ redeemer: claim.redeemed_by, tier: claim.tier })
+      : t.subscriptions.void_claim_confirm_unredeemed;
+  }
+
+  async function voidClaim(claim: PaymentClaim): Promise<void> {
+    const s = secretHex;
+    if (!s) return;
+    if (armedCode !== claim.code) {
+      armedCode = claim.code;
+      return;
+    }
+    armedCode = null;
+    try {
+      await paymentsClaimsVoid(s, claim.code);
+      onerror('');
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // The row is no longer the author's to void: the list is what is stale,
+      // so re-read it rather than report an error about a row that should go.
+      if (!message.includes('fauna.payments.claim_not_found')) onerror(message);
+    }
+    await load(s);
   }
 </script>
 
@@ -96,6 +131,15 @@
         <span class="badge" data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_STATUS}>
           {claimStatusLabel(claim.redeemed_by !== null, claim.voided_at !== null)}
         </span>
+        {#if claim.voided_at === null}
+          <button
+            class="btn" data-testid={PAYMENTS_IDS.SUBSCRIPTION_CLAIM_VOID_BUTTON}
+            onclick={() => voidClaim(claim)}
+          >{voidLabel(claim)}</button>
+          {#if armedCode === claim.code}
+            <button class="btn" onclick={() => (armedCode = null)}>{t.subscriptions.void_claim_cancel}</button>
+          {/if}
+        {/if}
       </div>
     {/each}
     {#if claims.length === 0}

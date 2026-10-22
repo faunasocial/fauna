@@ -183,6 +183,117 @@ pub fn structured_view(decoded: JsValue) -> Result<JsValue, JsValue> {
     }
 }
 
+/// The home a post's own bytes are fetched from, `null` for this nest — the
+/// browser twin of the UniFFI `post_blob_home`, over the one shared
+/// `fauna_feed::PostSummary::blob_home`, so the SPA never re-decides what a
+/// blank home means. Takes the two snapshot-post fields the pick reads (the
+/// `postCardGate` posture); returns `{ url, nest_actor_id }`, handed back
+/// unchanged to [`WasmPostBlobHosts`]'s `get` / `headHasC2pa`.
+#[wasm_bindgen(js_name = postBlobHome)]
+pub fn post_blob_home(
+    home_nest_url: Option<String>,
+    home_nest_actor_id: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let post = fauna_feed::PostSummary {
+        home_nest_url,
+        home_nest_actor_id,
+        ..Default::default()
+    };
+    match post.blob_home() {
+        Some(home) => crate::rpc::to_js(&PostBlobHome {
+            url: home.url.to_string(),
+            nest_actor_id: home.nest_actor_id.map(str::to_string),
+        }),
+        None => Ok(JsValue::NULL),
+    }
+}
+
+/// The JS shape of a post's foreign home — the record form of
+/// `fauna_feed::BlobHome`, as `postBlobHome` hands it out and the plane takes it
+/// back. `nest_actor_id` is carried for parity with the native face and is
+/// unused by the browser plane (`fauna_core::post_blob` — no pin in a browser).
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+struct PostBlobHome {
+    url: String,
+    nest_actor_id: Option<String>,
+}
+
+// ── WasmPostBlobHosts — a post's own bytes, from the nest they rest on ────────
+//
+// Wasm-only: the fetch is the browser's (`fauna_core::post_blob`, behind
+// `blob-fetch-wasm`). The face adds no logic — the host pick is
+// `postBlobHome`, and the anonymous read, the inline-blob cap and the
+// content-address check are the shared plane's.
+#[cfg(target_arch = "wasm32")]
+mod post_blob_face {
+    use fauna_rpc_wasm::WsRpcClient;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen_futures::future_to_promise;
+
+    use super::PostBlobHome;
+
+    /// One session's post-blob reads — the web twin of the native
+    /// `FfiPostBlobHosts`, built by `WsRpcClient::postBlobHosts`. A `null` home
+    /// is this session's own nest (its CURRENT URL, read per call so an
+    /// SRV-swap is followed); any other is the home `postBlobHome` named, read
+    /// direct and never relayed (`transport-trust.md` § The post arm → *The
+    /// browser's leg*). No graduation: a browser hands WASM no certificate, so a
+    /// home's `nest_actor_id` is carried and unused, and a home serving the
+    /// self-signed floor stays unreachable — the declared browser residual.
+    #[wasm_bindgen]
+    pub struct WasmPostBlobHosts {
+        nest: WsRpcClient,
+    }
+
+    impl WasmPostBlobHosts {
+        /// Over the SPA's connected client.
+        pub fn with_client(nest: WsRpcClient) -> Self {
+            Self { nest }
+        }
+
+        fn base_url(&self, home: JsValue) -> Result<String, JsValue> {
+            if home.is_null() || home.is_undefined() {
+                return Ok(self.nest.nest_url());
+            }
+            let home: PostBlobHome = crate::rpc::from_js(home)?;
+            Ok(home.url)
+        }
+    }
+
+    #[wasm_bindgen]
+    impl WasmPostBlobHosts {
+        /// The blob `hash` of a post homed at `home` (`postBlobHome`; `null` =
+        /// this nest), capped and verified against its content address.
+        /// Resolves a `Uint8Array`; substitute bytes reject, never paint.
+        pub fn get(&self, home: JsValue, hash: String) -> js_sys::Promise {
+            let base = self.base_url(home);
+            future_to_promise(async move {
+                let bytes = fauna_core::post_blob::get_post_blob(&base?, &hash)
+                    .await
+                    .map_err(|e| JsValue::from_str(&format!("{e:#}")))?;
+                Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+            })
+        }
+
+        /// Whether the blob `hash` of a post homed at `home` asserts C2PA
+        /// provenance — the `x-c2pa` HEAD, a pre-filter only. Resolves a boolean.
+        #[wasm_bindgen(js_name = headHasC2pa)]
+        pub fn head_has_c2pa(&self, home: JsValue, hash: String) -> js_sys::Promise {
+            let base = self.base_url(home);
+            future_to_promise(async move {
+                fauna_core::post_blob::head_has_c2pa(&base?, &hash)
+                    .await
+                    .map(JsValue::from_bool)
+                    .map_err(|e| JsValue::from_str(&format!("{e:#}")))
+            })
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub use post_blob_face::WasmPostBlobHosts;
+
 // ── WasmFeedManager — the shared Feed-page snapshot, for the SPA ──────────────
 //
 // Wasm-only: it wraps `FeedManager<WsRpcClient>` over the `Rc`-based browser
@@ -626,6 +737,21 @@ mod manager {
             })
         }
 
+        /// A second manager over ONE author's posts — the profile page's Posts
+        /// tab (`feed.md` § State & data shape → *The author window*): the same
+        /// transport, signing secret and installed seams, its own empty list
+        /// state and no observers, `snapshot().author_selected = actorId` (hex).
+        /// The page attaches its observer and loads the first page with
+        /// `refreshCurrentFeed`, then pages with `loadMore`. It never composes,
+        /// so it shares this manager's drafts rail rather than owning one.
+        #[wasm_bindgen(js_name = authorWindow)]
+        pub fn author_window(&self, actor_id: String) -> WasmFeedManager {
+            WasmFeedManager {
+                manager: Rc::new(self.manager.author_window(actor_id)),
+                drafts_sync: self.drafts_sync.clone(),
+            }
+        }
+
         /// Select a feed (`feed-item`) and load its first page. `feed_id`
         /// `null`/`undefined` ⇒ the nest's local feed.
         #[wasm_bindgen(js_name = selectFeed)]
@@ -707,7 +833,7 @@ mod manager {
 
         /// Process + seal one compose attachment for the composer's **current**
         /// audience, resolving the same `WasmUploadPayload`
-        /// `processAndSealPublicPost` returns — so `$lib/wasm`'s
+        /// `processAndSealPublicPost` returns — so `#lib/wasm`'s
         /// `takeUploadPayload` normalizes both and the SPA has one upload
         /// shape, not two (priority #1).
         ///
@@ -996,6 +1122,21 @@ mod manager {
             })
         }
 
+        /// `resolvePost` for a link that names the post's home nest
+        /// (`ui/feed.md` § The read model → *A post homed on another nest*):
+        /// this nest first, and on its not-found the home through this nest's
+        /// relay. A relayed post carries `home_nest_url` (and the home's
+        /// stamped `home_nest_actor_id`), where its bytes are
+        /// fetched. Resolves the same [`fauna_feed::PostResolution`] object.
+        #[wasm_bindgen(js_name = resolvePostFrom)]
+        pub fn resolve_post_from(&self, post_id: String, nest_url: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                let resolution = m.resolve_post_from(post_id, nest_url).await;
+                crate::rpc::to_js(&resolution)
+            })
+        }
+
         /// Resolve the first media blob hash for a loaded `has_media` post and
         /// write it into the matching `PostSummary.media_hash`. No-op unless a
         /// loaded post flags media and isn't resolved. Resolves `undefined`.
@@ -1025,6 +1166,28 @@ mod manager {
             let m = self.manager.clone();
             future_to_promise(async move {
                 m.resolve_post_unlock_offer(post_id).await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Name a post's remote author from their own signed profile and fold
+        /// it into the matching `PostSummary.author_display` — and that of
+        /// every rendered post by the same author and home (`ui/feed.md` § The
+        /// read model → *The remote author's byline*). Drives `post-author` /
+        /// `feed-post-detail-author` through the card's existing
+        /// `peerDisplayLabel` chain. Resolves `undefined`.
+        ///
+        /// Call once per rendered post from the same pump that drives
+        /// `resolveMedia`, guarded on `home_nest_url != null` and
+        /// `author_display == null`. One relay per author and home per window;
+        /// fire-once by construction — every outcome writes a face, an empty
+        /// one when the author shows none, so the guard closes and the card
+        /// reads the id.
+        #[wasm_bindgen(js_name = resolveAuthorFace)]
+        pub fn resolve_author_face(&self, post_id: String) -> js_sys::Promise {
+            let m = self.manager.clone();
+            future_to_promise(async move {
+                m.resolve_author_face(post_id).await;
                 Ok(JsValue::UNDEFINED)
             })
         }
@@ -1863,7 +2026,7 @@ mod manager {
         // The browser faces of the shared tracker's frozen clock pair
         // (`fauna_feed::CueTracker` § The test clock), driven by the SPA's
         // `feed_cue_clock_*` / `feed_cue_probe` agent commands
-        // (`$lib/feed-cues-e2e`) — the twins of tui's and linux's arms. Gated on
+        // (`#lib/feed-cues-e2e`) — the twins of tui's and linux's arms. Gated on
         // this crate's off-by-default `test-helpers` feature, so a production
         // wasm build does not export them (convention 15).
 

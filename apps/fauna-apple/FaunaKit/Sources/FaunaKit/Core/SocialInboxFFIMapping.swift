@@ -61,7 +61,8 @@ extension NotificationItem {
                   createdAt: Int(ffi.createdAt), read: ffi.isRead,
                   notifType: ffi.notifType,
                   source: ffi.source, contentId: ffi.contentId,
-                  senderId: ffi.senderId, subjectUri: ffi.subjectUri)
+                  senderId: ffi.senderId, subjectUri: ffi.subjectUri,
+                  localizedBody: ffi.body)
     }
 }
 

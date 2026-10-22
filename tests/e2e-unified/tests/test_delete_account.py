@@ -27,7 +27,7 @@ from tests.api import ws_api
 pytestmark = [pytest.mark.tier_3]
 
 
-@pytest.mark.feature("account")
+@pytest.mark.feature("account", "mailbox-export")
 def test_delete_account_via_confirm_field(delete_account_app, delete_account_nest):
     app = delete_account_app
     user = delete_account_nest["user"]
@@ -41,6 +41,16 @@ def test_delete_account_via_confirm_field(delete_account_app, delete_account_nes
         "settings-delete-account-button must start disabled — typing DELETE "
         "into settings-delete-confirm-field is the whole point of the "
         "type-to-confirm gate"
+    )
+
+    # (a2) the confirmation's own text reminds the person to take both exports
+    # first (settings.md item 14; mailbox-export outcome 41).
+    reminder = app.settings.delete_confirm_text()
+    assert "Export My Data" in reminder and "Settings → Account" in reminder, (
+        f"settings-delete-confirm-text must name the account data export: {reminder!r}"
+    )
+    assert "Settings → Mail" in reminder, (
+        f"settings-delete-confirm-text must name the mail export: {reminder!r}"
     )
 
     # (b) typing the exact string DELETE enables it.
@@ -408,7 +418,7 @@ def test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device(
         active=actor,
     )
     driver = create_driver("web")
-    driver.launch({"url": spa + "/app/"})
+    driver.launch({"url": spa + "/app/", "seed_credentials": seed})
 
     def ls(key):
         return driver.eval_js(f"localStorage.getItem({json.dumps(key)})")
@@ -418,10 +428,6 @@ def test_web_an_account_the_nest_stops_accepting_erases_nothing_on_the_device(
 
     try:
         # (1) Signed in as the identity, from the registry this device holds.
-        driver.eval_js(";".join(
-            f"localStorage.setItem({json.dumps(k)},{json.dumps(v)})" for k, v in seed.items()
-        ))
-        driver.hard_reload()
         wait_until(
             lambda: session().get("actor_id") == actor and session().get("authenticated"),
             APP_RELAUNCH_S,

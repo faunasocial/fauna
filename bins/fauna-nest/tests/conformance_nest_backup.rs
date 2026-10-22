@@ -56,22 +56,21 @@ use fauna_protocol::{
 /// writing a user's backup state relative to the process CWD.
 async fn router_and_state() -> (RpcRouter, Arc<AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let data_dir = tempfile::tempdir().unwrap();
-    let db_path = data_dir
-        .path()
-        .join("nest.db")
+    // The data dir is the state's scratch root, removed when the state drops.
+    let base = AppState::for_test(db);
+    let db_path = base
+        .test_scratch_path("nest.db")
         .to_string_lossy()
         .into_owned();
-    std::mem::forget(data_dir); // outlives the test; the OS reaps the tempdir
     let state = Arc::new(AppState {
         config: Arc::new(fauna_nest::config::NestConfig {
             nest: fauna_nest::config::NestSection {
                 db_path,
                 ..Default::default()
             },
-            ..(*AppState::for_test(db.clone()).config).clone()
+            ..(*base.config).clone()
         }),
-        ..AppState::for_test(db)
+        ..base
     });
     let mut b = RpcRouter::builder();
     backup_handlers::register_backup_handlers(&mut b);

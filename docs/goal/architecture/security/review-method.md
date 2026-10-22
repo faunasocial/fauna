@@ -384,6 +384,10 @@ ratified here at that finding's verify-back.
   DISPOSED: <sha> ranked-out — wraps a row's citations, no security surface
   ```
 
+  The SHA stands bare or in ONE pair of backticks (`` DISPOSED: `<sha>` graded — … ``, ruled
+  2026-10-16 — graders quote SHAs in code spans everywhere else in a record, and that spelling had
+  become the common one); nothing may precede `DISPOSED:` on its line.
+
   The probe greps `^DISPOSED: <sha>` and each candidate's own `%B`, and **nothing else** — rankings,
   enumerations, measurement tables, and narrative prose are all inert by construction, in any file,
   forever.

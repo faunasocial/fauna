@@ -2,7 +2,7 @@
 //!
 //! Extracted from `wasm.ts` so the pure classification logic is unit-testable
 //! without pulling in the SvelteKit `$app/*` aliases or the wasm glue. Re-exported
-//! from `$lib/wasm` for existing call sites.
+//! from `#lib/wasm` for existing call sites.
 
 /** A transient transport failure from `challengeVerify` (anonymous-WS connect /
  *  timeout / disconnect). The onboarding launch screen treats it as `transient`

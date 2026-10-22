@@ -156,7 +156,7 @@ pub(crate) async fn dispatch(
 }
 
 /// Run one door of a consumer seam for the account `actorIdHex` — the one
-/// export `sharedAccountPort` (`$lib/account-runtime`) forwards every call
+/// export `sharedAccountPort` (`#lib/account-runtime`) forwards every call
 /// to. Resolves with the answer's canonical bytes (a seam method's refusal
 /// included, which is data); rejects with the tagged object
 /// `PortFault::to_js` writes when the crossing itself fails.

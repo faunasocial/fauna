@@ -128,3 +128,18 @@ def test_photo_grant_follows_the_screens_own_sdk_split(recorded, sdk, granted):
     grants = [c[-1] for c in calls if "grant" in c]
     assert grants == granted
     assert all(c[-3:-1] == ["grant", "social.fauna.fauna"] for c in calls if "grant" in c)
+
+
+@pytest.mark.parametrize("sdk, granted", [
+    ("34", ["android.permission.POST_NOTIFICATIONS"]),
+    ("33", ["android.permission.POST_NOTIFICATIONS"]),
+    ("32", []),
+])
+def test_notification_grant_applies_from_api_33_only(recorded, sdk, granted):
+    # The push journeys (`test_push_settings.py`) drive the toggle, never the
+    # permission controller's dialog; below API 33 nothing needs granting.
+    driver, calls, answers = recorded
+    answers["getprop"] = sdk + "\n"
+    driver.grant_notifications()
+    driver._apply_permission_grants()
+    assert [c[-1] for c in calls if "grant" in c] == granted

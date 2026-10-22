@@ -220,22 +220,20 @@ public sealed partial class BridgeCard : UserControl
 
     private FrameworkElement BuildSettingRow(string bridgeId, BridgeSetting setting)
     {
-        // Hedges the same three spellings linux's build_settings_group does —
-        // providers do not agree on one string (activitypub emits "boolean",
-        // the shared default emits "bool").
-        switch (setting.SettingType)
+        // Which control a setting paints is the shared classifier's call
+        // (fauna_client_bridges::setting_control) — no spelling is matched here.
+        switch (uniffi.fauna_ffi.FaunaFfiMethods.SettingControl(setting.SettingType))
         {
-            case "bool":
-            case "boolean":
-            case "toggle":
+            case uniffi.fauna_ffi.FfiSettingControl.Toggle:
                 return BuildToggleRow(bridgeId, setting);
-            case "number":
+            case uniffi.fauna_ffi.FfiSettingControl.Number:
                 return BuildTextRow(bridgeId, setting, isNumber: true);
-            case "text":
+            case uniffi.fauna_ffi.FfiSettingControl.Text:
                 return BuildTextRow(bridgeId, setting, isNumber: false);
             default:
-                // Forward-compat fallback: a setting_type this build predates
-                // (a newer nest) — a read-only row, never a dropped setting.
+                // Unknown (a setting_type this build predates — a newer nest)
+                // and Select (windows has no picker row yet): a read-only
+                // row, never a dropped setting.
                 // Mirrors tui's Element::chrome fallback / web's/android's
                 // read-only "{label}: {value}" line.
                 var value = setting.BoolValue?.ToString()

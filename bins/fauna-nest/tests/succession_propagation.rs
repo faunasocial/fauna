@@ -1891,7 +1891,7 @@ async fn bind_foreign_member(
 /// nothing could move it back afterwards.
 ///
 /// The rule this pins: **a succession re-points the identity and never the
-/// binding.** `federation.md` § Cross-nest shared folders + channel append
+/// binding.** `federation-shared-folders.md` § Cross-nest shared folders + channel append
 /// enumerates the powers over an existing grant — the claimant, or a rostered
 /// actor while it is unconfirmed — and the succession statement
 /// (`identity-succession.md` § The succession statement (wire)) carries no

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using FaunaApp.Core.Services;
@@ -29,6 +30,7 @@ public sealed partial class SettingsShellPage : Page
     public SettingsShellPage()
     {
         this.InitializeComponent();
+        TagRailRows();
         _itemsByTag = new Dictionary<string, NavigationViewItem>
         {
             [SettingsNavigation.Status] = SubStatus,
@@ -58,6 +60,37 @@ public sealed partial class SettingsShellPage : Page
             [SettingsNavigation.ConnectedApps] = SubConnectedApps,
             [SettingsNavigation.Logs] = SubLogs,
         };
+    }
+
+    /// <summary>
+    /// The rail tags that are not their ui.yaml page key (every other tag already
+    /// is, or is the two-element nav slug for an entry realized from the
+    /// <c>settings</c> page itself: <c>status</c>, <c>privacy</c>, <c>general</c>,
+    /// <c>encryption</c>).
+    /// </summary>
+    private static readonly Dictionary<string, string> PageKeyByTag = new()
+    {
+        [SettingsNavigation.MemberReview] = "member_review",
+        [SettingsNavigation.Web] = "web-settings",
+        [SettingsNavigation.Logs] = "settings-logs",
+    };
+
+    /// <summary>
+    /// Give every rail row its <c>settings-nav-row[&lt;key&gt;]</c> id (ui.yaml
+    /// <c>navigation.sub_page_nav_rows</c>) so a test reaches any Settings sub-page
+    /// by clicking the rail. The Account row stays untagged: its older id,
+    /// <c>account-settings-link</c>, lives on the Status page.
+    /// </summary>
+    private void TagRailRows()
+    {
+        foreach (var entry in SettingsNav.MenuItems)
+        {
+            if (entry is NavigationViewItem { Tag: string tag } item && tag != SettingsNavigation.Account)
+            {
+                var key = PageKeyByTag.TryGetValue(tag, out var mapped) ? mapped : tag;
+                AutomationProperties.SetAutomationId(item, $"{FaunaApp.UiIds.Ids.SettingsNavRow}[{key}]");
+            }
+        }
     }
 
     /// <summary>

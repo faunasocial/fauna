@@ -21,7 +21,7 @@
 //! consumer: the chain **it fetches from the home nest it already knew** for
 //! the identity. Concretely, both legs resolve the anchor through
 //! [`resolve_anchor`] — the nest **identity** of the *oldest residue row
-//! overall* ([`crate::db::CacheDb::oldest_foreign_member_nest_id`]) at first
+//! overall* ([`crate::db::CacheDb::oldest_succession_residue_nest_id`]) at first
 //! contact, and the **persisted** [`crate::db::CacheDb::foreign_recovery_head`]
 //! `anchor_nest_id` pin once the identity has ever been verified, which a later
 //! (attacker-mintable) binding never displaces. **The dial then PROVES that
@@ -196,7 +196,7 @@ pub fn spawn_succession_pull(state: Arc<AppState>) {
 /// `pub` so a test can drive a single deterministic pass instead of waiting on
 /// the interval — the cadence is not what any assertion is about.
 pub async fn pull_successions_once(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    let actors = state.db.distinct_foreign_member_actors().await?;
+    let actors = state.db.succession_residue_actors().await?;
     if actors.is_empty() {
         return Ok(0);
     }
@@ -285,7 +285,7 @@ async fn resolve_anchor(
         .map(|h| h.anchor_nest_id);
     let expected = match pinned {
         Some(id) => id,
-        None => match state.db.oldest_foreign_member_nest_id(actor).await? {
+        None => match state.db.oldest_succession_residue_nest_id(actor).await? {
             Some(id) => id,
             None => return Ok(None),
         },
@@ -471,6 +471,8 @@ pub async fn verify_and_record_from_home(
                 foreign_memberships = applied.foreign_memberships,
                 member_grants = applied.member_grants,
                 contact_edges = applied.contact_edges,
+                remote_follows = applied.remote_follows,
+                reader_entitlements = applied.reader_entitlements,
                 "learned a succession from the anchored home nest"
             );
             Ok(1)

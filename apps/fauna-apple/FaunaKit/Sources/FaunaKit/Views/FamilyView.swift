@@ -325,6 +325,25 @@ public struct FamilyView: View {
                 // (`account-offline-mutation.md` § The offline-mutation contract).
                 .faunaGate("fauna.family.policy.update")
 
+                // ── Feature limits — the guardian host of the shared
+                // `feature-policy-editor` (family-safety.md § App surface →
+                // *Feature limits*), directly after the reach form's save
+                // button: its save is the shared editor's own, never that
+                // button. Paints only; the rows and editor are the host's. ──
+                if let host = vm.featureAuthoring {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L.features.guardianSectionTitle).font(.headline)
+                        Text(L.features.guardianSectionDesc)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        FeatureAuthoringRows(host: host, ids: .guardian)
+                    }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier(Ids.familyPolicyFeatureLimitsSection)
+                    .automationValue(Ids.familyPolicyFeatureLimitsSection,
+                                     text: { L.features.guardianSectionTitle })
+                }
+
                 // ── The guardian-enrolled-device marker (family-safety.md §
                 // Full visibility for young children, Slice F) — one
                 // `family-device-mark-item` per device of the SELECTED ward.

@@ -1582,7 +1582,7 @@ public class TestAgent
                 // testing.md convention 14's fake clock + `run_now` poke for the
                 // screen-time usage heartbeat (family-safety.md § Screen time,
                 // Slice E) — the windows twin of linux `screen_time_heartbeat`
-                // (main.rs) / web `$lib/screen-time-e2e.ts` / android
+                // (main.rs) / web `#lib/screen-time-e2e.ts` / android
                 // `advanceTestClockAndTick`. Advances the ward client's clock by
                 // `minutes` of foreground use and runs one production heartbeat
                 // step, so a tier_3 journey can prove the budget half WITHOUT

@@ -11,6 +11,7 @@ import uniffi.fauna_client_mail_settings.BridgeApprovalAction
 import uniffi.fauna_client_mail_settings.BridgeApprovalMachine
 import uniffi.fauna_client_mail_settings.BridgeApprovalSnapshot
 import uniffi.fauna_client_mail_settings.BridgeApprovalStatus
+import uniffi.fauna_client_mail_settings.BridgeConfirm
 import javax.inject.Inject
 
 /**
@@ -55,11 +56,26 @@ class AdminBridgesPendingVM @Inject constructor(
     fun approve(pubkeyHex: String, role: String) =
         dispatch(BridgeApprovalAction.Approve(pubkeyHex = pubkeyHex, role = role))
 
-    fun reject(pubkeyHex: String) =
-        dispatch(BridgeApprovalAction.Reject(pubkeyHex = pubkeyHex))
+    /**
+     * Open the reject / rotate confirm in the shared machine. Sync (arming reaches no
+     * nest), so the page paints the confirm in the click's own frame; the open act is
+     * read back as `snapshot.armed` — the page keeps no confirm state of its own.
+     */
+    fun arm(confirm: BridgeConfirm) {
+        val m = machine ?: return
+        m.arm(confirm)
+        publish(m)
+    }
 
-    fun rotate(pubkeyHex: String) =
-        dispatch(BridgeApprovalAction.Rotate(pubkeyHex = pubkeyHex))
+    /** The open confirm's cancel button: close it, no write. */
+    fun disarm() {
+        val m = machine ?: return
+        m.disarm()
+        publish(m)
+    }
+
+    /** The open confirm's confirm button: the machine runs the armed act. */
+    fun confirm() = dispatch(BridgeApprovalAction.Confirm)
 
     private fun dispatch(action: BridgeApprovalAction) {
         val m = machine ?: return
@@ -89,6 +105,7 @@ class AdminBridgesPendingVM @Inject constructor(
             webdavEnabled = null,
             status = BridgeApprovalStatus.IDLE,
             error = null,
+            armed = null,
         )
     }
 }

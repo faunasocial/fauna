@@ -62,6 +62,15 @@ where
         handle.folder_keys().await
     }
 
+    /// The gated read (`AccountStoreHandle::listed_folder_keys`): a replica
+    /// that has not listed custody's scope refuses as not ready rather than
+    /// answering the empty custody it holds. An absent runtime answers at
+    /// once, as [`Self::load`] does.
+    async fn load_listed(&self) -> anyhow::Result<FoldersConfig> {
+        let handle = (self.source)().ok_or_else(|| anyhow::anyhow!(RUNTIME_ABSENT))?;
+        handle.listed_folder_keys().await
+    }
+
     /// The store's replica-local meta row — device-local, never synced, and
     /// read by every process that mounts this device's store.
     async fn adoption_markers(&self) -> anyhow::Result<Vec<[u8; 32]>> {

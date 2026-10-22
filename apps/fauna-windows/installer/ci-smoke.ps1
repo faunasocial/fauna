@@ -88,7 +88,7 @@ function Assert-Installed {
   # only its apphost is checked there.
   $natives = @(Get-ChildItem -Path (Join-Path $installDir '*') -File -Include '*.exe', '*.dll') +
              @(Get-Item -LiteralPath (Join-Path $installDir 'App\FaunaApp.exe'))
-  foreach ($required in 'fauna-sync-agent.exe', 'fauna-tui.exe', 'fauna-nest-svc.exe',
+  foreach ($required in 'fauna-sync-agent.exe', 'fauna-tui.exe', 'fauna-cli.exe', 'fauna-nest-svc.exe',
                         'fauna-bridge-svc.exe', 'fauna-mail-bridge.exe') {
     if (-not ($natives | Where-Object Name -eq $required)) { throw "$required is not installed under $installDir" }
   }

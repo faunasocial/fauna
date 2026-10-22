@@ -43,12 +43,12 @@ use crate::backend::ConvPushEvent;
 use crate::backend::WelcomeChannelKind;
 use crate::backend::{BridgedSink, BridgedSource};
 use crate::backends::bridged::{BridgedBackend, poll_inbound_bridged};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backends::fauna_mls::poll_inbound_conv;
 use crate::backends::fauna_mls::{
     FaunaMlsBackend, ingest_scheduling_welcome, ingest_welcome, join_folder_welcome,
     poll_inbound_conv_past_key_in, poll_inbound_folder, poll_inbound_scheduling,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use crate::backends::fauna_mls::{leave_folder, poll_inbound_conv};
 use crate::backends::smtp::{SmtpBackend, poll_inbound_mail};
 // Only `start_receive_loop`'s index-arm reopening uses this, and that whole impl
 // block is `cfg(not(wasm32))` — so an ungated import warned on every wasm build.
@@ -853,8 +853,9 @@ impl ConversationsSession {
         self.fauna_mls.set_room_ceremony(ceremony);
     }
 
-    /// Register all four nest-backed room seams at once ([`RoomSeams`]):
-    /// the roster report and read, the generation read and the ceremony.
+    /// Register all five nest-backed room seams at once ([`RoomSeams`]):
+    /// the roster report and read, the generation read, the ceremony and the
+    /// post read behind the room search.
     /// This is the call every glue site makes. The group-reception keys are
     /// registered separately, from the account-store-ready edge.
     pub fn set_room_seams(&self, seams: RoomSeams) {
@@ -954,7 +955,7 @@ impl ConversationsSession {
     /// backend's application post. ⚠ **Not Commit-free**: that post runs the
     /// device-owned-epoch takeover — a self-`Update` **Commit** — first. On a
     /// claimed folder channel that takeover is *admitted* from any roster member
-    /// (the roster-membership commit admission, `federation.md` §
+    /// (the roster-membership commit admission, `federation-shared-folders.md` §
     /// Cross-nest shared folders + channel append); a nest refuses the Commit
     /// of a member it has not admitted, so this send can fail on a pass. See `FaunaMlsBackend::send_share_endpoints`, which owns the
     /// full statement.
@@ -1414,6 +1415,7 @@ impl ConversationsSession {
             &channel_id_hex,
             &welcome_bytes,
             "",
+            None,
         )
         .await?;
         Ok(Some(thread_id.0))
@@ -1658,58 +1660,6 @@ impl ConversationsSession {
             &welcome_ctx,
         )
         .await?;
-        Ok(channel.to_string())
-    }
-
-    /// **Leave** a joined cross-user shared folder — the reverse of
-    /// [`Self::join_folder_welcome`], driving the recipient's
-    /// `folder-leave-button` (`docs/goal/ui/folders.md` § Sharing: "a
-    /// `folder-leave-button` … to remove yourself"). Locally forgets the MLS group
-    /// ([`leave_folder`]: `MlsEngine::forget_group` + unmark the folder channel),
-    /// so the set drops from the recipient's `has_group`-filtered member-visible
-    /// list. Addressed by the raw MLS `group_id` (hex) the member holds in their B3
-    /// `FolderSummary` — the same value the nest-side `fauna.folders.leave`
-    /// self-drop takes. Idempotent (forgetting an unknown / already-left group is a
-    /// no-op). The FFI/wasm caller pairs this with `FoldersClient::leave` (the nest
-    /// roster self-drop) — off the roster, the leaver stops receiving content-key
-    /// rotations; a voluntary leave does not rotate the owner's content key. Returns
-    /// the forgotten channel id (hex).
-    /// The home-nest URL to route a leave/read for the set bound to
-    /// `group_id_hex`, when it is a **foreign** (cross-nest) membership: the
-    /// backend's RAM `channel_home` (recorded at this session's join) first,
-    /// else the durable foreign-set record via the custody sink —
-    /// so a relaunched client still resolves it. `None` ⇒ same-nest set (or no
-    /// record): the plain local path. Callers thread it into
-    /// `FoldersClient::leave_with_home` before calling
-    /// [`Self::leave_folder`]. `Err` ⇒ the custody record could not be read, so
-    /// whether the set is foreign is **unknown**: the caller must stop before
-    /// any mutation, never fall back to the same-nest path.
-    pub async fn folder_home_url(&self, group_id_hex: &str) -> Result<Option<String>, String> {
-        let Some(raw) = hex::decode(group_id_hex.trim())
-            .ok()
-            .filter(|b| !b.is_empty())
-        else {
-            return Ok(None);
-        };
-        let channel_id = fauna_mls::types::ChannelId::from_group_id(&raw);
-        if let Some(url) = self.fauna_mls.channel_home_url(&channel_id) {
-            return Ok((!url.is_empty()).then_some(url));
-        }
-        let Some(sink) = self.fauna_mls.folder_custody_sink() else {
-            return Ok(None);
-        };
-        sink.foreign_home_url(&channel_id.0).await
-    }
-
-    pub async fn leave_folder(&self, group_id_hex: String) -> Result<String, BackendError> {
-        let channel = leave_folder(&self.fauna_mls, &group_id_hex)?;
-        // Cross-nest: drop the foreign-set record too, so a left
-        // foreign set stops appearing in the member-visible list (the foreign
-        // twin of the roster self-drop the caller pairs this with). Best-effort
-        // and a no-op for a same-nest set (no record exists).
-        if let Some(sink) = self.fauna_mls.folder_custody_sink() {
-            sink.forget_foreign_set(&channel.0).await;
-        }
         Ok(channel.to_string())
     }
 
@@ -2793,7 +2743,7 @@ pub struct FolderWelcomeContext {
     /// The sharer's handle + handle domain (`WelcomePayload.shared_by_handle` /
     /// `shared_by_domain`) — the cross-nest owner label, paired only when the
     /// recipient's own nest bound the domain to the origin's key
-    /// (`federation.md` § Cross-nest shared folders + channel append → *The
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The
     /// cross-nest owner label*). Recorded on the accept-time foreign-set record
     /// when both halves are present. Display-only.
     pub shared_by_handle: Option<String>,
@@ -2805,7 +2755,7 @@ pub struct FolderWelcomeContext {
     pub set_name_seal: Option<fauna_core::label_custody::SealedSetName>,
     /// The folder's residency as its home nest stamped it on the Welcome
     /// relay (`WelcomePayload.residency` — `"metadata_only"` / `"full"`;
-    /// `federation.md` § … *The `residency` stamp*) — [`join_folder_welcome`]
+    /// `federation-shared-folders.md` § … *The `residency` stamp*) — [`join_folder_welcome`]
     /// seeds the accept-time foreign-set record with it, so the member's seat
     /// arms before any federated read. Absent means *not stated*, never *full*.
     pub residency: Option<String>,
@@ -2859,6 +2809,7 @@ pub async fn ingest_welcome_by_kind(
                 channel_id_hex,
                 welcome_bytes,
                 home_nest_url,
+                welcome_ctx.home_nest_actor_id.as_deref(),
             )
             .await?;
         }

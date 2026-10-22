@@ -72,6 +72,7 @@ public struct LinkedNestsView: View {
             // task, so a bumped token re-reads the mounted page too.
             await vm.refresh(api: client.api)
         }
+        .onStoreChange { await vm.resyncCustody() }
         // The machine is pull-based and the nest's outbox worker stamps a failed
         // send's reason (and later delivers) on its own clock, so while the
         // queue is non-empty keep re-reading it — otherwise a page the user
@@ -288,7 +289,10 @@ private struct NestItemRow: View {
             }
 
             if !row.isHome {
-                let caps = row.capabilities.joined(separator: ", ")
+                // The shared capability labels (`linked-nests.md` § The surface):
+                // `renderLocalizedText` resolves each key, and a capability with no
+                // label keeps its wire name as the key, which resolves to itself.
+                let caps = row.capabilityLabels.map(renderLocalizedText).joined(separator: ", ")
                 automationText(Ids.nestsItemCapabilities, "\(L.nests.capabilitiesLabel) \(caps)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -456,7 +460,7 @@ private struct TrustGrantItemView: View {
         VStack(alignment: .leading, spacing: 2) {
             automationText(
                 Ids.nestTrustGrantScope,
-                "\(L.nests.trustedToRead) \(scopeLine(grant.scope))"
+                "\(L.nests.trustedToRead) \(scopeLine(grant.scope, folder: grant.folder))"
             )
             .font(.subheadline)
             .fontWeight(.medium)
@@ -532,7 +536,7 @@ private struct TrustGrantItemView: View {
         // Per-row presence entry so the in-process registry can `count`
         // `nest-trust-grant-item` rows (mirrors the `nests-item` container
         // pattern — a bare `.accessibilityIdentifier` alone never registers).
-        .automationValue(Ids.nestTrustGrantItem, text: { scopeLine(grant.scope) })
+        .automationValue(Ids.nestTrustGrantItem, text: { scopeLine(grant.scope, folder: grant.folder) })
     }
 }
 
@@ -981,12 +985,14 @@ func durationText(_ duration: TrustGrantDuration) -> String {
     renderLocalizedText(FaunaFFISwift.durationLabel(d: duration))
 }
 
-private func scopeLabel(_ scope: TrustScope) -> String {
-    renderLocalizedText(FaunaFFISwift.scopeLabel(s: scope))
-}
-
-private func scopeLine(_ scope: [TrustScope]) -> String {
-    scope.map(scopeLabel).joined(separator: ", ")
+/// The grant / History scope line: one label per scope tuple with the paywall
+/// folder named (`Your folder "premium"`), from the shared
+/// `grant_scope_labels` door. A scopeless `Revoke` with a folder yields the
+/// folder label alone.
+func scopeLine(_ scope: [TrustScope], folder: TrustFolder?) -> String {
+    FaunaFFISwift.grantScopeLabels(scope: scope, folder: folder)
+        .map(renderLocalizedText)
+        .joined(separator: ", ")
 }
 
 private func statusLabel(_ liveness: TrustLiveness) -> String {
@@ -1001,7 +1007,7 @@ private func backupStatusLabel(_ status: TrustBackupStatus) -> String {
 /// ‹when›" etc.). Trust timestamps (`at`) are epoch **seconds** (the shared
 /// row's wire unit); `ValueFormat.absoluteDate` takes epoch milliseconds.
 private func historyLine(_ h: TrustHistoryRow) -> String {
-    let scope = scopeLine(h.scope)
+    let scope = scopeLine(h.scope, folder: h.folder)
     let when = ValueFormat.absoluteDate(epochMs: h.at * 1000, withTime: true)
     switch h.kind {
     case .mint: return L.nests.historyMinted(scope: scope, when: when)

@@ -22,7 +22,7 @@
 // - **Lifecycle:** built with the page, stopped with it — over ONE tracker per
 //   feed manager (`cueTrackerFor`), as tui and linux keep one per auth: every
 //   leave drains it empty, so a re-mount starts clean, and the frozen test
-//   clock (`$lib/feed-cues-e2e`) survives a trip off the page. Leaving the list —
+//   clock (`#lib/feed-cues-e2e`) survives a trip off the page. Leaving the list —
 //   the route unmounting, a post-detail or compose dialog covering it, the tab
 //   going hidden — drains every tracked card (off-screen is off-viewport). The
 //   route leaving and the tab going hidden also flush the rollup

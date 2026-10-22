@@ -9,17 +9,13 @@
 > **The server is yours, in your own account, and you pay for it directly.** You
 > open an account with a cloud provider, and the app uses a token you give it to
 > create the server there on your behalf. Your provider bills you, at their
-> normal prices. Fauna does not host anything, does not resell anything, and
-> never sees your card — it only drives the provider's controls for you.
+> normal prices. Fauna does not host your server, does not resell anything, and never sees your card — it only drives the provider's controls for you.
 >
 > It sits alongside two other ways to get a nest:
 >
 > - *[Join or claim a nest from the app](getting-started.md)* — your first run,
 >   when someone else (or a box you already installed) is waiting for you.
-> - *[Set up a nest on the internet by hand](nest-internet-setup.md)* — the same
->   server, but you create the box and run the Docker commands yourself. That is
->   the path the Fauna project runs for its own alpha, so it is the most
->   battle-tested; this in-app path is the easy one.
+> - *[Set up a nest on the internet by hand](nest-internet-setup.md)* — the same server, but you create the box and run the Docker commands yourself. It suits people who want to see every step; this in-app path is the easy one.
 >
 > You need **your own domain** (bring one, or buy it inside the app) and a
 > **cloud-server account** to build in. Everything else is automatic.
@@ -35,28 +31,25 @@
  │  — created for you by the app            │
  │                                          │
  │   • the Fauna app, at                    │
- │     https://yourdomain.com/app/          │
+ │     https://example.com/app/             │
  │   • posts, messages, files, calendar     │
- │   • email @yourdomain.com (optional)     │
+ │   • email @example.com (optional)        │
  │   • a real TLS certificate, automatic    │
  └─────────────────────────────────────────┘
         ▲ phones, laptops — anywhere
 ```
 
-The result is identical to the [hand-built internet nest](nest-internet-setup.md)
-— a full internet-facing Fauna server that is yours, sealed to keys only your
-devices hold. The difference is only in *how you get there*: the app does the
-creating, installing, claiming, and DNS instead of you.
+The result is the same Fauna server as the [hand-built internet nest](nest-internet-setup.md) — a full internet-facing Fauna server that is yours, with your content stored on it encrypted, apart from what you publish to everyone. The difference is in *how you get there* — the app does the creating, installing, claiming, and DNS instead of you — and in one piece of upkeep: a server the app builds also restarts itself when an operating-system update needs it — once no one is connected, or within a day at the latest.
 
 ## What you need
 
 | You need | Notes |
 |---|---|
 | **A domain** | Bring one you already own, **or buy one inside the app** while you set up. |
-| **A cloud-server account** | Your account with a cloud provider, where the box gets built and which **bills you directly** for it. You'll paste a **Read & Write API token** so the app can create the server on your behalf — the token stays sealed to *your* account, and the finished nest never sees it. |
+| **A cloud-server account** | Your account with a cloud provider, where the box gets built and which **bills you directly** for it. You'll paste a **Read & Write API token** so the app can create the server on your behalf. The app uses the token only while it builds your server and doesn't keep it for that; the finished nest never sees it. (If one token also manages your domain's DNS, as a Hetzner token can, the app keeps it as your DNS token, encrypted in your account, so it can keep your records up to date.) |
 | **A DNS-provider token** *(optional)* | Hand the app a token for wherever your domain's DNS lives and it publishes every record for you. Don't want to? Choose **Set up later** and paste a couple of records by hand at the end instead. |
-| **The Fauna app** | Web, desktop, or mobile — the wizard is the same on all of them. |
-| **About 10–15 minutes** | Most of it is waiting for the new server to boot and DNS to catch up. |
+| **The Fauna app** | A desktop, phone or terminal app — the wizard is the same on all of them. The web app is served by a nest, so you can only open it from a nest that is already running, and the build may not finish from it yet (see *Where this stands today*). |
+| **A few minutes to build** | Most of it is waiting for the new server to start. Your domain's records can then take from seconds to a few hours to reach everyone — whether the app publishes them or you add them by hand — before the server answers at its own name. |
 
 > There is **nothing to set up by hand, no server to log into, and no claim code
 > to copy.** The app generates the box's one-time claim secret itself, plants it
@@ -67,15 +60,12 @@ creating, installing, claiming, and DNS instead of you.
 
 ## How it works, in one breath
 
-Enter your handle → connect your DNS (or defer it) → pick a server → watch it
-build → (paste a couple of DNS records, only if you deferred) → you're signed in
-as the admin. Six pages, and the app carries the whole thing.
+Enter your handle → connect your DNS (or defer it) → pick a server → watch it build → (paste a couple of DNS records, only if you deferred) → confirm how the nest connects, and whether to trust it → you're signed in as the admin. The app carries the whole thing.
 
 ## Step 1 — Enter your handle
 
 Open the Fauna app and start setup as usual: create or import your identity,
-then enter your **handle** as **`you@yourdomain.com`** — the name you want, at
-the domain you'll use.
+then enter your **handle** as **`you@example.com`** — the name you want, at the domain you'll use.
 
 When the app checks the handle and finds the domain has **no nest yet**, it
 offers to build one for you and switches into the provisioning flow. **The
@@ -92,15 +82,13 @@ The DNS step is where you tell Fauna how your domain's records get published.
   itself.
 - **Buy the domain here.** Don't have one yet? Choose **Porkbun**, **Gandi**,
   **Namecheap**, or **Cloudflare**, and the app registers the domain for you
-  as part of setup (you'll confirm the price first — and the price you'll pay
-  each year after that is shown before anything is charged).
+  as part of setup (you'll confirm the price first — and, where the registrar quotes it, the price you'll pay each year after that is shown before anything is charged).
 - **A name under a domain you already have.** A handle like
   `you@box.example.com` puts the server on a subdomain of `example.com`. The
   handle check tells you the name sits inside `example.com`, and this page
   opens with **Buy domain** unticked: pick the provider that hosts
   `example.com`'s DNS, verify, and the app publishes the server's records
-  inside that zone. (Buying a name like `you@example.co.uk`? The check can't
-  tell `co.uk` apart from a domain someone holds, so you get the same message.
+  inside that zone. (Buying a name under a two-part ending such as `.co.uk`? The check can't tell `co.uk` apart from a domain someone holds, so you get the same message.
   Tick **Buy domain** yourself after you verify the registrar.)
 - **One company for everything.** A company that implements the open *Fauna
   Bundled Provider API* can register your domain, host its DNS, **and** rent
@@ -132,43 +120,32 @@ Pick where and how big:
 - **Provider and location** — choose your cloud account and a region near you.
 - **Size** — a short list of sensible server sizes, each showing its CPU,
   memory, disk, and monthly price.
-- **Email — on or off.** One toggle decides whether this box is set up for
-  **full email** at your domain:
+- **Email — on or off.** One toggle, **Run mail on this box**, decides whether this box is set up for **full email** at your domain:
   - **On** (the default for a real domain) — the box is built with everything
     email needs, including a virus scanner and spam filter. Those need memory,
     so the size list only offers plans with **2 GB RAM or more**.
   - **Off** — a leaner, cheaper **social-only** box (posts, messages, files,
     calendar, federation — everything *except* email), which can run on the
-    smallest **1 GB** size. **Note:** a social-only box can't add email later
-    without moving to a bigger server, so leave email **on** if you might ever
-    want it.
+    smallest **1 GB** size. **Note:** a social-only box can't add email later — the server would have to be set up again with email, on a plan with 2 GB or more — so leave email **on** if you might ever want it.
 - **Updates.** Your server keeps itself up to date automatically; this choice
   decides which versions it follows:
   - **Stable** (the default) — released versions. Recommended.
   - **Test** — numbered releases being accepted by users before they become
     Stable. A release reaches Test first and moves to Stable once it has been
     verified and approved; if you want to try releases early, this is the
-    channel. Until version 0.2 a Test server works only with apps of exactly
-    the same version, so pair it with the app stores' test tracks.
-  - **Dev** — the newest development builds, before any checking, for people
-    who build the apps from source. Expect breakage; pick it only for a server
-    you are happy to rebuild.
+    channel. Until version 0.2 a Test server works only with apps of exactly the same version.
+  - **Dev** — the newest development builds, before any checking, for people who build the apps from source. Until version 0.2 a Dev server works only with apps built from the same source. Expect breakage; pick it only for a server you are happy to rebuild.
 
-  The choice is made here, when the server is created, and cannot be changed
-  from the app afterwards yet.
+  You make the choice here, when the server is created, and can change it later on the admin area's **Nest** page (see the [admin tour](admin-tour.md#nest)).
 
-Turning email on here only *sizes* the box for mail (the memory the virus
-scanner and spam filter need) — it doesn't switch mail on by itself. Once you
+Turning email on here builds the box for mail — the virus scanner and spam filter, and the memory they need — but it doesn't switch mail on by itself. Once you
 claim the finished box with your real domain and confirm it's publicly
 reachable (the default), the app turns email on for you automatically; see
 "After it's up" below.
 
 ## Step 4 — Watch it build
 
-Before the build button, a short recap shows what you're about to be charged —
-the domain's one-time registration price (if you're buying one) and the
-server's monthly price. Both prices are ones you already saw and agreed to
-earlier; this is just a reminder, not a new charge.
+Before the build button, a short recap shows what you're about to be charged — the domain's price for its first year (if you're buying one), with the yearly price after that where the registrar quotes it, and the server's monthly price. The first-year and monthly prices are ones you already saw and agreed to earlier; this is just a reminder, not a new charge.
 
 Press the build button and the app provisions everything, showing four steps in
 order:
@@ -222,17 +199,11 @@ answered.)
 
 ## Step 6 — You're the owner
 
-However you got here — the app finishing on its own or you pasting the last
-records — the result is the same: **you land in the app as your nest's admin, no
-claim code to type.** Within a minute or two of coming online, the box fetches a
-real TLS certificate for your domain from Let's Encrypt automatically — no
+However you got here — the app finishing on its own or you pasting the last records — the result is the same: **you are your nest's admin, no claim code to type.** Two short questions come first. **Is this nest reachable from the internet?** is already answered **Public (internet-facing)** for a server like this one, so just press **Confirm** — or **Decide later**; you can change it any time in **Admin → Nest**. Then the app asks whether to trust the box (below). Once your domain's records have reached the internet — from seconds to a few hours, depending on your DNS provider — the box fetches a real TLS certificate for your domain from Let's Encrypt automatically — no
 certbot, no configuration. Reload and you're on your own Fauna nest, reachable
 from anywhere.
 
-Your content is sealed to your devices' keys from that first moment. Nothing on
-the box can read it, and nothing is granted by default; if you ever want the box
-to do more with your data, you mint the specific grant for it later, from
-**Settings → Nests**, and every grant is revocable.
+From that first moment, your content is stored encrypted on the box, apart from what you publish to everyone, which is public by design. Your nest sees what any server that delivers your messages must: who you're connected to — your contacts, whom you follow, the groups you're in — and when and how much you send. Beyond what you publish to everyone and the mail and messages your nest passes to and from email and other networks, what any machine may read is a permission you granted and can revoke in the app. A group may also choose to be a community room, which its home nest can read. And a link standing on a line of its own in a post or a message is fetched for its preview by the nest of each person who reads it, so that nest learns the link's address. And someone who can open one of your messages, or a post only some people can open, can attach its text to a report, which the admins it goes to can then read. The app asks **Trust this box?**: trusting it lets the box read your mail after it has arrived, to run its virus and spam checks on it again when those checks are updated (mail from outside your nest is checked once as it arrives, whatever you answer), and read your calendar for itself — a community labeler that reads your mail gets its own trust when you subscribe to it, and a calendar or mail app you connect works with its own password either way — and that trust renews itself while you use Fauna, so it doesn't quietly run out. Choose **Yes, trust this box** or **Not now**. Saying no changes nothing you have now: mail from outside your nest is still checked as it arrives, and only those later re-checks wait until you say yes. You can trust it later, or take the trust back at any time, from **Settings → Nests**, where every change is written down for you. (If the box runs nothing that would read your content, the app says there's nothing to decide yet.)
 
 ---
 
@@ -247,15 +218,12 @@ files:
   you confirm your hand-added records.
 - **Email.** If you built a mail-ready box, email is already on —
   claiming with a real domain while publicly reachable (the default) turns it
-  on automatically, no switch to flip. Open **Settings → Mail** for the
-  one-time mailbox password the app generated for you, then publish the records
+  on automatically, no switch to flip. Open **Settings → Connected apps** for the mailbox password the app generated for you — you can show or copy it there any time — then publish the records
   the **Admin → DNS** page now asks for (including the DKIM key your box has
-  generated). `you@yourdomain.com` is a real, working email address — in your
+  generated). `you@example.com` is a real, working email address — in your
   Fauna conversations and in any standard mail app. (Chose **Private**
-  reachability instead? Email stays off; turn it on yourself from
-  **Settings → Mail**.)
-- **Back it up.** All your nest's data lives on that one server; snapshot it on a
-  schedule with your cloud provider's backup tooling.
+  reachability instead? Email stays off: a private box runs no mail receiver of its own, so mail reaches it only through a public nest that relays for it. Once it has one, linking the two from an installed Fauna app sets your mail up here — see *[Link a home nest to an internet nest](nest-relay-setup.md)*.)
+- **Back it up.** All of this nest's data lives on that one server, so keep a copy of your own data somewhere else too — *[Backup with Fauna](cloud-backup.md)* shows how. A snapshot of the whole server from your provider's control panel is yours to add as a second copy; Fauna neither takes nor restores it.
 
 For a screen-by-screen map of everything you just unlocked, take
 [the tour of the app](app-tour.md) and, for the owner's controls,
@@ -263,26 +231,24 @@ For a screen-by-screen map of everything you just unlocked, take
 
 ## If something doesn't work
 
-- **The build stalls on "Online" for a long while** — DNS can take from minutes
-  to a few hours to propagate. The app keeps retrying; give it time, or check
-  the record at your registrar.
+- **The build stalls on "Online" for a long while** — this step doesn't wait for DNS: the app reaches your new server by its address. The server may still be starting up; the app keeps retrying on its own, and if it stops with an error, press **Retry**. Building from the web app? A browser may not be able to finish this step yet — build from a desktop, phone or terminal app.
 - **"Verify" fails on your cloud or DNS token** — make sure the token has
   **write** permission (a read-only token can list your account but can't create
   the server or publish records), and that you pasted it whole.
 - **Email doesn't arrive after you turn it on** — most providers block outbound
   port **25** on new accounts until you ask them to unblock it, and inbound mail
   needs your `MX` record green on the **Admin → DNS** page.
-- **A DNS provider won't verify in the web app** — see the note in the table
-  below; the desktop and mobile apps talk to every provider directly.
+- **A provider won't verify in the web app** — Cloudflare, Namecheap, Gandi and Vultr don't work from the web app yet; the desktop, phone and terminal apps talk to every provider directly.
 
 ## Where this stands today
 
 | Piece | Status |
 |---|---|
-| The whole in-app flow — handle, DNS, server pick, live build progress, automatic claim, automatic TLS | **Works today** — built into every Fauna app. The hand-built [by-hand path](nest-internet-setup.md) is the one the project runs for its own alpha, so it's the most road-tested; this path is the easy one. |
-| Buying a **server** inside the app | **Works today** — Hetzner, DigitalOcean, Vultr, OVH, and Linode. Hetzner is the most road-tested and the recommended default. |
-| Buying a **domain** inside the app | **Porkbun, Gandi, Namecheap, and Cloudflare today.** |
-| Managed DNS (hand the app a token, it maintains every record) | **Works today** — Cloudflare, Hetzner, Porkbun, Gandi, Namecheap. |
-| A free **Fauna-hosted address** (no domain of your own at all) | **Planned** — for now you bring or buy a domain. |
-| DNS/server providers in the **web app** | Buying through **Porkbun** and building on **Hetzner** needs nothing extra in the browser. Cloudflare, Namecheap, Gandi (DNS and domain purchase) and Vultr (server) currently verify best from the **desktop or mobile** app, which reaches them directly, until a small helper service for the web app is deployed. |
-| One-command installers / packaged app releases | **Planned** — building from source (native apps) or the web app is the way in during alpha. |
+| The whole in-app flow — handle, DNS, server pick, live build progress, automatic claim, automatic TLS | **Available** — built into every Fauna app, and tested end to end against test servers. From the web app the build may not finish yet (below). |
+| The nest software itself | **No Stable release yet** — until the first one is out, a server built on the **Stable** channel has nothing to install. A numbered release is published on the **Test** channel, and the **Dev** channel's development builds are published. |
+| Buying a **server** inside the app | **Available** — Hetzner, DigitalOcean, Vultr and Linode. Hetzner is the most road-tested and the recommended default. An OVH account can't be used to build a server from the app. |
+| Buying a **domain** inside the app | **Available** — Porkbun, Gandi, Namecheap and Cloudflare. |
+| Managed DNS (hand the app a token, it maintains every record) | **Available** — Cloudflare, Hetzner, Porkbun, Gandi, Namecheap. |
+| A free **Fauna-hosted address** (no domain of your own at all) | **Not offered** — you bring or buy a domain. |
+| Setting up from the **web app** | A browser cannot trust a brand-new server the way the other apps can, so from the web app the build may not finish yet; build it from a desktop, phone or terminal app. Cloudflare, Namecheap and Gandi (DNS and domain purchase) and Vultr (server) also don't work from the web app yet. |
+| Packaged app releases | **No public release yet** — outside Google Play's invitation-only testing, and apart from the web app a nest serves itself by default, trying an app means building it from source. |

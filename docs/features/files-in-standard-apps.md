@@ -65,10 +65,10 @@ Stamped 2026-09-23 at 6605debcb9.
 | App | Status | Stamp |
 |---|---|---|
 | web | ✅ full | 0.1.2-dev+2cb6e915.dirty standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+f29a951a standalone |
-| macos | ✅ full | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 

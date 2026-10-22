@@ -50,6 +50,12 @@ pub mod endpoint;
 #[cfg(any(unix, windows))]
 pub mod convergence;
 
+// The conversations oracle's door — the second endpoint, served by the app
+// hosting the account's conversations engine and reached by a device principal
+// (`conversations-oracle.md` § The custodian and the door).
+#[cfg(any(unix, windows))]
+pub mod oracle;
+
 // The shared consumer loop for the agent's pushed events (the sibling of
 // `convergence` on the read side): filter + blocking recv loop + self-healing
 // listener thread. Platform shells inject only the notification surface.

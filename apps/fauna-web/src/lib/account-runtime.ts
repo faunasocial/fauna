@@ -5,7 +5,7 @@
 // `account_runtime` module); this file is only its lifecycle beside the
 // conversations manager's:
 //
-// - **Start** once the manager exists (`$lib/conversations` calls
+// - **Start** once the manager exists (`#lib/conversations` calls
 //   `startAccountRuntimeFor` right after installing it). The runtime
 //   registers the account-plane conversations seams on that manager at its
 //   store-ready edge — the same edge every native app uses. Only the tab that
@@ -22,7 +22,7 @@
 //   machine enrolled. Either returns once the store and its Web Lock are
 //   released.
 //
-// - **The store-change notice** (`$lib/store-change`) is relayed from the
+// - **The store-change notice** (`#lib/store-change`) is relayed from the
 //   started runtime to the open store-backed pages, and ends with it.
 //
 // A start that fails leaves the tab with no account store and says so in the
@@ -104,7 +104,7 @@ export function startAccountRuntimeFor(
       // account's start) since then owns the flag.
       if (starting !== attempt) return;
       started = true;
-      // The store-change notice for the open pages (`$lib/store-change`): one
+      // The store-change notice for the open pages (`#lib/store-change`): one
       // relay per started runtime, ended by the runtime's own stop.
       void relayStoreChanges(accountStoreChangedAfter, (e) =>
         logMessage('warn', 'fauna_web::store_change', `store-change notice: ${e}`),
@@ -187,7 +187,7 @@ export async function accountRuntimeSettled(): Promise<void> {
 /** Has this tab's runtime started — is the account store readable right now?
  *  The synchronous half of `accountRuntimeSettled`: a launch pass that rests
  *  on the store runs in line when this is true and waits for the settle when
- *  it is not (`$lib/launch-pass`). */
+ *  it is not (`#lib/launch-pass`). */
 export function accountRuntimeStarted(): boolean {
   return started;
 }

@@ -4,7 +4,7 @@ Owns: windows, windows-shell-extension
 Status: ratified — as-built architecture; remaining gaps declared in § Implementation status today
 Authority: windows-app architecture — the WinUI 3 app and its two nest transports (the WS-RPC `NestRpcClient` over the UniFFI `FfiNestClient`, plus `DirectNestClient` HTTP for unmigrated clusters), in-process MLS via `fauna_ffi.dll`, the per-user sync agent + cfapi on-demand hydration host + per-session named-pipe IPC, and shell-extension behavior (overlay/context-menu COM surfaces, pipe protocol); MSI packaging, COM registration, Path-1 upgrade + the services process model → [`../installers/windows.md`](../installers/windows.md); cross-app behavior → [`common.md`](common.md); the app-lifecycle model mirrors [`linux.md`](linux.md) § System Tray.
 
-Last verified: 2026-09-16 (docs-consistency sweep, one of ~23 concepts in a wide parallel fan-out for a 4080-commit watermark gap — re-flow-traced the two-plane transport: `grep -rl INestRpcClient`/`DirectNestClient` under `FaunaApp/` now land at 107/10 consuming files, up from 100/11 three weeks prior, so the "~100" figure was bumped to "~107" (the "~10" figure held); confirmed the store-safe/payments `Views/Payments/` `UserControl` count still holds at six (`AskingPriceInput`/`NostrZapSignersSection` landed 2026-09-06 are already the doc's cited additions, no further growth); the "known code bug" (`fauna-bridge-service/src/pipe_server.rs:67` querying the deleted `GET /api/v1/bridges`) was then present and has since been resolved by deleting the pipe server. **Drift found+fixed:** (1) the Primary-nav bullet and the Nav-order line still listed "P2P" as a top-level nav destination — the WireGuard-stack deletion (2026-08-23, predating even the prior sweep's watermark) removed the `NavigationViewItem` from `MainPage.xaml`, and this doc's own § P2P section already said so; the two lists contradicted the doc's own § P2P section, now fixed to match. (2) `FaunaApp/Views/` re-enumerated at 62 top-level `.xaml.cs` pages (up from 58) — four pages landed since last sweep with no matching doc update: `AdminCustodyHostingPage` (2026-09-09, Admin hub), `SettingsMailImportPage` (2026-08-31) and `SettingsMemberReviewPage` (2026-09-09, Settings shell), `LaunchAccountIndexUnreadablePage` (2026-09-11, Launch surfaces) — all four added to their respective Views-section bullets. Grep-terms otherwise clean across the sweep scope (remaining hits across `docs/goal/` are legitimate per-app/per-feature references to the shared transport seam, not restatements of this doc's own windows-specific counts); no-modes tombstone lexicon absent from this doc | Source: `apps/fauna-windows/`
+Last verified: 2026-10-14 (docs-consistency sweep) — two-plane transport (~116 `INestRpcClient` / ~14 `DirectNestClient` consuming files), the `FaunaApp/Views/` page enumeration (64 top-level pages), the `Views/Payments/` store-safe set (eleven) and the Credential Manager key-storage claims re-checked against the code | Source: `apps/fauna-windows/`
 
 ## Goal
 
@@ -180,6 +180,7 @@ fauna-windows/
 │   └── FaunaApp.Tests/       # Unit tests
 ├── fauna-bridge-service/     # Rust: IMAP/CalDAV bridge supervision — spawns the Go fauna-mail-bridge MDA (top-level workspace member)
 ├── fauna-nest-service/       # Rust: the FaunaNest machine service (network-reachable HTTPS :443, optional)
+├── installer/                # WiX v6 MSI sources (`installers/windows.md`)
 ├── shell-ext/                # Windows shell integration (Cloud Files API)
 └── shellext-fixture/         # Test-only harness binary driving shell-ext headlessly (§ Shell Extension → Observation harness)
 ```
@@ -196,7 +197,7 @@ public interface into `FaunaApp.Tests/Generated/FakeBases.g.cs`, every member `v
 throwing; a hand-written fake (`FakeAccountRegistry`, `FakeDraftsSync`, `FakeWebClient`, …)
 inherits it and `override`s only the members it implements. This makes a Rust-side interface
 growth compile clean by construction instead of relying on every fake author to notice —
-`docs/goal/architecture/merge-gate-check.md` § Merge-gate check (win) owns the incident history and
+`docs/goal/architecture/merge-gate-check-win.md` § Merge-gate check (win) owns the incident history and
 the gate mechanics.
 
 ---
@@ -219,7 +220,7 @@ feature — see `FaunaApp/Views/`):
   `AdminLogsPage`, `AdminMailPage`, `AdminNestPage`, `AdminWebPage`
   (`AdminNavigation.cs`; shell model → `behavior/admin.md`).
 - **Settings shell:** `SettingsShellPage` (Status is the default sub-page) +
-  sub-pages Account, Encryption, General, LinkedNests (Nests), Logs, Mail,
+  sub-pages Account, ConnectedApps, Encryption, General, LinkedNests (Nests), Logs, Mail,
   MailAliases, MailExport, MailImport, MailLists, MailListMembers, MailSpam,
   MemberReview, MutedWords, Privacy, Subscriptions, TaskDelegation, Web —
   plus `DevicesPage`, `FoldersPage`, `PersonalizationPage`,
@@ -229,6 +230,7 @@ feature — see `FaunaApp/Views/`):
 - **Launch surfaces:** `OnboardingPage` (+ `Views/Onboarding/`),
   `LaunchRetryPage`, `LaunchNeedsUpdatePage`, `LaunchIdentityChangedPage`,
   `LaunchInstanceChooserPage`, `LaunchAccountIndexUnreadablePage`,
+  `LaunchSignInRefusedPage`,
   `FamilyPage` (gated footer).
 
 **Retired (2026-06-28 sync/folder UI unification):** `GroupsPage` /
@@ -310,7 +312,7 @@ plus the `DagCborIpcTests.cs` conformance pins were deleted with that retirement
 
 ## Local Nest Service (Optional)
 
-`fauna-nest-service` is the installed `FaunaNest` machine service — a real **network-reachable nest server**, not a loopback proxy: it binds `0.0.0.0:443` HTTPS off the self-signed floor cert via the shared `fauna_nest::desktop_serve` sequence (`apps/fauna-windows/fauna-nest-service/src/service.rs`; legacy persisted `7450`-era ports are actively rewritten by its `config.rs`). Packaging, virtual accounts, and lifecycle: `installers/windows.md` § Services and the per-user sync agent. (The old `http://127.0.0.1:7450` caching-proxy/MLS-delegate model is retired — MLS runs via P/Invoke/UniFFI to `fauna_ffi.dll`, never a local HTTP proxy.)
+`fauna-nest-service` is the installed `FaunaNest` machine service — a real **network-reachable nest server**, not a loopback proxy: it binds `0.0.0.0:443` HTTPS off the self-signed floor cert via the shared `fauna_nest::desktop_serve` sequence (`apps/fauna-windows/fauna-nest-service/src/service.rs`; `config.rs` loads an existing device config as written and generates the fixed internal-loopback `nest_port` only for a fresh one). Packaging, virtual accounts, and lifecycle: `installers/windows.md` § Services and the per-user sync agent. (The old `http://127.0.0.1:7450` caching-proxy/MLS-delegate model is retired — MLS runs via P/Invoke/UniFFI to `fauna_ffi.dll`, never a local HTTP proxy.)
 
 ---
 
@@ -814,11 +816,11 @@ post-decrypt **local detections** (`IModerationLocalDetections`, from
 
 ## Implementation status today
 
-- **Declared absences (owner [`../../behavior/family-safety.md`](../../behavior/family-safety.md) § The account age band):** no store age signal and therefore no `invite-request-age-notice` (D3 — at most the two store-distributed mobile apps ever receive one; the id is `platform_elements: {android, ios}` in ui.yaml), and no kids flavor (the kids-app bullet: the kids door is a store construct, android and ios only). The e2e gate for both is `declared_absence`, never `skip_unbuilt`.
+- **Declared absences (owner [`../../behavior/account-age-band.md`](../../behavior/account-age-band.md) § The account age band):** no store age signal and therefore no `invite-request-age-notice` (D3 — at most the two store-distributed mobile apps ever receive one; the id is `platform_elements: {android, ios}` in ui.yaml), and no kids flavor (the kids-app bullet: the kids door is a store construct, android and ios only), and no store-consent lock (`store-consent-lock` + its message — `global.platform_elements: {android, ios}` in ui.yaml; the store-law developer duties bullet, ruled 2026-10-19: a parent's consent to a significant change is a store construct about one device). The e2e gate for all three is `declared_absence`, never `skip_unbuilt`.
 - **Two-plane transport is the shipped shape** (§ Architecture): `NestRpcClient`
-  over `FfiNestClient` for migrated clusters (~107 consuming files in FaunaApp,
+  over `FfiNestClient` for migrated clusters (~116 consuming files in FaunaApp,
   up from ~100 as more clusters migrated), `DirectNestClient` for the remainder
-  (~10 consuming files). The bridges HTTP→WS-RPC swap is **done**
+  (~14 consuming files). The bridges HTTP→WS-RPC swap is **done**
   (`BridgesViewModel` drives `INestRpcClient.BridgesListAsync`).
 - **Admin hub, moderation pipeline, C2PA render** (`BlobImageLoader`,
   `DmMessageBubble`), **email-alias UI** (`SettingsMailAliasesPage` +

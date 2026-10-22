@@ -1,6 +1,8 @@
 package com.fauna.app.ui.viewmodel
 
 import com.fauna.app.core.ApiClient
+import com.fauna.app.core.PendingAppealStore
+import com.fauna.ffi.FfiObligationAction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -100,6 +102,38 @@ class ModerationQueueVMAppealTest {
         assertEquals("I hold the licence.", vm.appealDraft.value?.reason)
         assertEquals("moderation.appeal_failed", vm.appealStatus.value?.key)
         assertEquals("a refusal is form feedback, not error-message", errorBefore, vm.errorMessage.value)
+    }
+
+    private fun serverAction(contentId: String) = FfiObligationAction(
+        id = 1L,
+        contentType = "conversation",
+        contentId = contentId,
+        category = "illegal",
+        confidencePerMille = 1000u,
+        action = 7u,
+        timestamp = 1L,
+    )
+
+    /** A `dm-message-withheld-badge` tap leaves the queue row's `content_id` in
+     *  [PendingAppealStore]; the queue's next load opens the appeal draft on that row
+     *  (once), and a row the queue no longer carries opens nothing. */
+    @Test
+    fun aWithheldBadgeTapOpensTheAppealOnItsQueueRowOnceLoaded() = runTest {
+        val api = mock(ApiClient::class.java)
+        whenever(api.moderationActions()).thenReturn(listOf(serverAction("aa"), serverAction("bb")))
+        whenever(api.moderationLocalDetections()).thenReturn(emptyList())
+        whenever(api.abuseReportMine()).thenThrow(RuntimeException("no ledger in this test"))
+
+        PendingAppealStore.set("bb")
+        val vm = ModerationQueueVM(api)
+
+        assertEquals("the appeal opens on the matched row", "bb", vm.appealDraft.value?.contentId)
+        assertNull("asked once", PendingAppealStore.consume())
+
+        vm.cancelAppeal()
+        PendingAppealStore.set("zz")
+        vm.load()
+        assertNull("a row the queue no longer carries opens nothing", vm.appealDraft.value)
     }
 
     @Test

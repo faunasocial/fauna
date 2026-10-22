@@ -3,7 +3,7 @@
 //
 // The conversations manager's build runs launch passes that read the folder-key
 // custody, and that custody rests in this tab's account runtime, which starts
-// beside the build and is never awaited by it (`$lib/account-runtime`: the
+// beside the build and is never awaited by it (`#lib/account-runtime`: the
 // store opening must not hold the conversations page back). So such a pass has
 // two edges — the build reaching it, and the runtime having started — and runs
 // at whichever comes last:

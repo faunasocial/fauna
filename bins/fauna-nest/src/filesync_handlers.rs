@@ -33,13 +33,13 @@ use bytes::Bytes;
 
 use fauna_core::identity::ActorId;
 use fauna_protocol::filesync::{
-    IMMEDIATE_DELETE_ACK_TEXT, PrunableSnapshot, SnapshotCheckReply, SnapshotCheckRequest,
-    SnapshotCreateFolderReply, SnapshotCreateFolderRequest, SnapshotCreateMessageKindReply,
-    SnapshotCreateMessageKindRequest, SnapshotDeleteImmediateReply, SnapshotDeleteImmediateRequest,
-    SnapshotDeleteReply, SnapshotDeleteRequest, SnapshotDiffEntry, SnapshotDiffReply,
-    SnapshotDiffRequest, SnapshotDiffSummary, SnapshotFileEntry, SnapshotGetReply,
-    SnapshotGetRequest, SnapshotListReply, SnapshotListRequest, SnapshotModifiedEntry,
-    SnapshotPruneReply, SnapshotPruneRequest, SnapshotPruneSetPolicyReply,
+    IMMEDIATE_DELETE_ACK_TEXT, PrunableSnapshot, SnapshotCheckError, SnapshotCheckReply,
+    SnapshotCheckRequest, SnapshotCreateFolderReply, SnapshotCreateFolderRequest,
+    SnapshotCreateMessageKindReply, SnapshotCreateMessageKindRequest, SnapshotDeleteImmediateReply,
+    SnapshotDeleteImmediateRequest, SnapshotDeleteReply, SnapshotDeleteRequest, SnapshotDiffEntry,
+    SnapshotDiffReply, SnapshotDiffRequest, SnapshotDiffSummary, SnapshotFileEntry,
+    SnapshotGetReply, SnapshotGetRequest, SnapshotListReply, SnapshotListRequest,
+    SnapshotModifiedEntry, SnapshotPruneReply, SnapshotPruneRequest, SnapshotPruneSetPolicyReply,
     SnapshotPruneSetPolicyRequest, SnapshotRestoreDivergenceListReply,
     SnapshotRestoreDivergenceListRequest, SnapshotRestoreHistoryListReply,
     SnapshotRestoreHistoryListRequest, SnapshotRestoreMessageKindReply,
@@ -499,166 +499,27 @@ fn create_message_kind_handler() -> RpcHandler {
                 return create_conv(&state, &actor, req.actor_id).await;
             }
 
-            let (content_blob, placement_blob): (Option<Vec<u8>>, Option<Vec<u8>>) =
-                match req.kind.as_str() {
-                    "mail" => {
-                        // Pin both the content manifest and the placement
-                        // manifest (backup-restore.md § 6 "serialises both
-                        // manifests in the same SQLite transaction so a
-                        // message-kind snapshot is never written with a stale
-                        // content/placement pairing"). restore_mail replays the
-                        // placement manifest into bridge_imap_*; a snapshot
-                        // without it is un-restorable.
-                        //
-                        // finalize_open before load_manifest on *both* stores so
-                        // the captured pair reflects all appended-but-unflushed
-                        // records.
-                        state
-                            .mail_segments
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let m = state
-                            .mail_segments
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let content = fauna_core::encoding::canonical_encode(&m)
-                            .map_err(|e| internal(format!("Manifest: {e}")))?;
+            if !matches!(req.kind.as_str(), "mail" | "post" | "calendar" | "card") {
+                return Err(unknown_kind(
+                    "kind must be 'mail', 'post', 'calendar', or 'card'",
+                ));
+            }
 
-                        state
-                            .mail_placement
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let pm = state
-                            .mail_placement
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let placement = fauna_core::encoding::canonical_encode(&pm)
-                            .map_err(|e| internal(format!("MailPlacementManifest: {e}")))?;
-
-                        (Some(content), Some(placement))
-                    }
-                    "post" => {
-                        // Posts have NO placement layer (unlike mail) —
-                        // placement_manifest is NULL (like conv). Pin only the
-                        // content manifest. finalize_open before load_manifest so
-                        // the captured manifest reflects all appended-but-
-                        // unflushed records.
-                        state
-                            .post_segments
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let m = state
-                            .post_segments
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let content = fauna_core::encoding::canonical_encode(&m)
-                            .map_err(|e| internal(format!("post Manifest: {e}")))?;
-                        (Some(content), None)
-                    }
-                    "calendar" => {
-                        // Mail's shape exactly (backup-restore.md § snapshot
-                        // create): pin the content manifest AND the placement
-                        // manifest together — restore_calendar replays the
-                        // placement into bridge_caldav_* and rebuilds rows
-                        // from the content manifest + disk segments; a
-                        // snapshot without either half is un-restorable.
-                        // finalize_open before load_manifest on both stores
-                        // so the captured pair reflects all appended-but-
-                        // unflushed records.
-                        state
-                            .cal_segments
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let m = state
-                            .cal_segments
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let content = fauna_core::encoding::canonical_encode(&m)
-                            .map_err(|e| internal(format!("calendar Manifest: {e}")))?;
-
-                        state
-                            .cal_placement
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let pm = state
-                            .cal_placement
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let placement = pm
-                            .encode()
-                            .map_err(|e| internal(format!("CalPlacementManifest: {e}")))?;
-
-                        (Some(content), Some(placement))
-                    }
-                    "card" => {
-                        // Calendar's twin — the two DAV stores share one DR
-                        // posture (carddav-server.md § Storage model).
-                        state
-                            .card_segments
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let m = state
-                            .card_segments
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let content = fauna_core::encoding::canonical_encode(&m)
-                            .map_err(|e| internal(format!("card Manifest: {e}")))?;
-
-                        state
-                            .card_placement
-                            .finalize_open(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let pm = state
-                            .card_placement
-                            .load_manifest(&actor)
-                            .await
-                            .map_err(internal)?;
-                        let placement = pm
-                            .encode()
-                            .map_err(|e| internal(format!("CardPlacementManifest: {e}")))?;
-
-                        (Some(content), Some(placement))
-                    }
-                    _ => {
-                        return Err(unknown_kind(
-                            "kind must be 'mail', 'post', 'calendar', or 'card'",
-                        ));
-                    }
-                };
-
-            let fs_id = state
-                .db
-                .get_or_create_reserved_folder(&actor, &req.kind)
-                .await
-                .map_err(internal)?;
-
-            let snap_id = state
-                .db
-                .create_message_kind_snapshot_row(
-                    fs_id,
-                    &req.kind,
-                    content_blob.as_deref(),
-                    placement_blob.as_deref(),
-                )
-                .await
-                .map_err(internal)?;
+            // The capture itself is the one nest-side function both creators
+            // call (backup-restore.md § 5 → *Creators*): the scheduler's
+            // automatic arm reaches the same body.
+            let capture = crate::backup::message_kind::create_message_kind_snapshot(
+                &state.db,
+                &crate::backup::message_kind::MessageKindStores::of(&state),
+                &actor,
+                &req.kind,
+            )
+            .await
+            .map_err(internal)?;
 
             encode_reply(&SnapshotCreateMessageKindReply {
-                snapshot_id: snap_id,
-                snapshot_ids: vec![snap_id],
+                snapshot_id: capture.snapshot_id,
+                snapshot_ids: vec![capture.snapshot_id],
                 kind: req.kind,
                 actor_id: ActorId(actor),
                 extra: std::collections::BTreeMap::new(),
@@ -727,34 +588,15 @@ async fn create_conv(
     // batched call these land within milliseconds (see the Plan 8 T4
     // consistent-T note — refactoring the row DAO to share one timestamp is
     // not warranted for the millisecond skew).
+    let stores = crate::backup::message_kind::MessageKindStores::of(state);
     let mut ids = Vec::with_capacity(channels.len());
     for channel in &channels {
-        // finalize_open before load_manifest so the captured manifest reflects
-        // all appended-but-unflushed records (mirrors the mail path).
-        state
-            .conv_segments
-            .finalize_open(channel)
-            .await
-            .map_err(internal)?;
-        let m = state
-            .conv_segments
-            .load_manifest(channel)
-            .await
-            .map_err(internal)?;
-        let content = fauna_core::encoding::canonical_encode(&m)
-            .map_err(|e| internal(format!("conv Manifest: {e}")))?;
-
-        let fs_id = state
-            .db
-            .get_or_create_reserved_conv_folder(channel)
-            .await
-            .map_err(internal)?;
-        let id = state
-            .db
-            .create_message_kind_snapshot_row(fs_id, "conv", Some(&content), None)
-            .await
-            .map_err(internal)?;
-        ids.push(id);
+        let capture = crate::backup::message_kind::create_message_kind_snapshot(
+            &state.db, &stores, channel, "conv",
+        )
+        .await
+        .map_err(internal)?;
+        ids.push(capture.snapshot_id);
     }
 
     encode_reply(&SnapshotCreateMessageKindReply {
@@ -1159,6 +1001,32 @@ fn list_handler() -> RpcHandler {
                         extra: Default::default(),
                     })
                     .collect()
+            } else if req.message_kind.as_deref() == Some("conv") {
+                // A conv row is keyed by its CHANNEL, not by the bearer, so the
+                // owner-implicit query below never sees one: the Conversations
+                // kind entry lists the rows of every channel the bearer belongs
+                // to (`ui/backups.md` § Snapshot-list shape → *Kind entries*) —
+                // the same membership read conv create and restore authorize on.
+                let mut rows = Vec::new();
+                for channel in state
+                    .db
+                    .list_actor_channels(&bearer)
+                    .await
+                    .map_err(internal)?
+                {
+                    rows.extend(
+                        state
+                            .db
+                            .list_message_kind_snapshots(&channel, Some("conv"), req.limit)
+                            .await
+                            .map_err(internal)?,
+                    );
+                }
+                rows.sort_by_key(|r| std::cmp::Reverse((r.created_at, r.id)));
+                if req.limit > 0 {
+                    rows.truncate(req.limit as usize);
+                }
+                rows
             } else {
                 // Owner-implicit message-kind list (original behavior): the
                 // bearer's WS-handshake actor scopes the query.
@@ -1689,140 +1557,210 @@ fn prune_set_policy_handler() -> RpcHandler {
             require_permission(&state, &actor, "fauna.filesync.snapshot.prune_set_policy").await?;
             let req: SnapshotPruneSetPolicyRequest = decode(&payload).map_err(malformed)?;
 
-            // Owner-scoped lookup (N1) — the same gate `prune` uses. A prune
-            // is a write; a roster member reading a group-bound set may not
-            // launch one.
-            let fs =
-                crate::folder_authz::resolve_owned_folder(&state.db, set_address(&req)?, &actor)
+            // A kind entry addresses the bearer's reserved kind row(s)
+            // (`ui/backups.md` § Snapshot-list shape → *Kind entries*); a
+            // folder entry, owner-scoped (N1) — the same gate `prune` uses. A
+            // prune is a write; a roster member reading a group-bound set may
+            // not launch one.
+            let sets = match req.message_kind.as_deref() {
+                Some(kind) => bearer_kind_rows(&state, &actor, kind).await?,
+                None => vec![
+                    crate::folder_authz::resolve_owned_folder(
+                        &state.db,
+                        set_address(&req)?,
+                        &actor,
+                    )
                     .await
                     .map_err(internal)?
-                    .ok_or_else(|| not_found("folder not found"))?;
-
-            use crate::backup::retention::{
-                FolderRetention, evaluate_folder_retention_at, parse_folder_retention,
+                    .ok_or_else(|| not_found("folder not found"))?,
+                ],
             };
 
-            // Both non-policy arms prune nothing and say which one it was, so
-            // the page can render *why* the count is zero instead of an empty
-            // success. `remaining` still reports the real active count — the
-            // user asked what this set holds, and the answer does not depend
-            // on whether a policy exists.
-            let policy = match parse_folder_retention(fs.retention_policy.as_deref()) {
-                FolderRetention::Policy(p) => p,
-                arm => {
-                    if arm == FolderRetention::Unparseable {
-                        // Same loud refusal as the automatic path: a writer
-                        // disagreeing with the canonical 2-field shape is a
-                        // live at-rest condition (an off-shape writer
-                        // leaves a non-canonical retention JSON here, and such rows are
-                        // deliberately left — `backup-restore.md` § 8 → *The
-                        // off-shape at-rest residual*), and guessing would
-                        // prune against a number nobody chose.
-                        tracing::warn!(
-                            folder = %fauna_core::log_redact::log_folder_name(&fs.name),
-                            "retention policy is not the canonical {{max_snapshots, max_age_days}} \
-                             shape — pruning nothing (backup-restore.md § 8)"
-                        );
-                    }
-                    let active = state
-                        .db
-                        .list_snapshots(fs.id)
-                        .await
-                        .map_err(internal)?
-                        .into_iter()
-                        .filter(crate::backup::prune::is_active_snapshot)
-                        .count();
-                    return encode_reply(&SnapshotPruneSetPolicyReply {
-                        dry_run: req.dry_run,
-                        pruned: 0,
-                        remaining: active as i64,
-                        snapshots: Vec::new(),
-                        policy_state: if arm == FolderRetention::Unparseable {
-                            policy_state::UNPARSEABLE.into()
-                        } else {
-                            policy_state::NOT_SET.into()
-                        },
-                        extra: std::collections::BTreeMap::new(),
-                    });
-                }
-            };
-
-            // § 7: the candidate population is the ACTIVE snapshots only —
-            // the shared predicate, so this kind's floor arithmetic and
-            // Layer 1's agree by construction. Counting the recovering rows
-            // would make the user's bound bind over snapshots they already
-            // deleted, so the bound they chose would never bind (the same trap the explicit kind fell into).
-            let snaps: Vec<_> = state
-                .db
-                .list_snapshots(fs.id)
-                .await
-                .map_err(internal)?
-                .into_iter()
-                .filter(crate::backup::prune::is_active_snapshot)
-                .collect();
-
-            // `list_snapshots` is newest-first; the evaluator wants oldest-first.
-            let mut metas: Vec<crate::backup::retention::SnapshotMeta> = snaps
-                .iter()
-                .map(|s| {
-                    crate::backup::retention::SnapshotMeta::from_tag_hashes(
-                        s.id,
-                        s.created_at,
-                        s.tag_hashes.as_deref(),
-                    )
-                })
-                .collect();
-            metas.reverse();
-
-            // The evaluator owns all three guarantees (tagged spared,
-            // >= SNAPSHOT_HARD_FLOOR remain, newest kept) — unlike the union
-            // engine, which needs the floor clamped onto it afterwards. No
-            // clamp here is therefore correct, not an omission.
-            let prunable_ids =
-                evaluate_folder_retention_at(&policy, &metas, crate::db::now_epoch_secs());
-            let remaining = (snaps.len() - prunable_ids.len()) as i64;
-
-            if req.dry_run {
-                let candidates = metas
-                    .iter()
-                    .filter(|m| prunable_ids.contains(&m.id))
-                    .map(|m| PrunableSnapshot {
-                        id: m.id,
-                        created_at: m.created_at,
-                        // The tags never rest, so a dry run names none.
-                        tags: Vec::new(),
-                        extra: Default::default(),
-                    })
-                    .collect();
-                return encode_reply(&SnapshotPruneSetPolicyReply {
-                    dry_run: true,
-                    pruned: prunable_ids.len() as i64,
-                    remaining,
-                    snapshots: candidates,
-                    policy_state: policy_state::APPLIED.into(),
-                    extra: std::collections::BTreeMap::new(),
-                });
-            }
-
-            // § 7 Layer 3: *soft*-delete, never the purge primitive — each
-            // pruned snapshot opens the 30-day `purge_after` window
-            // `fauna.filesync.snapshot.undelete` serves; only GC's phase 3
-            // purges. Layer 2 (a cancellable delay) is deliberately NOT
-            // interposed, the same ruling the explicit kind carries:
-            // a user-requested, previewed, synchronous prune with an undelete
-            // window satisfies no-user-data-loss on its own.
-            for id in &prunable_ids {
-                state.db.soft_delete_snapshot(*id).await.map_err(internal)?;
-            }
-            encode_reply(&SnapshotPruneSetPolicyReply {
-                dry_run: false,
-                pruned: prunable_ids.len() as i64,
-                remaining,
+            // A kind with no row yet has nothing to prune and resolves to the
+            // kind default — `applied`, never `not_set`.
+            let mut reply = SnapshotPruneSetPolicyReply {
+                dry_run: req.dry_run,
+                pruned: 0,
+                remaining: 0,
                 snapshots: Vec::new(),
                 policy_state: policy_state::APPLIED.into(),
                 extra: std::collections::BTreeMap::new(),
-            })
+            };
+            for fs in &sets {
+                let one = prune_one_set_by_policy(&state, fs, req.dry_run).await?;
+                reply.pruned += one.pruned;
+                reply.remaining += one.remaining;
+                reply.snapshots.extend(one.snapshots);
+                if one.policy_state != policy_state::APPLIED {
+                    reply.policy_state = one.policy_state;
+                }
+            }
+            encode_reply(&reply)
         })
+    })
+}
+
+/// The bearer's reserved message-kind rows for `kind` that a capture has
+/// minted — one for an actor-scoped kind, one per channel the bearer belongs
+/// to for conv (the batched set `create_conv` captures). Never mints a row: a
+/// kind with no snapshot yet resolves to none.
+async fn bearer_kind_rows(
+    state: &Arc<AppState>,
+    bearer: &[u8; 32],
+    kind: &str,
+) -> Result<Vec<crate::db::FolderRow>, RpcError> {
+    if !crate::backup::message_kind::MESSAGE_KINDS.contains(&kind) {
+        return Err(unknown_kind(
+            "message_kind must be 'mail', 'post', 'calendar', 'card', or 'conv'",
+        ));
+    }
+    let scopes = if kind == "conv" {
+        state
+            .db
+            .list_actor_channels(bearer)
+            .await
+            .map_err(internal)?
+    } else {
+        vec![*bearer]
+    };
+    let mut rows = Vec::new();
+    for scope in &scopes {
+        let Some(id) = state
+            .db
+            .find_reserved_kind_folder_id(scope, kind)
+            .await
+            .map_err(internal)?
+        else {
+            continue;
+        };
+        if let Some(fs) = state.db.get_folder_by_id(id).await.map_err(internal)? {
+            rows.push(fs);
+        }
+    }
+    Ok(rows)
+}
+
+/// Apply ONE set's resting policy through the same armed path as the
+/// automatic prune — the policy read is the shared seam
+/// [`crate::backup::retention::effective_folder_retention`], so a kind row's
+/// default binds here exactly as it does on the scheduler.
+async fn prune_one_set_by_policy(
+    state: &Arc<AppState>,
+    fs: &crate::db::FolderRow,
+    dry_run: bool,
+) -> Result<SnapshotPruneSetPolicyReply, RpcError> {
+    use crate::backup::retention::{
+        FolderRetention, effective_folder_retention, evaluate_folder_retention_at,
+    };
+
+    // § 7: the candidate population is the ACTIVE snapshots only — the shared
+    // predicate, so this kind's floor arithmetic and Layer 1's agree by
+    // construction. Counting the recovering rows would make the user's bound
+    // bind over snapshots they already deleted, so the bound they chose would
+    // never bind (the same trap the explicit kind fell into).
+    // The set-wide listing, so a kind row's own snapshots are the population.
+    let snaps: Vec<_> = state
+        .db
+        .list_set_snapshots(fs.id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .filter(crate::backup::prune::is_active_snapshot)
+        .collect();
+
+    // Both non-policy arms prune nothing and say which one it was, so the page
+    // can render *why* the count is zero instead of an empty success.
+    // `remaining` still reports the real active count — the user asked what
+    // this set holds, and the answer does not depend on whether a policy exists.
+    let policy = match effective_folder_retention(fs) {
+        FolderRetention::Policy(p) => p,
+        arm => {
+            if arm == FolderRetention::Unparseable {
+                // Same loud refusal as the automatic path: a writer disagreeing
+                // with the canonical 2-field shape is a live at-rest condition
+                // (an off-shape writer leaves a non-canonical retention JSON
+                // here, and such rows are deliberately left — `backup-restore.md`
+                // § 8 → *The off-shape at-rest residual*), and guessing would
+                // prune against a number nobody chose.
+                tracing::warn!(
+                    folder = %fauna_core::log_redact::log_folder_name(&fs.name),
+                    "retention policy is not the canonical {{max_snapshots, max_age_days}} \
+                     shape — pruning nothing (backup-restore.md § 8)"
+                );
+            }
+            return Ok(SnapshotPruneSetPolicyReply {
+                dry_run,
+                pruned: 0,
+                remaining: snaps.len() as i64,
+                snapshots: Vec::new(),
+                policy_state: if arm == FolderRetention::Unparseable {
+                    policy_state::UNPARSEABLE.into()
+                } else {
+                    policy_state::NOT_SET.into()
+                },
+                extra: std::collections::BTreeMap::new(),
+            });
+        }
+    };
+
+    // `list_snapshots` is newest-first; the evaluator wants oldest-first.
+    let mut metas: Vec<crate::backup::retention::SnapshotMeta> = snaps
+        .iter()
+        .map(|s| {
+            crate::backup::retention::SnapshotMeta::from_tag_hashes(
+                s.id,
+                s.created_at,
+                s.tag_hashes.as_deref(),
+            )
+        })
+        .collect();
+    metas.reverse();
+
+    // The evaluator owns all three guarantees (tagged spared, >=
+    // SNAPSHOT_HARD_FLOOR remain, newest kept) — unlike the union engine, which
+    // needs the floor clamped onto it afterwards. No clamp here is therefore
+    // correct, not an omission.
+    let prunable_ids = evaluate_folder_retention_at(&policy, &metas, crate::db::now_epoch_secs());
+    let remaining = (snaps.len() - prunable_ids.len()) as i64;
+
+    if dry_run {
+        let candidates = metas
+            .iter()
+            .filter(|m| prunable_ids.contains(&m.id))
+            .map(|m| PrunableSnapshot {
+                id: m.id,
+                created_at: m.created_at,
+                // The tags never rest, so a dry run names none.
+                tags: Vec::new(),
+                extra: Default::default(),
+            })
+            .collect();
+        return Ok(SnapshotPruneSetPolicyReply {
+            dry_run: true,
+            pruned: prunable_ids.len() as i64,
+            remaining,
+            snapshots: candidates,
+            policy_state: policy_state::APPLIED.into(),
+            extra: std::collections::BTreeMap::new(),
+        });
+    }
+
+    // § 7 Layer 3: *soft*-delete, never the purge primitive — each pruned
+    // snapshot opens the 30-day `purge_after` window
+    // `fauna.filesync.snapshot.undelete` serves; only GC's phase 3 purges.
+    // Layer 2 (a cancellable delay) is deliberately NOT interposed, the same ruling the explicit kind carries: a user-requested, previewed,
+    // synchronous prune with an undelete window satisfies no-user-data-loss on
+    // its own.
+    for id in &prunable_ids {
+        state.db.soft_delete_snapshot(*id).await.map_err(internal)?;
+    }
+    Ok(SnapshotPruneSetPolicyReply {
+        dry_run: false,
+        pruned: prunable_ids.len() as i64,
+        remaining,
+        snapshots: Vec::new(),
+        policy_state: policy_state::APPLIED.into(),
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -1833,6 +1771,11 @@ fn check_handler() -> RpcHandler {
         Box::pin(async move {
             require_permission(&state, &actor, "fauna.filesync.snapshot.check").await?;
             let req: SnapshotCheckRequest = decode(&payload).map_err(malformed)?;
+
+            if let Some(kind) = req.message_kind.as_deref() {
+                let sets = bearer_kind_rows(&state, &actor, kind).await?;
+                return encode_reply(&check_kind_rows(&state, kind, &sets).await?);
+            }
 
             // Owner-scoped lookup (N1) — see create_folder.
             let fs =
@@ -1876,6 +1819,81 @@ fn check_handler() -> RpcHandler {
             })
         })
     })
+}
+
+/// `check` on a kind entry (`ui/backups.md` § Snapshot-list shape → *Kind
+/// entries*): a kind row has no `snapshot_files`, so the folder chunk walk has
+/// nothing to read — instead every active row's pinned content segments must be
+/// on disk, the verification a message-kind restore runs first. One
+/// `missing_segment` finding per row with any missing; a row whose content
+/// manifest is absent or does not decode counts as a missing / corrupt
+/// manifest, the folder check's own counters.
+async fn check_kind_rows(
+    state: &Arc<AppState>,
+    kind: &str,
+    sets: &[crate::db::FolderRow],
+) -> Result<SnapshotCheckReply, RpcError> {
+    let stores = crate::backup::message_kind::MessageKindStores::of(state);
+    let content_store = stores
+        .content(kind)
+        .ok_or_else(|| unknown_kind("not a snapshotted message kind"))?;
+    let mut reply = SnapshotCheckReply::default();
+    for fs in sets {
+        let Ok(scope) = <[u8; 32]>::try_from(fs.actor_id.as_slice()) else {
+            continue;
+        };
+        for snap in state.db.list_set_snapshots(fs.id).await.map_err(internal)? {
+            if !crate::backup::prune::is_active_snapshot(&snap) {
+                continue;
+            }
+            reply.snapshots_checked += 1;
+            let (content, _) = state
+                .db
+                .get_snapshot_kind_manifests(snap.id)
+                .await
+                .map_err(internal)?;
+            let Some(content) = content else {
+                reply.missing_manifests += 1;
+                reply.structured_errors.push(SnapshotCheckError {
+                    kind: "missing_manifest".into(),
+                    snapshot_id: Some(snap.id),
+                    ..Default::default()
+                });
+                continue;
+            };
+            let Ok(manifest) =
+                fauna_core::encoding::canonical_decode::<fauna_segment_store::Manifest>(&content)
+            else {
+                reply.corrupt_manifests += 1;
+                reply.structured_errors.push(SnapshotCheckError {
+                    kind: "corrupt_manifest".into(),
+                    snapshot_id: Some(snap.id),
+                    ..Default::default()
+                });
+                continue;
+            };
+            reply.manifests_checked += 1;
+            if !crate::backup::message_kind::missing_pinned_segments(
+                content_store,
+                &scope,
+                &manifest,
+            )
+            .is_empty()
+            {
+                reply.structured_errors.push(SnapshotCheckError {
+                    kind: "missing_segment".into(),
+                    snapshot_id: Some(snap.id),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    reply.status = if reply.structured_errors.is_empty() {
+        SnapshotCheckReply::STATUS_OK.into()
+    } else {
+        "errors".into()
+    };
+    Ok(reply)
 }
 
 // ── fauna.filesync.snapshot.diff ────────────────────────────────
@@ -3613,6 +3631,7 @@ mod tests {
             &channel,
             0,
             100,
+            None,
         )
         .await
         .expect("read at T");
@@ -3638,6 +3657,7 @@ mod tests {
             &channel,
             0,
             100,
+            None,
         )
         .await
         .expect("read after appends");
@@ -3676,6 +3696,7 @@ mod tests {
             &channel,
             0,
             100,
+            None,
         )
         .await
         .expect("read after restore");
@@ -3852,6 +3873,7 @@ mod tests {
             &channel,
             0,
             100,
+            None,
         )
         .await
         .expect("read after refused restore");

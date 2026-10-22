@@ -27,6 +27,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 3. [nest] Infected mail is refused at the door, named as malware to the sending server, and clean mail is accepted — `docs/goal/behavior/mail-content-scanning.md` § Pipeline
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_infected_rejects`
    - `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_clean_delivers`
+   - `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar`
 4. [nest] A storm of mail-app sign-ins to one account is held to a limit, while a calendar app making many requests in a row is never locked out — `docs/goal/behavior/caldav-server.md` § Authentication
    - `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_imap_reconnect_storm_trips_rate_limit`
    - `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_caldav_burst_stays_under_rate_limit_via_cache`
@@ -70,6 +71,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
    - `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned`
 24. [nest] Clean mail reaches you carrying the result of its scan — `docs/goal/behavior/mail-content-scanning.md` § How the result is sealed
    - `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan`
+   - `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar`
 
 ## Status
 
@@ -93,6 +95,7 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 2 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_security_accept.py::test_perimeter_accepts_dkim_aligned_pass_rejects_broken` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_infected_rejects` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_bridge_mta.py::test_inbound_scan_clean_delivers` | nest (linux): passed |
+| 3 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_imap_reconnect_storm_trips_rate_limit` | nest (linux): passed |
 | 4 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_rate_limit_burst.py::test_caldav_burst_stays_under_rate_limit_via_cache` | nest (linux): passed |
 | 5 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_abuse_perimeter.py::test_a_quarantine_policy_failure_is_accepted_and_filed_as_spam` | nest (linux): passed |
@@ -115,4 +118,5 @@ Stamped 2026-10-01 at dc4b94e0f1.
 | 22 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_the_incoming_mail_port_never_accepts_a_sign_in` | nest (linux): passed |
 | 23 | nest | `tests/e2e-unified/tests/test_mail_abuse_refused.py::test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unscanned` | nest (linux): passed |
 | 24 | nest | `tests/e2e-unified/tests/test_mail_inbound_stamps.py::test_clean_mail_reaches_you_carrying_the_result_of_its_scan` | nest (linux): passed |
+| 24 | nest | `tests/e2e-unified/tests/platform/docker/test_mail_scan_real_clamd.py::test_real_clamd_stamps_clean_and_refuses_eicar` | nest (linux): passed |
 <!-- features-render:end -->

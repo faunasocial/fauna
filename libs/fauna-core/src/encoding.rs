@@ -564,6 +564,12 @@ impl Signed for KeyBlob {
     }
 }
 
+impl Signed for crate::subscription::types::FollowIntent {
+    fn signer_public_key(&self) -> &[u8; 32] {
+        &self.subscriber.0
+    }
+}
+
 impl Signed for DeviceAuthorization {
     fn signer_public_key(&self) -> &[u8; 32] {
         &self.actor_id.0
@@ -622,6 +628,25 @@ pub fn content_hash(bytes: &[u8]) -> ContentHash {
     ContentHash::from_digest_raw(*hash.as_bytes())
 }
 
+/// Whether `bytes` are the content `id` names — a 64-hex blake3 digest or a
+/// base32 CID, the two spellings the blob door serves the same bytes under. An
+/// id in neither spelling names no content and matches nothing. The one check
+/// every post-blob plane keeps fetched bytes behind, native and browser alike
+/// (`fauna_client::post_blob`).
+pub fn content_address_matches(id: &str, bytes: &[u8]) -> bool {
+    let named = match fauna_cbor::Cid::from_base32(id) {
+        Ok(cid) => cid.digest(),
+        Err(_) => {
+            let mut digest = [0u8; 32];
+            if hex::decode_to_slice(id, &mut digest).is_err() {
+                return false;
+            }
+            digest
+        }
+    };
+    content_hash(bytes).digest() == named
+}
+
 /// Compute the PostId — the [`fauna_cbor::Cid`] of the canonical dag-cbor
 /// encoding of the `Post` value.
 ///
@@ -640,6 +665,20 @@ pub fn compute_post_id(post: &Post) -> Result<PostId> {
 mod tests {
     use super::*;
     use crate::data::{ContactRequest, DeliveryReceipt, PostBody, Timestamp};
+
+    #[test]
+    fn both_spellings_of_a_content_address_match() {
+        let bytes = b"blob";
+        let hex_id = hex::encode(content_hash(bytes).digest());
+        assert!(content_address_matches(&hex_id, bytes));
+        assert!(content_address_matches(
+            &content_hash(bytes).to_base32(),
+            bytes
+        ));
+        let other = hex::encode(content_hash(b"other").digest());
+        assert!(!content_address_matches(&other, bytes));
+        assert!(!content_address_matches("not-a-hash", bytes));
+    }
 
     // ── verify_device_admission_witness ──────────────────────────────────
 
@@ -1034,6 +1073,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: crate::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         }
     }
@@ -1126,6 +1166,9 @@ mod tests {
             load_hint: Option<AccountLoadHint>,
             inbox_mode: InboxMode,
             updated_at: Timestamp,
+            // `audience` always serializes; this test pins only the
+            // `recovery_head` skip, so the mirror carries it.
+            audience: crate::data::ProfileAudience,
         }
 
         let new_shape = sample_profile([7u8; 32]);
@@ -1142,6 +1185,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             updated_at: Timestamp(0),
+            audience: crate::data::ProfileAudience::default(),
         };
 
         let new_bytes = canonical_encode(&new_shape).expect("encode new");

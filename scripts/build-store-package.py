@@ -290,6 +290,8 @@ def automation_surface_hits(payload_root):
 _PE_MACHINE = {"x64": 0x8664, "arm64": 0xAA64}
 _PE_MACHINE_I386 = 0x14C
 _CLR_DIRECTORY = 14
+_LOAD_CONFIG_DIRECTORY = 10
+_LOAD_CONFIG_CHPE_METADATA = 0xC8   # IMAGE_LOAD_CONFIG_DIRECTORY64.CHPEMetadataPointer
 _COMIMAGE_FLAGS_ILONLY = 0x1
 _COMIMAGE_FLAGS_32BITREQUIRED = 0x2
 # Every capability a Store upload declares. Owner of the ruling: installers/windows.md
@@ -318,7 +320,10 @@ def pe_arch_problem(data, arch):
 
     A native image must carry the package's machine type. A managed AnyCPU assembly
     (i386 machine type, a CLR header flagged ILONLY and not 32BITREQUIRED) runs on
-    either arch, so it passes whatever the package's arch.
+    either arch, so it passes whatever the package's arch. An ARM64X hybrid image (ARM64
+    machine type with CHPE metadata in its load config) carries ARM64EC code for x64
+    processes on ARM64 Windows, so it ships in the x64 package -- the Windows App SDK's
+    x64 runtime carries such images (Microsoft.Windows.Workloads.Resources_ec.dll).
     """
     try:
         layout = _pe_layout(data)
@@ -327,6 +332,14 @@ def pe_arch_problem(data, arch):
         machine, directory, offset = layout
         if machine == _PE_MACHINE[arch]:
             return None
+        if arch == "x64" and machine == _PE_MACHINE["arm64"]:
+            lc_rva = directory(_LOAD_CONFIG_DIRECTORY)
+            if lc_rva:
+                lc = offset(lc_rva)
+                (lc_size,) = struct.unpack_from("<I", data, lc)
+                if lc_size >= _LOAD_CONFIG_CHPE_METADATA + 8 and \
+                        struct.unpack_from("<Q", data, lc + _LOAD_CONFIG_CHPE_METADATA)[0]:
+                    return None
         clr_rva = directory(_CLR_DIRECTORY)
         if machine == _PE_MACHINE_I386 and clr_rva:
             (flags,) = struct.unpack_from("<I", data, offset(clr_rva) + 16)

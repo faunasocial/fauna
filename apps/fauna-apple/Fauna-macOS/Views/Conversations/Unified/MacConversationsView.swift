@@ -19,6 +19,8 @@ import FaunaKit
 /// `AddParticipantSheet`) are shared with iOS in `FaunaKit/Views/`.
 struct MacConversationsView: View {
     @Environment(ConversationsVM.self) private var vm
+    @Environment(FeedVM.self) private var feedVM
+    @Environment(MacAppState.self) private var appState
 
     var body: some View {
         NavigationSplitView {
@@ -64,6 +66,9 @@ struct MacConversationsView: View {
                 .padding(.bottom, 6)
                 .accessibilityIdentifier(Ids.conversationSearchBox)
                 .automationField(Ids.conversationSearchBox, text: vm.searchBinding)
+
+            // The standing community-room invitations, atop the list.
+            RoomInvitationsSection()
 
             List(selection: selectionBinding) {
                 ForEach(Array(vm.rows.enumerated()), id: \.element.id) { index, row in
@@ -116,7 +121,14 @@ struct MacConversationsView: View {
         if vm.newThreadCompose != nil {
             MacNewThreadComposeView()
         } else if let detail = vm.selectedDetail {
-            ThreadDetailView(detail: detail)
+            ThreadDetailView(detail: detail, onOpenRoomPost: { postId, home in
+                // A room-search post hit opens on the feed page through the same
+                // pending-open door a Search hit uses, carrying the room's home
+                // so a foreign-homed post resolves through `resolve_post_from`.
+                appState.selectedSidebar = .feed
+                feedVM.pendingPostOpenHome = home
+                feedVM.pendingPostOpen = postId
+            })
         } else {
             ContentUnavailableView(
                 L.conversations.list.title,

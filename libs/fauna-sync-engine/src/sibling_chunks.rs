@@ -29,7 +29,7 @@ use fauna_core::data::ContentHash;
 use fauna_peer_channel::PeerChannel;
 use fauna_transport::NestPath;
 
-use crate::sibling_source::SiblingChunkSource;
+use crate::sibling_source::{SiblingChunkSource, SiblingRowPage};
 
 /// What this host's downloads moved over the peer leg since start — the
 /// observable that says whether a body came from a sibling or the nest.
@@ -45,12 +45,28 @@ pub struct SiblingTally {
 }
 
 /// See the module docs.
-#[derive(Default)]
 pub struct SiblingChannels {
     inner: Mutex<Inner>,
     chunks: AtomicU64,
     bytes: AtomicU64,
     to_nest: AtomicU64,
+    /// Bumped on every admission — the engines' "pull this sibling now"
+    /// signal. A `watch`, not a `Notify`: every engine of the host holds its
+    /// own receiver, and one busy in another arm when the pass admits still
+    /// sees the change at its next select.
+    admissions: tokio::sync::watch::Sender<u64>,
+}
+
+impl Default for SiblingChannels {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            chunks: AtomicU64::default(),
+            bytes: AtomicU64::default(),
+            to_nest: AtomicU64::default(),
+            admissions: tokio::sync::watch::channel(0).0,
+        }
+    }
 }
 
 /// Admitted siblings by NodeId, in admission order.
@@ -72,9 +88,12 @@ impl SiblingChannels {
 
     /// Hold `channel` as `node_id`'s admitted channel, replacing an older one.
     pub(crate) fn admitted(&self, node_id: [u8; 32], channel: Arc<PeerChannel>) {
-        let mut inner = self.inner.lock().expect("sibling registry");
-        inner.channels.retain(|(id, _)| *id != node_id);
-        inner.channels.push((node_id, channel));
+        {
+            let mut inner = self.inner.lock().expect("sibling registry");
+            inner.channels.retain(|(id, _)| *id != node_id);
+            inner.channels.push((node_id, channel));
+        }
+        self.admissions.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// Forget `node_id` — it failed this pass, or failed a pull.
@@ -130,6 +149,16 @@ impl SiblingChannels {
             bytes: self.bytes.load(Ordering::Relaxed),
             to_nest: self.to_nest.load(Ordering::Relaxed),
         }
+    }
+
+    fn channel(&self, node_id: &[u8; 32]) -> Option<Arc<PeerChannel>> {
+        self.inner
+            .lock()
+            .expect("sibling registry")
+            .channels
+            .iter()
+            .find(|(id, _)| id == node_id)
+            .map(|(_, channel)| Arc::clone(channel))
     }
 
     fn snapshot(&self) -> (Admitted, NestPath) {
@@ -196,5 +225,51 @@ impl SiblingChunkSource for SiblingChannels {
             );
         }
         got
+    }
+
+    fn siblings(&self) -> Vec<[u8; 32]> {
+        self.snapshot().0.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Rows walk any path (metadata-sized) — no byte gate here.
+    async fn pull_folder_changes(
+        &self,
+        sibling: &[u8; 32],
+        folder: &str,
+        since: i64,
+    ) -> anyhow::Result<SiblingRowPage> {
+        let channel = self
+            .channel(sibling)
+            .ok_or_else(|| anyhow::anyhow!("the sibling is no longer held"))?;
+        let reply = fauna_peer_sync::pull_folder_changes(&channel, folder, since).await?;
+        Ok(SiblingRowPage {
+            rows: reply.changes,
+            more: reply.more,
+        })
+    }
+
+    async fn fetch_manifest(&self, folder: &str, hash: &ContentHash) -> Option<Vec<u8>> {
+        for (node_id, channel) in self.snapshot().0 {
+            match fauna_peer_sync::fetch_folder_manifest(&channel, folder, hash).await {
+                Ok(Some(bytes)) => return Some(bytes),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        node = %fauna_core::hex32::encode(&node_id),
+                        "sibling manifest fetch failed; the nest path serves it: {e:#}"
+                    );
+                    self.dropped(&node_id);
+                }
+            }
+        }
+        None
+    }
+
+    fn drop_sibling(&self, sibling: &[u8; 32]) {
+        self.dropped(sibling);
+    }
+
+    fn admissions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.admissions.subscribe())
     }
 }

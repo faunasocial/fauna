@@ -125,8 +125,8 @@ class _Config:
         self.hook = self
         self.deselected: list[_Item] = []
 
-    def getoption(self, name):
-        return self._opts.get(name)
+    def getoption(self, name, default=None):
+        return self._opts.get(name, default)
 
     def pytest_deselected(self, items):
         self.deselected.extend(items)

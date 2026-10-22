@@ -48,8 +48,6 @@
 //! graph, chosen over enabling a dep's verify glue so every step of the
 //! boundary stays readable in our own code.
 
-use std::collections::HashMap;
-
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::aes::cipher::BlockDecrypt;
 use aes_gcm::aes::{Aes256, Block};
@@ -57,13 +55,13 @@ use aes_gcm::{Aes256Gcm, Nonce as GcmNonce};
 use p256::ecdsa::signature::Verifier;
 use p256::pkcs8::DecodePublicKey;
 use sha2::{Digest, Sha256, Sha384};
-use tokio::sync::RwLock;
 
 use fauna_protocol::age::{
     AGE_ATTESTATION_PLATFORM_ANDROID, AGE_ATTESTATION_PLATFORM_IOS, AgeAttestation, AgeBand,
     AgeBandProvenance, age_claim_signed_message,
 };
 
+use crate::challenge_auth::{ChallengeStore, ChallengeStoreFull, IssueSource};
 use crate::routes::AppState;
 
 // ---------------------------------------------------------------------------
@@ -195,9 +193,9 @@ pub struct PlayIntegrityKeyMaterial {
 }
 
 /// How long a minted age nonce stays redeemable (the app has to run the
-/// platform attestation round inside it; the same onboarding-scale TTL as
-/// `challenge_auth::CHALLENGE_TTL_SECS`).
-pub const AGE_NONCE_TTL_SECS: u64 = 300;
+/// platform attestation round inside it) — the ceremony store's own TTL, the
+/// age store being one.
+pub const AGE_NONCE_TTL_SECS: u64 = crate::challenge_auth::CHALLENGE_TTL_SECS;
 
 fn now_secs() -> u64 {
     fauna_core::data::Timestamp::now_secs() as u64
@@ -207,16 +205,23 @@ fn now_secs() -> u64 {
 // Nonce store
 // ---------------------------------------------------------------------------
 
+/// The actor every age nonce is issued to: none. The minting caller is
+/// pre-identity, so the inner store's actor re-check is vacuous here.
+const UNBOUND_ACTOR: [u8; 32] = [0u8; 32];
+
 /// Single-use nonces for the attested age claim (`fauna.account.age_nonce`) —
-/// the `ChallengeStore` shape minus the actor binding: the minting caller is
-/// **pre-identity** (no account yet), and the actor is bound inside the
-/// attested payload itself (`age_claim_signed_message` carries `actor_id`),
-/// not at mint time. In-memory on purpose: a nest restart mid-onboarding just
-/// re-mints, exactly like a sign-in challenge.
+/// a [`ChallengeStore`] whose every nonce is issued to [`UNBOUND_ACTOR`]: the
+/// minting caller is **pre-identity** (no account yet), and the actor is bound
+/// inside the attested payload itself (`age_claim_signed_message` carries
+/// `actor_id`), not at mint time. Being that store, it carries the same bounds
+/// as every ceremony nonce store — the per-source cap, the global cap with
+/// heaviest-network eviction, expired entries swept before counting
+/// (`deployment-threat-model.md` § Concern 1a, finding H2). In-memory on
+/// purpose: a nest restart mid-onboarding just re-mints, exactly like a
+/// sign-in challenge.
 #[derive(Default)]
 pub struct AgeNonceStore {
-    /// nonce -> expiry (epoch seconds).
-    entries: RwLock<HashMap<[u8; 32], u64>>,
+    inner: ChallengeStore,
 }
 
 impl AgeNonceStore {
@@ -224,13 +229,19 @@ impl AgeNonceStore {
         Self::default()
     }
 
-    /// Mint a fresh nonce. Returns `(nonce, expires_in_secs)`.
-    pub async fn issue(&self) -> ([u8; 32], u64) {
-        let mut nonce = [0u8; 32];
-        getrandom::fill(&mut nonce).expect("getrandom failed");
-        let mut map = self.entries.write().await;
-        map.insert(nonce, now_secs() + AGE_NONCE_TTL_SECS);
-        (nonce, AGE_NONCE_TTL_SECS)
+    /// A store with explicit caps (see [`ChallengeStore::with_caps`]).
+    pub fn with_caps(per_source_cap: usize, global_cap: usize) -> Self {
+        Self {
+            inner: ChallengeStore::with_caps(per_source_cap, global_cap),
+        }
+    }
+
+    /// Mint a fresh nonce charged to `source`. Returns
+    /// `(nonce, expires_in_secs)`, or [`ChallengeStoreFull`] when `source`
+    /// already holds its cap of outstanding nonces.
+    pub async fn issue(&self, source: IssueSource) -> Result<([u8; 32], u64), ChallengeStoreFull> {
+        let (nonce, _) = self.inner.issue(UNBOUND_ACTOR, source).await?;
+        Ok((nonce, AGE_NONCE_TTL_SECS))
     }
 
     /// Consume a nonce, removing it. `true` only for a known, unexpired entry
@@ -239,18 +250,22 @@ impl AgeNonceStore {
     /// burns its nonce, so the expensive chain check can never be ground
     /// against one mint.
     pub async fn consume(&self, nonce: &[u8; 32]) -> bool {
-        let mut map = self.entries.write().await;
-        match map.remove(nonce) {
-            Some(expires_at) => expires_at > now_secs(),
-            None => false,
-        }
+        self.inner.consume(&UNBOUND_ACTOR, nonce).await
     }
 
     /// Drop entries whose TTL expired more than 60 seconds ago.
     pub async fn gc(&self) -> usize {
-        let cutoff = now_secs().saturating_sub(60);
-        let mut map = self.entries.write().await;
-        crate::ttl_gc::gc_before_cutoff(&mut map, |v| *v, cutoff)
+        self.inner.gc().await
+    }
+
+    /// Outstanding nonces — what the caps bound.
+    pub async fn len(&self) -> usize {
+        self.inner.len().await
+    }
+
+    /// `true` when no nonce is outstanding.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.is_empty().await
     }
 }
 
@@ -1506,10 +1521,12 @@ mod tests {
         );
     }
 
+    const SRC: IssueSource = IssueSource::Peer([0x5e; 32]);
+
     #[tokio::test]
     async fn nonces_are_single_use() {
         let store = AgeNonceStore::new();
-        let (nonce, expires_in) = store.issue().await;
+        let (nonce, expires_in) = store.issue(SRC).await.unwrap();
         assert_eq!(expires_in, AGE_NONCE_TTL_SECS);
         assert!(store.consume(&nonce).await, "first consume succeeds");
         assert!(!store.consume(&nonce).await, "second consume refused");
@@ -1517,24 +1534,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_respects_the_sixty_second_grace_period() {
-        // No prior test called gc() directly — insert entries with a
-        // controlled expiry (rather than waiting out the real TTL) so this
-        // exercises the ttl_gc::gc_before_cutoff delegation, and its
-        // grace-period cutoff specifically, without a wall-clock wait.
-        let store = AgeNonceStore::new();
-        {
-            let mut map = store.entries.write().await;
-            // Expired 120s ago — past the 60s grace window.
-            map.insert([1u8; 32], now_secs().saturating_sub(120));
-            // Expired 10s ago — still inside the 60s grace window.
-            map.insert([2u8; 32], now_secs().saturating_sub(10));
-            map.insert([3u8; 32], now_secs() + 300);
+    async fn one_source_is_refused_past_its_cap() {
+        let store = AgeNonceStore::with_caps(2, 100);
+        assert!(store.issue(SRC).await.is_ok());
+        assert!(store.issue(SRC).await.is_ok());
+        assert_eq!(store.issue(SRC).await, Err(ChallengeStoreFull));
+        assert_eq!(store.len().await, 2, "a refusal writes nothing");
+        assert!(store.issue(IssueSource::Peer([0x42; 32])).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_many_slash64_flood_stays_bounded_and_a_light_source_still_mints() {
+        // The age nonce is pre-identity: a flood spread over many /64s of one
+        // /48 passes every per-source bound, so the store's global cap — with
+        // the heaviest network evicted first — is what holds it.
+        let store = AgeNonceStore::with_caps(3, 12);
+        let (honest, _) = store.issue(SRC).await.unwrap();
+        for sub in 0..40u8 {
+            let mut key = [0u8; 32];
+            key[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x03]);
+            key[7] = sub;
+            for _ in 0..3 {
+                assert!(store.issue(IssueSource::Peer(key)).await.is_ok());
+            }
         }
-        assert_eq!(store.gc().await, 1);
-        let map = store.entries.read().await;
-        assert_eq!(map.len(), 2);
-        assert!(!map.contains_key(&[1u8; 32]));
+        assert_eq!(store.len().await, 12, "the store stays at its cap");
+        let light = IssueSource::Peer([0x77; 32]);
+        let (fresh, _) = store
+            .issue(light)
+            .await
+            .expect("a light source still mints");
+        assert_eq!(store.len().await, 12);
+        assert!(
+            store.consume(&honest).await,
+            "the flood evicted the light source's nonce"
+        );
+        assert!(store.consume(&fresh).await);
     }
 
     // ── Play Integrity ──────────────────────────────────────────────────────

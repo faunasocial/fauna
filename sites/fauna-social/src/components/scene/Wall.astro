@@ -1,0 +1,76 @@
+---
+// The walled garden, now far away: a low grey band along the left horizon,
+// its foot hidden behind the back hill, its far corner turning away — a bad
+// memory rather than a looming threat. On top a single strand of wire with
+// tiny barbs; in the band a small barred gate with the keeper standing
+// beside it, head and shoulders over the crest; and — where the wall
+// crosses the hill — the breach the critters left through: a jagged notch
+// bitten out of the top, the wire snapped and dangling, a few bricks
+// scattered on the slope below. Drawn inside the meadow's SVG, behind the
+// back hill, in the `--wall-*` tokens; the whole group is slightly
+// translucent, which reads as distance haze.
+//
+// Geometry: the band runs parallel to the back hill's edge
+// (M0 120 Q300 45 600 110), about 30 units above it, from off-canvas left
+// to the corner at x≈468; the foot (y=132) is below the hill line
+// everywhere it spans, so only the band above the grass ever shows.
+interface Props {
+  /** Centre of the little gate arch. */
+  gateX?: number;
+  /** Left lip of the breach. */
+  breachX?: number;
+}
+const { gateX = 235, breachX = 340 } = Astro.props;
+const g = gateX;
+const b = breachX;
+---
+<g class="wall" opacity="0.9">
+  <!-- the band, the breach bitten out of its top edge -->
+  <path d={`M-10 92 Q150 56 300 50 L${b} 48.4
+      L${b + 4} 62 L${b + 16} 56 L${b + 26} 64 L${b + 38} 57 L${b + 48} 63 L${b + 52} 54 L${b + 54} 46.2
+      Q430 45.2 468 54 L468 132 L-10 132 Z`} fill="var(--wall)" />
+  <path d="M-10 92 Q150 56 300 50 L340 48.4" fill="none" stroke="var(--wall-edge)" stroke-width="2.5" />
+  <path d="M394 46.2 Q430 45.2 468 54" fill="none" stroke="var(--wall-edge)" stroke-width="2.5" />
+  <path d="M468 54 L468 132" stroke="var(--wall-edge)" stroke-width="2" />
+  <!-- a hint of brickwork: short joints, nothing that could read as rails -->
+  <g stroke="var(--wall-mortar)" stroke-width="1.1" opacity="0.8">
+    <path d="M50 98 L51 104 M120 78 L121 84 M190 66 L191 72 M255 68 L256 74 M305 58 L306 64 M430 56 L431 62 M80 108 L81 114 M225 78 L226 84" />
+  </g>
+  <!-- bricks that tumbled out of the breach, on the slope below -->
+  <g fill="var(--wall)" stroke="var(--wall-edge)" stroke-width="0.8">
+    <rect x={b + 6} y="84" width="9" height="5" rx="1" transform={`rotate(-18 ${b + 10} 86)`} />
+    <rect x={b + 26} y="90" width="9" height="5" rx="1" transform={`rotate(14 ${b + 30} 92)`} />
+    <rect x={b + 46} y="86" width="8" height="5" rx="1" transform={`rotate(-8 ${b + 50} 88)`} />
+    <rect x={b + 16} y="96" width="8" height="4.5" rx="1" transform={`rotate(24 ${b + 20} 98)`} />
+  </g>
+  <!-- wire: a strand each side of the breach, snapped ends drooping -->
+  <g fill="var(--wall-edge)">
+    <rect x="108.8" y="57" width="2.4" height="10" rx="1" />
+    <rect x="268.8" y="40" width="2.4" height="10" rx="1" />
+    <rect x="438.8" y="36" width="2.4" height="10" rx="1" />
+  </g>
+  <path d={`M-10 84 Q150 48 300 42 L${b - 6} 40.8 Q${b + 2} 44 ${b + 3} 50`} fill="none" stroke="var(--wall-edge)" stroke-width="1.2" />
+  <path d={`M${b + 58} 40 Q430 38.5 466 45 M${b + 58} 40 Q${b + 52} 44 ${b + 51} 49`} fill="none" stroke="var(--wall-edge)" stroke-width="1.2" />
+  <g stroke="var(--wall-edge)" stroke-width="1" stroke-linecap="round">
+    {[
+      [70, 73], [150, 60], [230, 51], [300, 45], [430, 41],
+    ].map(([x, y]) => <path d={`M${x - 2} ${y - 2} L${x + 2} ${y + 2} M${x + 2} ${y - 2} L${x - 2} ${y + 2}`} />)}
+  </g>
+  <!-- the gate: a dark arch, four bars -->
+  <path d={`M${g - 11} 110 L${g - 11} 66 Q${g} 54 ${g + 11} 66 L${g + 11} 110 Z`} fill="var(--wall-inside)" />
+  <g stroke="#c3c6c9" stroke-width="1" stroke-linecap="round">
+    <path d={`M${g - 6.5} 62.5 L${g - 6.5} 108`} />
+    <path d={`M${g - 2.2} 60 L${g - 2.2} 108`} />
+    <path d={`M${g + 2.2} 60 L${g + 2.2} 108`} />
+    <path d={`M${g + 6.5} 62.5 L${g + 6.5} 108`} />
+  </g>
+  <!-- the keeper, head and shoulders over the crest beside the gate -->
+  <g>
+    <ellipse cx={g + 25} cy="79" rx="5.5" ry="4.5" fill="#5d5148" />
+    <circle cx={g + 25} cy="70.5" r="3.8" fill="#7a6b60" />
+    <path d={`M${g + 20.8} 68.3 Q${g + 25} 63.8 ${g + 29.2} 68.3 Z`} fill="#3f4346" />
+    <rect x={g + 20.2} y="67.6" width="9.6" height="1.7" rx="0.85" fill="#2b2a24" />
+    <path d={`M${g + 23.4} 70.3 L${g + 24.6} 70.9 M${g + 26.6} 70.3 L${g + 25.4} 70.9`} stroke="#2b2a24" stroke-width="0.7" stroke-linecap="round" />
+    <circle cx={g + 30} cy="78" r="1.3" fill="#f4c95d" />
+  </g>
+</g>

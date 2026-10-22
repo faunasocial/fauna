@@ -1,3 +1,4 @@
+#if !FAUNA_KIDS
 import SwiftUI
 import FaunaKit
 
@@ -23,6 +24,9 @@ struct NestProvisioningView: View {
                     .font(.title2)
 
                 ProvisioningPriceBom(items: vm.machine.billOfMaterials())
+
+                // Below the price recap, before the Buy-and-set-up CTA.
+                TermsNotice()
 
                 if snap.overall == .idle {
                     Button(L.onboarding.nestProvisioning.startButton) {
@@ -131,4 +135,4 @@ struct NestProvisioningView: View {
         }
     }
 }
-
+#endif // !FAUNA_KIDS

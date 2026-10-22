@@ -140,7 +140,7 @@ if (typeof window !== 'undefined' && __FAUNA_E2E_AUTOMATION__) {
   // it — `OnboardingMachine::set_provider_base_urls` (machine.rs) — so no driver,
   // agent command or test has to learn a second gesture.
   //
-  // Read at MODULE LOAD of `$lib/api`, which every nest-facing page imports, so a
+  // Read at MODULE LOAD of `#lib/api`, which every nest-facing page imports, so a
   // launch that never mounts the onboarding page (a plain relaunch straight into
   // `/app/feed`) installs it too.
   const raw = new URLSearchParams(location.search).get('fauna_e2e_provider_base_urls');
@@ -246,7 +246,7 @@ export function currentTokenId(secretHex: string, targetNode?: string): string |
  *  `{expires_in_secs, own_session_ids}`, the web leg of the cross-app
  *  `launch_token` state key (`fauna_e2e_agent::LAUNCH_TOKEN_KEY` owns the shape;
  *  web's held bearer is this cache). Test builds only: its sole caller is
- *  `$lib/e2e-automation`. A plain read — never mints. */
+ *  `#lib/e2e-automation`. A plain read — never mints. */
 export function homeBearerScheduleForTest(secretHex: string): {
   expires_in_secs: number | null;
   own_session_ids: string[];
@@ -717,10 +717,10 @@ export async function fetchNestPath(secretHex: string, path: string): Promise<Ui
 // (`fauna.conversations.room.*`) on the shared wasm `ConversationsManager`. The
 // web `listGroups`/`createGroup`/`sendGroupAction`/`fetchGroupMembers`/
 // `fetchGroupMessages` HTTP twins were removed once the `/groups` page +
-// `$lib/channels` were deleted in the page convergence.
+// `#lib/channels` were deleted in the page convergence.
 
 // `fetchBackupStatus` (was `GET /api/v1/sync/backup-status`) moved to
-// `$lib/rpc` (`fauna.sync.backup_status`).
+// `#lib/rpc` (`fauna.sync.backup_status`).
 
 // Media-page sync state rides `fauna.sync.{status,files}` over the shared
 // `fauna_client_sync::SyncClient` (wasm twin), retiring `GET /api/v1/sync/*`.
@@ -747,7 +747,7 @@ export async function fetchSyncFiles(
 }
 
 // Snapshot CRUD + list + detail + prune + check (was `/api/v1/snapshots*`
-// + `/api/v1/sync/backup-status`) moved to `$lib/rpc` as the
+// + `/api/v1/sync/backup-status`) moved to `#lib/rpc` as the
 // `fauna.filesync.snapshot.*` / `fauna.sync.backup_status` WS-RPC twins
 // (Track B15 / B13). No snapshot route is HTTP: a file's bytes come from the
 // shared client-side walk (`downloadSnapshotFileBytes` →
@@ -970,8 +970,9 @@ export async function createEmailFilter(
   combination: string,
   action: string | Record<string, unknown>,
   priority: number,
+  continueOnMatch: boolean,
 ): Promise<{ id: number }> {
-  return { id: await rpc.emailFiltersCreate(secretHex, name, rules, combination, action, priority) };
+  return { id: await rpc.emailFiltersCreate(secretHex, name, rules, combination, action, priority, continueOnMatch) };
 }
 
 export async function deleteEmailFilter(secretHex: string, id: number): Promise<void> {
@@ -990,8 +991,9 @@ export async function updateEmailFilter(
   combination: string,
   action: string | Record<string, unknown>,
   priority: number,
+  continueOnMatch: boolean,
 ): Promise<void> {
-  return rpc.emailFiltersUpdate(secretHex, id, name, rules, combination, action, priority);
+  return rpc.emailFiltersUpdate(secretHex, id, name, rules, combination, action, priority, continueOnMatch);
 }
 
 // The post-succession filter-mark review (succession-aftermath.md §

@@ -77,8 +77,60 @@
                     AutomationProperties.Name="new-event-btn" />
         </Grid>
 
+        <StackPanel Grid.Row="2">
+        <!-- Refused scheduling changes (events.md § Refused scheduling changes): a
+             list above the calendar content, painted ONLY while at least one open row
+             exists (Collapsed otherwise, so count(refused-change-list) is 0 on the page
+             every user sees every day). Every line is the shared refused_change_view's
+             wording; dismiss is the ONLY control — deliberately no "apply anyway"
+             (inbound-scheduling-authority.md § Surfacing). The container and each item
+             carry AutomationProperties.Name (a bare layout panel or DataTemplate root
+             with only an AutomationId is pruned from the UIA tree); the text lines carry
+             an AutomationId ONLY, so get_text reads their text. -->
+        <StackPanel x:Name="RefusedChangeListPanel" Spacing="4" Margin="0,0,0,8"
+                    Visibility="Collapsed"
+                    AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeList}"
+                    AutomationProperties.Name="refused-change-list">
+            <TextBlock Text="{loc:Localize Key=events/refused_changes/title}"
+                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <ScrollViewer MaxHeight="160" VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="RefusedChangeItems">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:RefusedChangeRow">
+                            <Grid ColumnSpacing="12" Padding="0,4"
+                                  AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeItem}"
+                                  AutomationProperties.Name="{x:Bind Title}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}" TextWrapping="Wrap"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeTitle}"
+                                               Style="{StaticResource BodyStrongTextBlockStyle}" />
+                                    <TextBlock Text="{x:Bind Author}" TextWrapping="Wrap"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeAuthor}"
+                                               Opacity="0.7" FontSize="12" />
+                                    <TextBlock Text="{x:Bind Reason}" TextWrapping="Wrap"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeReason}"
+                                               Opacity="0.7" FontSize="12" />
+                                    <TextBlock Text="{x:Bind Time}"
+                                               AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeTime}"
+                                               Opacity="0.5" FontSize="11" />
+                                </StackPanel>
+                                <Button Grid.Column="1" VerticalAlignment="Center"
+                                        Content="{loc:Localize Key=events/refused_changes/dismiss}"
+                                        Tag="{x:Bind Key}" Click="RefusedChangeDismiss_Click"
+                                        AutomationProperties.AutomationId="{x:Bind ids:Ids.RefusedChangeDismiss}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </StackPanel>
+
         <!-- Calendar creation panel (shown when new-calendar-btn is clicked) -->
-        <StackPanel Grid.Row="2" x:Name="CalendarCreationPanel" Orientation="Horizontal"
+        <StackPanel x:Name="CalendarCreationPanel" Orientation="Horizontal"
                     Spacing="8" Margin="0,0,0,8" Visibility="Collapsed">
             <TextBox x:Name="CalendarNameBox"
                      AutomationProperties.AutomationId="{x:Bind ids:Ids.CalendarName}"
@@ -86,6 +138,7 @@
             <Button x:Name="CreateCalendarButton"
                     AutomationProperties.AutomationId="{x:Bind ids:Ids.CreateCalendar}"
                     Click="CreateCalendar_Click" />
+        </StackPanel>
         </StackPanel>
 
         <!-- Calendar list: calendar-item selects (narrows the agenda to just this

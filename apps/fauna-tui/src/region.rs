@@ -207,7 +207,27 @@ pub fn verdict_for(
     reported: Option<ReportKey<'_>>,
     input: impl FnOnce() -> LabelerPostInput,
 ) -> ComposedVerdict {
-    let joined = labels_for(app, content_id_hex, labels, input);
+    // The scorer input is built at most once, for whichever source asks first:
+    // the region's bundled scorers, or the session nest's keyword rules and
+    // labelers (`nest-rules.md` § The nest content policy — run post-decrypt
+    // on the device).
+    let make = std::cell::Cell::new(Some(input));
+    let built = std::cell::OnceCell::new();
+    let input = || {
+        built
+            .get_or_init(|| (make.take().expect("the scorer input is built once"))())
+            .clone()
+    };
+    let regioned = labels_for(app, content_id_hex, labels, input);
+    let content_id = fauna_core::hex32::decode(content_id_hex).ok();
+    let nested = app
+        .nest_rules
+        .join_labels(content_id.as_ref(), &regioned, input);
+    // The guardian document's keyword rules and labelers, on a supervised
+    // account.
+    let joined = app
+        .content_policy
+        .join_guardian_labels(content_id.as_ref(), &nested, input);
     match reported {
         Some(key) => app
             .content_policy

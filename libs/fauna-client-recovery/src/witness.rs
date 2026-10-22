@@ -1562,7 +1562,7 @@ pub fn state_json(
             "awaiting_remove_old": counts.awaiting_remove_old,
             "not_in_this_group": counts.not_in_this_group,
             // The folder commit walk's hold behind a parked statement
-            // (`federation.md` § Cross-nest shared folders + channel append
+            // (`federation-shared-folders.md` § Cross-nest shared folders + channel append
             // → *The folder commit walk inherits the harvest wait*): a count
             // climbing while `parked` stays up is a set's commit rail
             // waiting on the sweep to settle its owner.

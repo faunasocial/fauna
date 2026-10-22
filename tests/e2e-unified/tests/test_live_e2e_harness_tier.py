@@ -32,7 +32,7 @@ Blast-radius argument (testing.md § The shared-box rule, non-destructive carve-
     deletion, no modification of pre-existing data.
   - **What teardown removes:** nothing — and that is stated rather than hidden:
     the wire has no tier delete (admin.md § 3), so the tier is permanent. It is
-    additive-only and was explicitly approved for dev.example.com on 2026-10-04.
+    additive-only and was explicitly approved for the dev nest on 2026-10-04.
     Re-running is a no-op (step 2), so a repeat never duplicates it.
 
 Test taxonomy: tier_4 (live-remote — a real deployed box).

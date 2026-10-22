@@ -24,7 +24,7 @@ import os
 
 import pytest
 
-from helpers.live_provision import cloud_project, hetzner_token, live_target_host
+from helpers.live_provision import cloud_project, hetzner_token, hetzner_token_hint, live_target_host
 
 pytestmark = [pytest.mark.tier_1]
 
@@ -103,3 +103,31 @@ def test_a_uac_run_never_takes_the_production_token(home, monkeypatch):
     _write_token_file(home, "production", "tok-prod\n")
     monkeypatch.setenv("FAUNA_E2E_STAGING_BOX", "dev.fauna.build")
     assert hetzner_token() == ""
+
+
+def test_the_dns_purpose_takes_the_zone_token_never_the_boxs(home, monkeypatch):
+    """The drive types two tokens: the cloud one into the VPS form, the dns one
+    into the DNS form (``deployment-threat-model.md`` § Concern 2, path 5)."""
+    _write_token_file(home, "uat", "tok-uat\n")
+    _write_token_file(home, "acceptance", "tok-acceptance\n")
+    monkeypatch.setenv("FAUNA_E2E_STAGING_BOX", "dev.fauna.build")
+    assert hetzner_token() == "tok-uat"
+    assert hetzner_token(purpose="dns") == ""
+    _write_token_file(home, "zone", "tok-zone\n")
+    assert hetzner_token(purpose="dns") == "tok-zone"
+    assert hetzner_token("fauna.build") == "tok-acceptance"
+    assert hetzner_token("fauna.build", purpose="dns") == "tok-zone"
+    assert "zone.token" in hetzner_token_hint(purpose="dns")
+
+
+def test_a_throwaway_run_under_the_org_zone_takes_the_uat_token(home, monkeypatch):
+    """``FAUNA_E2E_ZONE`` names the zone throwaway boxes go UNDER, never a box:
+    its cloud token is a box-below-the-zone's (uat), never the apex box's
+    (acceptance) — else a throwaway box would be made in the acceptance
+    project."""
+    _write_token_file(home, "uat", "tok-uat\n")
+    _write_token_file(home, "acceptance", "tok-acceptance\n")
+    _write_token_file(home, "zone", "tok-zone\n")
+    monkeypatch.setenv("FAUNA_E2E_ZONE", "fauna.build")
+    assert hetzner_token() == "tok-uat"
+    assert hetzner_token(purpose="dns") == "tok-zone"

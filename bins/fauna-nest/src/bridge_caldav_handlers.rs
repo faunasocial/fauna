@@ -1076,6 +1076,7 @@ pub(crate) async fn place_sealed_invite(
     {
         return Ok(PlaceInboundInviteReply::AlreadyOnCalendar);
     }
+    state.db.after_precheck().await;
     let cal = fauna_protocol::dav_identity::personal_calendar_id();
     if !state
         .db
@@ -2422,6 +2423,86 @@ mod tests {
             hms_after_first,
             "a second invitation for the same UID must leave the calendar untouched"
         );
+    }
+
+    /// Create-only holds in the write's own transaction, not just at the
+    /// pre-check: a calendar app that stores the same UID on the
+    /// Personal calendar after the placement's UID pre-check has passed keeps
+    /// its event byte-for-byte, and the placement answers `AlreadyOnCalendar`.
+    #[tokio::test]
+    async fn an_emailed_invitation_racing_a_same_uid_store_leaves_it_untouched() {
+        use crate::db::pending_actions::PrecheckGate;
+        use tokio::sync::Notify;
+
+        let state = fixture_state().await;
+        let mta = [156u8; 32];
+        let mda = [157u8; 32];
+        approve_bridge(&state.db, &mta, BridgeRole::Mta).await;
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let actor = [158u8; 32];
+        let uid_hash = [159u8; 32];
+        let personal = fauna_protocol::dav_identity::personal_calendar_id();
+        crate::test_support::seed_recipient_seal_key(&state.db, &actor, &[0x5Eu8; 32]).await;
+        provision_one(&state, &mda, &actor, &personal).await;
+
+        let reached = Arc::new(Notify::new());
+        let proceed = Arc::new(Notify::new());
+        state.db.arm_precheck_gate(PrecheckGate {
+            reached: reached.clone(),
+            proceed: proceed.clone(),
+        });
+        let placing = {
+            let state = state.clone();
+            // spawn-ok(test): the racing placement, awaited below.
+            tokio::spawn(async move {
+                place_inbound_invite_handler()(
+                    state,
+                    mta,
+                    invite_payload(&actor, &uid_hash, "org@example.com"),
+                )
+                .await
+            })
+        };
+        reached.notified().await;
+        // Inside the window: the user's own app stores the UID.
+        let users_body = sealed(b"BEGIN:VCALENDAR the user's own");
+        let put = make_put_payload(
+            &actor,
+            &personal,
+            &uid_hash,
+            &users_body,
+            &sealed(b"users-hint"),
+            1_700_000_000,
+            None,
+        );
+        put_event_ciphertext_handler()(state.clone(), mda, put)
+            .await
+            .expect("the app's store");
+        let before = state
+            .db
+            .query_caldav_events(&actor, &personal, None, None, 0)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(before.len(), 1);
+        proceed.notify_one();
+
+        let reply: PlaceInboundInviteReply =
+            fauna_cbor::decode_strict(&placing.await.unwrap().expect("placement ok")).unwrap();
+        assert_eq!(reply, PlaceInboundInviteReply::AlreadyOnCalendar);
+        let after = state
+            .db
+            .query_caldav_events(&actor, &personal, None, None, 0)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(after.len(), 1, "nothing lands beside the user's event");
+        assert_eq!(
+            after[0].event_id, before[0].event_id,
+            "the user's event stays"
+        );
+        assert_eq!(after[0].record_cid, before[0].record_cid, "its body stays");
+        assert_eq!(after[0].etag, before[0].etag, "its revision stays");
     }
 
     /// The invitation goes where its mail went (`family-safety.md` § The mail

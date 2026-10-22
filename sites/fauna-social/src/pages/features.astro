@@ -1,0 +1,164 @@
+---
+import Base from '../layouts/Base.astro';
+// The prose is single-sourced from docs/sites/fauna-social/features.md, like every
+// other page here; the TABLE is single-sourced from docs/features/matrix.json, which
+// `just features-render` generates from the feature catalog's pages and the ledger the
+// test runs write (docs/goal/architecture/feature-catalog.md § Render).
+//
+// **There is deliberately no second generator.** This page imports the same committed
+// JSON that MATRIX.md is rendered from, so the site can never disagree with the
+// repository's own matrix — the bylaws pattern applied to generated data. Everything
+// below is placement and styling: no mark is computed here, no cell is judged here,
+// and a state this file does not know how to colour still renders its own glyph.
+import matrix from '../../../../docs/features/matrix.json';
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/features.md';
+import { fill } from '../data/fill.ts';
+import { takeOpening } from '../data/copy.ts';
+
+const { heading, lead, rest } = takeOpening(fill(await compiledContent()));
+
+// The public column labels. The catalog's app keys are internal spellings; a visitor
+// reads platform names. Keyed off matrix.apps so a new column appears here the day it
+// appears there — an unknown key falls back to its own name rather than vanishing.
+const APP_LABELS: Record<string, string> = {
+  web: 'Web',
+  linux: 'Linux',
+  windows: 'Windows',
+  macos: 'macOS',
+  ios: 'iOS',
+  android: 'Android',
+  tui: 'Terminal',
+};
+
+// What each state MEANS, as a cell tooltip — the legend in the copy says it once in
+// prose, and this repeats it where the reader's cursor already is.
+const STATE_TITLE: Record<string, string> = {
+  full: 'Every test for this feature passed on this platform',
+  partial: 'Partly covered, or a mix of passes and failures',
+  failing: 'Tests exist for this platform and none passed',
+  none: 'No run recorded yet — a statement about our records, not the software',
+  absent: 'Deliberately absent on this platform',
+};
+
+const apps: string[] = matrix.apps;
+const label = (app: string) => APP_LABELS[app] ?? app;
+const mark = (state: string) => (matrix.marks as Record<string, string>)[state] ?? '?';
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <h1 set:html={heading} />
+      <p class="lead" set:html={lead} />
+      <Fragment set:html={rest} />
+
+      {matrix.sections.map((section: any) => (
+        <section class="matrix">
+          <h2>{section.name.charAt(0).toUpperCase() + section.name.slice(1)}</h2>
+          <div class="scroller">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" class="feature">Feature</th>
+                  {apps.map((app) => <th scope="col">{label(app)}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {section.features.map((feature: any) => (
+                  <tr>
+                    <th scope="row" class="feature">{feature.title}</th>
+                    {feature.nest_only ? (
+                      <td class="cell nest" colspan={apps.length}
+                          title={STATE_TITLE[feature.cells[apps[0]].state]}>
+                        <span class="glyph">{mark(feature.cells[apps[0]].state)}</span>
+                        <span class="note">your nest — the same on every app</span>
+                      </td>
+                    ) : apps.map((app) => (
+                      <td class={`cell state-${feature.cells[app].state}`}
+                          title={STATE_TITLE[feature.cells[app].state]}>
+                        <span class="glyph">{mark(feature.cells[app].state)}</span>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ))}
+
+      {matrix.releases.length > 0 && (
+        <section class="matrix">
+          <h2>Releases</h2>
+          <div class="scroller">
+            <table>
+              <thead>
+                <tr><th scope="col">Version</th><th scope="col">Date</th><th scope="col">In production</th></tr>
+              </thead>
+              <tbody>
+                {matrix.releases.map((release: any) => (
+                  <tr>
+                    <th scope="row">{release.version}</th>
+                    <td>{release.date}</td>
+                    <td>{release.promoted ? 'yes' : 'not yet'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </article>
+  </div>
+</Base>
+
+<style>
+  .matrix { margin-top: 2.5rem; }
+  .matrix h2 { font-size: 1.2rem; margin-bottom: 0.6rem; }
+
+  /* The table is wider than a phone. It scrolls inside its own box rather than
+     making the whole page scroll sideways. */
+  .scroller { overflow-x: auto; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border-bottom: 1px solid var(--rule, rgba(0, 0, 0, 0.08));
+    padding: 0.45rem 0.5rem;
+    text-align: center;
+    vertical-align: middle;
+  }
+  thead th {
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  th.feature {
+    text-align: left;
+    font-weight: 500;
+    white-space: normal;
+    min-width: 12rem;
+  }
+  tbody th { font-weight: 500; }
+
+  .glyph { font-size: 1rem; line-height: 1; }
+  /* An empty cell still needs a hit area for its tooltip, and a visible
+     placeholder so a blank reads as "nothing recorded" rather than as a
+     rendering fault. */
+  .state-none .glyph::before { content: '·'; color: var(--text-muted); opacity: 0.5; }
+
+  .cell.nest { text-align: left; }
+  .cell.nest .note {
+    margin-left: 0.5rem;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+  }
+
+  @media (max-width: 560px) {
+    table { font-size: 0.85rem; }
+    th.feature { min-width: 9rem; }
+  }
+</style>

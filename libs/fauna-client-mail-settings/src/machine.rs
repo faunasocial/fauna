@@ -45,12 +45,13 @@ use fauna_protocol::wrapped_blob::{
 };
 
 use crate::credential::{Credential, derive_credential_id};
-use crate::error::{DispatchError, NestError, SignerError};
+use crate::error::{DispatchError, NestError, SetMailEnabledError, SignerError};
 use crate::rotation;
 use crate::state::{
     MailCredentialSummary, MailSettingsAction, MailSettingsSnapshot, MuaInstructions,
     PendingRotationStatus, SettingsStatus,
 };
+use crate::token_refresh;
 use crate::wrap;
 
 /// Default `SubmissionToken.expires_at` window. Spec § Submission
@@ -197,8 +198,18 @@ pub trait NestClient: MaybeSendSync {
     /// (`fauna.bridges.set_mail_enabled`). This is Admin-class on the nest, so a
     /// non-admin actor's call is rejected server-side — which is exactly how
     /// [`MailSettingsMachine::enable_mail`] scopes design A: it calls this
-    /// best-effort and swallows the `Rejected` (the non-admin no-op).
-    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError>;
+    /// best-effort and swallows the `Rejected` (the non-admin no-op). The one
+    /// refusal it must not swallow — the box cannot enable mail — arrives as
+    /// its own [`SetMailEnabledError::UnavailableHere`].
+    async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError>;
+
+    /// Whether this box cannot enable mail (`fauna.setup.status` through
+    /// `SetupStatusReply::mail_unavailable_here`; `mail-bridge-lifecycle.md`
+    /// § Default-off on first claim → *A box with no content scanners cannot
+    /// enable mail*). Best-effort, like [`Self::get_caldav_port`]: the caller
+    /// reads a failure as "available" — the nest's own refusal stands behind
+    /// it.
+    async fn mail_unavailable_here(&self) -> Result<bool, NestError>;
 
     /// Flip whether this nest serves the *calling* actor's mailbox over
     /// IMAP/CalDAV to external MUAs (`fauna.bridges.set_mail_serving_enabled`).
@@ -227,7 +238,7 @@ pub trait NestClient: MaybeSendSync {
     /// directly (`caldav-server.md` § Network exposure — Desktop / IP). The read
     /// is best-effort: the caller treats a failure (a transport error) as "keep
     /// the for-node-URL default" rather than failing the whole hydrate.
-    async fn get_caldav_port(&self) -> Result<u16, NestError>;
+    async fn get_caldav_port(&self) -> Result<crate::state::DavListener, NestError>;
 
     /// Whether this actor serves **≥1 folder over WebDAV** — the owner-scoped
     /// `fauna.folders.list` rows folded through the owner's folder-key
@@ -729,7 +740,17 @@ pub struct MailSettingsMachine {
     signer: Arc<dyn IdentitySigner>,
     mua: MuaInstructions,
     inner: Mutex<Inner>,
+    /// The clock a rotation reads for the outgoing generation's retirement
+    /// instant — at step (d) and again at finalize (`rotation.rs`):
+    /// [`Timestamp::now_secs`] in production, a pinned or hand-stepped one
+    /// under test ([`Self::with_retirement_clock`]), so a test asserts the
+    /// snapshot writes by the instants it chose, never by where the box's
+    /// clock-second boundary happened to fall.
+    retirement_clock: RetirementClock,
 }
+
+/// [`MailSettingsMachine`]'s retirement clock, in unix seconds.
+pub type RetirementClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 impl MailSettingsMachine {
     pub fn new(
@@ -755,7 +776,20 @@ impl MailSettingsMachine {
             signer,
             mua,
             inner: Mutex::new(Inner { snapshot }),
+            retirement_clock: Arc::new(|| Timestamp::now_secs().max(0) as u64),
         }
+    }
+
+    /// This machine, reading `clock` for a rotation's retirement instants in
+    /// place of the wall clock.
+    pub fn with_retirement_clock(mut self, clock: RetirementClock) -> Self {
+        self.retirement_clock = clock;
+        self
+    }
+
+    /// The retirement instant a rotation stamps now (unix seconds).
+    pub(crate) fn retirement_now_unix(&self) -> u64 {
+        (self.retirement_clock)()
     }
 
     /// The actor's id. Not part of the UniFFI surface — `[u8; 32]` is not
@@ -1646,6 +1680,16 @@ impl MailSettingsMachine {
         display_name: String,
         credential: Credential,
     ) -> Result<(), DispatchError> {
+        // A box that cannot enable mail refuses before anything is minted: the
+        // nest would refuse the subsystem flip, leaving a mailbox no MTA
+        // serves. The hydrated field decides on the page; the fresh read
+        // covers a machine that never hydrated (the claim-time launch glue)
+        // and a page hydrated before the box changed.
+        let hydrated_unavailable = self.inner.lock().unwrap().snapshot.mail_unavailable_here;
+        if hydrated_unavailable || self.nest.mail_unavailable_here().await.unwrap_or(false) {
+            self.inner.lock().unwrap().snapshot.mail_unavailable_here = true;
+            return Err(DispatchError::mail_unavailable_here());
+        }
         let rows = self.mail.load_rows().await?;
         let mail = rows.config();
         if mail.is_mail_enabled() {
@@ -1738,9 +1782,17 @@ impl MailSettingsMachine {
         //    `Rejected`. A `Transient` (connectivity) failure surfaces: it rides
         //    the same WS that just provisioned the mailbox, so the user should
         //    learn the enable didn't fully land.
+        //    The one refusal NOT swallowed is the box's own: a deployment that
+        //    cannot enable mail (`mail-bridge-lifecycle.md` § Default-off on
+        //    first claim → *A box with no content scanners cannot enable mail*)
+        //    answers with its exact code, and the page shows it as the error.
         match self.nest.set_mail_enabled(true).await {
-            Ok(()) | Err(NestError::Rejected(_)) => {}
-            Err(e @ NestError::Transient(_)) => return Err(e.into()),
+            Ok(()) | Err(SetMailEnabledError::Nest(NestError::Rejected(_))) => {}
+            Err(e @ SetMailEnabledError::UnavailableHere) => {
+                self.inner.lock().unwrap().snapshot.mail_unavailable_here = true;
+                return Err(e.into());
+            }
+            Err(SetMailEnabledError::Nest(e @ NestError::Transient(_))) => return Err(e.into()),
         }
         Ok(())
     }
@@ -1812,6 +1864,7 @@ impl MailSettingsMachine {
                 // The generation marker: this row's blob was just wrapped under
                 // `msek` (`mail-credentials.md` § *The generation marker*).
                 wrapped_under: Some(MsekFingerprint::of(msek)),
+                token_minted_at: None,
                 revoked_at_unix: None,
                 burned: None,
             })
@@ -1981,13 +2034,29 @@ impl MailSettingsMachine {
     /// Shared by `enable_mail`'s CalDAV→email upgrade, first-enable's step 4
     /// (`rotation::first_enable`, fresh or resumed) and
     /// [`Self::add_credential`], so the paths can never drift on the seal
-    /// recipe. Idempotent atomic-replace on the nest.
+    /// recipe. Idempotent atomic-replace on the nest. Issued now on the token
+    /// clock ([`token_refresh::now_secs`]); returns that `issued_at`.
     pub(crate) async fn provision_submission_token(
         &self,
         credential_id: &str,
         credential: &Credential,
-    ) -> Result<(), DispatchError> {
-        let signed_token = self.mint_submission_token(credential_id)?;
+    ) -> Result<u64, DispatchError> {
+        self.provision_submission_token_at(credential_id, credential, token_refresh::now_secs())
+            .await
+    }
+
+    /// [`Self::provision_submission_token`] issued at `issued_at`, then the
+    /// credential row's token-mint stamp recorded — after the nest holds the
+    /// token, so a stamp never names a mint the MTA cannot see (a row not yet
+    /// written, as at an add, is stamped by its own put). The refresh's one
+    /// mint ([`Self::refresh_submission_tokens`]).
+    async fn provision_submission_token_at(
+        &self,
+        credential_id: &str,
+        credential: &Credential,
+        issued_at: u64,
+    ) -> Result<u64, DispatchError> {
+        let signed_token = self.mint_submission_token(credential_id, issued_at)?;
         let token_blob = wrap::seal_token_under_credential(
             &signed_token,
             &self.actor_id,
@@ -1997,7 +2066,10 @@ impl MailSettingsMachine {
         self.nest
             .provision_wrapped_submission_token(token_blob)
             .await?;
-        Ok(())
+        self.mail
+            .mark_token_minted(credential_id.to_string(), issued_at)
+            .await?;
+        Ok(issued_at)
     }
 
     // ─── ProvisionRelayMailbox: provision the existing mailbox onto a *second*
@@ -2061,12 +2133,9 @@ impl MailSettingsMachine {
         // only the MDA comes up (`deployment-home-with-public-relay.md`
         // § Plaintext-mode behavior). Admin-class; the home-relay user is admin
         // on their own home box, so this normally succeeds — swallow `Rejected`
-        // (a non-admin self-provision), surface `Transient`.
-        match self.nest.set_mail_enabled(true).await {
-            Ok(()) | Err(NestError::Rejected(_)) => {}
-            Err(e @ NestError::Transient(_)) => return Err(e.into()),
-        }
-        Ok(())
+        // (a non-admin self-provision), surface `Transient` — the same flip as
+        // every email enable's last step.
+        self.turn_mail_subsystem_on().await
     }
 
     // ─── AddCredential: new credential on already-enabled actor ───
@@ -2092,7 +2161,8 @@ impl MailSettingsMachine {
             wrap::seal_msek_under_credential(&msek, &self.actor_id, &credential_id, &credential)?;
         self.nest.provision_wrapped_mls_blob(msek_blob).await?;
 
-        self.provision_submission_token(&credential_id, &credential)
+        let minted_at = self
+            .provision_submission_token(&credential_id, &credential)
             .await?;
 
         self.mail
@@ -2106,6 +2176,7 @@ impl MailSettingsMachine {
                 // The generation marker: this row's blob was just wrapped under
                 // `msek` (`mail-credentials.md` § *The generation marker*).
                 wrapped_under: Some(MsekFingerprint::of(&msek)),
+                token_minted_at: Some(minted_at),
                 revoked_at_unix: None,
                 burned: None,
             })
@@ -2209,10 +2280,14 @@ impl MailSettingsMachine {
             self.revoke_row(c.credential_id.clone()).await?;
         }
         let mail = self.mail.load().await?;
+        // A rotation this teardown abandons is cleared by name: a sentinel
+        // another device set after this load is not this teardown's to clear.
+        if let Some(pending) = &mail.pending_rotation {
+            self.mail.clear_rotation(pending.new_msek.clone()).await?;
+        }
         self.mail
             .write_state(MailStateRow {
                 mail_enabled: Some(false),
-                pending_rotation: None,
                 ..MailStateRow::recreatable_of(&mail)
             })
             .await?;
@@ -2347,8 +2422,8 @@ impl MailSettingsMachine {
     pub(crate) fn mint_submission_token(
         &self,
         credential_id: &str,
+        now: u64,
     ) -> Result<SubmissionToken, DispatchError> {
-        let now = Timestamp::now_secs() as u64;
         let unsigned = SubmissionToken {
             actor_id: self.actor_id.to_vec(),
             credential_id: credential_id.to_string(),
@@ -2373,24 +2448,24 @@ impl MailSettingsMachine {
                 .map(|c| c.credential_id.clone())
                 .collect()
         });
-        // `serving_enabled`, `serves_webdav_set` and the displayed
-        // `mua.caldav_port` are nest-sourced values NOT part of the synced
-        // `MailConfig`, so carry the current values forward across a
-        // config-driven re-snapshot (`hydrate` refreshes all three from the nest
-        // separately). For a registrable-domain box the carried port is always
-        // the canonical 443 (the admin port never overrides it —
-        // `MuaInstructions::apply_admin_caldav_port`); for a local-target box it
-        // is the last admin-set port the machine fetched.
-        let (serving_enabled, serves_webdav_set, prior_caldav_port) = {
+        // `serving_enabled`, `serves_webdav_set` and the displayed DAV lines
+        // (CalDAV host/port, WebDAV URL) are nest-sourced values NOT part of the
+        // synced `MailConfig`, so carry the current values forward across a
+        // config-driven re-snapshot (`hydrate` refreshes them all from the nest
+        // separately). The DAV lines are whatever the last hydrate's
+        // `MuaInstructions::apply_dav_listener` made of the nest's listener —
+        // or the for-node-URL default before the first.
+        let (serving_enabled, serves_webdav_set, mail_unavailable_here, prior_mua) = {
             let g = self.inner.lock().unwrap();
             (
                 g.snapshot.serving_enabled,
                 g.snapshot.serves_webdav_set,
-                g.snapshot.mua.caldav_port,
+                g.snapshot.mail_unavailable_here,
+                g.snapshot.mua.clone(),
             )
         };
         let mut mua = self.mua.clone();
-        mua.apply_admin_caldav_port(prior_caldav_port);
+        mua.carry_dav_lines_from(&prior_mua);
         let snapshot = MailSettingsSnapshot {
             // "Mail enabled" = **email** on, NOT merely "has an MSEK" — a
             // CalDAV-only actor holds the shared MSEK but must render mail OFF
@@ -2414,6 +2489,7 @@ impl MailSettingsMachine {
                 || mail.carddav_enabled
                 || serves_webdav_set,
             serving_enabled,
+            mail_unavailable_here,
             // A credential of a kind this build does not name is kept in the
             // sealed config untouched and offered by no row here.
             credentials: mail
@@ -2537,12 +2613,15 @@ impl MailSettingsMachine {
         // Best-effort: on a transport error the displayed port falls back
         // to the for-node-URL default (443 / `DEFAULT_CALDAV_PORT`) rather than
         // failing the whole page hydrate.
-        let caldav_port = self.nest.get_caldav_port().await.ok();
+        let dav_listener = self.nest.get_caldav_port().await.ok();
         // Best-effort for the same reason: a transport hiccup on this pure
         // read must
         // not fail the whole page hydrate — an unknown serve state reads as "not
         // serving", which merely hides the WebDAV URL row.
         let serves_webdav_set = self.nest.serves_any_webdav_set().await.unwrap_or(false);
+        // Best-effort as well: an unread box reads "available", and the nest's
+        // own refusal of the enable stands behind it.
+        let mail_unavailable_here = self.nest.mail_unavailable_here().await.unwrap_or(false);
         // Best-effort: the generation marker's heal and its delete dual — a
         // failure logs and leaves the rows owed for the next hydrate.
         let rows = match heal && self.heal_generation_markers(&rows).await {
@@ -2554,6 +2633,7 @@ impl MailSettingsMachine {
             let mut inner = self.inner.lock().unwrap();
             inner.snapshot.serving_enabled = serving_enabled;
             inner.snapshot.serves_webdav_set = serves_webdav_set;
+            inner.snapshot.mail_unavailable_here = mail_unavailable_here;
             // Recompute the predicate: `set_snapshot_from` folded in the
             // *carried-forward* serve state, which the fresh nest read may have
             // just changed (first-ever hydrate, or a set served since the last).
@@ -2561,8 +2641,8 @@ impl MailSettingsMachine {
                 || inner.snapshot.caldav_enabled
                 || inner.snapshot.carddav_enabled
                 || serves_webdav_set;
-            if let Some(port) = caldav_port {
-                inner.snapshot.mua.apply_admin_caldav_port(port);
+            if let Some(listener) = dav_listener {
+                inner.snapshot.mua.apply_dav_listener(listener);
             }
         }
         Ok(())
@@ -2656,6 +2736,36 @@ impl MailSettingsMachine {
             )
             .await?;
         Ok(())
+    }
+
+    /// Re-mint every live credential's outbound submission token that is due
+    /// at `now` (unix seconds on the token clock, [`token_refresh::now_secs`])
+    /// — at least [`token_refresh::SUBMISSION_TOKEN_REFRESH_INTERVAL_SECS`]
+    /// old, or of unknown age — so the token the MTA unwraps is always well
+    /// inside its 30-day lifetime (`mail-credentials.md` § Architectural
+    /// rules, rule 10: "any online client refreshes"). Each re-mint is an
+    /// idempotent atomic replace on the nest, then the row's token-mint
+    /// stamp; two devices re-minting at once both land harmlessly. Returns how
+    /// many it re-minted.
+    ///
+    /// A no-op unless email is on (a calendar-only mailbox has no outbound
+    /// half) and while a rotation is pending (its resume provisions the
+    /// tokens it owes).
+    pub async fn refresh_submission_tokens(&self, now: u64) -> Result<u32, DispatchError> {
+        let mail = self.mail.load().await?;
+        if mail.msek.is_none() || mail.pending_rotation.is_some() || !mail.is_mail_enabled() {
+            return Ok(0);
+        }
+        let mut reminted = 0;
+        for row in mail
+            .live_credentials()
+            .filter(|row| token_refresh::token_refresh_due(row, now))
+        {
+            self.provision_submission_token_at(&row.credential_id, &Credential::of_row(row)?, now)
+                .await?;
+            reminted += 1;
+        }
+        Ok(reminted)
     }
 
     /// Recover a credential's secret (the PLAIN password or OAUTHBEARER token)
@@ -3168,11 +3278,12 @@ mod tests {
     fn mint_submission_token_wires_actor_credential_and_policy() {
         let m = machine();
         let token = m
-            .mint_submission_token("cred-abc")
+            .mint_submission_token("cred-abc", 1_800_000_000)
             .expect("mint submission token");
 
         assert_eq!(token.actor_id, ACTOR.to_vec());
         assert_eq!(token.credential_id, "cred-abc");
+        assert_eq!(token.issued_at, 1_800_000_000);
         assert_eq!(
             token.expires_at,
             token.issued_at + SUBMISSION_TOKEN_LIFETIME_SECS

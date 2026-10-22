@@ -671,6 +671,59 @@ async fn an_ingest_with_neither_an_inline_body_nor_a_reference_is_refused() {
     );
 }
 
+/// **The MTA-ingest leg's reference ceiling** — a
+/// `body_ref` declaring more than `MAX_MESSAGE_BYTES_CEILING` plus the seal
+/// allowance is refused before any chunk is read (`mail-message-size.md` § the
+/// bounded-reference rule). The reference names a chunk never staged, so a
+/// resolver that read first would answer "not staged" instead.
+#[tokio::test]
+async fn an_ingest_reference_over_its_legs_ceiling_is_refused_unread() {
+    let h = harness().await;
+    let recipient: [u8; 32] = [0x43; 32];
+    let (_, recipient_pubkey) = derive_recipient_hpke_keypair(&[0x5f; 32]);
+    common::seed_recipient_seal_key(&h.state.db, &recipient, &[0x5f; 32]).await;
+    let mta_actor: [u8; 32] = [0x12; 32];
+    approve_bridge(&h.state.db, &mta_actor, BridgeRole::Mta, &[0x92; 32]).await;
+
+    let sealed_hint = seal_to_recipient(b"index-hint", &recipient_pubkey)
+        .unwrap()
+        .to_canonical_bytes()
+        .unwrap();
+    let err = dispatch(
+        &h,
+        mta_actor,
+        "fauna.bridges.ingest_inbound_mail",
+        Bytes::from(
+            encode_canonical(&IngestInboundMailRequest {
+                dedup_key: "env:v1:fixture".into(),
+                envelope_key: "env:v1:fixture".into(),
+                actor_id: recipient.to_vec(),
+                encrypted_body: Vec::new(),
+                encrypted_index_hint: sealed_hint,
+                body_ref: Some(fauna_protocol::bridge_routing::MailBodyRef {
+                    chunk_hashes: vec![serde_bytes::ByteBuf::from(vec![0xABu8; 32])],
+                    total_bytes: 4 * u64::from(u32::MAX),
+                }),
+                ..Default::default()
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect_err("a reference over the leg's ceiling must be refused");
+    assert_eq!(err.code, fauna_nest::mail_body_plane::INVALID_BODY_REF_CODE);
+    let detail = err
+        .details
+        .as_ref()
+        .map(|d| format!("{d:?}"))
+        .unwrap_or_default();
+    assert!(
+        detail.contains("ceiling"),
+        "a ceiling refusal, got: {detail}"
+    );
+}
+
 /// Nest's APPEND admission (`bridge_imap_handlers::append_message_handler`) sees
 /// only the sealed `ciphertext_size`, but the product ceiling `max_message_bytes`
 /// is on RAW bytes. It bridges the two with `SEAL_ENVELOPE_ALLOWANCE_BYTES`,

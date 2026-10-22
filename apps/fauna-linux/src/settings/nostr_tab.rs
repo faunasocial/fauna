@@ -493,6 +493,9 @@ pub fn build_nostr_page() -> adw::PreferencesPage {
         .title(nostr::account::SIGNING_MODE)
         .subtitle("—")
         .build();
+    // `nostr-signing-mode` — the row's value (its subtitle) is the shared
+    // `nostr_key_source_label` label; the row is hidden while unlinked.
+    set_test_id(&mode_row, ids::NOSTR_SIGNING_MODE);
     account_group.add(&mode_row);
 
     page.add(&account_group);

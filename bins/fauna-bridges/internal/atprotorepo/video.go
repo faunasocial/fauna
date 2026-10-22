@@ -132,6 +132,9 @@ type ResolvedVideo struct {
 //     is skipped rather than mapped, retried the next time the post is offered;
 //   - the remux failed or produced something over the ceiling after all.
 //
+// onRemuxFailed (nil-safe) is called once per remux failure, so the binary can
+// count it on an admin-facing surface without this package knowing which.
+//
 // A video already published for this repo is neither re-fetched nor
 // re-assembled, so a re-projection is free.
 func ResolveVideo(
@@ -141,6 +144,7 @@ func ResolveVideo(
 	did string,
 	item *VideoItem,
 	logger *slog.Logger,
+	onRemuxFailed func(),
 ) (*ResolvedVideo, error) {
 	if item == nil || source == nil || len(item.Renditions) == 0 {
 		return nil, nil
@@ -179,6 +183,9 @@ func ResolveVideo(
 	if err != nil {
 		logger.Warn("atproto projection: video remux failed; skipping the post",
 			"did", did, "manifest_cid", item.ManifestCID, "height", rendition.Height, "err", err)
+		if onRemuxFailed != nil {
+			onRemuxFailed()
+		}
 		return nil, nil
 	}
 	// The declared total was an upper bound, so this should always hold — but

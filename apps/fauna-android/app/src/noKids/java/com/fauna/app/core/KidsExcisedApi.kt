@@ -58,6 +58,28 @@ abstract class KidsExcisedApi {
         null
 
     /**
+     * One Profile-header picture (`profile-avatar` / `profile-banner`) by its
+     * hex blob hash, from the nest that served the profile: this nest when
+     * [relayedFrom] is `null`, else the relayed-from home's anonymous public
+     * blob route pinned to [homeNestActorId], the identity this nest stamped on
+     * the relay reply (`null` keeps the WebPKI floor) — the shared post-blob
+     * host pick, capped and verified against the hash (`profile.md` § Where
+     * logic lives → *Bytes direct, as for a relayed post*). `null` on any
+     * failure — the element stays empty, never `error-message`.
+     */
+    suspend fun fetchProfilePicture(relayedFrom: String?, homeNestActorId: String?, hashHex: String): ByteArray? {
+        val client = api.nestClient ?: return null
+        return try {
+            val home = relayedFrom?.let { com.fauna.ffi.FfiPostBlobHome(it, homeNestActorId) }
+            client.postBlobHosts().get(home, hashHex)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
      * Detach the singletons above for [ApiClient.clearAuth]: drop their
      * observers and the references now, and return the close of their FFI
      * handles for the off-main teardown that follows `client.disconnect()`.
@@ -546,6 +568,12 @@ abstract class KidsExcisedApi {
     fun buildMailPolicyMachine(): uniffi.fauna_client_mail_settings.MailPolicyMachine? =
         api.nestClient?.let { com.fauna.ffi.buildMailPolicyMachine(it) }
 
+    /** `admin-mail-reports` sub-page — the DMARC aggregate reports peer servers send
+     *  this nest (`dmarc-reporting.md` § Admin pane summary surface); the shared
+     *  `DmarcReportsMachine` owns the fold, the shares and the raw view's gunzip. */
+    fun buildDmarcReportsMachine(): uniffi.fauna_client_mail_settings.DmarcReportsMachine? =
+        api.nestClient?.let { com.fauna.ffi.buildDmarcReportsMachine(it) }
+
     /** Flat `admin-calendar` page — the deployment-wide CalDAV-enable toggle, the
      *  sibling of `admin-mail`'s mail-enable toggle (`admin.md` § 8 Calendar;
      *  `caldav-server.md` § Independent enablement). Hydrates `caldav_enabled` from
@@ -596,6 +624,30 @@ abstract class KidsExcisedApi {
     /** Set the hourly limit; returns the persisted `{value, ceiling}`. */
     suspend fun forwardPerHourSet(value: UInt): com.fauna.ffi.ForwardPerHour =
         com.fauna.ffi.forwardPerHourSet(api.nestRpc(), value)
+
+    // ── Per-account receive / send switches and the mailbox quota readout
+    // (mail-policy-config.md § Tier 3; imap-server.md § Composition with
+    // submission quota) — plain fauna.bridges.* RPCs over the shared
+    // MailAccountClient; the wording and the notice decision are the shared
+    // `mail_quota_display_of` / `mail_over_quota_notice_of`.
+
+    /** The caller's own receive, send and scan-result-row switches (all on by default). */
+    suspend fun mailSwitchesGet(): com.fauna.ffi.MailSwitches =
+        com.fauna.ffi.mailSwitchesGet(api.nestRpc())
+
+    /** Set either switch (`null` keeps its stored value); returns the nest's
+     *  re-read, never the local edit. */
+    suspend fun mailSwitchesSet(receiveEnabled: Boolean?, sendEnabled: Boolean?): com.fauna.ffi.MailSwitches =
+        com.fauna.ffi.mailSwitchesSet(api.nestRpc(), receiveEnabled, sendEnabled)
+
+    /** Set the scan-result-row switch; returns the nest's re-read of all three
+     *  switches, never the local edit. */
+    suspend fun mailScanResultVisibleSet(visible: Boolean): com.fauna.ffi.MailSwitches =
+        com.fauna.ffi.mailScanResultVisibleSet(api.nestRpc(), visible)
+
+    /** The caller's mailbox quota and daily sending allowance. */
+    suspend fun mailQuotasGet(): uniffi.fauna_client_mail_settings.MailQuotas =
+        com.fauna.ffi.mailQuotasGet(api.nestRpc())
 
     /** `admin-bridges-pending` approval feed (`fauna.bridges.{list_pending,
      *  approve_pending,reject_pending}_bridges` + set_mail_enabled — backend real). */
@@ -744,10 +796,34 @@ abstract class KidsExcisedApi {
      * token), so the author can later wrap hybrid `KeyBlob`s to this subscriber.
      * `Approved` (plaintext / auto-approve) or `Queued` (encrypted — pending the
      * author's confirm); follow is a subscribe to the free "followers" tier. Mirrors linux `offers.rs::subscribe_to` / `mod.rs::follow`.
+     *
+     * [homeNestUrl] is the author's home nest when it is not the viewer's own — the
+     * profile page's actor-home slot (`profile.md` § Where logic lives → *The
+     * actor's home*) — and rides the shared across-nests form, which is the local
+     * publishing-ek subscribe when it is `null`/blank (`federated-follow.md`
+     * § Decision 2).
      */
-    suspend fun subscriptionSubscribe(authorIdHex: String, tier: String): com.fauna.ffi.FfiSubscribeReply =
-        com.fauna.ffi.subscriptionsSubscribePublishingEk(
-            api.nestRpc(), api.ownerSecretBytes(), HexUtil.hexToBytes(authorIdHex), tier)
+    suspend fun subscriptionSubscribe(
+        authorIdHex: String,
+        tier: String,
+        homeNestUrl: String? = null,
+    ): com.fauna.ffi.FfiSubscribeReply =
+        com.fauna.ffi.subscriptionsSubscribeAcrossNests(
+            api.nestRpc(), api.ownerSecretBytes(), HexUtil.hexToBytes(authorIdHex), tier, homeNestUrl)
+
+    /**
+     * The leave twin of [subscriptionSubscribe]: unsubscribe from [authorId]'s [tier],
+     * carrying the creator's [homeNestUrl] (the `mine.list` row's `home_nest_url`) so a
+     * follow relayed across nests is left at its home too. Encrypted mode returns
+     * `Queued` (the subscriber stays a member until the author commits the removal).
+     */
+    suspend fun subscriptionUnsubscribe(
+        authorId: ByteArray,
+        tier: String,
+        homeNestUrl: String?,
+    ): com.fauna.ffi.FfiUnsubscribeReply =
+        com.fauna.ffi.subscriptionsUnsubscribeAcrossNests(
+            api.nestRpc(), api.ownerSecretBytes(), authorId, tier, homeNestUrl)
 
     /**
      * The deployment "Fauna controls DNS" master switch (`admin-service-dns-toggle`
@@ -892,4 +968,43 @@ abstract class KidsExcisedApi {
     ) {
         buildMailSettingsMachine()?.trainSpamModelClientMail(text, isSpam, messageId, mailbox, subject)
     }
+
+    // ── The automatic-reply setting (email-filters.md § The auto-respond
+    // setting) — `mail-admin`, compiled out of the kids flavor; called only from
+    // `src/noKids/`'s MailSettingsVM.
+
+    suspend fun autorespondGet(): com.fauna.ffi.FfiAutoRespond = api.emailRpc().autorespondGet()
+
+    /** Turn the reply on with `message`, or change it (check the draft first). */
+    suspend fun autorespondSet(message: String) = api.emailRpc().autorespondSet(message)
+
+    /** Turn the reply off. */
+    suspend fun autorespondClear() = api.emailRpc().autorespondClear()
+
+    // ── The shared rule editor's mountings (`nest-rules.md` § The shared rule
+    // editor) — `rule-editor` rides `store-safe`'s tail: a kids account is never
+    // an admin or a guardian. Called only from `src/noKids/`'s mountings.
+
+    /** `fauna.admin.content_policy.get` — the nest's rules as last accepted. */
+    suspend fun adminContentPolicy(): com.fauna.ffi.FfiAdminContentPolicy =
+        api.nestRpc().admin().contentPolicy()
+
+    /** `fauna.admin.content_policy.set` — replace the nest's whole rules with an
+     *  editor's `documentBytes()`; a refusal comes back as `defect`. */
+    suspend fun adminSetContentPolicy(document: ByteArray): com.fauna.ffi.FfiAdminContentPolicy =
+        api.nestRpc().admin().setContentPolicy(document)
+
+    /** The guardian mounting's save (`FfiFamilyClient.saveContentRules`): the
+     *  ward's fresh entry, or `null` when the caller no longer guards it. */
+    suspend fun familySaveContentRules(ward: ByteArray, document: ByteArray): com.fauna.ffi.FfiFamilyWardInfo? =
+        api.nestRpc().family().saveContentRules(ward, document)
+
+    /** The publisher's subscribed `wasm` labelers over posts, as hex ids — the
+     *  labeler picker's `subscribed`. */
+    suspend fun ruleLabelers(): List<String> =
+        com.fauna.ffi.buildRuleLabelersClient(api.nestRpc()).ruleLabelers()
+
+    /** One subscribed labeler's module for a rule to bundle, or `null`. */
+    suspend fun ruleModule(labelerIdHex: String): ByteArray? =
+        com.fauna.ffi.buildRuleLabelersClient(api.nestRpc()).ruleModule(com.fauna.app.core.HexUtil.hexToBytes(labelerIdHex))
 }

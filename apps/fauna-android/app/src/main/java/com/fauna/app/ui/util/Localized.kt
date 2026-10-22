@@ -67,6 +67,22 @@ fun resolveLocalizedNested(context: Context, text: LocalizedText?): String? {
     return substituteNamed(template, resolvedArgs)
 }
 
+/**
+ * The `mail-settings-mailbox-quota` readout, fully composed — the Kotlin twin of
+ * shared Rust `mail_quota_text`. The label's `{used}` / `{limit}` holes are
+ * localized sizes (`byte_size` keys), a [LocalizedText] argument being a flat
+ * string, so they are resolved first and substituted into the label's own args.
+ */
+fun mailQuotaText(context: Context, display: uniffi.fauna_client_mail_settings.MailQuotaDisplay): String {
+    val args = display.label.args.toMutableMap()
+    args["used"] = resolveLocalized(context, display.used).orEmpty()
+    args["limit"] = resolveLocalized(context, display.limit).orEmpty()
+    val resName = display.label.key.replace('.', '_')
+    val resId = context.resources.getIdentifier(resName, "string", context.packageName)
+    val template = if (resId == 0) display.label.key else context.getString(resId)
+    return substituteNamed(template, args)
+}
+
 /** Composable convenience over [resolveLocalizedNested] using the ambient context. */
 @Composable
 fun localizedNested(text: LocalizedText?): String? =

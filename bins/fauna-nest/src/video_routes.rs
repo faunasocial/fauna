@@ -11,6 +11,13 @@ use serde_json::json;
 use crate::api_error::ApiError;
 use crate::routes::{AppState, parse_32_bytes as parse_hash};
 
+/// The cache-on-fetch dial's whole-request deadline — the general client's 5 s.
+const CACHE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The bound on one segment a peer serves to cache-on-fetch: axum's 2 MiB
+/// `Bytes` default, the most [`upload_segment`] ever accepts.
+const CACHE_FETCH_SEGMENT_CAP: usize = 2 * 1024 * 1024;
+
 /// POST /api/v1/video/segments -- Upload a video segment, returns its content hash.
 pub async fn upload_segment(
     State(state): State<Arc<AppState>>,
@@ -122,38 +129,16 @@ pub async fn download_segment(
     };
 
     for source in &sources {
-        let url = format!(
-            "{}/api/v1/video/segments/{hash_hex}",
-            source.nest_url.trim_end_matches('/')
-        );
-        tracing::debug!("cache-on-fetch: trying {url}");
-        let resp = match state.http_client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("cache-on-fetch GET {url} failed: {e}");
-                continue;
-            }
-        };
-        if !resp.status().is_success() {
-            tracing::debug!("cache-on-fetch: {url} returned {}", resp.status());
+        let Some(data) = fetch_segment_from_peer(
+            &source.nest_url,
+            &hash_hex,
+            &hash_bytes,
+            state.peer_fetch_loopback.as_ref(),
+        )
+        .await
+        else {
             continue;
-        }
-        let data = match resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("cache-on-fetch: failed to read body from {url}: {e}");
-                continue;
-            }
         };
-        // Verify BLAKE3 hash before caching.
-        let fetched_hash: [u8; 32] = *blake3::hash(&data).as_bytes();
-        if fetched_hash != hash_bytes {
-            tracing::warn!(
-                "cache-on-fetch: hash mismatch from {url} — expected {hash_hex}, got {}",
-                hex::encode(fetched_hash)
-            );
-            continue;
-        }
         // Cache locally — with the copy's `blob_metadata` row, so the blob sweep
         // can reclaim a cached segment nothing on this box names any more (the
         // sweep's premise, `backup-restore.md` § 9). A cache entry is
@@ -189,6 +174,58 @@ pub async fn download_segment(
     }
 
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// One cache-on-fetch attempt: `GET <peer>/api/v1/video/segments/<hash>`,
+/// returning the bytes only when they hash to the segment asked for. A delivery
+/// source's URL is a remote nest's own claim, so the dial goes through the SSRF
+/// guard (`crate::ssrf::peer_fetch_get`, `deployment-threat-model.md`
+/// § Concern 2, item 3) and the body through a capped read.
+async fn fetch_segment_from_peer(
+    peer_url: &str,
+    hash_hex: &str,
+    hash_bytes: &[u8; 32],
+    loopback: Option<&reqwest::Client>,
+) -> Option<Bytes> {
+    let url = format!(
+        "{}/api/v1/video/segments/{hash_hex}",
+        peer_url.trim_end_matches('/')
+    );
+    tracing::debug!("cache-on-fetch: trying {url}");
+    let request = match crate::ssrf::peer_fetch_get(&url, CACHE_FETCH_TIMEOUT, loopback).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("cache-on-fetch: {url} refused by the fetch guard: {e}");
+            return None;
+        }
+    };
+    let resp = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("cache-on-fetch GET {url} failed: {e}");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::debug!("cache-on-fetch: {url} returned {}", resp.status());
+        return None;
+    }
+    let data = match crate::ssrf::read_capped(resp, CACHE_FETCH_SEGMENT_CAP).await {
+        Ok(b) => Bytes::from(b),
+        Err(e) => {
+            tracing::warn!("cache-on-fetch: failed to read body from {url}: {e}");
+            return None;
+        }
+    };
+    let fetched_hash: [u8; 32] = *blake3::hash(&data).as_bytes();
+    if fetched_hash != *hash_bytes {
+        tracing::warn!(
+            "cache-on-fetch: hash mismatch from {url} — expected {hash_hex}, got {}",
+            hex::encode(fetched_hash)
+        );
+        return None;
+    }
+    Some(data)
 }
 
 /// Resolve a video post for a manifest handler, **through the same post-read
@@ -241,9 +278,17 @@ async fn load_video_post(
         .map(|id| id.0);
 
     let post_bytes = match crate::routes::get_post_core(state, caller, post_id).await {
-        crate::routes::GetPostOutcome::Found(bytes) => bytes,
+        // The author keeps their own view of a post an admin blocked; every
+        // other caller gets the block's 403, never the takedown's 451.
+        crate::routes::GetPostOutcome::Found(bytes)
+        | crate::routes::GetPostOutcome::AdminBlocked {
+            body: Some(bytes), ..
+        } => bytes,
         crate::routes::GetPostOutcome::LegalTakedown { .. } => {
             return Err(StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS.into_response());
+        }
+        crate::routes::GetPostOutcome::AdminBlocked { body: None, .. } => {
+            return Err(StatusCode::FORBIDDEN.into_response());
         }
         crate::routes::GetPostOutcome::NotFound => {
             return Err(StatusCode::NOT_FOUND.into_response());
@@ -350,4 +395,45 @@ pub async fn serve_variant_manifest(
         .body(axum::body::Body::from(playlist))
         .unwrap()
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ssrf::test_server::{head_with_length, serve_once};
+
+    /// A delivery source is a peer's claim: a shipped nest refuses a loopback
+    /// or metadata-service source before any dial; the test state's loopback
+    /// exemption still fetches (and hash-checks) a real segment.
+    #[tokio::test]
+    async fn cache_on_fetch_dial_is_guarded() {
+        let test_client = reqwest::Client::new();
+        let lo = Some(&test_client);
+        let seg = vec![0x47u8; 188];
+        let hash = *blake3::hash(&seg).as_bytes();
+        let hash_hex = hex::encode(hash);
+        let peer = serve_once(head_with_length("200 OK", seg.len()), seg.clone(), false).await;
+        assert!(
+            fetch_segment_from_peer(&peer, &hash_hex, &hash, None)
+                .await
+                .is_none()
+        );
+        assert!(
+            fetch_segment_from_peer("https://169.254.169.254", &hash_hex, &hash, None)
+                .await
+                .is_none()
+        );
+        assert!(
+            fetch_segment_from_peer("http://169.254.169.254", &hash_hex, &hash, lo)
+                .await
+                .is_none()
+        );
+        let peer = serve_once(head_with_length("200 OK", seg.len()), seg.clone(), false).await;
+        assert_eq!(
+            fetch_segment_from_peer(&peer, &hash_hex, &hash, lo)
+                .await
+                .as_deref(),
+            Some(seg.as_slice())
+        );
+    }
 }

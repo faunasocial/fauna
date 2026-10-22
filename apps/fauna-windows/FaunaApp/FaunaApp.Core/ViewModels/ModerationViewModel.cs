@@ -49,6 +49,116 @@ public partial class ModerationViewModel : ViewModelBase
     /// (ui/README.md § List pages: loading is not empty).</summary>
     [ObservableProperty] private bool _reportsLoaded;
 
+    // ── Appeal (moderation.md § Legal takedown — the transparency triple's second
+    //     leg). Every decision is pre-made in shared Rust: `row_is_appealable` picks
+    //     the rows that offer a handle, `appeal_form_view` owns the guard and the
+    //     wording, `appeal_verdict` the outcome sentence. This VM paints that fold and
+    //     dispatches; it decides and words nothing. Mirrors linux's `AppealDraft` /
+    //     `finish_appeal` and android's `ModerationQueueVM.openAppeal`/`submitAppeal`.
+
+    /// The decision being appealed, captured when the form OPENED. The queue
+    /// refetches under an open form, so a dispatch keyed on the row's index could
+    /// appeal the wrong decision.
+    private string? _appealContentId;
+
+    /// <summary>Whether the appeal form is open (<c>appeal-reason-input</c>,
+    /// <c>appeal-submit-button</c> and <c>appeal-cancel-button</c> paint only
+    /// while true — absent, not merely disabled).</summary>
+    [ObservableProperty] private bool _appealOpen;
+
+    /// <summary><c>appeal-reason-input</c> — the reason as typed.</summary>
+    [ObservableProperty] private string _appealReason = string.Empty;
+
+    /// <summary>Whether <c>appeal-submit-button</c> may be offered — the shared
+    /// fold's <c>can_submit</c> verbatim.</summary>
+    [ObservableProperty] private bool _appealCanSubmit;
+
+    /// <summary>Why the submit control is disabled, or <c>null</c> exactly when
+    /// <see cref="AppealCanSubmit"/> is true.</summary>
+    [ObservableProperty] private string? _appealBlockedReason;
+
+    /// <summary><c>appeal-submit-button</c>'s label (the fold's <c>submit_label</c>).</summary>
+    [ObservableProperty] private string _appealSubmitLabel = string.Empty;
+
+    /// <summary>Names the content the appeal is filed against (the fold's <c>summary</c>).</summary>
+    [ObservableProperty] private string _appealSummary = string.Empty;
+
+    /// <summary><c>appeal-status</c> — the last attempt's outcome. Page-level so it
+    /// survives the form closing on success, and deliberately NOT
+    /// <see cref="ViewModelBase.ErrorMessage"/>: a refused appeal is form feedback
+    /// that must not blank the queue the user is reading. <c>null</c> until an
+    /// attempt (and again after a cancel).</summary>
+    [ObservableProperty] private string? _appealStatus;
+
+    private bool _appealBusy;
+
+    partial void OnAppealReasonChanged(string value) => RefoldAppeal();
+
+    private void RefoldAppeal()
+    {
+        var view = FaunaFfiMethods.AppealFormView(_appealContentId ?? string.Empty, AppealReason ?? string.Empty);
+        AppealCanSubmit = view.canSubmit;
+        AppealBlockedReason = view.blockedReason is { } reason ? Strings.Resolve(reason) : null;
+        AppealSubmitLabel = Strings.Resolve(view.submitLabel);
+        AppealSummary = Strings.Resolve(view.summary);
+    }
+
+    /// <summary><c>appeal-button</c>: open the form on <paramref name="row"/>,
+    /// capturing its content id now.</summary>
+    public void OpenAppeal(ModerationRow row)
+    {
+        _appealContentId = row.ContentId;
+        AppealStatus = null;
+        AppealReason = string.Empty;
+        RefoldAppeal();   // the reason may already have been empty (no change event)
+        AppealOpen = true;
+    }
+
+    /// <summary><c>appeal-cancel-button</c>: drop the draft and the stale status
+    /// together, touching nothing nest-side.</summary>
+    public void CancelAppeal()
+    {
+        _appealContentId = null;
+        AppealOpen = false;
+        AppealReason = string.Empty;
+        AppealStatus = null;
+    }
+
+    /// <summary><c>appeal-submit-button</c>: dispatch the captured draft. Re-gates on
+    /// the shared <c>can_submit</c> rather than trusting the control's enabled state.
+    /// There is no offline gate: <c>fauna.moderation.appeal</c> is
+    /// <c>OfflineQueued</c>. Success CLOSES the form (the decision is with an
+    /// administrator now; the row stays — appeals are additive history); failure
+    /// KEEPS it open with the reason intact so it can be fixed and resent.</summary>
+    public async Task SubmitAppealAsync()
+    {
+        if (_appealBusy || !AppealOpen || _appealContentId is not { } contentId) return;
+        var reason = AppealReason ?? string.Empty;
+        if (!FaunaFfiMethods.AppealFormView(contentId, reason).canSubmit) return;
+
+        _appealBusy = true;
+        string? error = null;
+        try
+        {
+            await _rpc.ModerationAppealAsync(contentId, reason);
+        }
+        catch (Exception ex)
+        {
+            error = Strings.Error(ex);
+        }
+        finally
+        {
+            _appealBusy = false;
+        }
+        AppealStatus = Strings.Resolve(FaunaFfiMethods.AppealVerdict(error));
+        if (error is null)
+        {
+            _appealContentId = null;
+            AppealOpen = false;
+            AppealReason = string.Empty;
+        }
+    }
+
     /// <summary>The line the last withdraw painted (its verdict), or <c>null</c>.</summary>
     [ObservableProperty] private string? _reportWithdrawStatus;
 
@@ -244,7 +354,9 @@ public partial class ModerationViewModel : ViewModelBase
             ActionLabel: actionLabel ?? string.Empty,
             ConfidencePercent: confidencePercent,
             IsLocal: r.source == QueueRowSource.Local,
-            BadgeAttributes: BadgeAttributes(r.category, confidencePercent, actionLabel));
+            BadgeAttributes: BadgeAttributes(r.category, confidencePercent, actionLabel),
+            // The shared rule: only a nest-issued decision has anything to appeal.
+            IsAppealable: FaunaFfiMethods.RowIsAppealable(r));
     }
 
     /// <summary>The <c>content-label-badge</c>'s automation attributes (moderation.md
@@ -295,4 +407,5 @@ public record ModerationRow(
     string ActionLabel,
     int ConfidencePercent,
     bool IsLocal,
-    string BadgeAttributes);
+    string BadgeAttributes,
+    bool IsAppealable);

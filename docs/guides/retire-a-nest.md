@@ -1,15 +1,11 @@
 # Retire a nest — take a server down from the app
 
-> **If the app set up your nest, the app can take it down again.** It finds the
-> servers Fauna created in your cloud account, removes the DNS records that point
-> at the one you pick, and then deletes the server — no provider dashboard, no
+> **If the app set up your nest, the app can take it down again.** It finds the servers Fauna created in your cloud account, removes the DNS records that belong to the one you pick, and then deletes the server — no provider dashboard, no
 > separate trip to your DNS settings. It works even when the nest itself no
 > longer answers, which is usually why you want it gone.
 >
 > This is for a nest you set up with *[Set up a nest from the app](nest-app-setup.md)*.
-> A server you created by hand (or one from before 8 July 2026, before Fauna
-> started marking the servers it creates) is retired from your cloud provider's
-> own dashboard.
+> A server you created by hand (or one from before 8 July 2026, before Fauna started marking the servers it creates) is retired from your cloud provider's own dashboard — except on OVH, where the app lists every server and can retire it (see Step 2).
 
 ---
 
@@ -17,16 +13,15 @@
 
 - **Deleting a server destroys everything on it** — its disk, and every
   account's posts, mail and files. It cannot be undone. The only way back is
-  from a backup, so if the data matters, check *[Cloud backup](cloud-backup.md)*
+  from a backup, so if the data matters, check *[Backup with Fauna](cloud-backup.md)*
   first. The app does not insist — you may be retiring a server you never used.
-- **Have your cloud provider's token ready.** The app asks for it each time and
-  forgets it when you leave the page; it is never saved. It is the same kind of
+- **Have your cloud provider's token ready.** The app asks for it each time and forgets it when you leave the page; what you enter here is never saved. It is the same kind of
   token you gave the app when it created the server.
 
 ## Where to find it
 
 - **Signed in as the admin:** open the admin area, go to **Nest**, and choose
-  **Retire this server…** — it sits beside **Factory reset**. The two are
+  **Retire this server…** — it sits beside **Factory Reset…**. The two are
   opposites: a factory reset wipes a server you keep; retiring destroys the
   server.
 - **When your nest can't be reached:** the app's "Couldn't reach your nest"
@@ -37,8 +32,7 @@
 1. **Pick your cloud provider and enter your token**, then choose **Verify
    credentials**. For a provider you sign in to (rather than paste a token),
    type the provider's address and choose **Sign in at the provider…**.
-2. **Pick the server.** The list shows only the servers Fauna created in that
-   account — a server someone else made there is never shown. Each row shows the
+2. **Pick the server.** The list shows only the servers Fauna created in that account — a server someone else made there is never shown. The exception is OVH, where the app no longer builds servers but can still retire one: OVH has no way to mark a server as Fauna's, so every server your OVH credentials can reach is listed, a server you built there by hand included, each with the note **Not marked as created by Fauna — check the name carefully before deleting it**. Each row shows the
    server's name, its address, and the domain it served, when the app could
    confirm it (the domain's address has to match the server's; the app never
    guesses from the name). The server you are signed into is labelled as such.
@@ -47,9 +41,7 @@
    will be removed first, and which you'll have to remove yourself.
 4. **Type the server's name exactly**, then choose **Delete the server and clean
    up DNS**. The button stays greyed out until the name matches.
-5. **Watch the two steps.** First the DNS records that point at the server are
-   removed — only those whose value is this server's address, so any record you
-   have pointed elsewhere is left alone. Then the server is deleted.
+5. **Watch the two steps.** First the DNS records that belong to the server are removed: its address records only where they still hold this server's address, so any record you have pointed elsewhere is left alone; the mail and calendar records that lead to its mail server; and, where the app remembers publishing them, its mail-signing key and identity records — another service's entry at the same name is kept. Then the server is deleted.
 6. **Done** shows what's left for you to remove by hand, with a button to copy
    the list.
 
@@ -75,15 +67,11 @@ them: remove them when convenient.
 
 If the app has no way into your domain's DNS — your cloud provider doesn't host
 DNS, and you didn't set up Fauna-managed DNS — nothing is removed automatically.
-The list then starts with the records that **still point at the server's
-address**; those are the ones to remove first, ideally before the address is
-reused.
+The list then starts with the records that **still point at the server's address**; those are the ones to remove first, ideally before the address is reused. Opened from the "Couldn't reach your nest" screen, the page usually can't use the DNS access the app keeps for your account — only your cloud token, when that provider also hosts your DNS — so if you can still sign in, retire the server from the admin area instead.
 
 ## Your domain's transfer code
 
-If you're moving your domain elsewhere, select its server in the list. Where
-your provider can hand out the domain's transfer code, a **Get the domain
-transfer code** button appears; the code shows up with a button to copy it. If
+If you're moving your domain elsewhere, select its server in the list. Where your provider can hand out the domain's transfer code, and the app has confirmed the server's domain, a **Get the domain transfer code** button appears; the code shows up with a button to copy it. If
 the registry still locks the domain against transfer, the app shows the date
 the lock lifts — ask again after that. For other providers, the row tells you
 to get the code from your registrar's own dashboard. Fetching the code deletes
@@ -93,6 +81,4 @@ nothing.
 
 - Retiring the server you were signed into ends that nest: the app goes back to
   its start screen.
-- Your nest's saved recovery key is **not** thrown away. If you later want the
-  same nest back somewhere else, from your backups, *[recovering a lost
-  nest](cloud-backup.md)* still works.
+- The copy of the server's own key that your Fauna app keeps for you is **not** thrown away. If you later want the same nest back on a new server, choose **Recover a lost box** — on the screen where you choose **Create New Identity**, or on the "Couldn't reach your nest" screen — and then bring your data back from a backup (*[Backup with Fauna](cloud-backup.md)*).

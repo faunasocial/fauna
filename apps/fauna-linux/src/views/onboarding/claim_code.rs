@@ -109,6 +109,9 @@ pub fn build(m: Arc<OnboardingMachine>) -> (gtk::Box, Rc<dyn Fn()>) {
     error_label.set_visible(false);
     root.append(&error_label);
 
+    // -- By-continuing terms notice, above the bottom row --
+    root.append(&super::widgets::terms_notice());
+
     // -- Back button row --
     let btn_row = gtk::Box::builder()
         .orientation(Orientation::Horizontal)

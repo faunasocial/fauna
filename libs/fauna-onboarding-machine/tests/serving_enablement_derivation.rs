@@ -4,12 +4,13 @@
 //! Per docs/goal/behavior/onboarding.md § 3b (ratified 2026-07-13): the intents
 //! are machine-derived from **two** axes — handle locality AND the NAT axis:
 //! ON iff the handle targets a real registerable domain AND the box's effective
-//! NAT mode is not `Private`. The NAT conjunct is what lets the two-box
-//! home-relay deployment (deployment-home-with-public-relay.md) express "this
-//! box does not run mail" with no checkbox: both boxes share the same
-//! real-domain handle, but the home box is exactly the box on the private axis,
-//! and a claim-time enable there would mint a fresh MSEK diverging from the
-//! fleet MSEK that `LinkBoth`/`ProvisionRelayMailbox` later re-seals onto it.
+//! NAT mode is not `Private`. The NAT conjunct covers a real-domain handle on a
+//! box whose effective axis is private, where a claim-time enable would mint a
+//! fresh MSEK diverging from the fleet MSEK that
+//! `LinkBoth`/`ProvisionRelayMailbox` later re-seals onto it. The **mail**
+//! intent alone carries a third axis — the box's own `content_scanners` report
+//! (§ 3b → *Third axis — the box's own build*, ruled 2026-10-17; the tests at
+//! the end of this file).
 //!
 //! "Effective NAT mode" = the committed choice when `submit_nat_mode_choice`
 //! succeeded, else the nest's seed (`fauna.setup.status`.`node_mode`) — a defer
@@ -20,7 +21,7 @@ use std::sync::Arc;
 use fauna_onboarding_machine::nest_api::FakeNestApi;
 use fauna_onboarding_machine::observer::NullObserver;
 use fauna_onboarding_machine::{
-    NestApi, NodeMode, OnboardingMachine, OnboardingObserver, OnboardingStep,
+    ContentScanners, NestApi, NodeMode, OnboardingMachine, OnboardingObserver, OnboardingStep,
 };
 
 fn machine_with_fake() -> (Arc<OnboardingMachine>, Arc<FakeNestApi>) {
@@ -216,6 +217,7 @@ fn machine_signed_in_as_returning_admin(handle: &str) -> Arc<OnboardingMachine> 
         continue_enabled: true,
         control_checkbox_visible: false,
         control_checkbox_checked: false,
+        ..Default::default()
     });
     m
 }
@@ -256,7 +258,7 @@ async fn a_manual_dns_claim_still_derives_all_four_on() {
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: Some("example.com".into()),
-        deployment_seed: None,
+        ..Default::default()
     }));
 
     let step = m.recheck_manual_dns().await;
@@ -282,5 +284,115 @@ async fn plain_sign_in_on_a_real_domain_public_box_derives_all_four_off() {
         all_four(&m),
         [false; 4],
         "a sign-in claimed nothing, so it must request no claim-time enablement"
+    );
+}
+
+// ── the third axis: the box's own build (mail only) ─────────────────────────
+//
+// onboarding.md § 3b → *Third axis — the box's own build* (ruled 2026-10-17):
+// the **mail** intent defaults ON only if the box itself reports its MTA can
+// run — `fauna_core::mail_availability::mta_can_run` over the box's
+// `content_scanners` declaration on `fauna.setup.status`. A social-only box
+// (no clamd/rspamd wired) reports `absent`: a claim-time enable there would
+// publish MX/DKIM for a box that cannot listen on 25. `unknown` (a nest outside
+// the image) derives from the two axes above. The DAV intents are untouched —
+// CalDAV/CardDAV/WebDAV ride the HTTPS surface every box has.
+
+#[tokio::test]
+async fn absent_scanners_on_a_public_real_domain_box_derive_mail_off_dav_on() {
+    let (m, _fake) = machine_at_claim_code("alice@example.com");
+    m.set_node_mode_seed_for_test(Some(NodeMode::Public));
+    m.set_content_scanners_seed_for_test(ContentScanners::Absent);
+
+    m.wizard_submit_claim_code("CLAIMCODE".into()).await;
+    m.defer_nat_mode_choice();
+
+    assert_eq!(all_four(&m), [false, true, true, true]);
+}
+
+#[tokio::test]
+async fn wired_scanners_keep_all_four_on() {
+    let (m, _fake) = machine_at_claim_code("alice@example.com");
+    m.set_node_mode_seed_for_test(Some(NodeMode::Public));
+    m.set_content_scanners_seed_for_test(ContentScanners::Wired);
+
+    m.wizard_submit_claim_code("CLAIMCODE".into()).await;
+    m.defer_nat_mode_choice();
+
+    assert_eq!(all_four(&m), [true; 4]);
+}
+
+#[tokio::test]
+async fn unknown_scanners_derive_from_the_two_axes() {
+    // A nest outside the image declares nothing: today's behaviour stands.
+    let (m, _fake) = machine_at_claim_code("alice@example.com");
+    m.set_node_mode_seed_for_test(Some(NodeMode::Public));
+    m.set_content_scanners_seed_for_test(ContentScanners::Unknown);
+
+    m.wizard_submit_claim_code("CLAIMCODE".into()).await;
+    m.defer_nat_mode_choice();
+
+    assert_eq!(all_four(&m), [true; 4]);
+}
+
+#[tokio::test]
+async fn absent_scanners_with_a_committed_private_axis_keep_all_four_off() {
+    let (m, fake) = machine_at_claim_code("alice@example.com");
+    m.set_node_mode_seed_for_test(Some(NodeMode::Public));
+    m.set_content_scanners_seed_for_test(ContentScanners::Absent);
+    fake.set_submit_nat_mode_response(Ok(()));
+
+    m.wizard_submit_claim_code("CLAIMCODE".into()).await;
+    m.select_nat_mode(NodeMode::Private);
+    m.submit_nat_mode_choice().await;
+
+    assert_eq!(all_four(&m), [false; 4]);
+}
+
+/// The production seam: the box's report reaches the derivation through the
+/// claim-time setup-status probe (`claim_provisioned_box`, which the
+/// deferred-DNS recheck and the provisioned-box connect both run) — never a
+/// test setter, and never the run's own `vps_config` memory.
+#[tokio::test]
+async fn the_claim_probe_seeds_an_absent_report_and_mail_derives_off() {
+    use fauna_onboarding_machine::DnsRecordPlain;
+    use fauna_onboarding_machine::nest_api::{ClaimAdminResponse, SetupStatus};
+
+    let (m, fake) = machine_with_fake();
+    m.seed_identity("01".repeat(32));
+    m.seed_awaiting_manual_dns(
+        "https://example.com".into(),
+        "alice@example.com".into(),
+        vec![DnsRecordPlain {
+            record_type: "A".into(),
+            name: "@".into(),
+            value: "1.2.3.4".into(),
+            ttl: 300,
+            priority: None,
+        }],
+        "CLAIM-XYZ".into(),
+    );
+    fake.set_probe_setup_status_response(Ok(SetupStatus {
+        claimed: false,
+        node_mode: Some(NodeMode::Public),
+        content_scanners: ContentScanners::Absent,
+    }));
+    fake.set_claim_admin_response(Ok(ClaimAdminResponse {
+        ok: true,
+        token: Some("tok".into()),
+        expires_at: Some(0),
+        domain: Some("example.com".into()),
+        ..Default::default()
+    }));
+
+    let step = m.recheck_manual_dns().await;
+    assert_eq!(step, OnboardingStep::NatModeChoice, "the claim succeeded");
+    assert_eq!(m.content_scanners_seed_for_test(), ContentScanners::Absent);
+    m.defer_nat_mode_choice();
+
+    assert_eq!(
+        all_four(&m),
+        [false, true, true, true],
+        "a social-only box reports absent scanners: no claim-time mail enable"
     );
 }

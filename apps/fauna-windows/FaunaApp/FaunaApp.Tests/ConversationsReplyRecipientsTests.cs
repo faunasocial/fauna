@@ -58,6 +58,7 @@ public class ConversationsReplyRecipientsTests
                 @encrypted: false, @signed: false, @verified: false,
                 @contentWarning: null),
             @legalTakedownRef: null,
+            @adminBlockReason: null,
             @planeRef: null);
         m.InjectInboundForTest(msg);
         var tid = m.Snapshot().threads[0].threadId;

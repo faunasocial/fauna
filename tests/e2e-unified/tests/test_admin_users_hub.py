@@ -263,7 +263,9 @@ def test_evict_and_cancel_eviction(admin_app, nest_instance):
     # the pre-condition below for reasons that have nothing to do with evicting.
     actor_hex = _admit_user(admin_app, nest_instance, "evictee")
     row = admin_app.admin.user_row_index(actor_hex)
-    assert not admin_app.admin.user_eviction_active(row), "the row should start un-evicting"
+    # Positive reads of the control the row should show (`is_visible_scrolled`
+    # is a positive-read form — base.py).
+    assert admin_app.admin.user_evict_available(row), "the row should start un-evicting"
 
     # Evict → the row flips to the cancel-eviction control (user not deleted).
     admin_app.admin.evict_user(row)
@@ -274,7 +276,7 @@ def test_evict_and_cancel_eviction(admin_app, nest_instance):
 
     # Cancel → the row flips back to the evict control.
     admin_app.admin.cancel_user_eviction(row)
-    assert not admin_app.admin.user_eviction_active(row), (
+    assert admin_app.admin.user_evict_available(row), (
         f"cancel did not clear the eviction: the row still shows cancel. "
         f"error: {admin_app.error_text()!r}"
     )

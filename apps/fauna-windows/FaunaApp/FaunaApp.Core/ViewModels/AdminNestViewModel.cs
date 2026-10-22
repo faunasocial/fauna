@@ -90,8 +90,8 @@ public partial class AdminNestViewModel : ObservableObject
     /// <c>os_maintenance_status_label</c> over the <c>os_*</c> fields on
     /// <c>fauna.setup.status</c> (the SAME fetch that seeds
     /// <see cref="ServingPort"/>). Always present — a nest with no host channel
-    /// (dev / desktop) reports the defaults → "OS up to date", no false
-    /// alarm. installers/vps.md § Host OS Maintenance § 4.</summary>
+    /// (a hand-built box, dev, desktop) reads <c>os_host_status_present</c> false →
+    /// "OS status not reported by this host", never "OS up to date". installers/vps.md § Host OS Maintenance § 4.</summary>
     [ObservableProperty] private string _osMaintenanceStatus = string.Empty;
 
     /// <summary><c>nest-os-updates-count</c> — the raw pending-security-update count
@@ -305,9 +305,19 @@ public partial class AdminNestViewModel : ObservableObject
     /// here), so no change notification is needed.</summary>
     public bool OauthControlsLive => _oauthView is not null && !OauthInFlight;
 
+    /// <summary>The admin host of the shared <c>feature-policy-editor</c> — the
+    /// <i>Feature limits for everyone</i> section's authored rows and open editor
+    /// (admin tier; <c>admin.md</c> § N Nest → <i>Feature limits</i>). The page
+    /// calls <see cref="FeatureAuthoringHost.RefreshAsync"/> once on load and
+    /// repaints on <see cref="FeatureAuthoringHost.Changed"/>.</summary>
+    internal FeatureAuthoringHost FeatureLimits { get; }
+
     internal AdminNestViewModel(INestRpcClient rpc)
     {
         _rpc = rpc;
+        FeatureLimits = new FeatureAuthoringHost(
+            () => rpc.FeaturesAuthoredRowsAsync("admin"),
+            feature => rpc.FeaturesOpenEditorAsync("admin", feature));
     }
 
     /// <summary>Load the admin pairing flag + serving-port / host-OS-maintenance
@@ -569,19 +579,23 @@ public partial class AdminNestViewModel : ObservableObject
         OsSecurityUpdatesPending = status.osSecurityUpdatesPending;
         OsRebootPending = status.osRebootPending;
         OsMaintenanceStatus =
-            OsMaintenanceStatusLine(status.osSecurityUpdatesPending, status.osRebootPending);
+            OsMaintenanceStatusLine(
+                status.osHostStatusPresent, status.osSecurityUpdatesPending, status.osRebootPending);
     }
 
     /// <summary>The localized <c>nest-os-maintenance-status</c> line. The state→key
-    /// decision (reboot pending → <c>os_restart_pending</c>; updates, no reboot →
+    /// decision (no host-status file → <c>os_no_host_data</c>; reboot pending →
+    /// <c>os_restart_pending</c>; updates, no reboot →
     /// <c>os_updates_pending</c>; else <c>os_up_to_date</c>) is single-sourced in
     /// shared Rust (<c>fauna_core::format::os_maintenance_status_label</c> via the
     /// value-format FFI), so the uniform per-app map can't drift — a pure consume
     /// (the <c>storage_mode_label</c> precedent, priority #2). installers/vps.md
     /// § Host OS Maintenance § 4.</summary>
-    internal static string OsMaintenanceStatusLine(uint securityUpdatesPending, bool rebootPending) =>
+    internal static string OsMaintenanceStatusLine(
+        bool hostStatusPresent, uint securityUpdatesPending, bool rebootPending) =>
         Strings.Resolve(
-            uniffi.fauna_ffi.FaunaFfiMethods.OsMaintenanceStatusLabel(securityUpdatesPending, rebootPending));
+            uniffi.fauna_ffi.FaunaFfiMethods.OsMaintenanceStatusLabel(
+                hostStatusPresent, securityUpdatesPending, rebootPending));
 
     /// <summary>Arm the deployment-identity rotation ceremony
     /// (<c>admin-nest-seed-rotate-button</c>): paint <see cref="SeedRotateArmStage.Loading"/>

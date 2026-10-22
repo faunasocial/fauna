@@ -185,7 +185,7 @@ pub(super) fn privacy_elements(state: &SettingsState, filter_marks: &[i64]) -> V
         els.push(
             Element::select(
                 ids::FILTER_RULE_TYPE,
-                p.filter_rule_type.clone(),
+                p.filter_rule.kind.clone(),
                 SelectTarget::EmailFilterRuleType,
                 FILTER_RULE_TYPES.iter().map(|s| s.to_string()).collect(),
             )
@@ -194,11 +194,32 @@ pub(super) fn privacy_elements(state: &SettingsState, filter_marks: &[i64]) -> V
         els.push(
             Element::input(
                 ids::FILTER_RULE_VALUE,
-                p.filter_rule_value.clone(),
+                p.filter_rule.value.clone(),
                 Field::Settings(SettingsField::FilterRuleValue),
             )
             .labelled(t::RULE_VALUE),
         );
+        // The two conditions with a second input (`email-filters.md` § Email
+        // filter rules): a header's value beside its name, and a spam score.
+        match p.filter_rule.kind.as_str() {
+            "HeaderContains" => els.push(
+                Element::input(
+                    ids::FILTER_RULE_HEADER_VALUE,
+                    p.filter_rule.header_value.clone(),
+                    Field::Settings(SettingsField::FilterRuleHeaderValue),
+                )
+                .labelled(t::privacy_page::HEADER_VALUE),
+            ),
+            "SpamScoreAtLeast" => els.push(
+                Element::input(
+                    ids::FILTER_RULE_SPAM_SCORE,
+                    p.filter_rule.spam_score.clone(),
+                    Field::Settings(SettingsField::FilterRuleSpamScore),
+                )
+                .labelled(t::privacy_page::SPAM_SCORE),
+            ),
+            _ => {}
+        }
         els.push(
             Element::select(
                 ids::FILTER_ACTION_SELECT,
@@ -228,6 +249,64 @@ pub(super) fn privacy_elements(state: &SettingsState, filter_marks: &[i64]) -> V
                 Gesture::Settings(Action::ToggleFilterKeepLocalCopy),
             ));
         }
+        // The other actions' own inputs, each present only while its action is
+        // selected — the Forward shape.
+        let action_inputs: Vec<(&str, &String, SettingsField, &str)> =
+            match p.filter_action.kind.as_str() {
+                "FileInto" => vec![(
+                    ids::FILTER_FILE_INTO_MAILBOX,
+                    &p.filter_action.file_into_mailbox,
+                    SettingsField::FilterFileIntoMailbox,
+                    t::privacy_page::FILE_INTO_MAILBOX,
+                )],
+                "AddLabel" => vec![(
+                    ids::FILTER_ADD_LABEL,
+                    &p.filter_action.label,
+                    SettingsField::FilterAddLabel,
+                    t::privacy_page::ADD_LABEL,
+                )],
+                "AutoReply" => vec![
+                    (
+                        ids::FILTER_AUTO_REPLY_SUBJECT,
+                        &p.filter_action.auto_reply_subject,
+                        SettingsField::FilterAutoReplySubject,
+                        t::privacy_page::AUTO_REPLY_SUBJECT,
+                    ),
+                    (
+                        ids::FILTER_AUTO_REPLY_BODY,
+                        &p.filter_action.auto_reply_body,
+                        SettingsField::FilterAutoReplyBody,
+                        t::privacy_page::AUTO_REPLY_BODY,
+                    ),
+                    (
+                        ids::FILTER_AUTO_REPLY_INTERVAL_HOURS,
+                        &p.filter_action.auto_reply_interval_hours,
+                        SettingsField::FilterAutoReplyIntervalHours,
+                        t::privacy_page::AUTO_REPLY_INTERVAL_HOURS,
+                    ),
+                ],
+                _ => vec![],
+            };
+        for (id, value, field, label) in action_inputs {
+            els.push(Element::input(id, value.clone(), Field::Settings(field)).labelled(label));
+        }
+        // The rule's place in the order and its `continue` flag
+        // (`email-filters.md` § Email filter rules: rules run in order, the
+        // first match wins unless it is marked to keep going).
+        els.push(
+            Element::input(
+                ids::FILTER_PRIORITY_INPUT,
+                p.filter_priority_input.clone(),
+                Field::Settings(SettingsField::FilterPriority),
+            )
+            .labelled(t::privacy_page::PRIORITY),
+        );
+        els.push(Element::checkbox_gesture(
+            ids::FILTER_CONTINUE_TOGGLE,
+            t::privacy_page::CONTINUE_MATCHING,
+            p.filter_continue,
+            Gesture::Settings(Action::ToggleFilterContinue),
+        ));
         // `create-filter`/`save-filter` are mutually exclusive (create-dialog's
         // counterpart while `editing_filter_id` is `Some`) — distinct ui.yaml
         // IDs so create vs. edit stay semantically separate on every app

@@ -55,8 +55,9 @@
 //! [`moderation.md`]: ../../../../docs/goal/behavior/moderation.md
 
 /// SQL fragment: true iff no **moderation flag** withholds the joined post —
-/// it is not taken down under a legal obligation, not quarantined, and not
-/// suppressed.
+/// it is not taken down under a legal obligation, not blocked by this nest's
+/// admin after a report (`moderation.md` § Admin block of a reported item), not
+/// quarantined, and not suppressed.
 ///
 /// The gate every surface serving post content to a **non-author** audience
 /// shares, whatever else it adds: the feed reads (`db/feeds.rs`), the
@@ -64,15 +65,17 @@
 /// (`db/fts.rs`), the web-site render (`list_web_published_servable_capped`),
 /// and — composed — [`PUBLIC_POST_SERVABLE`]. A surface whose audience is the
 /// post's **author** binds only the legal-takedown arm (quarantine is
-/// author-visible by design; `moderation.md` § Legal takedown → *Posts*), so it
-/// spells `cm.legal_takedown_ref IS NULL` on its own rather than reaching for
-/// this.
+/// author-visible by design; `moderation.md` § Legal takedown → *Posts*; the
+/// author keeps their own view of a blocked item, § Admin block of a reported
+/// item, decision 4), so it spells `cm.legal_takedown_ref IS NULL` on its own
+/// rather than reaching for this.
 ///
 /// **Contract for callers** — the query binds `content_meta` as `cm`. A `LEFT
 /// JOIN` is fine here, unlike for the off-box predicate: an unmatched row carries
 /// no flag to honour, and a takedown cannot land on one (its write asserts it
 /// matched exactly one row — `post_legal_takedown_txn`).
 pub const MODERATION_SERVABLE: &str = "cm.legal_takedown_ref IS NULL \
+     AND cm.admin_block_report_id IS NULL \
      AND COALESCE(cm.quarantined, 0) = 0 \
      AND COALESCE(cm.suppressed, 0) = 0";
 
@@ -102,6 +105,11 @@ pub const MODERATION_SERVABLE: &str = "cm.legal_takedown_ref IS NULL \
 /// / `put_post` / `put_post_with_source` write and `get_post_source` reads
 /// back (`db/posts.rs`) — never on `content_meta`, which carries no `source`
 /// column.
+///
+/// A post envelope a **federated follow** delivered here
+/// (`c.follow_delivered = 1`) is the author's, resting at their home, and one
+/// local reader's to read (`federated-follow.md` § Decision 4): it never
+/// leaves this nest to a third party.
 pub static PUBLIC_POST_SERVABLE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let archive = fauna_core::source::ARCHIVE_PLATFORMS
         .iter()
@@ -112,6 +120,7 @@ pub static PUBLIC_POST_SERVABLE: std::sync::LazyLock<String> = std::sync::LazyLo
         "c.schema LIKE 'post/%'
              AND cm.content_id IS NOT NULL
              AND cm.gated_tier IS NULL
+             AND c.follow_delivered = 0
              AND {MODERATION_SERVABLE}
              AND COALESCE(c.source, '{native}') NOT IN ({archive})",
         native = fauna_core::source::NATIVE,
@@ -237,6 +246,7 @@ mod tests {
             "cm.content_id IS NOT NULL",
             "cm.gated_tier IS NULL",
             "cm.legal_takedown_ref IS NULL",
+            "cm.admin_block_report_id IS NULL",
             "COALESCE(cm.quarantined, 0) = 0",
             "COALESCE(cm.suppressed, 0) = 0",
         ] {

@@ -14,8 +14,8 @@
 // work forever. That rule lives once, in shared Rust, for all seven apps
 // (participants.md § The assignment picker) — web is `HeavyTaskCapability::ViewerOnly`
 // (a browser tab runs no lease driver), which is why "This device" never appears here.
-import { type LocalizedText, resolveLocalized } from '$lib/i18n/localized';
-import { taskDelegationRunnerLabelRaw, taskDelegationOptionLabelRaw, taskDelegationOptionKeyRaw } from '$lib/wasm';
+import { type LocalizedText, resolveLocalized } from '#lib/i18n/localized';
+import { taskDelegationRunnerLabelRaw, taskDelegationOptionLabelRaw, taskDelegationOptionKeyRaw } from '#lib/wasm';
 
 /** `fauna_core::data::ParticipantRef` — a device (hex id) or a nest (pubkey bytes).
  *  The pubkey is a byte-string field in Rust, so the WASM bridge may hand it over

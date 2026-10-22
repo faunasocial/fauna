@@ -383,6 +383,9 @@ impl KindRegistry {
         self.add("fauna.bridges.cancel_import_session", fetch);
         self.add("fauna.bridges.finalize_import_session", fetch);
         self.add("fauna.bridges.fail_import_session", fetch);
+        // A failed import's Dismiss: a delete of a terminal row that answers
+        // `existed: false` the second time, so naturally idempotent.
+        self.add("fauna.bridges.discard_import_session", fetch);
         // Mailbox-export surface (`mail-export.md` § Wire shapes) — twelve
         // User-class, caller-scoped kinds, the read-out twin of the import
         // block above. The two body-carrying legs of the chunk relay take the
@@ -1169,6 +1172,18 @@ impl KindRegistry {
         );
     }
 
+    /// Register the oracle's profile door (TP11 —
+    /// [`crate::profile_author`]): principal-only, light. A replay re-applies
+    /// the same display fields under a later `updated_at` — the same profile
+    /// the principal could ask for again — so it is replay-safe in effect.
+    pub fn register_profile_author_kinds(&mut self) {
+        use std::time::Duration;
+        self.add(
+            crate::profile_author::KIND_SET,
+            RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+    }
+
     /// Register the oracle's ATProto door (TP11 —
     /// [`crate::atproto_oracle::KIND_SERVICE_AUTH`]): principal-only, light,
     /// replay-safe — a replayed request mints a second token for the same
@@ -1320,7 +1335,7 @@ impl KindRegistry {
         // the phantom-leaf discriminator for `add_participant`'s heal
         // (`mls-group-key-material.md` § M2 *Admitting a member*). A pure read.
         self.add("fauna.conversations.channel.actors", read);
-        // The foreign-member roster-read relay (`federation.md` § Cross-nest) —
+        // The foreign-member roster-read relay (`federation-shared-folders.md` § Cross-nest) —
         // a pure read like `actors`, but 30 s covers the federation hop.
         self.add(
             "fauna.conversations.channel.actors_remote",
@@ -1554,6 +1569,13 @@ impl KindRegistry {
             "fauna.conversations.room.search",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // Its relayed twin, for a member homed on another nest: the same
+        // pure read, replay-safe, with the peer round trip's deadline (the
+        // `room.list_roster_remote` posture).
+        self.add(
+            "fauna.conversations.room.search_remote",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
     }
 
     /// Register the task-delegation heartbeat-lease kinds
@@ -1650,6 +1672,14 @@ impl KindRegistry {
         self.add("fauna.moderation.abuse_report.withdraw", heavy);
         self.add("fauna.moderation.abuse_report.queue", quick);
         self.add("fauna.moderation.abuse_report.resolve", heavy);
+        // The admin's block of one reported item (moderation.md § Admin block
+        // of a reported item) — Admin-only, like `legal_takedown`: one
+        // transaction (flag + obligation + audit + the report resolved) plus a
+        // synchronous blob-withhold rebuild, so `heavy`. Replay-safe: a replayed
+        // block finds the flag set and the report resolved and answers the same
+        // status without a second write. `.list` is a pure read.
+        self.add("fauna.moderation.admin_block", heavy);
+        self.add("fauna.moderation.admin_block.list", quick);
     }
 
     /// Register the family-safety kinds (`family-safety.md` § Wire & data
@@ -2396,6 +2426,7 @@ impl KindRegistry {
         self.add("fauna.admin.tiers.list", meta);
         self.add("fauna.admin.tiers.create", meta);
         self.add("fauna.admin.tiers.update", meta);
+        self.add("fauna.admin.tiers.delete", meta);
         // Membership designation (monetization.md § Pillar 4) — the link making
         // one of the admin's own *subscription* tiers mean paid nest access.
         // WS-RPC-native (no HTTP twin); same replay posture as the rest of C2:
@@ -2465,6 +2496,15 @@ impl KindRegistry {
         // reach. The admin declares the situs; that is all.
         self.add("fauna.admin.region.get", meta);
         self.add("fauna.admin.region.set", meta);
+
+        // The nest admin's published rules (`nest-rules.md` § The nest content
+        // policy). Unlike a region's policy, this one IS the admin's: rules
+        // only, applied on the member's device. Same `forbid_replay = false`
+        // @5 s: `get` is a pure read and `set` a whole-document replace — a
+        // replay re-stores the same document (under a fresh sequence, which
+        // members read as an unchanged rule set).
+        self.add("fauna.admin.content_policy.get", meta);
+        self.add("fauna.admin.content_policy.set", meta);
 
         // The admin's web-app origin choice — what this nest's `/app` answers
         // (`web-content-hosting.md` § Same-origin security model → *The
@@ -2744,6 +2784,12 @@ impl KindRegistry {
             "fauna.posts.room_labels_remote",
             RpcKindMeta::new(false, Duration::from_secs(30)),
         );
+        // get_remote: the deep-link door's relay of `get` to a post's home
+        // nest. Pure read, replay-safe; 30 s for the peer round trip.
+        self.add(
+            "fauna.posts.get_remote",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
+        );
     }
 
     /// Register the user-facing profile-fetch kind (`fauna.profile.get`) —
@@ -2766,6 +2812,13 @@ impl KindRegistry {
         self.add(
             "fauna.profile.set",
             RpcKindMeta::new(false, Duration::from_secs(10)),
+        );
+        // get_remote: `get` relayed to an actor's home nest (`profile.md`
+        // § Where logic lives → *The remote read*). Pure read, replay-safe;
+        // 30 s for the peer round trip, the `posts.get_remote` posture.
+        self.add(
+            "fauna.profile.get_remote",
+            RpcKindMeta::new(false, Duration::from_secs(30)),
         );
     }
 
@@ -2858,8 +2911,8 @@ impl KindRegistry {
     ///
     /// Replay semantics — every kind here is `forbid_replay = false` @5 s:
     ///
-    /// - The five reads (`list`, `get`, `posts`, `local.posts`,
-    ///   `contributors.list`) are pure reads, trivially replay-safe.
+    /// - The reads (`list`, `get`, `posts`, `local.posts`, `author.posts`,
+    ///   `trending.posts`, `contributors.list`) are pure reads, trivially replay-safe.
     /// - The mutations (`create`, `update`, `delete`, `contributors.grant`,
     ///   `contributors.revoke`) are owner-keyed and idempotent-enough to make
     ///   the conservative 5 s replay window acceptable — unlike
@@ -2883,6 +2936,7 @@ impl KindRegistry {
         self.add("fauna.feed.get", read);
         self.add("fauna.feed.posts", read);
         self.add("fauna.feed.local.posts", read);
+        self.add("fauna.feed.author.posts", read);
         self.add("fauna.feed.trending.posts", read);
         self.add("fauna.feed.contributors.list", read);
         let mutation = RpcKindMeta::new(false, Duration::from_secs(5));
@@ -3496,6 +3550,10 @@ impl KindRegistry {
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
         self.add(
+            "fauna.bridges.set_microsoft_registration",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
+        self.add(
             "fauna.bridges.set_role_address",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
@@ -4070,6 +4128,13 @@ impl KindRegistry {
             "fauna.principals.ops",
             RpcKindMeta::new(false, Duration::from_secs(5)),
         );
+        // A device custodian's submission of the operations it performed
+        // (`conversations-oracle.md` § The per-operation record); the op ids
+        // make a retry converge, so it is not replay-forbidden.
+        self.add(
+            "fauna.principals.ops.record",
+            RpcKindMeta::new(false, Duration::from_secs(5)),
+        );
         self.add(
             "fauna.principals.revoke",
             RpcKindMeta::new(false, Duration::from_secs(5)),
@@ -4206,6 +4271,7 @@ impl KindRegistry {
         self.register_nostr_bunker_kinds();
         self.register_activitypub_oracle_kinds();
         self.register_post_author_kinds();
+        self.register_profile_author_kinds();
         self.register_atproto_oracle_kinds();
         self.register_bridged_conversation_kinds();
         #[cfg(feature = "zaps")]
@@ -4981,6 +5047,7 @@ mod tests {
             "fauna.admin.tiers.list",
             "fauna.admin.tiers.create",
             "fauna.admin.tiers.update",
+            "fauna.admin.tiers.delete",
             "fauna.admin.invite_codes.list",
             "fauna.admin.invite_codes.delete",
             "fauna.admin.invite_requests.list",
@@ -5305,6 +5372,7 @@ mod tests {
             "fauna.feed.delete",
             "fauna.feed.posts",
             "fauna.feed.local.posts",
+            "fauna.feed.author.posts",
             "fauna.feed.contributors.list",
             "fauna.feed.contributors.grant",
             "fauna.feed.contributors.revoke",

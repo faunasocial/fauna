@@ -203,3 +203,59 @@ fn the_verdict_types_have_exactly_one_definition() {
     assert_eq!(arc(ArcVerdict::PermError), ArcVerdict::PermError);
     assert_eq!(verdicts(AuthVerdicts::default()), AuthVerdicts::default());
 }
+
+// ── The verification deadline (deployment-threat-model.md § Concern 1a, M3) ──
+//
+// A sender controls the DNS its own SPF and DKIM lookups reach, so it can make
+// every one of them hang; without a deadline the port-25 DATA goroutine waits
+// out every resolver timeout in turn, holding the message's whole buffer. The
+// resolver here points at a loopback UDP socket that reads and never answers,
+// with a per-query timeout far past the deadline, so only the deadline can end
+// the call — and it must end it as `Timeout`, which the MTA tempfails (451):
+// a verdict computed without the lookups would let a hung DKIM key fail a
+// victim domain's DMARC open.
+#[tokio::test]
+async fn verify_past_its_deadline_is_a_timeout_not_a_verdict() {
+    use hickory_resolver::config::{
+        ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts,
+    };
+    use std::time::{Duration, Instant};
+
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = silent.local_addr().expect("addr");
+    let _sink = tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while silent.recv_from(&mut buf).await.is_ok() {}
+    });
+    let mut udp = ConnectionConfig::udp();
+    udp.port = addr.port();
+    udp.bind_addr = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 0)));
+    let server = NameServerConfig::new(addr.ip(), true, vec![udp]);
+    let config = ResolverConfig::from_parts(None, vec![], vec![server]);
+    let mut opts = ResolverOpts::default();
+    opts.timeout = Duration::from_secs(60);
+    opts.attempts = 1;
+    let authenticator =
+        mail_auth::MessageAuthenticator::new(config, opts).expect("silent authenticator");
+
+    let started = Instant::now();
+    let out = fauna_mail::auth::verify_inbound_observed_within(
+        &authenticator,
+        Duration::from_millis(300),
+        NO_AUTH_EML,
+        "alice@example.com",
+        "192.0.2.1",
+        "mail.example.com",
+    )
+    .await;
+    assert!(
+        matches!(out, Err(fauna_mail::auth::AuthError::Timeout)),
+        "a verify past its deadline must be AuthError::Timeout, got {out:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the deadline did not bound the call"
+    );
+}

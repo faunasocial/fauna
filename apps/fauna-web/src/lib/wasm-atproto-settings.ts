@@ -1,5 +1,5 @@
 import type { SharedRpcPort } from '../../static/fauna_wasm_atproto_settings.js';
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
 import type { AtprotoSettingsMachine } from '../../static/fauna_wasm_atproto_settings.js';
 import type { AtprotoSettingsSnapshot } from './atproto-settings-machine';
 import type { LocalizedText } from './i18n/localized';
@@ -9,7 +9,7 @@ import { registerActorScopedReset } from './actorScope';
 import { sharedAccountPort } from './account-runtime';
 
 // Re-export so route/component files consume the machine type via
-// `$lib/wasm-atproto-settings` rather than a fragile relative path into
+// `#lib/wasm-atproto-settings` rather than a fragile relative path into
 // `static/` (mirrors `wasm-labeler-catalog.ts`).
 export type { AtprotoSettingsMachine };
 
@@ -40,7 +40,7 @@ export function ensureAtprotoSettingsWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_atproto_settings.js');
-      await mod.default(`${base}/fauna_wasm_atproto_settings_bg.wasm`);
+      await mod.default(asset('fauna_wasm_atproto_settings_bg.wasm'));
       wasmModule = mod;
       // This chunk hosts feeder #1's critical-alerts registry (see the Rust
       // module doc in `libs/fauna-wasm-atproto-settings/src/lib.rs`) — wire it
@@ -74,7 +74,7 @@ export interface AtprotoSettingsMachineObserver {
 
 /**
  * Build the page-level `AtprotoSettingsMachine` over the SPA singleton's
- * socket — `port` is `sharedRpcPort(secretHex)` from `$lib/rpc`; `secretHex`
+ * socket — `port` is `sharedRpcPort(secretHex)` from `#lib/rpc`; `secretHex`
  * is the actor's 32-byte ed25519 seed (signs the D10 delegation). The minted
  * credential secrets and the rotation-key custody rest on the account plane,
  * reached through the account port wired here before the first refresh
@@ -203,7 +203,7 @@ registerActorScopedReset(resetAtprotoSettingsMachine);
  *
  *  The export exists only in the `wasm-atproto-settings-test` chunk flavor
  *  (gated on this crate's `test-helpers` feature — testing.md § convention
- *  15, mirrors `$lib/wasm`'s `enableDnsFakeProviderForTest`), so it is
+ *  15, mirrors `#lib/wasm`'s `enableDnsFakeProviderForTest`), so it is
  *  reached off the module record rather than the generated type, and THROWS
  *  on a production bundle instead of failing silently (convention 11). */
 export async function enableFakePlcDirectoryForTest(url: string): Promise<void> {
@@ -222,7 +222,7 @@ export async function enableFakePlcDirectoryForTest(url: string): Promise<void> 
  *  `expired` are reachable without waiting out the real ~90-day window
  *  (testing.md § convention 14 — a fake clock, never a sleep). The wasm twin of
  *  native's `atproto_delegation_advance_clock`; driven by
- *  `$lib/atproto-delegation-e2e`.
+ *  `#lib/atproto-delegation-e2e`.
  *
  *  ⚠ Never the MINT clock: `authorizeExternalApps` always stamps a fresh cert
  *  with the real wall clock, so an offset left behind lapses the very next

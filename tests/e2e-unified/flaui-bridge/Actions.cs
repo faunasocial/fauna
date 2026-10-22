@@ -1850,6 +1850,158 @@ class Actions
     }
 
     /// <summary>
+    /// Size the app's main window to <paramref name="widthDip"/> × <paramref name="heightDip"/>
+    /// device-independent pixels and capture THAT WINDOW ALONE to a PNG — the store-listing
+    /// screenshots' path (installers/windows.md § Store distribution, the screenshots paragraph).
+    /// <see cref="Screenshot"/> above grabs the whole virtual screen, which on a shared dev box
+    /// carries whatever other window sits over the app; <c>PrintWindow</c> with
+    /// <c>PW_RENDERFULLCONTENT</c> renders the window's own composition instead, so z-order and
+    /// the harness's <c>--e2e-no-activate</c> launch do not matter.
+    ///
+    /// The thread runs per-monitor-v2 DPI aware for the whole call: the bridge process is
+    /// DPI-unaware, and under that context every rect below would be virtualized to 96-DPI
+    /// units while the app (PerMonitorV2) lays out in physical pixels. The image is cropped to
+    /// the DWM extended frame bounds — the visible window, without the invisible resize
+    /// border — so its pixel size is the window's visible size at the monitor's scale.
+    ///
+    /// Settling is latency-independent (convention 14): it re-reads until the window reports
+    /// the asked size AND two consecutive renders are pixel-identical; <c>Settled=false</c>
+    /// means the deadline came first (an animation or a caret that never stops), which the
+    /// caller asserts on rather than keeping a mid-reflow frame.
+    /// </summary>
+    public WindowCapture CaptureWindow(string name, int widthDip, int heightDip)
+    {
+        if (widthDip <= 0 || heightDip <= 0)
+            throw new ArgumentException($"CaptureWindow: size must be positive, got {widthDip}x{heightDip} DIP");
+        var hwnd = (IntPtr)_session.RootElement.Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd == IntPtr.Zero)
+            throw new InvalidOperationException("CaptureWindow: the app's main window has no HWND");
+
+        var dir = Path.Combine(Path.GetTempPath(), "fauna-e2e-screenshots");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, $"{name}.png");
+
+        var previousContext = Win32.SetThreadDpiAwarenessContext(Win32.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        try
+        {
+            if (Win32.IsIconic(hwnd) || Win32.IsZoomed(hwnd))
+                Win32.ShowWindow(hwnd, Win32.SW_SHOWNOACTIVATE);
+            var dpi = Win32.GetDpiForWindow(hwnd);
+            if (dpi == 0) dpi = 96;
+            var width = (int)Math.Round(widthDip * dpi / 96.0);
+            var height = (int)Math.Round(heightDip * dpi / 96.0);
+            Win32.SetWindowPos(hwnd, IntPtr.Zero, 0, 0, width, height,
+                Win32.SWP_NOMOVE | Win32.SWP_NOZORDER | Win32.SWP_NOACTIVATE);
+
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            byte[]? previous = null;
+            System.Drawing.Bitmap? frame = null;
+            var settled = false;
+            var sized = false;
+            Win32.RECT windowRect = default;
+            while (true)
+            {
+                Win32.GetWindowRect(hwnd, out windowRect);
+                sized = windowRect.Right - windowRect.Left == width && windowRect.Bottom - windowRect.Top == height;
+                if (sized)
+                {
+                    frame?.Dispose();
+                    frame = RenderVisibleWindow(hwnd, windowRect);
+                    var pixels = PixelBytes(frame);
+                    if (previous is not null && pixels.AsSpan().SequenceEqual(previous))
+                    {
+                        settled = true;
+                        break;
+                    }
+                    previous = pixels;
+                }
+                if (DateTime.UtcNow >= deadline) break;
+                Thread.Sleep(150);
+            }
+            if (!sized)
+                throw new InvalidOperationException(
+                    $"CaptureWindow: asked for {width}x{height} px ({widthDip}x{heightDip} DIP at {dpi} DPI), " +
+                    $"the window stayed {windowRect.Right - windowRect.Left}x{windowRect.Bottom - windowRect.Top} px " +
+                    "(a size larger than the monitor is clamped by the window manager)");
+            using (frame)
+            {
+                if (IsUniform(previous!))
+                    throw new InvalidOperationException(
+                        "CaptureWindow: the window rendered as one flat colour — PrintWindow drew nothing " +
+                        "(a disconnected or locked desktop session renders no composition)");
+                frame!.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                return new WindowCapture(path, frame.Width, frame.Height, dpi / 96.0, settled);
+            }
+        }
+        finally
+        {
+            Win32.SetThreadDpiAwarenessContext(previousContext);
+        }
+    }
+
+    /// <summary>One PrintWindow render of <paramref name="hwnd"/>, cropped to its DWM extended
+    /// frame bounds (falls back to the whole window rect where DWM reports none).</summary>
+    private static System.Drawing.Bitmap RenderVisibleWindow(IntPtr hwnd, Win32.RECT windowRect)
+    {
+        var fullWidth = windowRect.Right - windowRect.Left;
+        var fullHeight = windowRect.Bottom - windowRect.Top;
+        using var full = new System.Drawing.Bitmap(fullWidth, fullHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var g = System.Drawing.Graphics.FromImage(full))
+        {
+            var hdc = g.GetHdc();
+            try
+            {
+                if (!Win32.PrintWindow(hwnd, hdc, Win32.PW_RENDERFULLCONTENT))
+                    throw new InvalidOperationException("CaptureWindow: PrintWindow failed");
+            }
+            finally
+            {
+                g.ReleaseHdc(hdc);
+            }
+        }
+        var crop = new System.Drawing.Rectangle(0, 0, fullWidth, fullHeight);
+        if (Win32.DwmGetWindowAttribute(hwnd, Win32.DWMWA_EXTENDED_FRAME_BOUNDS, out Win32.RECT frameRect,
+                System.Runtime.InteropServices.Marshal.SizeOf<Win32.RECT>()) == 0)
+        {
+            var visible = System.Drawing.Rectangle.FromLTRB(
+                frameRect.Left - windowRect.Left, frameRect.Top - windowRect.Top,
+                frameRect.Right - windowRect.Left, frameRect.Bottom - windowRect.Top);
+            visible.Intersect(crop);
+            if (visible.Width > 0 && visible.Height > 0) crop = visible;
+        }
+        return full.Clone(crop, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+    }
+
+    /// <summary>The bitmap's pixels as tightly packed 24-bit rows (the stride's row padding
+    /// dropped, so <see cref="IsUniform"/> reads pixels only).</summary>
+    private static byte[] PixelBytes(System.Drawing.Bitmap bitmap)
+    {
+        var data = bitmap.LockBits(new System.Drawing.Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+        try
+        {
+            var row = bitmap.Width * 3;
+            var bytes = new byte[row * bitmap.Height];
+            for (var y = 0; y < bitmap.Height; y++)
+                System.Runtime.InteropServices.Marshal.Copy(data.Scan0 + y * data.Stride, bytes, y * row, row);
+            return bytes;
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+    }
+
+    private static bool IsUniform(byte[] pixels)
+    {
+        if (pixels.Length < 3) return true;
+        for (var i = 3; i + 2 < pixels.Length; i += 3)
+            if (pixels[i] != pixels[0] || pixels[i + 1] != pixels[1] || pixels[i + 2] != pixels[2])
+                return false;
+        return true;
+    }
+
+    /// <summary>
     /// Dismiss system dialogs (e.g. Windows Firewall) by searching the desktop
     /// for known dialog patterns and clicking Cancel/Allow.
     /// Returns the number of dialogs dismissed.
@@ -2576,6 +2728,11 @@ class Actions
 /// </summary>
 record PhysicalTypeReport(long AppHwnd, long ForegroundAfterForegroundApp, long ForegroundAtInject);
 
+/// <summary>What <see cref="Actions.CaptureWindow"/> wrote: the PNG, its pixel size, the
+/// window's display scale (DPI / 96) and whether two consecutive renders agreed before the
+/// deadline.</summary>
+record WindowCapture(string Path, int Width, int Height, double Scale, bool Settled);
+
 internal static class Win32
 {
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -2600,6 +2757,56 @@ internal static class Win32
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     public const int SW_RESTORE = 9;
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    // ── Window sizing + single-window capture (Actions.CaptureWindow) ──
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool IsZoomed(IntPtr hWnd);
+
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    /// <summary>Render through DWM's own composition — WinUI 3 content is DirectComposition,
+    /// which a plain PrintWindow draws as black.</summary>
+    public const uint PW_RENDERFULLCONTENT = 0x00000002;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint flags);
+
+    public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(IntPtr hWnd, int attribute, out RECT value, int size);
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]

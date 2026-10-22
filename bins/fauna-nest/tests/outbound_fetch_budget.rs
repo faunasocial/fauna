@@ -42,14 +42,20 @@ use fauna_protocol::{decode_strict as decode, encode_canonical};
 async fn router_and_state() -> (RpcRouter, Arc<AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().expect("open in-memory db"));
     // A real byte plane so the staged-envelope legs can seal/stage/resolve.
-    let dir = tempfile::tempdir().unwrap();
+    let base = AppState::for_test(db.clone());
     let backup_svc = Arc::new(
-        BackupService::new(db.clone(), None, false, dir.path().to_path_buf(), None).unwrap(),
+        BackupService::new(
+            db.clone(),
+            None,
+            false,
+            base.test_scratch_path("blobs"),
+            None,
+        )
+        .unwrap(),
     );
-    std::mem::forget(dir); // outlive the test; a leaked temp dir is fine here
     let state = Arc::new(AppState {
         backup_service: Some(backup_svc),
-        ..AppState::for_test(db)
+        ..base
     });
     let mut b = RpcRouter::builder();
     register_bridge_routing_handlers(&mut b);
@@ -193,6 +199,51 @@ async fn a_row_over_the_inline_budget_is_staged_and_delivered() {
     assert!(
         due.iter().any(|r| r.id == big_id),
         "a staged row stays due until delivered, never permfailed"
+    );
+}
+
+/// **The outbound leg's reference ceiling** — a
+/// `staged_body` declaring more than the enqueue's own byte ceiling plus the
+/// envelope overhead is refused before any chunk is read (`mail-message-size.md`
+/// § the bounded-reference rule). The reference names a chunk never staged, so a
+/// resolver that read first would answer "not staged" instead.
+#[tokio::test]
+async fn an_enqueue_reference_over_its_legs_ceiling_is_refused_unread() {
+    let (router, state) = router_and_state().await;
+    let mta: [u8; 32] = [0x0E; 32];
+    approve_bridge(&state.db, &mta, BridgeRole::Mta, &[0x9Au8; 32]).await;
+    let (submitter, token) = proven_mta_submitter(&state, [0x0F; 32]).await;
+
+    let req = EnqueueOutboundMailRequest {
+        original_msgid: "over@example".into(),
+        original_sender: "alice@example.com".into(),
+        recipients: vec!["bob@external.test".into()],
+        raw_message: vec![],
+        staged_body: Some(fauna_protocol::bridge_routing::StagedBodyRef {
+            chunk_hashes: vec![serde_bytes::ByteBuf::from(vec![0xABu8; 32])],
+            total_bytes: 4 * u64::from(u32::MAX),
+            key: fauna_core::secret::SecretByteBuf::from(vec![0u8; 32]),
+        }),
+        on_behalf_of_actor: Some(submitter.to_vec()),
+        submission_token: Some(token),
+    };
+    let payload = Bytes::from(encode_canonical(&req).expect("encode req").to_vec());
+    let meta = router
+        .kind_meta("fauna.bridges.enqueue_outbound_mail")
+        .expect("kind registered");
+    let err = match (meta.handler)(state.clone(), mta, payload).await {
+        Ok(_) => panic!("a reference over the leg's ceiling must be refused"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, fauna_nest::mail_body_plane::INVALID_BODY_REF_CODE);
+    let detail = err
+        .details
+        .as_ref()
+        .map(|d| format!("{d:?}"))
+        .unwrap_or_default();
+    assert!(
+        detail.contains("ceiling"),
+        "a ceiling refusal, got: {detail}"
     );
 }
 

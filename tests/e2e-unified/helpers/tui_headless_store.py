@@ -28,10 +28,10 @@ from actions.onboarding import OnboardingActions
 from common.nest import CLAIM_CODE
 from drivers import create_driver
 
-# Element IDs (tests/e2e-unified/ui.yaml § tui-unlock + onboarding).
-PASSPHRASE_INPUT = "tui-unlock-passphrase-input"
-CONFIRM_INPUT = "tui-unlock-confirm-input"
-SUBMIT = "tui-unlock-submit-button"
+# Element IDs (tests/e2e-unified/ui.yaml § unlock + onboarding).
+PASSPHRASE_INPUT = "unlock-passphrase-input"
+CONFIRM_INPUT = "unlock-confirm-input"
+SUBMIT = "unlock-submit-button"
 CREATE_IDENTITY = "create-identity-button"
 
 

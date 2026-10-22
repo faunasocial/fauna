@@ -43,14 +43,11 @@
 //! app — there is no client-side "is it linked" signal, and the e2e verifies
 //! the outcome against `fauna.bridges.list` (`test_bridges.py`).
 //!
-//! **Settings rows and the follow-add inputs carry no ui.yaml id** — the
-//! `bridge-card` component scopes only `bridge-action-button` / the follows
-//! elements, so a metadata-driven setting toggle/select and the id/petname add
-//! fields render as **untagged** (empty-id) controls: painted and keyboard-
-//! focusable, but not automatable (the `nostr` bunker-URL field precedent).
-//! Minting a per-setting id would be the invented-ID anti-pattern (rule A). The
-//! mutation path is still unit-tested via [`apply_local`], the same way the
-//! Nostr content toggles are.
+//! **Settings rows are keyed by the setting, not its position** —
+//! `bridge-setting[<key>]` (the `settings-nav-row[<key>]` idiom; ui.yaml
+//! `elements.bridge-setting`, user-approved 2026-10-16), whatever control the
+//! setting's type paints; the follow-add fields are `bridge-follow-id-input` /
+//! `bridge-follow-petname-input` and the linked identity line `bridge-identity`.
 //!
 //! **Settings auto-save (`bridges.md` § Bridge settings).** A toggle and a
 //! select are discrete gestures, so each commits its `set_settings` the moment
@@ -72,10 +69,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fauna_client::NestClient;
-use fauna_client_bridges::{BridgesClient, follow_display, is_unified_bridges_page_bridge};
+use fauna_client_bridges::{
+    BridgesClient, FollowRequestRow, InstalledPluginRow, PluginCard, PluginCardAction,
+    PluginsClient, SettingControl, follow_display, follow_request_row, installed_plugin_row,
+    is_unified_bridges_page_bridge, plugin_card, plugin_publisher_text, plugin_status_lines,
+    setting_control,
+};
 use fauna_i18n::strings::{bridges as t, common};
 use fauna_protocol::Value as WireValue;
-use fauna_protocol::bridge_search_policy::SETTING_TYPE_NUMBER;
 use fauna_protocol::bridges_ui::{BridgeFollow, BridgeSetting, BridgeStatus};
 
 use crate::app::App;
@@ -103,6 +104,10 @@ pub struct BridgesState {
     /// linked follows-capable bridge (an unlinked one has nothing to list, and
     /// asking would turn a correct refusal into a page error).
     pub follows: BTreeMap<String, Vec<BridgeFollow>>,
+    /// `fauna.bridges.list_follow_requests` rows per `bridge_id`, fetched only
+    /// for a linked bridge declaring `supports_follow_requests` (`bridges.md`
+    /// § Follow requests) — the card's list renders from this and nothing else.
+    pub follow_requests: BTreeMap<String, Vec<FollowRequestRow>>,
     /// Per-`(bridge_id, field_key)` link-form input buffers — the metadata-
     /// driven `bridge-link-field-{key}` inputs. Keyed by both because two
     /// unlinked bridges can each declare a field of the same key.
@@ -111,12 +116,12 @@ pub struct BridgesState {
     pub follow_id_input: BTreeMap<String, String>,
     /// Per-`bridge_id` "Petname (optional)" add-form buffer.
     pub follow_petname_input: BTreeMap<String, String>,
-    /// Per-`(bridge_id, setting_key)` buffer for a `number`-typed
-    /// [`BridgeSetting`] (the search-policy cap today). Absent means "no local
-    /// edit" — [`BridgesState::number_setting_field`] then falls back to the
-    /// live nest value, unlike [`Self::link_field`] which has no live value to
-    /// fall back to.
-    pub number_setting_inputs: BTreeMap<(String, String), String>,
+    /// Per-`(owner, setting_key)` buffer for a `number`- or `string`-typed
+    /// [`BridgeSetting`] (the search-policy cap, a plugin's text setting).
+    /// Absent means "no local edit" — [`BridgesState::setting_field`] then
+    /// falls back to the live nest value, unlike [`Self::link_field`] which
+    /// has no live value to fall back to.
+    pub setting_inputs: BTreeMap<(SettingOwner, String), String>,
     /// The `(bridge_id, operation, target)` triples this session saw refused by
     /// the guardian gate (`family-safety.md` § Feed-source approvals). Purely
     /// the *local* half of the ask surface: it is what turns a refusal the user
@@ -129,6 +134,36 @@ pub struct BridgesState {
     /// the contacts page orders its two (`contacts.rs`: "the durable list is
     /// what survives navigation and a restart").
     pub guardian_refused: std::collections::BTreeSet<(String, String, String)>,
+    /// The admin's installed plugins (`fauna.plugins.list`, each row composed
+    /// by the shared [`installed_plugin_row`]) — `None` until an admin's
+    /// visit has read them, so the list paints neither rows nor its empty
+    /// line before then (`bridges.md` § Hosted plugins on this page).
+    pub plugins: Option<Vec<InstalledPluginRow>>,
+    /// The `bridge-plugin-install-url` draft.
+    pub plugin_install_url: String,
+    /// An install card was opened by this visit's Install — the page points
+    /// the admin at Connected apps, where the card is answered.
+    pub plugin_install_opened: bool,
+    /// The plugin whose inline uninstall confirm is open, by install row id.
+    pub plugin_uninstall_armed: Option<Vec<u8>>,
+    /// This account's settings card for every installed plugin
+    /// (`fauna.plugins.available`, each composed by the shared
+    /// [`plugin_card`]) — one more `bridge-card` each, after the bridges.
+    pub plugin_cards: Vec<PluginCard>,
+    /// A bind card was opened by this visit's Connect — the page points the
+    /// user at Connected apps, where the card is answered.
+    pub plugin_bind_opened: bool,
+}
+
+/// Whose settings a settings row edits: a bridge's
+/// (`fauna.bridges.set_settings`) or, for this account, an installed
+/// plugin's (`fauna.plugins.set_settings`, by install row id). One renderer
+/// serves both — a plugin's settings are the same `BridgeSetting` vocabulary
+/// (`third-party.md` § The manifest).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SettingOwner {
+    Bridge(String),
+    Plugin(Vec<u8>),
 }
 
 impl BridgesState {
@@ -163,25 +198,37 @@ impl BridgesState {
             .unwrap_or_default()
     }
 
-    /// The displayed/edited text for a `number` setting: the local buffer if
-    /// the user has started editing, else the live nest value stringified —
-    /// so both the paint and the FIRST keystroke (`crate::element::Field`'s
-    /// generic read) start from what is actually persisted rather than
-    /// blanking a populated cap.
-    fn number_setting_field(&self, bridge_id: &str, key: &str) -> String {
-        if let Some(v) = self
-            .number_setting_inputs
-            .get(&(bridge_id.to_string(), key.to_string()))
-        {
+    /// The live setting `key` of `owner`, as the last read returned it.
+    fn live_setting(&self, owner: &SettingOwner, key: &str) -> Option<&BridgeSetting> {
+        let settings = match owner {
+            SettingOwner::Bridge(id) => &self.bridges.iter().find(|b| &b.id == id)?.settings,
+            SettingOwner::Plugin(id) => {
+                &self
+                    .plugin_cards
+                    .iter()
+                    .find(|c| &c.principal_id == id)?
+                    .settings
+            }
+        };
+        settings.iter().find(|s| s.key == key)
+    }
+
+    /// The displayed/edited text for a `number` or `string` setting: the
+    /// local buffer if the user has started editing, else the live nest
+    /// value stringified — so both the paint and the FIRST keystroke
+    /// (`crate::element::Field`'s generic read) start from what is actually
+    /// persisted rather than blanking a populated value.
+    fn setting_field(&self, owner: &SettingOwner, key: &str) -> String {
+        if let Some(v) = self.setting_inputs.get(&(owner.clone(), key.to_string())) {
             return v.clone();
         }
-        self.bridges
-            .iter()
-            .find(|b| b.id == bridge_id)
-            .and_then(|b| b.settings.iter().find(|s| s.key == key))
-            .map(setting_number)
-            .unwrap_or_default()
-            .to_string()
+        match self.live_setting(owner, key) {
+            Some(s) if setting_control(&s.setting_type) == SettingControl::Number => {
+                setting_number(s).to_string()
+            }
+            Some(s) => setting_str(s),
+            None => String::new(),
+        }
     }
 }
 
@@ -200,9 +247,10 @@ pub fn init(nest: Arc<NestClient>) -> BridgesState {
 /// hook (`crate::app::on_nav_enter`). Returns the op; the caller runs it (the
 /// agent awaits, the keyboard spawns), never a fire-and-forget spawn that could
 /// race a same-visit mutation.
-pub fn nav_enter_op(state: &BridgesState) -> Option<Op> {
+pub fn nav_enter_op(state: &BridgesState, admin: bool) -> Option<Op> {
     Some(Op::Refresh {
         nest: state.nest.clone()?,
+        admin,
     })
 }
 
@@ -210,8 +258,9 @@ pub fn nav_enter_op(state: &BridgesState) -> Option<Op> {
 
 /// A Bridges-page editable field. Every one is a local buffer committed by an
 /// explicit button (add-follow) or an [`crate::element::Role::InputCommit`]
-/// activation (the `number` setting), never per keystroke. All render as
-/// untagged (empty-id) inputs — ui.yaml scopes no id to them (module docs).
+/// activation (the `number` setting), never per keystroke. The follow buffers
+/// render as `bridge-follow-id-input` / `bridge-follow-petname-input`, a
+/// setting's as `bridge-setting[<key>]` (module docs).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BridgesField {
     /// A `bridge-link-field-{key}` input, keyed by the bridge and the provider-
@@ -221,10 +270,14 @@ pub enum BridgesField {
     FollowId { bridge_id: String },
     /// The per-bridge "Petname (optional)" add-form buffer.
     FollowPetname { bridge_id: String },
-    /// A `number`-typed [`BridgeSetting`] buffer, keyed by the bridge and the
-    /// setting's key (the search-policy cap today — `bridges.md` § Bridge
-    /// settings). Committed by [`Action::SetNumberSetting`].
-    NumberSetting { bridge_id: String, key: String },
+    /// A `number`- or `string`-typed [`BridgeSetting`] buffer, keyed by its
+    /// owner and the setting's key (the search-policy cap, a plugin's text
+    /// setting — `bridges.md` § Bridge settings). Committed by
+    /// [`Action::CommitSetting`].
+    Setting { owner: SettingOwner, key: String },
+    /// The admin's `bridge-plugin-install-url` draft, committed by
+    /// [`Action::InstallPlugin`].
+    PluginInstallUrl,
 }
 
 pub fn field(state: &BridgesState, field: &BridgesField) -> String {
@@ -240,9 +293,8 @@ pub fn field(state: &BridgesState, field: &BridgesField) -> String {
             .get(bridge_id)
             .cloned()
             .unwrap_or_default(),
-        BridgesField::NumberSetting { bridge_id, key } => {
-            state.number_setting_field(bridge_id, key)
-        }
+        BridgesField::Setting { owner, key } => state.setting_field(owner, key),
+        BridgesField::PluginInstallUrl => state.plugin_install_url.clone(),
     }
 }
 
@@ -257,9 +309,10 @@ pub fn set_field(state: &mut BridgesState, field: BridgesField, value: String) {
         BridgesField::FollowPetname { bridge_id } => {
             state.follow_petname_input.insert(bridge_id, value);
         }
-        BridgesField::NumberSetting { bridge_id, key } => {
-            state.number_setting_inputs.insert((bridge_id, key), value);
+        BridgesField::Setting { owner, key } => {
+            state.setting_inputs.insert((owner, key), value);
         }
+        BridgesField::PluginInstallUrl => state.plugin_install_url = value,
     }
 }
 
@@ -275,20 +328,28 @@ pub enum Action {
     Link { bridge_id: String, mode: String },
     /// `bridge-action-button` (linked) — `fauna.bridges.unlink`, then refresh.
     Unlink { bridge_id: String },
-    /// A boolean setting toggle (untagged) — `set_settings` with just that key.
+    /// A boolean setting toggle (`bridge-setting[<key>]`) — `set_settings` with just that key.
     /// `value` is the value the tap should PRODUCE, so a click is idempotent
     /// from a driver's side (the Nostr content-flag convention).
     ToggleSetting {
-        bridge_id: String,
+        owner: SettingOwner,
         key: String,
         value: bool,
     },
-    /// A `select` setting (untagged) — carried by index because [`SelectTarget`]
+    /// A `select` setting (`bridge-setting[<key>]`) — carried by index because [`SelectTarget`]
     /// must stay `Copy` and cannot hold the `String` bridge id / key; resolved
     /// back to `(bridge_id, key)` against the live snapshot in [`apply_local`]
     /// (the row-scoped-select convention, e.g. `SelectTarget::FolderConflictPolicy`).
     SetSelectSetting {
         bridge: usize,
+        setting: usize,
+        value: String,
+    },
+    /// A plugin card's `select` setting (`bridge-setting[<key>]`) — the
+    /// [`Self::SetSelectSetting`] indirection over
+    /// [`BridgesState::plugin_cards`].
+    SetPluginSelectSetting {
+        plugin: usize,
         setting: usize,
         value: String,
     },
@@ -301,16 +362,16 @@ pub enum Action {
         target: String,
         label: String,
     },
-    /// A `number` setting (untagged) — `set_settings` with the
-    /// [`BridgesField::NumberSetting`] buffer, parsed via the shared
+    /// A `number` or `string` setting (`bridge-setting[<key>]`) — `set_settings` with the
+    /// [`BridgesField::Setting`] buffer. A number parses via the shared
     /// [`fauna_core::format::parse_count_i64`] (non-negative only; nest-side
     /// range validation is the real guard — `content-index.md` § Bridge
-    /// content in the Search corpus). Committed by
+    /// content in the Search corpus); a string commits as typed. Committed by
     /// [`crate::element::Role::InputCommit`] activation, the
     /// `folder-member-cap-input` idiom — this IS the tui analogue of the GUI's
     /// debounced auto-save, since a terminal has no keystroke-timer concept
     /// (module docs).
-    SetNumberSetting { bridge_id: String, key: String },
+    CommitSetting { owner: SettingOwner, key: String },
     /// `bridge-add-follow-button` — `fauna.bridges.add_follow` from the per-
     /// bridge id/petname buffers, then refresh.
     AddFollow { bridge_id: String },
@@ -318,6 +379,33 @@ pub enum Action {
     /// follow's own id (not a positional index — a list that shifted under us
     /// must still remove the row the user saw; the Nostr follow-remove rule).
     RemoveFollow { bridge_id: String, id: String },
+    /// `bridge-follow-request-approve` — `fauna.bridges.resolve_follow_request`
+    /// with `approve: true`, keyed by the request's own id (never a position:
+    /// the list may have shifted under the click), then re-read.
+    ApproveFollowRequest { bridge_id: String, id: String },
+    /// `bridge-follow-request-refuse` — the same kind with `approve: false`.
+    RefuseFollowRequest { bridge_id: String, id: String },
+    /// `bridge-plugin-install-submit` — ADMIN: `fauna.plugins.install` with
+    /// the URL draft; the nest opens the install card, answered in Connected
+    /// apps like any card.
+    InstallPlugin,
+    /// `bridge-plugin-uninstall` — the first press arms the inline confirm,
+    /// a press on the armed row runs `fauna.plugins.uninstall`. Keyed by the
+    /// install row's id, never a position.
+    UninstallPlugin(Vec<u8>),
+    /// The confirm's Keep — closes it, nothing reaches the nest.
+    CancelUninstallPlugin,
+    /// A plugin card's `bridge-action-button` while unbound — *Connect*:
+    /// `fauna.plugins.bind` through the connected-apps machine, which shows
+    /// the bind card in Connected apps → Requests, answered there through its
+    /// one approve path. Keyed by the install row's id.
+    ConnectPlugin(Vec<u8>),
+    /// A plugin card's `bridge-action-button` while bound — *Disconnect*:
+    /// the roster's one verb on the binding row, through the same machine.
+    DisconnectPlugin(Vec<u8>),
+    /// `connected-apps-item-settings-link` — open this page from a plugin's
+    /// roster row, where its settings card is.
+    Open,
 }
 
 impl Action {
@@ -336,15 +424,32 @@ impl Action {
             // All three setting shapes commit through the one `set_settings`
             // call (see [`apply_local`] — select/number resolve to the same
             // `Op`).
+            Action::ToggleSetting {
+                owner: SettingOwner::Plugin(_),
+                ..
+            }
+            | Action::CommitSetting {
+                owner: SettingOwner::Plugin(_),
+                ..
+            }
+            | Action::SetPluginSelectSetting { .. } => "fauna.plugins.set_settings",
             Action::ToggleSetting { .. }
             | Action::SetSelectSetting { .. }
-            | Action::SetNumberSetting { .. } => "fauna.bridges.set_settings",
+            | Action::CommitSetting { .. } => "fauna.bridges.set_settings",
             Action::AddFollow { .. } => "fauna.bridges.add_follow",
             Action::RemoveFollow { .. } => "fauna.bridges.remove_follow",
+            Action::ApproveFollowRequest { .. } | Action::RefuseFollowRequest { .. } => {
+                "fauna.bridges.resolve_follow_request"
+            }
             // The one gesture on this page that is NOT a `fauna.bridges.*`
             // call: the ask rides the family namespace, because it is a request
             // about policy rather than an operation on the bridge.
             Action::RequestFeedSource { .. } => "fauna.family.feed_source.request",
+            Action::InstallPlugin => "fauna.plugins.install",
+            Action::UninstallPlugin(_) => "fauna.plugins.uninstall",
+            Action::ConnectPlugin(_) => "fauna.plugins.bind",
+            Action::DisconnectPlugin(_) => "fauna.principals.revoke",
+            Action::CancelUninstallPlugin | Action::Open => return None,
         })
     }
 }
@@ -379,15 +484,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             nest: st.nest.clone()?,
             bridge_id,
         }),
-        Action::ToggleSetting {
-            bridge_id,
-            key,
-            value,
-        } => Some(Op::SetSettings {
-            nest: st.nest.clone()?,
-            bridge_id,
-            settings: WireValue::Map(BTreeMap::from_iter([(key, WireValue::Bool(value))])),
-        }),
+        Action::ToggleSetting { owner, key, value } => {
+            settings_op(st.nest.clone()?, owner, key, WireValue::Bool(value))
+        }
         Action::SetSelectSetting {
             bridge,
             setting,
@@ -405,28 +504,43 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 settings: WireValue::Map(BTreeMap::from_iter([(key, WireValue::String(value))])),
             })
         }
-        Action::SetNumberSetting { bridge_id, key } => {
+        Action::SetPluginSelectSetting {
+            plugin,
+            setting,
+            value,
+        } => {
+            let nest = st.nest.clone()?;
+            // The `SetSelectSetting` resolution, over the plugin cards.
+            let card = st.plugin_cards.get(plugin)?;
+            let key = card.settings.get(setting)?.key.clone();
+            settings_op(
+                nest,
+                SettingOwner::Plugin(card.principal_id.clone()),
+                key,
+                WireValue::String(value),
+            )
+        }
+        Action::CommitSetting { owner, key } => {
             let nest = st.nest.clone()?;
             // Falls back to the LIVE value (not the raw buffer) the same way
             // the paint does, so an activation with no local edit re-commits
             // the value already shown rather than silently dropping — and a
-            // successful parse always yields a wire-sendable number.
-            let raw = st.number_setting_field(&bridge_id, &key);
-            let n = fauna_core::format::parse_count_i64(&raw)?;
+            // successful number parse always yields a wire-sendable number.
+            let raw = st.setting_field(&owner, &key);
+            let number = st
+                .live_setting(&owner, &key)
+                .is_some_and(|s| setting_control(&s.setting_type) == SettingControl::Number);
+            let value = if number {
+                WireValue::Integer(fauna_core::format::parse_count_i64(&raw)? as i128)
+            } else {
+                WireValue::String(raw)
+            };
             // Clear the buffer: the repaint after `refresh` is what should own
-            // the displayed text from here (the nest may have clamped `n`),
-            // matching the page's non-optimistic contract for the other two
-            // setting shapes (module docs).
-            st.number_setting_inputs
-                .remove(&(bridge_id.clone(), key.clone()));
-            Some(Op::SetSettings {
-                nest,
-                bridge_id,
-                settings: WireValue::Map(BTreeMap::from_iter([(
-                    key,
-                    WireValue::Integer(n as i128),
-                )])),
-            })
+            // the displayed text from here (the nest may have clamped a
+            // number), matching the page's non-optimistic contract for the
+            // other setting shapes (module docs).
+            st.setting_inputs.remove(&(owner.clone(), key.clone()));
+            settings_op(nest, owner, key, value)
         }
         Action::AddFollow { bridge_id } => {
             let nest = st.nest.clone()?;
@@ -463,6 +577,18 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             bridge_id,
             id,
         }),
+        Action::ApproveFollowRequest { bridge_id, id } => Some(Op::ResolveFollowRequest {
+            nest: st.nest.clone()?,
+            bridge_id,
+            id,
+            approve: true,
+        }),
+        Action::RefuseFollowRequest { bridge_id, id } => Some(Op::ResolveFollowRequest {
+            nest: st.nest.clone()?,
+            bridge_id,
+            id,
+            approve: false,
+        }),
         Action::RequestFeedSource {
             bridge_id,
             operation,
@@ -475,7 +601,75 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             target,
             label,
         }),
+        Action::InstallPlugin => {
+            let nest = st.nest.clone()?;
+            let document_url = st.plugin_install_url.trim().to_string();
+            if document_url.is_empty() {
+                return None;
+            }
+            st.plugin_install_opened = false;
+            app.errors.remove(&Page::Bridges);
+            Some(Op::InstallPlugin { nest, document_url })
+        }
+        Action::UninstallPlugin(principal_id) => {
+            if st.plugin_uninstall_armed.as_deref() != Some(principal_id.as_slice()) {
+                st.plugin_uninstall_armed = Some(principal_id);
+                return None;
+            }
+            st.plugin_uninstall_armed = None;
+            Some(Op::UninstallPlugin {
+                nest: st.nest.clone()?,
+                principal_id,
+            })
+        }
+        Action::CancelUninstallPlugin => {
+            st.plugin_uninstall_armed = None;
+            None
+        }
+        Action::ConnectPlugin(principal_id) => {
+            st.plugin_bind_opened = false;
+            app.errors.remove(&Page::Bridges);
+            Some(Op::ConnectPlugin {
+                machine: app.settings.connected_apps.machine.clone()?,
+                principal_id,
+            })
+        }
+        Action::DisconnectPlugin(binding_principal_id) => {
+            app.errors.remove(&Page::Bridges);
+            Some(Op::DisconnectPlugin {
+                nest: st.nest.clone()?,
+                machine: app.settings.connected_apps.machine.clone()?,
+                binding_principal_id,
+                admin: app.am_i_admin,
+            })
+        }
+        Action::Open => {
+            app.page = Page::Bridges;
+            nav_enter_op(&app.bridges, app.am_i_admin)
+        }
     }
+}
+
+/// The settings write for one row — the bridge's `fauna.bridges.set_settings`
+/// or the plugin's `fauna.plugins.set_settings` — with just that key.
+fn settings_op(
+    nest: Arc<NestClient>,
+    owner: SettingOwner,
+    key: String,
+    value: WireValue,
+) -> Option<Op> {
+    Some(match owner {
+        SettingOwner::Bridge(bridge_id) => Op::SetSettings {
+            nest,
+            bridge_id,
+            settings: WireValue::Map(BTreeMap::from_iter([(key, value)])),
+        },
+        SettingOwner::Plugin(principal_id) => Op::SetPluginSettings {
+            nest,
+            principal_id,
+            settings: BTreeMap::from_iter([(key, value)]),
+        },
+    })
 }
 
 // ── Network half ─────────────────────────────────────────────────────────────
@@ -485,8 +679,8 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 pub enum Op {
     /// `fauna.bridges.list` (+ `list_follows` per linked follows-capable
     /// bridge) — the nav edge, and after every mutation (the fresh status IS
-    /// the observable effect).
-    Refresh { nest: Arc<NestClient> },
+    /// the observable effect). `admin` adds the installed-plugins read.
+    Refresh { nest: Arc<NestClient>, admin: bool },
     Link {
         nest: Arc<NestClient>,
         bridge_id: String,
@@ -513,6 +707,15 @@ pub enum Op {
         bridge_id: String,
         id: String,
     },
+    /// `fauna.bridges.resolve_follow_request` — approve or refuse one waiting
+    /// follow request, then re-read (non-optimistic: the list repaints from the
+    /// nest's own answer).
+    ResolveFollowRequest {
+        nest: Arc<NestClient>,
+        bridge_id: String,
+        id: String,
+        approve: bool,
+    },
     /// `fauna.family.feed_source.request` — the ward's "ask your guardian"
     /// beside a `feed_sources` refusal (`family-safety.md` § Feed-source
     /// approvals). Re-reads `fauna.family.status` on success so the durable ask
@@ -523,6 +726,38 @@ pub enum Op {
         operation: String,
         target: String,
         label: String,
+    },
+    /// `fauna.plugins.install` — ADMIN: opens the install card.
+    InstallPlugin {
+        nest: Arc<NestClient>,
+        document_url: String,
+    },
+    /// `fauna.plugins.uninstall` — ADMIN, then re-read the list.
+    UninstallPlugin {
+        nest: Arc<NestClient>,
+        principal_id: Vec<u8>,
+    },
+    /// *Connect*: the connected-apps machine's `bind_plugin`, which opens the
+    /// bind card into its Requests tray.
+    ConnectPlugin {
+        machine: Arc<fauna_client_connected_apps::ConnectedAppsMachine>,
+        principal_id: Vec<u8>,
+    },
+    /// *Disconnect*: the connected-apps machine's `revoke_principal` on the
+    /// binding row, then re-read the page (`admin` re-reads the installed
+    /// list too, whose bound-accounts count just moved).
+    DisconnectPlugin {
+        nest: Arc<NestClient>,
+        machine: Arc<fauna_client_connected_apps::ConnectedAppsMachine>,
+        binding_principal_id: Vec<u8>,
+        admin: bool,
+    },
+    /// `fauna.plugins.set_settings` — this account's own settings for a
+    /// plugin it has bound, then re-read the page.
+    SetPluginSettings {
+        nest: Arc<NestClient>,
+        principal_id: Vec<u8>,
+        settings: BTreeMap<String, WireValue>,
     },
 }
 
@@ -535,7 +770,18 @@ pub enum Outcome {
     Loaded {
         bridges: Vec<BridgeStatus>,
         follows: BTreeMap<String, Vec<BridgeFollow>>,
+        follow_requests: BTreeMap<String, Vec<FollowRequestRow>>,
+        /// The admin's installed plugins when this read asked for them;
+        /// `None` leaves the page's list as it was.
+        plugins: Option<Vec<InstalledPluginRow>>,
+        /// This account's plugin settings cards when this read asked for
+        /// them; `None` leaves the page's cards as they were.
+        plugin_cards: Option<Vec<PluginCard>>,
     },
+    /// The install card is open — the admin answers it in Connected apps.
+    PluginInstallOpened,
+    /// The bind card is open — the user answers it in Connected apps.
+    PluginBindOpened,
     /// A transport or provider failure — lands on `error-message`.
     Failed(String),
     /// The guardian gate refused this operation (the typed
@@ -566,7 +812,7 @@ pub enum Outcome {
 impl Op {
     pub async fn run(self) -> Outcome {
         match self {
-            Op::Refresh { nest } => refresh(nest).await,
+            Op::Refresh { nest, admin } => refresh_page(nest, admin).await,
             Op::Link {
                 nest,
                 bridge_id,
@@ -637,6 +883,23 @@ impl Op {
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
+            Op::ResolveFollowRequest {
+                nest,
+                bridge_id,
+                id,
+                approve,
+            } => {
+                let client = BridgesClient::new(Arc::clone(&nest));
+                let resolved = if approve {
+                    client.approve_follow_request(bridge_id, id).await
+                } else {
+                    client.refuse_follow_request(bridge_id, id).await
+                };
+                match resolved {
+                    Ok(()) => refresh(nest).await,
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
             Op::RequestFeedSource {
                 nest,
                 bridge_id,
@@ -663,8 +926,67 @@ impl Op {
                     Err(e) => Outcome::FeedSourceRequestFailed(e.to_string()),
                 }
             }
+            Op::InstallPlugin { nest, document_url } => {
+                match PluginsClient::new(nest).install(document_url).await {
+                    Ok(_) => Outcome::PluginInstallOpened,
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
+            Op::UninstallPlugin { nest, principal_id } => {
+                match PluginsClient::new(Arc::clone(&nest))
+                    .uninstall(principal_id)
+                    .await
+                {
+                    Ok(_) => refresh_page(nest, true).await,
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
+            Op::ConnectPlugin {
+                machine,
+                principal_id,
+            } => {
+                machine.bind_plugin(principal_id).await;
+                match machine_error(&machine) {
+                    Some(e) => Outcome::Failed(e),
+                    None => Outcome::PluginBindOpened,
+                }
+            }
+            Op::DisconnectPlugin {
+                nest,
+                machine,
+                binding_principal_id,
+                admin,
+            } => {
+                machine.revoke_principal(binding_principal_id).await;
+                match machine_error(&machine) {
+                    Some(e) => Outcome::Failed(e),
+                    None => refresh_page(nest, admin).await,
+                }
+            }
+            Op::SetPluginSettings {
+                nest,
+                principal_id,
+                settings,
+            } => {
+                match PluginsClient::new(Arc::clone(&nest))
+                    .set_settings(principal_id, settings)
+                    .await
+                {
+                    Ok(_) => refresh_page(nest, false).await,
+                    Err(e) => Outcome::Failed(e.to_string()),
+                }
+            }
         }
     }
+}
+
+/// The connected-apps machine's error after a gesture, resolved — it carries
+/// the page error a Connect or Disconnect failed with.
+fn machine_error(machine: &fauna_client_connected_apps::ConnectedAppsMachine) -> Option<String> {
+    machine
+        .snapshot()
+        .error
+        .map(|e| e.resolve(fauna_i18n::strings::lookup))
 }
 
 /// Split the guardian gate off every other failure, on the SHARED typed
@@ -722,16 +1044,89 @@ pub(crate) async fn refresh(nest: Arc<NestClient>) -> Outcome {
             }
         }
     }
-    Outcome::Loaded { bridges, follows }
+    // Follow requests likewise exist only for a linked bridge that declares the
+    // capability; asking one that does not turns a correct refusal into a page
+    // error, so the flag is read first.
+    let mut follow_requests = BTreeMap::new();
+    for b in &bridges {
+        if b.linked && b.supports_follow_requests {
+            match client.list_follow_requests(&b.id).await {
+                Ok(r) => {
+                    follow_requests.insert(
+                        b.id.clone(),
+                        r.requests.iter().map(follow_request_row).collect(),
+                    );
+                }
+                Err(e) => return Outcome::Failed(e.to_string()),
+            }
+        }
+    }
+    Outcome::Loaded {
+        bridges,
+        follows,
+        follow_requests,
+        plugins: None,
+        plugin_cards: None,
+    }
+}
+
+/// The page's own read: [`refresh`], plus this account's plugin settings
+/// cards (`fauna.plugins.available`) and — for an admin — the installed
+/// plugins (`fauna.plugins.list`), which only an admin may list.
+async fn refresh_page(nest: Arc<NestClient>, admin: bool) -> Outcome {
+    let mut outcome = refresh(Arc::clone(&nest)).await;
+    if let Outcome::Loaded {
+        plugins,
+        plugin_cards,
+        ..
+    } = &mut outcome
+    {
+        let client = PluginsClient::new(nest);
+        match client.available().await {
+            Ok(available) => *plugin_cards = Some(available.into_iter().map(plugin_card).collect()),
+            Err(e) => return Outcome::Failed(e.to_string()),
+        }
+        if admin {
+            match client.list().await {
+                Ok(listed) => {
+                    *plugins = Some(listed.into_iter().map(installed_plugin_row).collect())
+                }
+                Err(e) => return Outcome::Failed(e.to_string()),
+            }
+        }
+    }
+    outcome
 }
 
 /// Fold an op's result back into the page. One function for both dispatch
 /// paths, so they cannot disagree about what an outcome means.
 pub fn apply_outcome(app: &mut App, outcome: Outcome) {
     match outcome {
-        Outcome::Loaded { bridges, follows } => {
+        Outcome::Loaded {
+            bridges,
+            follows,
+            follow_requests,
+            plugins,
+            plugin_cards,
+        } => {
             app.bridges.bridges = bridges;
             app.bridges.follows = follows;
+            app.bridges.follow_requests = follow_requests;
+            if let Some(plugins) = plugins {
+                app.bridges.plugins = Some(plugins);
+            }
+            if let Some(cards) = plugin_cards {
+                app.bridges.plugin_cards = cards;
+            }
+            app.errors.remove(&Page::Bridges);
+        }
+        Outcome::PluginInstallOpened => {
+            app.bridges.plugin_install_url.clear();
+            app.bridges.plugin_install_opened = true;
+            app.errors.remove(&Page::Bridges);
+        }
+        Outcome::PluginBindOpened => {
+            app.bridges.plugin_bind_opened = true;
             app.errors.remove(&Page::Bridges);
         }
         Outcome::Failed(msg) => {
@@ -810,18 +1205,183 @@ pub fn elements(app: &App) -> Vec<Element> {
         .enumerate()
         .filter(|(_, b)| is_unified_bridges_page_bridge(&b.id))
         .collect();
-    if unified.is_empty() {
+    if unified.is_empty() && st.plugin_cards.is_empty() {
         // No unified-page bridge on this nest — untagged chrome, exactly like
         // linux's `StatusPage` placeholder (ui.yaml gives the empty-state no
         // id). `is_page_visible()` keys on `page-heading`, which is present.
         out.push(Element::chrome(t::NO_BRIDGES));
-        return out;
     }
 
+    let bridges = unified.len();
     for (display_i, (real_i, bridge)) in unified.into_iter().enumerate() {
         bridge_card(st, &app.family, display_i, real_i, bridge, &mut out);
     }
+    // Each installed plugin is one more `bridge-card`, after the bridges
+    // (owner-ruled 2026-10-16: no card family of its own).
+    for (i, card) in st.plugin_cards.iter().enumerate() {
+        plugin_card_elements(st, bridges + i, i, card, &mut out);
+    }
+    if st.plugin_bind_opened {
+        out.push(Element::chrome(t::PLUGIN_BIND_OPENED));
+    }
+    if app.am_i_admin {
+        plugin_elements(st, &mut out);
+    }
     out
+}
+
+/// The admin's hosted plugins (`bridges.md` § Hosted plugins on this page):
+/// one `bridge-plugin-item` per installed plugin — its name, publisher and
+/// runner status, each the shared row's text, and Uninstall behind an inline
+/// confirm — then the install entry, the document URL an admin gives
+/// (`third-party.md` § The runner contract → *The install-approval leg*).
+/// Painted only while the `am_i_admin` gate passes.
+fn plugin_elements(st: &BridgesState, out: &mut Vec<Element>) {
+    const ITEM: &str = ids::BRIDGE_PLUGIN_ITEM;
+    let resolve =
+        |text: &fauna_core::localized::LocalizedText| text.resolve(fauna_i18n::strings::lookup);
+    out.push(Element::chrome(t::PLUGINS_HEADING));
+    // The three-state list: nothing until the read returned, then rows or
+    // the empty line.
+    if let Some(plugins) = &st.plugins {
+        if plugins.is_empty() {
+            out.push(Element::chrome(t::PLUGINS_EMPTY));
+        }
+        for (i, row) in plugins.iter().enumerate() {
+            out.push(
+                Element::label(ids::BRIDGE_PLUGIN_NAME, row.name.clone())
+                    .attr("client_id", &row.client_id)
+                    .within(ITEM, i),
+            );
+            out.push(
+                Element::label(
+                    ids::BRIDGE_PLUGIN_PUBLISHER,
+                    resolve(&plugin_publisher_text(row)),
+                )
+                .within(ITEM, i),
+            );
+            out.push(
+                Element::label(
+                    ids::BRIDGE_PLUGIN_STATUS,
+                    plugin_status_lines(row)
+                        .iter()
+                        .map(resolve)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+                .attr("state", &row.state)
+                .within(ITEM, i),
+            );
+            let armed = st.plugin_uninstall_armed.as_deref() == Some(row.principal_id.as_slice());
+            if armed {
+                out.push(Element::chrome(t::plugin_uninstall_prompt(&row.name)).within(ITEM, i));
+            }
+            out.push(
+                Element::gesture_button(
+                    ids::BRIDGE_PLUGIN_UNINSTALL,
+                    if armed {
+                        t::PLUGIN_UNINSTALL_CONFIRM
+                    } else {
+                        t::PLUGIN_UNINSTALL
+                    },
+                    true,
+                    Gesture::Bridges(Action::UninstallPlugin(row.principal_id.clone())),
+                )
+                .within(ITEM, i),
+            );
+            if armed {
+                out.push(
+                    Element::chrome_button(
+                        t::PLUGIN_UNINSTALL_CANCEL,
+                        Gesture::Bridges(Action::CancelUninstallPlugin),
+                    )
+                    .within(ITEM, i),
+                );
+            }
+        }
+    }
+    out.push(
+        Element::input_commit(
+            ids::BRIDGE_PLUGIN_INSTALL_URL,
+            st.plugin_install_url.clone(),
+            Field::Bridges(BridgesField::PluginInstallUrl),
+            Gesture::Bridges(Action::InstallPlugin),
+        )
+        .labelled(t::PLUGIN_INSTALL_LABEL),
+    );
+    out.push(Element::gesture_button(
+        ids::BRIDGE_PLUGIN_INSTALL_SUBMIT,
+        t::PLUGIN_INSTALL_SUBMIT,
+        !st.plugin_install_url.trim().is_empty(),
+        Gesture::Bridges(Action::InstallPlugin),
+    ));
+    if st.plugin_install_opened {
+        out.push(Element::chrome(t::PLUGIN_INSTALL_OPENED));
+    }
+}
+
+/// One account's settings card for an installed plugin, as one more
+/// `bridge-card` (`third-party.md` § The principal model → *Hosted
+/// principals*): the shared [`plugin_card`]'s name, badge and publisher as
+/// text, its verb as the card's `bridge-action-button` — Connect while
+/// unbound, Disconnect while bound — and, once bound, its settings through
+/// the one settings renderer. The button carries the plugin's `client_id` and
+/// a `bound` value, so a reader can tell which card is which plugin's and
+/// whether it is connected: `bridge-card` itself has no per-card identity.
+fn plugin_card_elements(
+    st: &BridgesState,
+    display_i: usize,
+    plugin_i: usize,
+    card: &PluginCard,
+    out: &mut Vec<Element>,
+) {
+    let resolve =
+        |text: &fauna_core::localized::LocalizedText| text.resolve(fauna_i18n::strings::lookup);
+    out.push(Element::chrome(card.name.clone()).within(ids::BRIDGE_CARD, display_i));
+    out.push(
+        Element::chrome(format!(
+            "{}\n{}",
+            resolve(&card.badge),
+            resolve(&card.publisher)
+        ))
+        .within(ids::BRIDGE_CARD, display_i),
+    );
+    let (label, gesture, bound) = match &card.action {
+        PluginCardAction::Connect => (
+            t::PLUGIN_CONNECT,
+            Action::ConnectPlugin(card.principal_id.clone()),
+            false,
+        ),
+        PluginCardAction::Disconnect {
+            binding_principal_id,
+        } => (
+            t::PLUGIN_DISCONNECT,
+            Action::DisconnectPlugin(binding_principal_id.clone()),
+            true,
+        ),
+    };
+    out.push(
+        Element::gesture_button(
+            ids::BRIDGE_ACTION_BUTTON,
+            label,
+            true,
+            Gesture::Bridges(gesture),
+        )
+        .attr("client_id", &card.client_id)
+        .attr("bound", if bound { "true" } else { "false" })
+        .within(ids::BRIDGE_CARD, display_i),
+    );
+    setting_elements(
+        st,
+        display_i,
+        &SettingOwner::Plugin(card.principal_id.clone()),
+        &card.settings,
+        |setting| SelectTarget::PluginSetting {
+            plugin: plugin_i,
+            setting,
+        },
+        out,
+    );
 }
 
 /// Embed one bridge's card — link form / linked card / settings / follows —
@@ -887,11 +1447,14 @@ fn bridge_card(
     out.push(Element::chrome(bridge.name.clone()).within(ids::BRIDGE_CARD, display_i));
 
     if bridge.linked {
-        // Identity ("Handle: @user@domain") — chrome; ui.yaml scopes no id.
+        // Identity ("Handle: @user@domain") — `bridge-identity`.
         if let Some(identity) = &bridge.identity {
             out.push(
-                Element::chrome(format!("{}: {}", identity.label, identity.display))
-                    .within(ids::BRIDGE_CARD, display_i),
+                Element::label(
+                    ids::BRIDGE_IDENTITY,
+                    format!("{}: {}", identity.label, identity.display),
+                )
+                .within(ids::BRIDGE_CARD, display_i),
             );
         }
         // The dual-purpose action button, in its Unlink role. Registered before
@@ -908,9 +1471,25 @@ fn bridge_card(
             )
             .within(ids::BRIDGE_CARD, display_i),
         );
-        setting_elements(st, display_i, real_i, bridge, out);
+        // `real_i` — a picker is resolved back against the unfiltered
+        // `st.bridges` by `apply_local`'s `SetSelectSetting` arm, not the
+        // display position.
+        setting_elements(
+            st,
+            display_i,
+            &SettingOwner::Bridge(bridge.id.clone()),
+            &bridge.settings,
+            |setting| SelectTarget::BridgeSetting {
+                bridge: real_i,
+                setting,
+            },
+            out,
+        );
         if bridge.supports_follows {
             follows_elements(st, display_i, bridge, out);
+        }
+        if bridge.supports_follow_requests {
+            follow_request_elements(st, display_i, bridge, out);
         }
     } else {
         // The unlinked link form: one input per declared field, then the Link
@@ -977,32 +1556,41 @@ fn bridge_card(
     source_ask_rows(fam, st, bridge, display_i, out);
 }
 
-/// The metadata-driven settings rows for a linked bridge — untagged (ui.yaml
-/// scopes no per-setting id), so they are keyboard-focusable but not
-/// automatable (module docs). Booleans render as a toggle, `select` as a
-/// picker, `number` as a committing input (the search-policy cap —
-/// `content-index.md` § Bridge content in the Search corpus); any other type
-/// falls back to a read-only "label: value" line rather than an unbuilt
-/// input-commit path (no live provider declares a free-text setting on this
-/// page — priority #5).
+/// A setting row's id, `bridge-setting[<key>]` — keyed by the setting's own
+/// key (the `settings-nav-row[<key>]` idiom), so a test addresses a setting by
+/// what it is, never by its position in the provider's list.
+fn setting_id(key: &str) -> String {
+    format!("{}[{key}]", ids::BRIDGE_SETTING)
+}
+
+/// The metadata-driven settings rows of one card — a linked bridge's, or a
+/// bound plugin's for this account — each `bridge-setting[<key>]`
+/// ([`setting_id`]).
+/// Booleans render as a toggle, `select` as a picker, `number` as a committing
+/// input (the search-policy cap — `content-index.md` § Bridge content in the
+/// Search corpus) and `string` / `text` as a committing text input (a
+/// plugin's text setting — `bridges.md` § Bridge settings' Text shape); any
+/// other type falls back to a read-only "label: value" line. `select_target`
+/// names a picker's row for the [`SelectTarget`] indirection.
 fn setting_elements(
     st: &BridgesState,
     display_i: usize,
-    real_i: usize,
-    bridge: &BridgeStatus,
+    owner: &SettingOwner,
+    settings: &[BridgeSetting],
+    select_target: impl Fn(usize) -> SelectTarget,
     out: &mut Vec<Element>,
 ) {
-    for (s_idx, setting) in bridge.settings.iter().enumerate() {
-        match setting.setting_type.as_str() {
-            "boolean" | "toggle" | "bool" => {
+    for (s_idx, setting) in settings.iter().enumerate() {
+        match setting_control(&setting.setting_type) {
+            SettingControl::Toggle => {
                 let on = setting_bool(setting);
                 out.push(
                     Element::checkbox_gesture(
-                        String::new(),
+                        setting_id(&setting.key),
                         setting.label.clone(),
                         on,
                         Gesture::Bridges(Action::ToggleSetting {
-                            bridge_id: bridge.id.clone(),
+                            owner: owner.clone(),
                             key: setting.key.clone(),
                             value: !on,
                         }),
@@ -1010,7 +1598,7 @@ fn setting_elements(
                     .within(ids::BRIDGE_CARD, display_i),
                 );
             }
-            "select" => {
+            SettingControl::Select => {
                 let options = setting
                     .options
                     .as_ref()
@@ -1025,32 +1613,26 @@ fn setting_elements(
                     .unwrap_or_default();
                 out.push(
                     Element::select(
-                        String::new(),
+                        setting_id(&setting.key),
                         setting_str(setting),
-                        // `real_i` — this is resolved back against the
-                        // unfiltered `st.bridges` by `apply_local`'s
-                        // `SetSelectSetting` arm, not the display position.
-                        SelectTarget::BridgeSetting {
-                            bridge: real_i,
-                            setting: s_idx,
-                        },
+                        select_target(s_idx),
                         options,
                     )
                     .labelled(setting.label.clone())
                     .within(ids::BRIDGE_CARD, display_i),
                 );
             }
-            SETTING_TYPE_NUMBER => {
+            SettingControl::Number | SettingControl::Text => {
                 out.push(
                     Element::input_commit(
-                        String::new(),
-                        st.number_setting_field(&bridge.id, &setting.key),
-                        Field::Bridges(BridgesField::NumberSetting {
-                            bridge_id: bridge.id.clone(),
+                        setting_id(&setting.key),
+                        st.setting_field(owner, &setting.key),
+                        Field::Bridges(BridgesField::Setting {
+                            owner: owner.clone(),
                             key: setting.key.clone(),
                         }),
-                        Gesture::Bridges(Action::SetNumberSetting {
-                            bridge_id: bridge.id.clone(),
+                        Gesture::Bridges(Action::CommitSetting {
+                            owner: owner.clone(),
                             key: setting.key.clone(),
                         }),
                     )
@@ -1058,10 +1640,13 @@ fn setting_elements(
                     .within(ids::BRIDGE_CARD, display_i),
                 );
             }
-            _ => {
+            SettingControl::Unknown => {
                 out.push(
-                    Element::chrome(format!("{}: {}", setting.label, setting_str(setting)))
-                        .within(ids::BRIDGE_CARD, display_i),
+                    Element::label(
+                        setting_id(&setting.key),
+                        format!("{}: {}", setting.label, setting_str(setting)),
+                    )
+                    .within(ids::BRIDGE_CARD, display_i),
                 );
             }
         }
@@ -1070,7 +1655,8 @@ fn setting_elements(
 
 /// The follows surface for a `supports_follows` bridge — the `bridge-follows-
 /// list` anchor, one `bridge-follow-item` + `bridge-follow-remove` per follow,
-/// then the untagged id/petname add inputs and the `bridge-add-follow-button`.
+/// then the `bridge-follow-id-input` / `bridge-follow-petname-input` add inputs
+/// and the `bridge-add-follow-button`.
 /// The ward's feed-source ask rows for ONE bridge card — the
 /// `bridge-source-request-button` / `bridge-source-request-state` pair
 /// (`family-safety.md` § Feed-source approvals). Both are `indexed` in ui.yaml
@@ -1150,6 +1736,63 @@ fn source_ask_rows(
     }
 }
 
+/// The follow requests waiting on a `supports_follow_requests` bridge
+/// (`bridges.md` § Follow requests): the `bridge-follow-requests-list` heading
+/// carrying the count — rendered with a zero count when the list is empty, the
+/// list being where the user checks — then one `bridge-follow-request-item` with
+/// its Approve and Refuse per request. Rows and two clicks only; the row text is
+/// the shared `FollowRequestRow::display`, and both gestures hand back the
+/// request's own id with no confirm.
+fn follow_request_elements(
+    st: &BridgesState,
+    i: usize,
+    bridge: &BridgeStatus,
+    out: &mut Vec<Element>,
+) {
+    let rows = st
+        .follow_requests
+        .get(&bridge.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    out.push(
+        Element::label(
+            ids::BRIDGE_FOLLOW_REQUESTS_LIST,
+            t::follow_requests(&rows.len().to_string()),
+        )
+        .within(ids::BRIDGE_CARD, i),
+    );
+    for row in rows {
+        out.push(
+            Element::label(ids::BRIDGE_FOLLOW_REQUEST_ITEM, row.display())
+                .within(ids::BRIDGE_CARD, i),
+        );
+        out.push(
+            Element::gesture_button(
+                ids::BRIDGE_FOLLOW_REQUEST_APPROVE,
+                t::APPROVE_FOLLOW_REQUEST,
+                true,
+                Gesture::Bridges(Action::ApproveFollowRequest {
+                    bridge_id: bridge.id.clone(),
+                    id: row.id.clone(),
+                }),
+            )
+            .within(ids::BRIDGE_CARD, i),
+        );
+        out.push(
+            Element::gesture_button(
+                ids::BRIDGE_FOLLOW_REQUEST_REFUSE,
+                t::REFUSE_FOLLOW_REQUEST,
+                true,
+                Gesture::Bridges(Action::RefuseFollowRequest {
+                    bridge_id: bridge.id.clone(),
+                    id: row.id.clone(),
+                }),
+            )
+            .within(ids::BRIDGE_CARD, i),
+        );
+    }
+}
+
 fn follows_elements(st: &BridgesState, i: usize, bridge: &BridgeStatus, out: &mut Vec<Element>) {
     out.push(Element::label(ids::BRIDGE_FOLLOWS_LIST, t::FOLLOWS).within(ids::BRIDGE_CARD, i));
     if let Some(follows) = st.follows.get(&bridge.id) {
@@ -1172,11 +1815,11 @@ fn follows_elements(st: &BridgesState, i: usize, bridge: &BridgeStatus, out: &mu
             );
         }
     }
-    // Untagged add-form inputs — ui.yaml gives the id/petname fields no id
-    // (module docs); the button carries the only id in this add row.
+    // The add row: `bridge-follow-id-input`, `bridge-follow-petname-input`,
+    // then `bridge-add-follow-button`.
     out.push(
         Element::input(
-            String::new(),
+            ids::BRIDGE_FOLLOW_ID_INPUT,
             st.follow_id_input
                 .get(&bridge.id)
                 .cloned()
@@ -1190,7 +1833,7 @@ fn follows_elements(st: &BridgesState, i: usize, bridge: &BridgeStatus, out: &mu
     );
     out.push(
         Element::input(
-            String::new(),
+            ids::BRIDGE_FOLLOW_PETNAME_INPUT,
             st.follow_petname_input
                 .get(&bridge.id)
                 .cloned()
@@ -1220,6 +1863,7 @@ mod tests {
     use super::*;
     use crate::app::tests::authed_app;
     use fauna_client_family::family::FamilyFeedRequestInfo;
+    use fauna_protocol::bridge_search_policy::SETTING_TYPE_NUMBER;
     use fauna_protocol::bridges_ui::{
         BridgeIdentity, BridgeLinkField, BridgeLinkMode, BridgeSettingOption,
     };
@@ -1493,6 +2137,37 @@ mod tests {
         }
     }
 
+    /// A linked card carries its identity as `bridge-identity` and its follow
+    /// add row as `bridge-follow-id-input` / `bridge-follow-petname-input`,
+    /// all scoped inside `bridge-card[i]`.
+    #[test]
+    fn a_linked_card_tags_its_identity_and_follow_inputs() {
+        let mut app = bridges_app();
+        app.bridges.bridges = vec![linked_bridge("activitypub", "ActivityPub", vec![])];
+        let out = elements(&app);
+        let identity = out
+            .iter()
+            .find(|e| e.id == ids::BRIDGE_IDENTITY)
+            .expect("a linked card shows its identity");
+        assert_eq!(identity.text, "Handle: @user@activitypub");
+        for id in [
+            ids::BRIDGE_FOLLOW_ID_INPUT,
+            ids::BRIDGE_FOLLOW_PETNAME_INPUT,
+        ] {
+            let input = out.iter().find(|e| e.id == id).expect(id);
+            assert!(
+                matches!(input.role, crate::element::Role::Input(_)),
+                "{id} is a text input"
+            );
+        }
+
+        app.bridges.bridges = vec![unlinked_bridge("activitypub", "ActivityPub", "enable", &[])];
+        assert!(
+            !elements(&app).iter().any(|e| e.id == ids::BRIDGE_IDENTITY),
+            "an unlinked card has no identity"
+        );
+    }
+
     /// An unlinked bridge declaring one link mode with `fields` (empty for the
     /// zero-field ActivityPub `enable` vehicle).
     fn unlinked_bridge(id: &str, name: &str, mode: &str, field_keys: &[&str]) -> BridgeStatus {
@@ -1538,6 +2213,306 @@ mod tests {
 
     fn count_id(app: &App, id: &str) -> usize {
         elements(app).iter().filter(|e| e.id == id).count()
+    }
+
+    fn plugin_row(name: &str, id: u8) -> InstalledPluginRow {
+        InstalledPluginRow {
+            principal_id: vec![id; 16],
+            name: name.into(),
+            client_id: format!("https://plugins.example/{name}.json"),
+            execution_form: "wasm".into(),
+            publisher_domain: Some("plugins.example".into()),
+            publisher_key: Some("did:key:pub".into()),
+            development: false,
+            state: "running".into(),
+            faults: 0,
+            last_fault: None,
+            reason: None,
+            bound_accounts: 0,
+        }
+    }
+
+    /// The plugin list and its install entry are the admin's alone; a member
+    /// sees neither, and an admin sees the entry even on a nest with no
+    /// unified-page bridge.
+    #[test]
+    fn only_an_admin_sees_the_plugin_list_and_install_entry() {
+        let mut app = bridges_app();
+        app.bridges.plugins = Some(vec![plugin_row("Hello", 1)]);
+        assert_eq!(count_id(&app, ids::BRIDGE_PLUGIN_INSTALL_URL), 0);
+        assert_eq!(count_id(&app, ids::BRIDGE_PLUGIN_NAME), 0);
+
+        app.am_i_admin = true;
+        assert_eq!(count_id(&app, ids::BRIDGE_PLUGIN_INSTALL_URL), 1);
+        assert_eq!(count_id(&app, ids::BRIDGE_PLUGIN_INSTALL_SUBMIT), 1);
+        let reg = crate::automation::Registry::of(elements(&app));
+        let scope = [(ids::BRIDGE_PLUGIN_ITEM.to_string(), 0)];
+        for id in [
+            ids::BRIDGE_PLUGIN_NAME,
+            ids::BRIDGE_PLUGIN_PUBLISHER,
+            ids::BRIDGE_PLUGIN_STATUS,
+            ids::BRIDGE_PLUGIN_UNINSTALL,
+        ] {
+            assert_eq!(reg.count_scoped(id, &scope), 1, "{id} inside its item");
+        }
+        let out = elements(&app);
+        let status = out
+            .iter()
+            .find(|e| e.id == ids::BRIDGE_PLUGIN_STATUS)
+            .unwrap();
+        assert!(status.attrs.contains(&("state".into(), "running".into())));
+        let publisher = out
+            .iter()
+            .find(|e| e.id == ids::BRIDGE_PLUGIN_PUBLISHER)
+            .unwrap();
+        assert!(publisher.text.contains("did:key:pub"));
+    }
+
+    /// Install takes the trimmed draft into the op; a blank draft issues
+    /// nothing; the opened card clears the draft and points at Connected apps.
+    #[test]
+    fn install_takes_the_url_draft_and_the_opened_card_clears_it() {
+        let mut app = bridges_app();
+        app.am_i_admin = true;
+        assert!(apply_local(&mut app, Action::InstallPlugin).is_none());
+        app.bridges.plugin_install_url = "  https://plugins.example/hello.json ".into();
+        let Some(Op::InstallPlugin { document_url, .. }) =
+            apply_local(&mut app, Action::InstallPlugin)
+        else {
+            panic!("an install op");
+        };
+        assert_eq!(document_url, "https://plugins.example/hello.json");
+        apply_outcome(&mut app, Outcome::PluginInstallOpened);
+        assert!(app.bridges.plugin_install_url.is_empty());
+        assert!(
+            elements(&app)
+                .iter()
+                .any(|e| e.text == t::PLUGIN_INSTALL_OPENED)
+        );
+    }
+
+    /// Uninstall's first press only arms the confirm; the second press on the
+    /// same row is what reaches the nest, and Keep closes it.
+    #[test]
+    fn uninstall_arms_a_confirm_and_only_the_second_press_reaches_the_nest() {
+        let mut app = bridges_app();
+        app.am_i_admin = true;
+        app.bridges.plugins = Some(vec![plugin_row("Hello", 1), plugin_row("Other", 2)]);
+        assert!(apply_local(&mut app, Action::UninstallPlugin(vec![1; 16])).is_none());
+        assert!(
+            elements(&app)
+                .iter()
+                .any(|e| e.text == t::PLUGIN_UNINSTALL_CONFIRM)
+        );
+        // Another row's press re-arms rather than uninstalling the first.
+        assert!(apply_local(&mut app, Action::UninstallPlugin(vec![2; 16])).is_none());
+        assert!(apply_local(&mut app, Action::CancelUninstallPlugin).is_none());
+        assert!(app.bridges.plugin_uninstall_armed.is_none());
+        assert!(apply_local(&mut app, Action::UninstallPlugin(vec![1; 16])).is_none());
+        let Some(Op::UninstallPlugin { principal_id, .. }) =
+            apply_local(&mut app, Action::UninstallPlugin(vec![1; 16]))
+        else {
+            panic!("the confirmed press uninstalls");
+        };
+        assert_eq!(principal_id, vec![1; 16]);
+    }
+
+    /// A read that did not ask for plugins leaves the admin's list as it was.
+    #[test]
+    fn a_bridges_only_read_keeps_the_plugin_list() {
+        let mut app = bridges_app();
+        app.bridges.plugins = Some(vec![plugin_row("Hello", 1)]);
+        apply_outcome(
+            &mut app,
+            Outcome::Loaded {
+                bridges: vec![],
+                follows: BTreeMap::new(),
+                follow_requests: BTreeMap::new(),
+                plugins: None,
+                plugin_cards: None,
+            },
+        );
+        assert_eq!(app.bridges.plugins.as_ref().map(Vec::len), Some(1));
+    }
+
+    fn available_plugin(id: u8, binding: Option<u8>) -> fauna_protocol::plugins::AvailablePlugin {
+        fauna_protocol::plugins::AvailablePlugin {
+            principal_id: vec![id; 16],
+            client_id: format!("https://plugins.example/{id}.json"),
+            label: Some("Hello Plugin".into()),
+            execution_form: "wasm".into(),
+            binding_principal_id: binding.map(|b| fauna_protocol::ByteBuf::from(vec![b; 16])),
+            settings: vec![setting(
+                "greeting",
+                "string",
+                WireValue::String("hi".into()),
+            )],
+            ..Default::default()
+        }
+    }
+
+    fn with_machine(app: &mut App) {
+        app.settings.connected_apps.machine =
+            Some(fauna_client_connected_apps::ConnectedAppsMachine::new(
+                Arc::new(NullConnectedAppsObserver),
+                Arc::new(fauna_client_connected_apps::FakeConnectedAppsNestApi::new()),
+            ));
+    }
+
+    struct NullConnectedAppsObserver;
+    impl fauna_client_connected_apps::ConnectedAppsObserver for NullConnectedAppsObserver {
+        fn on_changed(&self) {}
+    }
+
+    /// The button scoped within `bridge-card[i]`.
+    fn card_button(app: &App, i: usize) -> Element {
+        let reg = crate::automation::Registry::of(elements(app));
+        assert_eq!(
+            reg.count_scoped(
+                ids::BRIDGE_ACTION_BUTTON,
+                &[(ids::BRIDGE_CARD.to_string(), i)]
+            ),
+            1
+        );
+        elements(app)
+            .into_iter()
+            .filter(|e| e.id == ids::BRIDGE_ACTION_BUTTON)
+            .nth(i)
+            .unwrap()
+    }
+
+    fn button_gesture(el: Element) -> Action {
+        match el.role {
+            crate::element::Role::Button(Gesture::Bridges(a)) => a,
+            _ => panic!("a Bridges button"),
+        }
+    }
+
+    /// Every member sees each installed plugin as one more `bridge-card`
+    /// after the bridges: unbound, its button Connects the install row and no
+    /// settings render; the button names the plugin and its state for a
+    /// reader, since `bridge-card` has no per-card identity.
+    #[test]
+    fn an_unbound_plugin_is_one_more_bridge_card_offering_connect() {
+        let mut app = bridges_app();
+        app.bridges.bridges = vec![linked_bridge("activitypub", "ActivityPub", vec![])];
+        app.bridges.plugin_cards = vec![plugin_card(available_plugin(3, None))];
+        let button = card_button(&app, 1);
+        assert_eq!(button.text, t::PLUGIN_CONNECT);
+        assert!(
+            button
+                .attrs
+                .contains(&("client_id".into(), "https://plugins.example/3.json".into()))
+        );
+        assert!(button.attrs.contains(&("bound".into(), "false".into())));
+        assert!(matches!(button_gesture(button), Action::ConnectPlugin(id) if id == vec![3; 16]));
+        assert!(
+            !elements(&app).iter().any(|e| e.text == "greeting label"),
+            "an unbound card renders no settings"
+        );
+    }
+
+    /// Connect goes through the connected-apps machine — the card lands in
+    /// its tray, answered there — and the page then points at Connected apps.
+    #[test]
+    fn connect_runs_through_the_connected_apps_machine_and_points_at_the_tray() {
+        let mut app = bridges_app();
+        app.bridges.plugin_cards = vec![plugin_card(available_plugin(3, None))];
+        assert!(
+            apply_local(&mut app, Action::ConnectPlugin(vec![3; 16])).is_none(),
+            "no machine, no op"
+        );
+        with_machine(&mut app);
+        let Some(Op::ConnectPlugin { principal_id, .. }) =
+            apply_local(&mut app, Action::ConnectPlugin(vec![3; 16]))
+        else {
+            panic!("a connect op");
+        };
+        assert_eq!(principal_id, vec![3; 16]);
+        apply_outcome(&mut app, Outcome::PluginBindOpened);
+        assert!(
+            elements(&app)
+                .iter()
+                .any(|e| e.text == t::PLUGIN_BIND_OPENED)
+        );
+    }
+
+    /// Bound, the card's button Disconnects the BINDING row — never the
+    /// install row — and the account's settings render, a text setting as a
+    /// committing input whose commit writes `fauna.plugins.set_settings`.
+    #[test]
+    fn a_bound_plugin_disconnects_its_binding_and_edits_its_settings() {
+        let mut app = bridges_app();
+        with_machine(&mut app);
+        app.bridges.plugin_cards = vec![plugin_card(available_plugin(3, Some(7)))];
+        let button = card_button(&app, 0);
+        assert_eq!(button.text, t::PLUGIN_DISCONNECT);
+        assert!(button.attrs.contains(&("bound".into(), "true".into())));
+        let action = button_gesture(button);
+        assert!(matches!(&action, Action::DisconnectPlugin(id) if *id == vec![7; 16]));
+        assert_eq!(
+            action.wire_kind(),
+            Some("fauna.principals.revoke"),
+            "Disconnect is the roster's one verb"
+        );
+        let Some(Op::DisconnectPlugin {
+            binding_principal_id,
+            ..
+        }) = apply_local(&mut app, action)
+        else {
+            panic!("a disconnect op");
+        };
+        assert_eq!(binding_principal_id, vec![7; 16]);
+
+        let input = elements(&app)
+            .into_iter()
+            .find(|e| e.text == "hi" && matches!(e.role, crate::element::Role::InputCommit { .. }))
+            .expect("the text setting renders its live value as a committing input");
+        let owner = SettingOwner::Plugin(vec![3; 16]);
+        let crate::element::Role::InputCommit { field, gesture } = input.role else {
+            unreachable!()
+        };
+        assert_eq!(
+            field,
+            Field::Bridges(BridgesField::Setting {
+                owner: owner.clone(),
+                key: "greeting".into()
+            })
+        );
+        set_field(
+            &mut app.bridges,
+            BridgesField::Setting {
+                owner: owner.clone(),
+                key: "greeting".into(),
+            },
+            "hello there".into(),
+        );
+        let Gesture::Bridges(commit) = gesture else {
+            panic!("a Bridges commit")
+        };
+        assert_eq!(commit.wire_kind(), Some("fauna.plugins.set_settings"));
+        let Some(Op::SetPluginSettings {
+            principal_id,
+            settings,
+            ..
+        }) = apply_local(&mut app, commit)
+        else {
+            panic!("a plugin settings op");
+        };
+        assert_eq!(principal_id, vec![3; 16], "settings key on the install row");
+        assert_eq!(
+            settings,
+            BTreeMap::from([(
+                "greeting".to_string(),
+                WireValue::String("hello there".into())
+            )])
+        );
+        assert!(
+            !app.bridges
+                .setting_inputs
+                .contains_key(&(owner, "greeting".to_string())),
+            "the buffer clears; the re-read repaints"
+        );
     }
 
     /// Count occurrences of `id` scoped to one `bridge-card[index]` — the
@@ -1827,6 +2802,115 @@ mod tests {
         );
     }
 
+    fn request_row(id: &str, address: &str, name: Option<&str>) -> FollowRequestRow {
+        FollowRequestRow {
+            id: id.to_string(),
+            address: address.to_string(),
+            name: name.map(str::to_string),
+        }
+    }
+
+    fn requests_bridge() -> BridgeStatus {
+        BridgeStatus {
+            supports_follow_requests: true,
+            ..linked_bridge("activitypub", "ActivityPub", vec![])
+        }
+    }
+
+    /// A provider declaring `supports_follow_requests` paints the heading with
+    /// the count, then one item + Approve + Refuse per request — and a bridge
+    /// that does not declare it paints none of it (`bridges.md` § Follow
+    /// requests → Layout).
+    #[test]
+    fn follow_requests_paint_a_counted_heading_and_a_row_per_request() {
+        let mut app = bridges_app();
+        app.bridges.bridges = vec![requests_bridge()];
+        app.bridges.follow_requests.insert(
+            "activitypub".to_string(),
+            vec![
+                request_row("https://a.example/bob", "@bob@a.example", Some("Bob")),
+                request_row("https://b.example/carol", "@carol@b.example", None),
+            ],
+        );
+
+        let els = elements(&app);
+        let heading = els
+            .iter()
+            .find(|e| e.id == "bridge-follow-requests-list")
+            .expect("the heading renders");
+        assert_eq!(heading.text, t::follow_requests("2"));
+        let items: Vec<&str> = els
+            .iter()
+            .filter(|e| e.id == "bridge-follow-request-item")
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(items, ["Bob (@bob@a.example)", "@carol@b.example"]);
+        assert_eq!(count_id(&app, "bridge-follow-request-approve"), 2);
+        assert_eq!(count_id(&app, "bridge-follow-request-refuse"), 2);
+        assert_eq!(count_scoped(&app, "bridge-follow-request-item", 0), 2);
+
+        app.bridges.bridges = vec![linked_bridge("activitypub", "ActivityPub", vec![])];
+        assert_eq!(count_id(&app, "bridge-follow-requests-list"), 0);
+        assert_eq!(count_id(&app, "bridge-follow-request-item"), 0);
+    }
+
+    /// An empty list keeps its heading with a zero count and paints no rows —
+    /// the list is where the user checks, so it does not vanish.
+    #[test]
+    fn an_empty_follow_request_list_keeps_a_zero_count_heading() {
+        let mut app = bridges_app();
+        app.bridges.bridges = vec![requests_bridge()];
+
+        let els = elements(&app);
+        let heading = els
+            .iter()
+            .find(|e| e.id == "bridge-follow-requests-list")
+            .expect("the heading renders with no requests");
+        assert_eq!(heading.text, t::follow_requests("0"));
+        assert_eq!(count_id(&app, "bridge-follow-request-item"), 0);
+    }
+
+    /// Both gestures hand back the request's own id — not a row position — and
+    /// differ only in the verdict.
+    #[test]
+    fn approve_and_refuse_resolve_the_request_by_its_own_id() {
+        let mut app = bridges_app();
+        for (action, want) in [
+            (
+                Action::ApproveFollowRequest {
+                    bridge_id: "activitypub".to_string(),
+                    id: "https://a.example/bob".to_string(),
+                },
+                true,
+            ),
+            (
+                Action::RefuseFollowRequest {
+                    bridge_id: "activitypub".to_string(),
+                    id: "https://a.example/bob".to_string(),
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(
+                action.wire_kind(),
+                Some("fauna.bridges.resolve_follow_request")
+            );
+            match apply_local(&mut app, action).expect("a resolve returns an op") {
+                Op::ResolveFollowRequest {
+                    bridge_id,
+                    id,
+                    approve,
+                    ..
+                } => {
+                    assert_eq!(bridge_id, "activitypub");
+                    assert_eq!(id, "https://a.example/bob");
+                    assert_eq!(approve, want);
+                }
+                _ => panic!("expected Op::ResolveFollowRequest"),
+            }
+        }
+    }
+
     /// A boolean setting toggle carries the FLIPPED value, so a click sets the
     /// opposite of what is currently persisted (non-optimistic).
     #[test]
@@ -1841,12 +2925,12 @@ mod tests {
                 WireValue::Bool(true),
             )],
         )];
-        // The toggle is untagged (no ui.yaml id) but present as a focusable
-        // checkbox — find it by its label.
+        // The toggle is keyed by its setting: `bridge-setting[<key>]`.
         let toggle = elements(&app)
             .into_iter()
-            .find(|e| e.text == "auto_accept_follows label")
-            .expect("the boolean setting renders");
+            .find(|e| e.id == "bridge-setting[auto_accept_follows]")
+            .expect("the boolean setting renders under its keyed id");
+        assert_eq!(toggle.text, "auto_accept_follows label");
         let gesture = match toggle.role {
             crate::element::Role::Checkbox { gesture, checked } => {
                 assert!(checked, "reads the persisted `true`");
@@ -1876,12 +2960,13 @@ mod tests {
                 select_setting("default_visibility", "public", &["public", "unlisted"]),
             ],
         )];
-        // The select renders (untagged) with the persisted value + the option
-        // values (not labels — the value round-trips through `select`).
+        // The select renders under its keyed id with the persisted value + the
+        // option values (not labels — the value round-trips through `select`).
         let sel = elements(&app)
             .into_iter()
             .find(|e| matches!(e.role, crate::element::Role::Select { .. }))
             .expect("the select setting renders");
+        assert_eq!(sel.id, "bridge-setting[default_visibility]");
         assert_eq!(sel.text, "public");
 
         let op = apply_local(
@@ -1939,17 +3024,17 @@ mod tests {
             crate::element::Role::InputCommit { field, gesture } => {
                 assert_eq!(
                     field,
-                    Field::Bridges(BridgesField::NumberSetting {
-                        bridge_id: "activitypub".to_string(),
+                    Field::Bridges(BridgesField::Setting {
+                        owner: SettingOwner::Bridge("activitypub".to_string()),
                         key: "limit_posts_in_search".to_string(),
                     })
                 );
                 match gesture {
-                    Gesture::Bridges(Action::SetNumberSetting { bridge_id, key }) => {
-                        assert_eq!(bridge_id, "activitypub");
+                    Gesture::Bridges(Action::CommitSetting { owner, key }) => {
+                        assert_eq!(owner, SettingOwner::Bridge("activitypub".into()));
                         assert_eq!(key, "limit_posts_in_search");
                     }
-                    _ => panic!("expected a SetNumberSetting gesture"),
+                    _ => panic!("expected a CommitSetting gesture"),
                 }
             }
             _ => unreachable!(),
@@ -1973,16 +3058,16 @@ mod tests {
         )];
         set_field(
             &mut app.bridges,
-            BridgesField::NumberSetting {
-                bridge_id: "activitypub".to_string(),
+            BridgesField::Setting {
+                owner: SettingOwner::Bridge("activitypub".to_string()),
                 key: "limit_posts_in_search".to_string(),
             },
             "  500  ".to_string(),
         );
         let op = apply_local(
             &mut app,
-            Action::SetNumberSetting {
-                bridge_id: "activitypub".to_string(),
+            Action::CommitSetting {
+                owner: SettingOwner::Bridge("activitypub".to_string()),
                 key: "limit_posts_in_search".to_string(),
             },
         )
@@ -2005,8 +3090,8 @@ mod tests {
             _ => panic!("expected Op::SetSettings"),
         }
         assert!(
-            !app.bridges.number_setting_inputs.contains_key(&(
-                "activitypub".to_string(),
+            !app.bridges.setting_inputs.contains_key(&(
+                SettingOwner::Bridge("activitypub".to_string()),
                 "limit_posts_in_search".to_string()
             )),
             "the buffer clears so the next repaint reflects the nest's own value"
@@ -2030,8 +3115,8 @@ mod tests {
         )];
         let op = apply_local(
             &mut app,
-            Action::SetNumberSetting {
-                bridge_id: "activitypub".to_string(),
+            Action::CommitSetting {
+                owner: SettingOwner::Bridge("activitypub".to_string()),
                 key: "limit_posts_in_search".to_string(),
             },
         )
@@ -2067,23 +3152,23 @@ mod tests {
         )];
         set_field(
             &mut app.bridges,
-            BridgesField::NumberSetting {
-                bridge_id: "activitypub".to_string(),
+            BridgesField::Setting {
+                owner: SettingOwner::Bridge("activitypub".to_string()),
                 key: "limit_posts_in_search".to_string(),
             },
             "lots".to_string(),
         );
         let op = apply_local(
             &mut app,
-            Action::SetNumberSetting {
-                bridge_id: "activitypub".to_string(),
+            Action::CommitSetting {
+                owner: SettingOwner::Bridge("activitypub".to_string()),
                 key: "limit_posts_in_search".to_string(),
             },
         );
         assert!(op.is_none(), "unparseable text must not reach the nest");
         assert_eq!(
-            app.bridges.number_setting_inputs.get(&(
-                "activitypub".to_string(),
+            app.bridges.setting_inputs.get(&(
+                SettingOwner::Bridge("activitypub".to_string()),
                 "limit_posts_in_search".to_string()
             )),
             Some(&"lots".to_string()),
@@ -2156,6 +3241,9 @@ mod tests {
             Outcome::Loaded {
                 bridges: vec![],
                 follows: BTreeMap::new(),
+                follow_requests: BTreeMap::new(),
+                plugins: None,
+                plugin_cards: None,
             },
         );
         assert!(

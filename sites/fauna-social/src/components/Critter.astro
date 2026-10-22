@@ -1,0 +1,48 @@
+---
+// Renders the animal an `*Illustration: fox*` line in the copy markdown asks
+// for. One registry for every page, so the set of names the copy may use is
+// stated in exactly one place. An unknown name fails the build loudly rather
+// than rendering a blank space nobody notices.
+import Badger from './critters/Badger.astro';
+import BearCub from './critters/BearCub.astro';
+import Beaver from './critters/Beaver.astro';
+import Bee from './critters/Bee.astro';
+import Cat from './critters/Cat.astro';
+import Duckling from './critters/Duckling.astro';
+import Fawn from './critters/Fawn.astro';
+import Fox from './critters/Fox.astro';
+import Frog from './critters/Frog.astro';
+import Hedgehog from './critters/Hedgehog.astro';
+import Mammoth from './critters/Mammoth.astro';
+import Mouse from './critters/Mouse.astro';
+import Otter from './critters/Otter.astro';
+import Owl from './critters/Owl.astro';
+import Parrot from './critters/Parrot.astro';
+import Penguin from './critters/Penguin.astro';
+import Rabbit from './critters/Rabbit.astro';
+import Snail from './critters/Snail.astro';
+import Squirrel from './critters/Squirrel.astro';
+import Turtle from './critters/Turtle.astro';
+
+const critters: Record<string, unknown> = {
+  badger: Badger, bear: BearCub, beaver: Beaver, bee: Bee, cat: Cat,
+  duckling: Duckling, fawn: Fawn, fox: Fox, frog: Frog, hedgehog: Hedgehog,
+  mammoth: Mammoth, mouse: Mouse, otter: Otter, owl: Owl, parrot: Parrot, penguin: Penguin,
+  rabbit: Rabbit, snail: Snail, squirrel: Squirrel, turtle: Turtle,
+};
+
+interface Props {
+  name: string;
+  size?: number;
+}
+
+const { name, size = 64 } = Astro.props;
+
+const Drawing = critters[name];
+if (!Drawing) {
+  throw new Error(
+    `copy markdown names unknown critter '${name}' — pick one of ${Object.keys(critters).join(', ')}`,
+  );
+}
+---
+<Drawing size={size} />

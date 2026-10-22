@@ -6,7 +6,7 @@
 // through the account store shows what a fresh visit would show, whoever
 // changed the store.
 //
-// ONE relay per running runtime (`$lib/account-runtime` starts it where the
+// ONE relay per running runtime (`#lib/account-runtime` starts it where the
 // runtime becomes ready; it ends by itself when the runtime stops) and a
 // listener set the open pages join — a page never calls wasm for the notice.
 // Only the tab that hosts the runtime hears anything: a second tab of the

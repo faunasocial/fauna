@@ -49,9 +49,9 @@ private func populatedVM() throws -> BackupsMachineVM {
     vm.probeSnapshot = BackupsSnapshot(
         folders: [
             BackupFolderRow(name: "documents",
-                             snapshotCount: 12, lastSnapshotAt: 1_754_000_000),
+                             snapshotCount: 12, lastSnapshotAt: 1_754_000_000, messageKind: nil),
             BackupFolderRow(name: "photos",
-                             snapshotCount: 3, lastSnapshotAt: 1_753_900_000),
+                             snapshotCount: 3, lastSnapshotAt: 1_753_900_000, messageKind: nil),
         ],
         selectedFolder: "documents",
         snapshots: [
@@ -67,7 +67,7 @@ private func populatedVM() throws -> BackupsMachineVM {
             SnapshotFileRow(path: "documents/quarterly-report-final.pdf",
                             sizeBytes: 524_288, fileType: "regular",
                             manifestHash: String(repeating: "ab", count: 32)),
-        ]),
+        ], messageKind: nil),
         error: nil)
     return vm
 }

@@ -12,6 +12,11 @@ from `libs/fauna-mail/src/imap_client/session.rs`, not from RFC 3501 at large:
 
     CAPABILITY                                   (after connect, and after LOGIN)
     LOGIN <user> <pass>
+    AUTHENTICATE XOAUTH2 [<initial response>]    → authenticate_xoauth2, only when
+                                                   ``xoauth2_token`` is set (the
+                                                   Outlook source's Microsoft
+                                                   sign-in); SASL-IR and the
+                                                   continuation form both
     LIST "" "*"                                  → list_mailboxes
     EXAMINE <mailbox>                            → examine (read-only, never SELECT)
     STATUS <mailbox> (MESSAGES SIZE)             → estimate_mailbox, only when
@@ -48,7 +53,8 @@ no keyword: leave ``cert`` unset and the instance mints its own, which no app
 was launched trusting.
 
 **Every command is recorded** in :attr:`FakeImapSource.commands` — the verb
-and its arguments, a ``LOGIN``'s password left out — so a witness can say what
+and its arguments, a ``LOGIN``'s password and an ``AUTHENTICATE``'s initial
+response left out — so a witness can say what
 the client never asked for (no ``SELECT``, no ``STORE``, every body read with
 ``BODY.PEEK``), which a record of only the expected commands cannot.
 
@@ -56,7 +62,7 @@ the client never asked for (no ``SELECT``, no ``STORE``, every body read with
 § The two TLS modes ratifies that a source session has no plaintext variant —
 the user's password crosses it — so the fake terminates real TLS with a cert
 minted per instance, and the app trusts it through the source-IMAP trust seed
-(`e2e-automation-surface-gating.md` § The source-IMAP trust seed). Both ratified
+(`e2e-gated-seeds.md` § The source-IMAP trust seed). Both ratified
 modes are served: ``implicit`` (TLS from the first byte, the 993 default) and
 ``starttls`` (negotiated over a cleartext connection).
 
@@ -68,6 +74,7 @@ to only the first would deadlock the client against its own concurrency cap.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import ipaddress
 import re
@@ -117,8 +124,22 @@ def mint_localhost_chain() -> tuple[str, str, str]:
     hundreds of milliseconds of pure latency. rustls verifies Ed25519 anchors
     and end-entity certs fine.
     """
-    now = datetime.datetime.now(datetime.timezone.utc)
+    ca, ca_key = _mint_ca()
+    leaf_pem, leaf_key_pem = _issue_leaf(
+        ca,
+        ca_key,
+        "localhost",
+        [
+            x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+        ],
+    )
+    return ca.public_bytes(serialization.Encoding.PEM).decode(), leaf_pem, leaf_key_pem
 
+
+def _mint_ca() -> tuple[x509.Certificate, ed25519.Ed25519PrivateKey]:
+    """A fresh source CA and its key — the anchor half of a chain."""
+    now = datetime.datetime.now(datetime.timezone.utc)
     ca_key = ed25519.Ed25519PrivateKey.generate()
     ca_name = x509.Name(
         [x509.NameAttribute(NameOID.COMMON_NAME, "fauna-e2e-source-ca")]
@@ -134,34 +155,35 @@ def mint_localhost_chain() -> tuple[str, str, str]:
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .sign(ca_key, None)
     )
+    return ca, ca_key
 
+
+def _issue_leaf(
+    ca: x509.Certificate,
+    ca_key: ed25519.Ed25519PrivateKey,
+    common_name: str,
+    sans: list[x509.GeneralName],
+) -> tuple[str, str]:
+    """A non-CA leaf the CA signs, carrying ``sans`` — as
+    ``(leaf_cert_pem, leaf_key_pem)``."""
+    now = datetime.datetime.now(datetime.timezone.utc)
     leaf_key = ed25519.Ed25519PrivateKey.generate()
     leaf = (
         x509.CertificateBuilder()
         .subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
         )
-        .issuer_name(ca_name)
+        .issuer_name(ca.subject)
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(
-            x509.SubjectAlternativeName(
-                [
-                    x509.DNSName("localhost"),
-                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
-                ]
-            ),
-            critical=False,
-        )
+        .add_extension(x509.SubjectAlternativeName(sans), critical=False)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .sign(ca_key, None)
     )
-
     pem = serialization.Encoding.PEM
     return (
-        ca.public_bytes(pem).decode(),
         leaf.public_bytes(pem).decode(),
         leaf_key.private_bytes(
             encoding=pem,
@@ -183,7 +205,23 @@ def mint_localhost_cert() -> tuple[str, str]:
     return leaf_pem, key_pem
 
 
+# The Outlook preset's IMAP host — `provider_preset`'s Outlook arm in
+# `libs/fauna-client-mail-settings/src/import.rs`, and the ONE host the
+# preset-host redirect seed maps (`e2e-gated-seeds.md` § The preset-host
+# redirect seed; `test_mail_import_tls_seam_gating.py` pins both).
+OUTLOOK_IMAP_HOST = "outlook.office365.com"
+
+_SESSION_CA: tuple[x509.Certificate, ed25519.Ed25519PrivateKey] | None = None
 _SESSION_CHAIN: tuple[str, str, str] | None = None
+_SESSION_LEAVES: dict[str, tuple[str, str]] = {}
+_SESSION_REDIRECT_PORT: int | None = None
+
+
+def _session_ca() -> tuple[x509.Certificate, ed25519.Ed25519PrivateKey]:
+    global _SESSION_CA
+    if _SESSION_CA is None:
+        _SESSION_CA = _mint_ca()
+    return _SESSION_CA
 
 
 def _session_chain() -> tuple[str, str, str]:
@@ -197,7 +235,11 @@ def _session_chain() -> tuple[str, str, str]:
     """
     global _SESSION_CHAIN
     if _SESSION_CHAIN is None:
-        _SESSION_CHAIN = mint_localhost_chain()
+        ca, _ca_key = _session_ca()
+        _SESSION_CHAIN = (
+            ca.public_bytes(serialization.Encoding.PEM).decode(),
+            *session_cert_for("localhost"),
+        )
     return _SESSION_CHAIN
 
 
@@ -215,6 +257,49 @@ def session_cert() -> tuple[str, str]:
     what a `FakeImapSource` presents, verifiable against
     :func:`session_ca_pem`."""
     return _session_chain()[1], _session_chain()[2]
+
+
+def session_cert_for(hostname: str) -> tuple[str, str]:
+    """A leaf the session CA issues for ``hostname``, as
+    ``(leaf_cert_pem, leaf_key_pem)``, minted once per name.
+
+    For a source the preset-host redirect seed dials on loopback: the app still
+    verifies the provider's own name (``session_cert_for(OUTLOOK_IMAP_HOST)``),
+    and this leaf chains to the anchor the trust seed already gave it.
+    ``localhost`` also carries ``127.0.0.1``, since the wizard's host field may
+    hold either spelling.
+    """
+    if hostname not in _SESSION_LEAVES:
+        ca, ca_key = _session_ca()
+        sans: list[x509.GeneralName] = [x509.DNSName(hostname)]
+        if hostname == "localhost":
+            sans.append(x509.IPAddress(ipaddress.ip_address("127.0.0.1")))
+        _SESSION_LEAVES[hostname] = _issue_leaf(ca, ca_key, hostname, sans)
+    return _SESSION_LEAVES[hostname]
+
+
+def session_preset_redirect() -> tuple[str, int]:
+    """The preset-host redirect seed's one entry, as ``(host, port)``: the
+    Outlook preset's host and the loopback port leased for it this session.
+
+    Leased on first use and held until the session ends — the app reads the map
+    out of its launch environment and the drivers are session-scoped, as for
+    the Microsoft authority's port — through `helpers.android_venue.nest_port`,
+    the seam `acme_pebble.lease_directory_port` uses, so a venue run gets a
+    port the device can reach. A test's `FakeImapSource(..., port=port)` binds
+    it (`e2e-gated-seeds.md` § The preset-host redirect seed).
+    """
+    global _SESSION_REDIRECT_PORT
+    if _SESSION_REDIRECT_PORT is None:
+        import atexit
+
+        from drivers.port_util import find_free_port
+        from helpers import android_venue
+
+        port, release = android_venue.nest_port(find_free_port)
+        atexit.register(release)
+        _SESSION_REDIRECT_PORT = port
+    return OUTLOOK_IMAP_HOST, _SESSION_REDIRECT_PORT
 
 
 @dataclass
@@ -298,6 +383,7 @@ class FakeImapSource:
         password: str = "oldpass",
         tls_mode: str = "implicit",
         host: str = "127.0.0.1",
+        port: int = 0,
         cert: tuple[str, str] | None = None,
         status_size: bool = False,
         refuse_starttls: bool = False,
@@ -306,6 +392,8 @@ class FakeImapSource:
         hold_fetch_in: str | None = None,
         revoke_password_after: int | None = None,
         drop_after: int | None = None,
+        xoauth2_token: str | None = None,
+        sasl_ir: bool = True,
     ) -> None:
         if tls_mode not in ("implicit", "starttls"):
             raise ValueError(f"tls_mode must be implicit|starttls, got {tls_mode!r}")
@@ -334,7 +422,11 @@ class FakeImapSource:
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind((host, 0))
+        # `port` is the preset-host redirect seed's leased port
+        # (`session_preset_redirect`) when a test stands in for a provider
+        # preset; 0 otherwise. `SO_REUSEADDR` above lets successive tests
+        # rebind it.
+        self._sock.bind((host, port))
         self._sock.listen(8)
         self.host, self.port = self._sock.getsockname()[:2]
 
@@ -353,6 +445,15 @@ class FakeImapSource:
         self.examines: list[tuple[str, str]] = []
         # How many STARTTLS commands were refused (`refuse_starttls`).
         self.starttls_refusals = 0
+        # SASL XOAUTH2 (`mailbox-migration.md` § Microsoft sign-in): with a
+        # token set the server advertises `AUTH=XOAUTH2` (and `SASL-IR` unless
+        # `sasl_ir=False`, which forces the continuation form) and accepts
+        # exactly `username` with exactly that bearer. `(user, bearer)` per
+        # AUTHENTICATE the client sent, accepted or not — outcome 17's record
+        # of what the source saw.
+        self.xoauth2_token = xoauth2_token
+        self.sasl_ir = sasl_ir
+        self.xoauth2_auths: list[tuple[str, str]] = []
 
         self.refuse_starttls = refuse_starttls
         self.unreadable = frozenset(unreadable)
@@ -416,6 +517,14 @@ class FakeImapSource:
         # Free every parked handler thread, so none outlives the instance.
         for gate in self._holds.values():
             gate.set()
+        # `shutdown` before `close`: on Linux a bare `close` does not wake the
+        # `_serve` thread blocked in `accept`, and the socket stays LISTENING
+        # until it returns — so the next source bound to the preset-host
+        # redirect's leased port fails `EADDRINUSE` despite `SO_REUSEADDR`.
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self._sock.close()
         except OSError:
@@ -527,6 +636,9 @@ class FakeImapSource:
     def _serve_commands(self, stream: ssl.SSLSocket) -> None:
         selected: SourceMailbox | None = None
         buf = bytearray()
+        # The tag of an `AUTHENTICATE XOAUTH2` sent without an initial
+        # response: the next line is that response, not a command.
+        pending_auth: str | None = None
 
         while not self._stopped.is_set():
             try:
@@ -545,7 +657,14 @@ class FakeImapSource:
                 idx = buf.index(b"\r\n")
                 line = bytes(buf[:idx]).decode("utf-8", "replace")
                 del buf[: idx + 2]
-                reply, selected, done = self._respond(line, selected)
+                if pending_auth is not None:
+                    reply, done = self._xoauth2(pending_auth, line.strip()), False
+                    pending_auth = None
+                else:
+                    reply, selected, done = self._respond(line, selected)
+                if isinstance(reply, _Continue):
+                    pending_auth = reply.tag
+                    reply = b"+ \r\n"
                 if reply is _DROP:
                     # The connection drops with the command unanswered, as a
                     # provider's does when the account's password changes.
@@ -565,16 +684,20 @@ class FakeImapSource:
         tag = parts[0] if parts else "*"
         verb = parts[1].upper() if len(parts) > 1 else ""
         rest = parts[2] if len(parts) > 2 else ""
-        recorded = (
-            f"LOGIN {_unquote(rest.partition(' ')[0])}"
-            if verb == "LOGIN"
-            else f"{verb} {rest}".strip()
-        )
+        if verb == "LOGIN":
+            recorded = f"LOGIN {_unquote(rest.partition(' ')[0])}"
+        elif verb == "AUTHENTICATE":
+            # The initial response carries the bearer: the mechanism only.
+            recorded = f"AUTHENTICATE {rest.partition(' ')[0].upper()}"
+        else:
+            recorded = f"{verb} {rest}".strip()
         with self._lock:
             self.commands.append(recorded)
 
         if verb == "CAPABILITY":
             caps = "IMAP4rev1 UIDPLUS" + (" STATUS=SIZE" if self.status_size else "")
+            if self.xoauth2_token is not None:
+                caps += (" SASL-IR" if self.sasl_ir else "") + " AUTH=XOAUTH2"
             return (
                 f"* CAPABILITY {caps}\r\n{tag} OK CAPABILITY done\r\n".encode(),
                 selected,
@@ -617,6 +740,16 @@ class FakeImapSource:
                     False,
                 )
             return (f"{tag} OK LOGIN done\r\n".encode(), selected, False)
+
+        if verb == "AUTHENTICATE":
+            mechanism, _, initial = rest.partition(" ")
+            if self.xoauth2_token is None or mechanism.upper() != "XOAUTH2":
+                return (f"{tag} NO unsupported mechanism\r\n".encode(), selected, False)
+            if not initial.strip():
+                return (_Continue(tag), selected, False)
+            if not self.sasl_ir:
+                return (f"{tag} BAD SASL-IR not advertised\r\n".encode(), selected, False)
+            return (self._xoauth2(tag, initial.strip()), selected, False)
 
         if verb == "LIST":
             # The attribute list is built outside the f-string: a backslash in an
@@ -662,6 +795,24 @@ class FakeImapSource:
         # Never silently drop a command (convention 11, applied to the fake): an
         # unanswered tag is a client hang, and a hang diagnoses nothing.
         return (f"{tag} BAD unknown command\r\n".encode(), selected, False)
+
+    def _xoauth2(self, tag: str, initial: str) -> bytes:
+        """Judge one SASL XOAUTH2 initial response
+        (``user=<u>\\x01auth=Bearer <t>\\x01\\x01``, base64) and record it."""
+        try:
+            decoded = base64.b64decode(initial, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return f"{tag} BAD malformed XOAUTH2 response\r\n".encode()
+        fields = dict(
+            part.split("=", 1) for part in decoded.split("\x01") if "=" in part
+        )
+        user = fields.get("user", "")
+        bearer = fields.get("auth", "").removeprefix("Bearer ")
+        with self._lock:
+            self.xoauth2_auths.append((user, bearer))
+        if user != self.username or bearer != self.xoauth2_token:
+            return f"{tag} NO [AUTHENTICATIONFAILED] Invalid credentials\r\n".encode()
+        return f"{tag} OK AUTHENTICATE completed\r\n".encode()
 
     def _uid_fetch(self, tag: str, rest: str, mailbox: SourceMailbox) -> bytes:
         upper = rest.upper()
@@ -737,6 +888,14 @@ class FakeImapSource:
 
 # `_respond`'s answer for "drop the connection, answer nothing".
 _DROP = b"\x00drop"
+
+
+@dataclass
+class _Continue:
+    """`_respond`'s answer to an `AUTHENTICATE XOAUTH2` sent without an
+    initial response: send `+`, and read the next line as that response."""
+
+    tag: str
 
 
 def _unquote(value: str) -> str:

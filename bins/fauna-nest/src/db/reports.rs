@@ -466,6 +466,55 @@ impl CacheDb {
         Ok(changed > 0)
     }
 
+    /// Enforce the table-wide cap ([`MAX_PEER_REPORT_ROWS_TOTAL`]) over every
+    /// peer: evict the oldest-updated rows past it, returning each evicted
+    /// `(hash, factor)` so the caller recomputes its aggregate. The per-peer cap
+    /// is keyed on a `nest_id` the peer mints for free, so only this bounds the
+    /// table against a flood of fresh identities (`report-sharing.md`
+    /// § Federation exchange). Run once per imported batch, not per row.
+    pub async fn trim_peer_reports(&self) -> Result<Vec<([u8; 32], String)>> {
+        let conn = self.conn.lock().await;
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peer_content_reports", [], |row| {
+                row.get(0)
+            })
+            .context("count peer reports")?;
+        let excess = total - MAX_PEER_REPORT_ROWS_TOTAL;
+        if excess <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn
+            .prepare(
+                "DELETE FROM peer_content_reports
+                 WHERE rowid IN (
+                     SELECT rowid FROM peer_content_reports
+                     ORDER BY updated_at ASC, rowid ASC
+                     LIMIT ?1)
+                 RETURNING content_hash, factor",
+            )
+            .context("prepare peer report trim")?;
+        let evicted = stmt
+            .query_map(rusqlite::params![excess], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+            })
+            .context("trim peer reports")?
+            .filter_map(|r| r.ok())
+            .filter_map(|(hash, factor)| Some((hash.as_slice().try_into().ok()?, factor)))
+            .collect::<std::collections::BTreeSet<([u8; 32], String)>>();
+        Ok(evicted.into_iter().collect())
+    }
+
+    /// Rows in `peer_content_reports`, over every peer.
+    pub async fn count_peer_reports(&self) -> Result<u64> {
+        let conn = self.conn.lock().await;
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM peer_content_reports", [], |row| {
+                row.get(0)
+            })
+            .context("count peer reports")?;
+        Ok(n.max(0) as u64)
+    }
+
     /// The federation-export view (`report-sharing.md` § Federation exchange):
     /// this nest's LOCAL aggregates only, each count having passed the k-gate
     /// — never a peer-derived value (no laundering), never a below-k count.
@@ -505,6 +554,11 @@ pub const MAX_REPORT_EXCHANGE_ENTRIES: usize = 1024;
 
 /// Per-peer stored-row cap on `peer_content_reports` (oldest-updated evicted).
 pub const MAX_PEER_REPORT_ROWS: i64 = 10_000;
+
+/// Table-wide stored-row cap on `peer_content_reports`, over every peer
+/// (oldest-updated evicted, [`CacheDb::trim_peer_reports`]): a peer's `nest_id`
+/// is self-minted, so the per-peer cap alone bounds nothing. 64 full exports.
+pub const MAX_PEER_REPORT_ROWS_TOTAL: i64 = 64 * MAX_REPORT_EXCHANGE_ENTRIES as i64;
 
 /// The one capture entry point the explicit mark-as-spam paths call
 /// (`report-sharing.md` § Report capture): iff the reporter opted in, a

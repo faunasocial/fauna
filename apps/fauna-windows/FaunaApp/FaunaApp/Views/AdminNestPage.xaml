@@ -205,6 +205,28 @@
                 </StackPanel>
             </StackPanel>
 
+            <!-- Feature limits for everyone (fauna.features.policy.{get,update};
+                 admin.md § N Nest → Feature limits; dynamic-features.md § Authoring
+                 surfaces) — the admin host of the shared feature-policy-editor, placed
+                 directly after Declared region. One row per gated feature the nest
+                 carries: its name, the admin's AUTHORED document in words, and an Edit
+                 button that opens the shared editor at the admin tier right under the
+                 row. Rows + editor are painted in code-behind from the shared authoring
+                 host (AdminNestPage.xaml.cs RenderFeatureLimits via
+                 FeatureAuthoringPainter); collapsed until the authored read answers (a
+                 summary painted before that would say "No limit set" with no basis). -->
+            <StackPanel x:Name="FeatureLimitsSection"
+                        AutomationProperties.AutomationId="{x:Bind ids:Ids.AdminNestFeatureLimitsSection}"
+                        AutomationProperties.Name="admin-nest-feature-limits-section"
+                        Visibility="Collapsed"
+                        Spacing="8">
+                <TextBlock Style="{StaticResource SubtitleTextBlockStyle}"
+                           Text="{loc:Localize Key=features/admin_section_title}" />
+                <TextBlock Opacity="0.6" TextWrapping="Wrap"
+                           Text="{loc:Localize Key=features/admin_section_desc}" />
+                <StackPanel x:Name="FeatureLimitsRowsHost" />
+            </StackPanel>
+
             <!-- NAT mode (fauna.setup.nat_mode via the shared AdminNatModeMachine) —
                  the post-onboarding change surface for the axis the wizard's
                  nat_mode_choice page confirms once at claim (admin.md § Nest → NAT-mode

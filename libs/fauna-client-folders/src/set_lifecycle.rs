@@ -559,12 +559,20 @@ where
     R: RpcRequester,
     R::Error: RpcErrorClass,
 {
+    // The gated read: a replica that has not listed custody refuses rather
+    // than answering an empty custody, which would read as "nothing to cut".
     let cfg = custody_store
-        .load_for_write()
+        .load_listed()
         .await
         .map_err(SetLifecycleError::Custody)?;
     let mut marked: Vec<[u8; 32]> = Vec::new();
-    for old in custody::uncut_owned_nonces(&cfg, &identity) {
+    let uncut = custody::uncut_owned_nonces(&cfg, &identity);
+    tracing::debug!(
+        sets = cfg.sets.len(),
+        uncut = uncut.len(),
+        "folders: the succession cut's candidates in custody"
+    );
+    for old in uncut {
         match custody_store.record_adoption_marker(old).await {
             Ok(()) => marked.push(old),
             Err(e) => {
@@ -608,6 +616,46 @@ where
     Ok(pushed)
 }
 
+/// [`remint_owned_sets`] for a pass that may run before the replica has
+/// listed custody — the succession aftermath's, at a successor's first
+/// store-ready, whose fresh store holds no set until its first listing lands
+/// (or until the co-located sync agent that pumps it does). A read refused as
+/// not ready ([`crate::custody_not_ready`]) is retried at each custody change
+/// notice ([`FolderKeyStore::change_notices`], taken before the first read so
+/// a listing between the two is not lost) and never taken for "no set to
+/// cut". Answers the cut's outcome, any other error at once, or the not-ready
+/// refusal once the store has no notice left to wait on — the launch
+/// reconcile then runs the arm again.
+pub async fn remint_owned_sets_once_listed<R>(
+    files: &FoldersClient<R>,
+    custody_store: &dyn FolderKeyStore,
+    identity: fauna_core::identity::ActorId,
+    report: &mut SetCustodyReconcile,
+) -> Result<Vec<(String, [u8; 32])>, SetLifecycleError<R::Error>>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+{
+    let mut notices = custody_store.change_notices().await;
+    loop {
+        match remint_owned_sets(files, custody_store, identity, report).await {
+            Err(SetLifecycleError::Custody(e)) if crate::custody_not_ready(&e) => {
+                let Some(source) = notices.as_mut() else {
+                    return Err(SetLifecycleError::Custody(e));
+                };
+                tracing::info!(
+                    "folders: the succession cut waits for custody's first listing; \
+                     it re-reads at the next custody change"
+                );
+                if !source.changed().await {
+                    return Err(SetLifecycleError::Custody(e));
+                }
+            }
+            other => return other,
+        }
+    }
+}
+
 /// [`remint_owned_sets`] as the succession aftermath's post-store-ready pass
 /// runs it (`fauna_client_config::FolderCustodyCut`, the seam the recovery
 /// crate declares): the folders client and the account's custody store a host
@@ -637,7 +685,7 @@ where
         identity: fauna_core::identity::ActorId,
     ) -> Result<usize, fauna_client_config::StoreError> {
         let mut report = SetCustodyReconcile::default();
-        remint_owned_sets(&self.files, &*self.custody, identity, &mut report)
+        remint_owned_sets_once_listed(&self.files, &*self.custody, identity, &mut report)
             .await
             .map_err(|e| fauna_client_config::StoreError::Save(e.to_string()))?;
         Ok(report.reminted)
@@ -1308,6 +1356,124 @@ mod tests {
             custody::live_set_nonce(&store.0.snapshot(), "docs"),
             Some([1; 32])
         );
+    }
+
+    /// A custody whose gated read is refused as not ready until a change
+    /// notice lands the listing — a successor's fresh store before its first
+    /// listing (`succession-cut.md` ruling (11)(a)).
+    struct ListedOnNotice {
+        inner: MemoryFolderKeyStore,
+        listed: Arc<std::sync::atomic::AtomicBool>,
+        notices: bool,
+    }
+    #[async_trait::async_trait]
+    impl crate::key_reader::FolderKeyReader for ListedOnNotice {
+        /// Ungated, as the plane's plain read is: an unlisted replica holds
+        /// none of the account's rows yet.
+        async fn load(&self) -> anyhow::Result<FoldersConfig> {
+            if !self.listed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(FoldersConfig::default());
+            }
+            self.inner.load().await
+        }
+        async fn load_listed(&self) -> anyhow::Result<FoldersConfig> {
+            if !self.listed.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!(fauna_client_config::LEDGER_NOT_READY);
+            }
+            self.load().await
+        }
+    }
+    #[async_trait::async_trait]
+    impl FolderKeyStore for ListedOnNotice {
+        async fn merge(&self, replica: FoldersConfig) -> anyhow::Result<FoldersConfig> {
+            self.inner.merge(replica).await
+        }
+        async fn settle_removal(
+            &self,
+            removal: fauna_core::data::FolderPendingRemoval,
+        ) -> anyhow::Result<FoldersConfig> {
+            self.inner.settle_removal(removal).await
+        }
+        async fn record_adoption_marker(&self, replaced: [u8; 32]) -> anyhow::Result<()> {
+            self.inner.record_adoption_marker(replaced).await
+        }
+        async fn change_notices(&self) -> Option<Box<dyn crate::key_reader::CustodyNotices>> {
+            self.notices.then(|| {
+                Box::new(LandsTheListing(Arc::clone(&self.listed)))
+                    as Box<dyn crate::key_reader::CustodyNotices>
+            })
+        }
+    }
+    /// One notice — the listing landing — then the source ends.
+    struct LandsTheListing(Arc<std::sync::atomic::AtomicBool>);
+    #[async_trait::async_trait]
+    impl crate::key_reader::CustodyNotices for LandsTheListing {
+        async fn changed(&mut self) -> bool {
+            !self.0.swap(true, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn not_yet_listed(notices: bool) -> ListedOnNotice {
+        let store = ListedOnNotice {
+            inner: MemoryFolderKeyStore::default(),
+            listed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            notices,
+        };
+        seed(&store.inner, |cfg| {
+            custody::record_created_set(cfg, "docs", [1; 32], Some(PRED), 10);
+        });
+        store
+    }
+
+    /// **The cut never takes an unlisted custody for "no set to cut"**: its
+    /// first read is refused as not ready, and the cut re-reads at the next
+    /// custody change — the listing landing — and re-mints the set then.
+    ///
+    /// Red-verified against the ungated read: the cut read the custody as it
+    /// stood, answered nothing re-minted, and never read it again.
+    #[test]
+    fn the_cut_waits_for_custodys_first_listing_and_re_mints_then() {
+        let (nest, files, _config) = harness(Outcome::Ok);
+        let store = not_yet_listed(true);
+        let mut report = SetCustodyReconcile::default();
+        let pushed = block_on(remint_owned_sets_once_listed(
+            &files,
+            &store,
+            OWN,
+            &mut report,
+        ))
+        .expect("the cut runs once custody is listed");
+        assert_eq!(report.reminted, 1, "{report:?}");
+        assert_eq!(pushed.len(), 1);
+        assert_ne!(
+            custody::live_set_nonce(&store.inner.snapshot(), "docs"),
+            Some([1; 32]),
+            "the predecessor's nonce is retired"
+        );
+        assert_eq!(nest.updates.lock().unwrap().len(), 1, "the pick pushed");
+    }
+
+    /// With no notice left to wait on, the cut answers the not-ready refusal
+    /// — never a cut that found nothing — and the launch reconcile owns the
+    /// rest.
+    #[test]
+    fn the_cut_answers_not_ready_when_no_listing_can_come() {
+        let (nest, files, _config) = harness(Outcome::Ok);
+        let store = not_yet_listed(false);
+        let mut report = SetCustodyReconcile::default();
+        let err = block_on(remint_owned_sets_once_listed(
+            &files,
+            &store,
+            OWN,
+            &mut report,
+        ))
+        .expect_err("an unlisted custody is no answer");
+        assert!(
+            matches!(&err, SetLifecycleError::Custody(e) if crate::custody_not_ready(e)),
+            "{err}"
+        );
+        assert_eq!(report, SetCustodyReconcile::default());
+        assert!(nest.updates.lock().unwrap().is_empty());
     }
 
     /// The create helper records the creating identity as the minter, so the

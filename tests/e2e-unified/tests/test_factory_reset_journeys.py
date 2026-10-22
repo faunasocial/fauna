@@ -498,7 +498,9 @@ class _NativeAccountSeats:
         }
         self.driver = create_driver(client)
 
-    def start(self, seed: dict[str, str]):
+    # Not `start`: `helpers/kind_reach.py` merges public names across the tree,
+    # so a `start` here would hand this relaunch's reach to every `.start()`.
+    def launch_with_seed(self, seed: dict[str, str]):
         self._config["seed_credentials"] = seed
         self.driver.launch(self._config)
         assert self.driver.preserve_state_across_relaunch()
@@ -555,7 +557,7 @@ class _WebAccountSeats:
         self._harness = make_launch_harness("web", spa_url=urls[0])
         self._bound = None
 
-    def start(self, seed: dict[str, str]):
+    def launch_with_seed(self, seed: dict[str, str]):
         # `launch()` seeds the store on the empty-store surface; the reload is
         # the first launch over it, as a native launch reads its seeded store.
         self._harness.launch(node_url=self.urls[0], trust=None, raw_fields=seed)
@@ -665,7 +667,7 @@ def test_each_account_keeps_its_own_pending_reset(
              "device_id": "reset-b", "handle": "admin"},
         ], active=actor_a)
 
-        driver = seats.start(seed)
+        driver = seats.launch_with_seed(seed)
         reached_authenticated_app(driver, timeout=_APP_S)
 
         code_a = ActionLayer(driver).admin.factory_reset_via_ui()

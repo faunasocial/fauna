@@ -66,6 +66,7 @@ static ACTIVE_SESSION: Mutex<ActiveSession> = Mutex::new(ActiveSession {
     ready: false,
     succession_witness: None,
     peer_anchor_harvest: None,
+    oracle_door: None,
 });
 
 struct ActiveSession {
@@ -82,6 +83,17 @@ struct ActiveSession {
     /// per peer. Beside the witness rather than inside it because *absence of an
     /// entry* is its own reading (that peer was never attempted).
     peer_anchor_harvest: Option<Arc<fauna_client_recovery::harvest::HarvestLog>>,
+    /// The conversations oracle's door this login keeps
+    /// (`conversations-oracle.md` § The custodian and the door) — replaced at
+    /// the next login and dropped at sign-out ([`stop_oracle_door`]), which
+    /// gives the door up for the account's next app.
+    oracle_door: Option<fauna_client_account_runtime::conversations_door::ConversationsDoor>,
+}
+
+/// Give the conversations oracle's door up — the sign-out's leave step, so
+/// the account's next app takes it over on its next tick.
+pub fn stop_oracle_door() {
+    ACTIVE_SESSION.lock().unwrap().oracle_door = None;
 }
 
 /// linux's concrete in-group succession witness — the shared policy over the
@@ -157,7 +169,7 @@ pub fn start_conversations_session(
         conv_push_source(Arc::clone(&nest)),
     );
 
-    // The room plane's four nest-backed seams, the SAME object again, registered
+    // The room plane's five nest-backed seams, the SAME object again, registered
     // as one bundle so no seam can be left out (`RoomSeams`):
     // - the floor-roster REPORT (`conversation-rooms.md` § The floor roster):
     //   after every membership commit this device authors on a governed room,
@@ -178,7 +190,10 @@ pub fn start_conversations_session(
     //   keying it through `room.publish_generation`, and the governance doors.
     //   Unlike the reads, unset is not a quiet skip: founding refuses by name,
     //   because a room founded on a device that cannot key it is a room nobody
-    //   could ever send into.
+    //   could ever send into;
+    // - the POST READ behind the room search (`room-search.md` § The surface):
+    //   a post hit's author, time and teaser through `fauna.posts.get` or its
+    //   relay. Unset, a post hit's row stays word-less.
     session.set_room_seams(room_seams);
 
     // Outbound mail (send) rail — registered here so a client that RECEIVES before
@@ -303,6 +318,24 @@ pub fn start_conversations_session(
         feed_manager.set_room_post_keys(session.clone());
         attach_own_rooms_refresh(feed_manager, runtime.clone());
     }
+    // The conversations oracle's door (`conversations-oracle.md` § The
+    // custodian and the door): this login holds the account's engine, so it
+    // may serve; the endpoint lock decides whether it does. Published with the
+    // session below.
+    let oracle_door = fauna_client_account_runtime::conversations_door::spawn_conversations_door(
+        fauna_client_account_runtime::conversations_door::ConversationsDoorInputs {
+            actor_id: self_actor.0,
+            manager: session.manager(),
+            nest: Arc::clone(&nest),
+            ledger: crate::account_runtime::ledger_seam(),
+            store: Arc::new(crate::account_runtime::handle),
+            index: Some(LauncherLocalIndex::new(
+                Arc::clone(&index_launcher),
+                session.manager(),
+            )),
+        },
+        runtime,
+    );
     session.set_index_builder_launcher(index_launcher);
 
     // Scheduling drain — the mailbox-less CalDAV iMIP rail: the loop drains every
@@ -489,6 +522,7 @@ pub fn start_conversations_session(
         g.ready = true;
         g.succession_witness = witness;
         g.peer_anchor_harvest = harvest_log;
+        g.oracle_door = oracle_door;
     }
 
     // Owned captures for the launch-time folder removal recovery below: the login

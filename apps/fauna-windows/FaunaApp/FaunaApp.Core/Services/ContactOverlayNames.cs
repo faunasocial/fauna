@@ -79,6 +79,13 @@ internal static class ContactOverlayNames
         internal string SubscriptionAuthorLabel(string? handle, byte[] authorId) =>
             _face.SubscriptionAuthorLabel(handle, authorId);
 
+        /// <summary>The completion under the label add field: the vocabulary labels
+        /// <paramref name="typed"/> starts, minus the <paramref name="staged"/> ones
+        /// (shared <c>label_suggestions</c>).</summary>
+        internal System.Collections.Generic.IReadOnlyList<string> LabelSuggestions(
+            string typed, System.Collections.Generic.IReadOnlyList<string> staged) =>
+            _face.LabelSuggestions(typed, staged.ToArray());
+
         /// <summary>The private section's editor for <paramref name="actorId"/>.</summary>
         internal FfiOverlayEditor Editor(string actorId) => _face.Editor(actorId);
 

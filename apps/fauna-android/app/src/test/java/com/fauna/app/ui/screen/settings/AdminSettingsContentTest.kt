@@ -73,6 +73,7 @@ class AdminSettingsContentTest {
         ownMembershipTierNames: List<String> = emptyList(),
         membershipTiers: List<FfiAdminMembershipTier> = emptyList(),
         onSaveTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
+        onDeleteTier: (String) -> Unit = {},
         onAddTier: (String, Long, Long, Long, Long, Long) -> Unit = { _, _, _, _, _, _ -> },
         onAddRefused: (String) -> Unit = {},
         onSaveMembershipTier: (String, String, String) -> Unit = { _, _, _ -> },
@@ -88,6 +89,7 @@ class AdminSettingsContentTest {
                 membershipTiers = membershipTiers,
                 onBack = {},
                 onSaveTier = onSaveTier,
+                onDeleteTier = onDeleteTier,
                 onAddTier = onAddTier,
                 onAddRefused = onAddRefused,
                 onSaveMembershipTier = onSaveMembershipTier,
@@ -113,6 +115,19 @@ class AdminSettingsContentTest {
         assertEquals(3, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-inbox").fetchSemanticsNodes().size)
         assertEquals(3, composeTestRule.onAllNodesWithTag("admin-settings-tier-cap-feeds").fetchSemanticsNodes().size)
         assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-save-button").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun everyTierRowCarriesADeleteButtonThatFiresWithItsName() {
+        val deleted = mutableListOf<String>()
+        render(
+            tiers = listOf(tier("free"), tier("personal")),
+            onDeleteTier = { deleted += it },
+        )
+        // One per row, `free`'s included — which tier is removable is the nest's call.
+        assertEquals(2, composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button").fetchSemanticsNodes().size)
+        composeTestRule.onAllNodesWithTag("admin-settings-tier-delete-button")[1].performScrollTo().performClick()
+        assertEquals(listOf("personal"), deleted)
     }
 
     @Test

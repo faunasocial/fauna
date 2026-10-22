@@ -97,17 +97,18 @@ def _appended_actor_id(app: ActionLayer) -> str:
     return bytes(SigningKey(secret).verify_key).hex()
 
 
-def _live_seed(nest_instance):
+def _live_seed(nest_instance, nest_url: str):
     """A freshly registered identity as the single, active registry row — the
     live account the append runs over. Dedicated, never the run's shared
-    admin (module docstring). Returns ``(seed_map, actor_id)``."""
+    admin (module docstring). ``nest_url`` is the URL the app dials for it.
+    Returns ``(seed_map, actor_id)``."""
     live = create_actor_and_register(
         nest_instance["port"], admin_signing_key=nest_instance["admin"]["signing_key"]
     )
     actor = live["actor_id_hex"]
     seed = build_registry_seed(
         [{"actor_id": actor, "secret_hex": bytes(live["signing_key"]).hex(),
-          "nest_url": nest_instance["url"], "device_id": "add-account-provision",
+          "nest_url": nest_url, "device_id": "add-account-provision",
           "handle": "live"}],
         active=actor,
     )
@@ -119,13 +120,16 @@ def _launch_live_account(app_name, nest_instance, request):
     store the journey will pin across a relaunch. Returns ``(action layer,
     live actor id)``."""
     config = _build_app_config(app_name, nest_instance, request)
-    seed, live_actor = _live_seed(nest_instance)
+    driver = create_driver(app_name)
+    # Web is single-origin: the page dials the SPA proxy it is served from
+    # (`drivers/web.py::launch`'s seed hook), every native app the nest itself.
+    nest_url = request.getfixturevalue("spa_url") if driver.is_web() else nest_instance["url"]
+    seed, live_actor = _live_seed(nest_instance, nest_url)
     config["seed_credentials"] = seed
     config["environment"] = {
         **config.get("environment", {}),
         **_seeded_environment(request, nest_instance),
     }
-    driver = create_driver(app_name)
     driver.launch(config)
     app = ActionLayer(driver)
     _await_live_session(driver, live_actor, after="at the first launch")
@@ -184,6 +188,13 @@ def _relaunch_on_the_same_store(app: ActionLayer) -> None:
     runs."""
     require_durable_client_store(app)
     driver = app.driver
+    if driver.is_web():
+        # Web's machine is the BrowserContext, and `teardown()` closes it,
+        # `localStorage` and all: closing the tab keeps it, and the reopen boots
+        # over it (`drivers/web.py::quit_app`).
+        driver.quit_app()
+        driver.hard_reload()
+        return
     driver.teardown()
     relaunch = dict(driver._launch_config)
     relaunch.pop("seed_credentials", None)

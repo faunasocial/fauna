@@ -17,6 +17,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -40,7 +41,9 @@ import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.resolveComposed
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.connectedAppsFactsSeparator
+import com.fauna.ffi.connectedAppsLineSeparator
 import com.fauna.ffi.connectedAppsRequestCardLines
+import com.fauna.ffi.connectedAppsRequestInstallText
 import com.fauna.ffi.connectedAppsRosterRowText
 import com.fauna.app.ui.viewmodel.ConnectedAppsVM
 import kotlinx.coroutines.launch
@@ -61,7 +64,9 @@ import uniffi.fauna_client_connected_apps.ConnectedAppsSnapshot
  *    would train the user to ignore the one place the anti-phishing check
  *    happens.
  * 2. **Connect an app** — the typed-code start: a code field and a submit.
- * 3. **The roster** — one row per connected app, Revoke with an inline confirm;
+ * 3. **The external-apps switch, then the roster** — the account's switch
+ *    (`atproto-external-apps-enable`) at every integration level, then one row
+ *    per connected app, Revoke with an inline confirm;
  *    a mail app-password row also carries its login, kind and secret controls.
  * 4. **Blocked apps** — one row per blocked client with Unblock; painted only
  *    while something is blocked.
@@ -108,11 +113,13 @@ fun ConnectedAppsScreen(
         revokeArmed = revokeArmed,
         revealed = revealed,
         onBack = { navController.popBackStack() },
+        onOpenSettingsCard = { navController.navigate("bridges") },
         onCodeChange = vm::setCode,
         onSubmitCode = vm::submitCode,
         onResolveRequest = vm::resolveRequest,
         onBlockRequest = vm::blockRequest,
         onUnblock = vm::unblock,
+        onSetExternalAppsEnabled = vm::setExternalAppsEnabled,
         onArmRevoke = vm::armRevoke,
         onConfirmRevoke = vm::confirmRevoke,
         onCancelRevoke = vm::cancelRevoke,
@@ -135,6 +142,7 @@ fun ConnectedAppsContent(
     onResolveRequest: (consentIdHex: String, approved: Boolean) -> Unit,
     onBlockRequest: (consentIdHex: String) -> Unit,
     onUnblock: (clientId: String) -> Unit,
+    onSetExternalAppsEnabled: (Boolean) -> Unit,
     onArmRevoke: (key: String) -> Unit,
     onConfirmRevoke: (key: String) -> Unit,
     onCancelRevoke: () -> Unit,
@@ -149,6 +157,9 @@ fun ConnectedAppsContent(
     // `fauna_core::format::format_unix_local_ms` over UniFFI (the one shared
     // timestamp wording — `YYYY-MM-DD HH:MM`, local), injected for the same reason.
     formatTime: (Long) -> String = { ms -> com.fauna.ffi.formatUnixLocalMs(ms) },
+    // A hosted plugin's row links to its settings card on the Bridges page
+    // (`connected-apps-item-settings-link`).
+    onOpenSettingsCard: () -> Unit = {},
 ) {
     // security.md § On-screen secret exposure, rule 2: a minted, revocable
     // secret suppresses capture for exactly the reveal window. The guard
@@ -228,7 +239,36 @@ fun ConnectedAppsContent(
             }
             DisabledControlReasonText(connectGate.reason)
 
-            // ── 3. The roster ──
+            // ── 3. The external-apps switch, then the roster it pauses ──
+            // At every integration level (`connected-apps.md` § Layout & flow).
+            // Rendered unconditionally and bound to the snapshot's own answer —
+            // an absent snapshot paints the flag's default, ON — never a local
+            // guess. A dispatch-on-change toggle IS the commit, so the switch
+            // itself declares its gate.
+            val externalAppsGate = faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
+            val externalAppsOn = snapshot?.externalAppsOff != true
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(
+                    stringResource(R.string.atproto_settings_external_apps_toggle),
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = externalAppsOn,
+                    onCheckedChange = onSetExternalAppsEnabled,
+                    enabled = externalAppsGate.enabled,
+                    modifier = Modifier.testTag(Ids.ATPROTO_EXTERNAL_APPS_ENABLE),
+                )
+            }
+            DisabledControlReasonText(externalAppsGate.reason)
+            Text(
+                stringResource(R.string.atproto_settings_external_apps_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             SectionHeading(R.string.connected_apps_roster_heading)
             // The three-state list: nothing until THIS visit's roster read has
             // returned, then either rows or the empty state (`ui/README.md`
@@ -253,6 +293,7 @@ fun ConnectedAppsContent(
                         onToggleReveal = onToggleReveal,
                         readSecret = readSecret,
                         resolveUsername = resolveUsername,
+                        onOpenSettingsCard = onOpenSettingsCard,
                     )
                 }
             }
@@ -329,6 +370,53 @@ private fun RequestCard(
                     },
                 )
             }
+            // An admin's hosted-plugin install card: what approving would run on
+            // the nest, one leaf per fact (`compose::request_install_text`), between
+            // the scopes and the binding code.
+            val install = remember(request) { connectedAppsRequestInstallText(request) }
+            if (install != null) {
+                val separator = connectedAppsLineSeparator()
+                val joined = { lines: List<uniffi.fauna_client_connected_apps.ComposedText> ->
+                    lines.joinToString(separator) { resolveComposed(context, it) }
+                }
+                Text(
+                    resolveComposed(context, install.heading),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL),
+                )
+                Text(
+                    resolveComposed(context, install.form),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier
+                        .testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_FORM)
+                        .semantics { stateDescription = request.install?.executionForm.orEmpty() },
+                )
+                Text(
+                    resolveComposed(context, install.publisher),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER),
+                )
+                Text(
+                    resolveComposed(context, install.digest),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_DIGEST),
+                )
+                Text(
+                    joined(install.kinds),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_KINDS),
+                )
+                Text(
+                    joined(install.hosts),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_HOSTS),
+                )
+                Text(
+                    joined(install.settings),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_REQUEST_INSTALL_SETTINGS),
+                )
+            }
             Text(
                 stringResourceFmt(R.string.atproto_settings_consent_code, request.code),
                 modifier = Modifier
@@ -400,6 +488,7 @@ private fun RosterRow(
     onToggleReveal: (String) -> Unit,
     readSecret: suspend (String) -> String?,
     resolveUsername: (String) -> String,
+    onOpenSettingsCard: () -> Unit,
 ) {
     val name = localized(row.name) ?: row.name.key
     val mailBurned = row.mail?.revoked == true
@@ -453,6 +542,16 @@ private fun RosterRow(
                 )
             }
             body.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+            // A hosted plugin's row links to its settings card; the shared
+            // composition says which rows (`opens_settings_card`).
+            if (composed.opensSettingsCard) {
+                TextButton(
+                    onClick = onOpenSettingsCard,
+                    modifier = Modifier.testTag(Ids.CONNECTED_APPS_ITEM_SETTINGS_LINK),
+                ) {
+                    Text(stringResource(R.string.connected_apps_settings_link))
+                }
+            }
             Text(
                 facts,
                 style = MaterialTheme.typography.bodySmall,

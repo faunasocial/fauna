@@ -14,25 +14,46 @@
 //!
 //! The SNI is a routing *hint*, not a trust decision: the backend still does
 //! full TLS + auth, so a mis-route just fails that backend's handshake.
+//!
+//! **Its one link to nest is the sidecar log plane** (`apps/observability.md`
+//! § The sidecar log plane): with `--nest-url` set, the router dials nest's
+//! `/internal/router/ws`, runs the `fauna.sidecar.hello` token handshake as the
+//! `router` scope, and reports its catalogue ([`log_catalogue`]) for the
+//! process's life. Routing never waits on that channel. Its credential rule is
+//! the sidecar channel's (`transport.md` § the internal sidecar channel → the
+//! credential's lifetime): nest refusing the token ENDS the process (exit 78)
+//! so s6 restarts it against nest's freshly minted token file — which drops
+//! every live `:443` splice once per nest restart, accepted because a nest
+//! restart already severs everything routed to nest.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use fauna_conn_limit::ShedCounter;
+use fauna_sidecar_client::{CredentialRefused, SidecarDialError};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tokio::sync::{Semaphore, watch};
+use tracing::{debug, error, info, warn};
 
+mod log_catalogue;
 mod sni;
 
 /// TLS records cap at 16 KiB of payload; the ClientHello fits in the first one.
 const MAX_CLIENT_HELLO: usize = 16 * 1024 + 5;
 /// How long to wait for the ClientHello before giving up on a connection.
 const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a SIGTERM'd router keeps its live splices before exiting anyway. The
+/// nest's graceful shutdown (WS 1001 to every app, its drain bounded by its 7 s
+/// `GRACEFUL_SHUTDOWN_TIMEOUT`, then the final flush) leaves through these
+/// splices, so the grace outlasts that budget and still fits the container's
+/// 15 s `stop_grace_period` (`transport-connection.md` § Graceful shutdown).
+const DRAIN_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Parser)]
 #[command(name = "fauna-sni-router", version)]
@@ -88,6 +109,26 @@ struct Cli {
     /// shed-on-cap behaviour as `--max-connections`.
     #[arg(long = "max-connections-per-ip", default_value_t = fauna_conn_limit::DEFAULT_MAX_CONNS_PER_IP)]
     max_connections_per_ip: usize,
+
+    /// nest's loopback HTTP(S) base, e.g. `https://127.0.0.1:3000` — artifact-set
+    /// IPC wiring (the s6 run-script). When set, the router holds the sidecar
+    /// log-plane channel to nest's `/internal/router/ws`, authenticating with the
+    /// boot-minted token the run-script passes as `FAUNA_SIDECAR_TOKEN`. Unset
+    /// (a bare test run), the router routes with no plane.
+    #[arg(long = "nest-url")]
+    nest_url: Option<String>,
+}
+
+/// The router's internal sidecar route on nest, and the scope its hello declares
+/// (`SidecarScope::Router` on the nest side).
+const ROUTER_WS_ROUTE: &str = "/internal/router/ws";
+const ROUTER_SCOPE: &str = "router";
+
+/// One backend's admin-facing name and its rate-limited connect-failure counter
+/// (see [`log_catalogue::backend_unreachable`]).
+struct BackendFailures {
+    name: String,
+    counter: ShedCounter,
 }
 
 struct Router {
@@ -114,6 +155,40 @@ struct Router {
     /// then trusts any loopback peer). The MDA CalDAV backend ignores the
     /// TLV (it skips unknown TLVs), so emitting it on every header is safe.
     proxy_auth: Option<Vec<u8>>,
+    /// Backend address → its name and connect-failure counter
+    /// ([`backend_failure_counters`]).
+    backend_failures: HashMap<String, BackendFailures>,
+}
+
+/// Name every backend by how it is routed — never by its address: the default
+/// route is `nest` (the deployment's `--default`), a label route is its leading
+/// label (`mail`, `relay`, `pds`), an exact route is `exact-route`. The first
+/// name given to an address wins, the default first.
+fn backend_failure_counters(
+    default: &str,
+    routes: &HashMap<String, String>,
+    label_routes: &HashMap<String, String>,
+) -> HashMap<String, BackendFailures> {
+    let mut named: Vec<(&str, String)> = vec![(default, "nest".to_string())];
+    let mut labels: Vec<_> = label_routes.iter().collect();
+    labels.sort();
+    named.extend(labels.into_iter().map(|(l, a)| (a.as_str(), l.clone())));
+    let mut exact: Vec<_> = routes.values().collect();
+    exact.sort();
+    named.extend(
+        exact
+            .into_iter()
+            .map(|a| (a.as_str(), "exact-route".to_string())),
+    );
+    let mut out = HashMap::new();
+    for (addr, name) in named {
+        out.entry(addr.to_string())
+            .or_insert_with(|| BackendFailures {
+                name,
+                counter: ShedCounter::new(),
+            });
+    }
+    out
 }
 
 impl Router {
@@ -139,6 +214,22 @@ impl Router {
 
     fn should_send_proxy(&self, backend: &str) -> bool {
         self.send_proxy_to.contains(backend)
+    }
+
+    /// Count one failed connect to `backend`; at the counter's rate-limited
+    /// moments, warn on stderr and report the batch on the log plane.
+    fn record_backend_failure(&self, backend: &str) {
+        let Some(failures) = self.backend_failures.get(backend) else {
+            return;
+        };
+        if let Some(count) = failures.counter.record() {
+            warn!(
+                backend = %failures.name,
+                failed_since_last_line = count,
+                "backend unreachable"
+            );
+            log_catalogue::backend_unreachable(&failures.name, count);
+        }
     }
 }
 
@@ -190,24 +281,22 @@ async fn main() -> Result<()> {
         }
         _ => None,
     };
+    let backend_failures = backend_failure_counters(&cli.default, &routes, &label_routes);
     let router = Arc::new(Router {
         routes,
         label_routes,
         default: cli.default.clone(),
         send_proxy_to,
         proxy_auth,
+        backend_failures,
     });
-    let conn_limit = Arc::new(Semaphore::new(cli.max_connections));
-    let per_ip_limit = fauna_conn_limit::PerIpConnLimit::new(cli.max_connections_per_ip);
-    // Shedding is the symptom an admin needs to see; logging it per-rejection
-    // would flood at connection-attempt rate, so both caps report through a
-    // rate-limited counter carrying the batch count.
-    let global_shed = fauna_conn_limit::ShedCounter::new();
-    let per_ip_shed = fauna_conn_limit::ShedCounter::new();
 
     let listener = TcpListener::bind(&cli.listen)
         .await
         .with_context(|| format!("binding {}", cli.listen))?;
+    if let Ok(addr) = listener.local_addr() {
+        log_catalogue::serving(addr.port());
+    }
     info!(
         listen = %cli.listen,
         default = %router.default,
@@ -217,8 +306,156 @@ async fn main() -> Result<()> {
         proxy_auth = router.proxy_auth.is_some(),
         max_connections = cli.max_connections,
         max_connections_per_ip = cli.max_connections_per_ip,
+        nest_url = ?cli.nest_url,
         "fauna-sni-router listening"
     );
+
+    // Created here, not in the accept loop, so the drain below can wait for
+    // every live splice to hand back its permit.
+    let conn_limit = Arc::new(Semaphore::new(cli.max_connections));
+    // Flipped at SIGTERM so every live splice learns the router is draining.
+    let (draining_tx, draining) = watch::channel(false);
+    let accept = accept_loop(
+        listener,
+        router,
+        Arc::clone(&conn_limit),
+        cli.max_connections,
+        cli.max_connections_per_ip,
+        draining,
+    );
+    // The run-script always sets the variable; an empty or stale value (the
+    // router started before nest minted this boot's tokens) is refused at the
+    // hello and recovered by the restart below, like every sidecar's.
+    let token = std::env::var("FAUNA_SIDECAR_TOKEN").unwrap_or_default();
+    let nest_channel = async move {
+        match cli.nest_url {
+            Some(nest_url) => nest_channel_loop(nest_url, token).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        never = accept => match never {},
+        refused = nest_channel => {
+            // Nest re-minted its sidecar tokens (it restarted): ours can never
+            // be honoured again and nothing in this process can re-read the
+            // root-owned token file. Exit so s6 restarts us against it — every
+            // live splice ends here (the accepted cost, module docs).
+            error!(error = %refused, "ending the router for a fresh sidecar token");
+            std::process::exit(fauna_sidecar_client::EXIT_CREDENTIAL_REFUSED);
+        }
+        () = shutdown_signal() => {}
+    }
+    // The accept loop is dropped with the select: the listener is closed and
+    // nothing new is accepted. Live splices are their own tasks and keep flowing.
+    let _ = draining_tx.send(true);
+    drain(&conn_limit, cli.max_connections).await;
+    Ok(())
+}
+
+/// SIGTERM (or SIGINT in a foreground run). A splice is cut only when the
+/// process exits, so the router does not exit on the signal itself — see
+/// [`drain`].
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = sigterm.recv() => info!("received SIGTERM; draining live splices"),
+            _ = tokio::signal::ctrl_c() => info!("received SIGINT; draining live splices"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("received Ctrl-C; draining live splices");
+    }
+}
+
+/// Wait until every live splice has ended — each holds one `conn_limit` permit
+/// until its task finishes — or [`DRAIN_GRACE`] has passed. While draining, a
+/// splice ends once its backend has closed and its last bytes reached the
+/// client, so a backend shutting down gracefully (the nest's WS 1001 drain) gets
+/// its goodbye through before the router exits, instead of every client seeing
+/// a bare TCP drop (`transport-connection.md` § Graceful shutdown) — and a
+/// client still holding its own half open does not hold the router for the
+/// whole grace, which the container's stop budget cannot afford after the
+/// nest's own drain (`installers/docker.md` § s6-overlay Services).
+async fn drain(conn_limit: &Semaphore, max_connections: usize) {
+    let all = u32::try_from(max_connections).unwrap_or(u32::MAX);
+    match tokio::time::timeout(DRAIN_GRACE, conn_limit.acquire_many(all)).await {
+        Ok(_) => info!("every splice drained; exiting"),
+        Err(_) => warn!(
+            live = max_connections.saturating_sub(conn_limit.available_permits()),
+            grace = ?DRAIN_GRACE,
+            "drain grace elapsed with splices still live; exiting"
+        ),
+    }
+}
+
+/// Hold the router's log-plane channel to nest for the life of the process
+/// (shared policy: [`fauna_sidecar_client::serve_while_reaching_nest`]). Returns
+/// only when nest refuses the router's credential.
+async fn nest_channel_loop(nest_url: String, token: String) -> CredentialRefused {
+    fauna_sidecar_client::serve_while_reaching_nest(
+        || serve_nest_channel(&nest_url, &token),
+        |_e: &SidecarDialError, _delay| log_catalogue::nest_unreachable(),
+    )
+    .await
+}
+
+/// One life of the channel: dial + handshake, then flush the plane's queue on
+/// [`log_catalogue::FLUSH_INTERVAL`] until the channel closes. `Ok(())` ⇒ it
+/// closed and the caller re-dials; `Err` ⇒ the dial itself failed.
+async fn serve_nest_channel(nest_url: &str, token: &str) -> Result<(), SidecarDialError> {
+    let dial = fauna_sidecar_client::dial_sidecar(
+        nest_url,
+        ROUTER_WS_ROUTE,
+        token,
+        ROUTER_SCOPE,
+        BTreeMap::new(),
+    )
+    .await?;
+    let dispatcher = dial.dispatcher;
+    let Some(mut inbound) = dispatcher.inbound_requests() else {
+        dial.driver.abort();
+        return Ok(());
+    };
+    info!("router channel to nest established; log plane is live");
+    // The first tick completes at once: what queued while the channel was down
+    // (`serving`, `nest_unreachable`) goes out as soon as it is up.
+    let mut flush = tokio::time::interval(log_catalogue::FLUSH_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = flush.tick() => fauna_sidecar_client::log_plane::flush(&dispatcher).await,
+            request = inbound.recv() => match request {
+                // Nest originates nothing on this channel; anything it sends
+                // goes unanswered and times out on its side.
+                Some(request) => debug!(kind = %request.kind, "router: kind not served on this channel"),
+                None => break,
+            },
+        }
+    }
+    dial.driver.abort();
+    Ok(())
+}
+
+/// Accept and splice for ever.
+async fn accept_loop(
+    listener: TcpListener,
+    router: Arc<Router>,
+    conn_limit: Arc<Semaphore>,
+    max_connections: usize,
+    max_connections_per_ip: usize,
+    draining: watch::Receiver<bool>,
+) -> Infallible {
+    let per_ip_limit = fauna_conn_limit::PerIpConnLimit::new(max_connections_per_ip);
+    // Shedding is the symptom an admin needs to see; logging it per-rejection
+    // would flood at connection-attempt rate, so both caps report through a
+    // rate-limited counter carrying the batch count — on stderr and, with the
+    // same count, on the log plane.
+    let global_shed = ShedCounter::new();
+    let per_ip_shed = ShedCounter::new();
 
     loop {
         let (client, peer) = match listener.accept().await {
@@ -240,10 +477,11 @@ async fn main() -> Result<()> {
                     // (transport-connection.md § Abuse posture).
                     warn!(
                         %peer,
-                        max = cli.max_connections,
+                        max = max_connections,
                         shed_since_last_line = shed,
                         "connection cap reached; shedding (sample: peer)"
                     );
+                    log_catalogue::connection_cap_shed(shed);
                 }
                 continue; // `client` dropped here → connection closed
             }
@@ -270,6 +508,7 @@ async fn main() -> Result<()> {
                         shed_since_last_line = shed,
                         "per-IP connection cap reached; shedding (sample: peer)"
                     );
+                    log_catalogue::per_ip_cap_shed(shed);
                 }
                 continue; // `client` + `permit` dropped here → connection closed
             }
@@ -284,17 +523,23 @@ async fn main() -> Result<()> {
             warn!(%peer, error = %e, "could not arm TCP keepalive; connection is leak-prone");
         }
         let router = Arc::clone(&router);
+        let draining = draining.clone();
         tokio::spawn(async move {
             let _permit = permit; // released when this connection's task ends
             let _ip_permit = ip_permit; // ditto — releases the per-IP slot
-            if let Err(e) = handle(client, peer, router).await {
+            if let Err(e) = handle(client, peer, router, draining).await {
                 debug!(%peer, error = %e, "connection closed with error");
             }
         });
     }
 }
 
-async fn handle(mut client: TcpStream, peer: SocketAddr, router: Arc<Router>) -> Result<()> {
+async fn handle(
+    mut client: TcpStream,
+    peer: SocketAddr,
+    router: Arc<Router>,
+    draining: watch::Receiver<bool>,
+) -> Result<()> {
     // Buffer the ClientHello (and possibly a bit more) without consuming it from
     // the logical stream — we replay every buffered byte to the backend.
     let mut buf = Vec::with_capacity(1024);
@@ -323,9 +568,13 @@ async fn handle(mut client: TcpStream, peer: SocketAddr, router: Arc<Router>) ->
     let send_proxy = router.should_send_proxy(&backend_addr);
     debug!(sni = ?sni, backend = %backend_addr, send_proxy, "routing");
 
-    let mut backend = TcpStream::connect(&backend_addr)
-        .await
-        .with_context(|| format!("connecting backend {backend_addr}"))?;
+    let mut backend = match TcpStream::connect(&backend_addr).await {
+        Ok(backend) => backend,
+        Err(e) => {
+            router.record_backend_failure(&backend_addr);
+            return Err(e).with_context(|| format!("connecting backend {backend_addr}"));
+        }
+    };
     // For PROXY-aware backends (nest), prepend a PROXY-v2 header conveying the
     // real client address *before* the buffered ClientHello, so the backend
     // records the internet client — not this router's loopback address — as the
@@ -347,9 +596,39 @@ async fn handle(mut client: TcpStream, peer: SocketAddr, router: Arc<Router>) ->
         .write_all(&buf)
         .await
         .context("replaying ClientHello to backend")?;
-    copy_bidirectional(&mut client, &mut backend)
+    splice(&mut client, &mut backend, draining)
         .await
-        .context("splicing")?;
+        .context("splicing")
+}
+
+/// Copy both ways until both directions end, each direction's EOF shutting down
+/// the other side's write — except that once the router is draining, the splice
+/// ends as soon as the backend's direction has: the backend has said everything
+/// it will say, and only the client's open half would keep the task alive.
+async fn splice(
+    client: &mut TcpStream,
+    backend: &mut TcpStream,
+    mut draining: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let (mut client_rd, mut client_wr) = client.split();
+    let (mut backend_rd, mut backend_wr) = backend.split();
+    let upstream = async {
+        tokio::io::copy(&mut client_rd, &mut backend_wr).await?;
+        backend_wr.shutdown().await
+    };
+    let downstream = async {
+        tokio::io::copy(&mut backend_rd, &mut client_wr).await?;
+        client_wr.shutdown().await
+    };
+    tokio::pin!(upstream, downstream);
+    let (mut up_done, mut down_done) = (false, false);
+    while !(up_done && down_done) {
+        tokio::select! {
+            r = &mut upstream, if !up_done => { r?; up_done = true; }
+            r = &mut downstream, if !down_done => { r?; down_done = true; }
+            _ = draining.wait_for(|d| *d), if down_done => return Ok(()),
+        }
+    }
     Ok(())
 }
 
@@ -369,7 +648,7 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Router, decode_hex};
+    use super::{Router, backend_failure_counters, decode_hex};
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -394,6 +673,7 @@ mod tests {
             default: "127.0.0.1:3000".to_string(),
             send_proxy_to: HashSet::new(),
             proxy_auth: None,
+            backend_failures: HashMap::new(),
         };
         // Label routes are domain-agnostic (the domainless fix): mail.<any>/relay.<any>.
         assert_eq!(r.backend_for(Some("mail.example.com")), "127.0.0.1:8444");
@@ -410,5 +690,25 @@ mod tests {
         assert_eq!(r.backend_for(Some("alice.example.com")), "127.0.0.1:3000");
         assert_eq!(r.backend_for(Some("example.com")), "127.0.0.1:3000");
         assert_eq!(r.backend_for(None), "127.0.0.1:3000");
+    }
+
+    /// A backend's admin-facing name comes from how it is routed, never its
+    /// address — the log plane's interpolation rule (`log_catalogue` docs).
+    #[test]
+    fn backends_are_named_by_route_never_by_address() {
+        let mut routes = HashMap::new();
+        routes.insert("apex.example.com".to_string(), "127.0.0.1:9000".to_string());
+        let mut label_routes = HashMap::new();
+        label_routes.insert("mail".to_string(), "127.0.0.1:8444".to_string());
+        label_routes.insert("pds".to_string(), "127.0.0.1:8447".to_string());
+        // A label route sharing nest's address keeps nest's name.
+        label_routes.insert("alias".to_string(), "127.0.0.1:3000".to_string());
+        let named = backend_failure_counters("127.0.0.1:3000", &routes, &label_routes);
+        let name = |addr: &str| named[addr].name.clone();
+        assert_eq!(name("127.0.0.1:3000"), "nest");
+        assert_eq!(name("127.0.0.1:8444"), "mail");
+        assert_eq!(name("127.0.0.1:8447"), "pds");
+        assert_eq!(name("127.0.0.1:9000"), "exact-route");
+        assert_eq!(named.len(), 4);
     }
 }

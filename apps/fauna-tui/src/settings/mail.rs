@@ -140,7 +140,7 @@ pub struct MailState {
     pub webdav_serve_reply: Option<Result<usize, String>>,
     /// The `mail-settings-forward-all-to-input` draft (`mail-forwarding.md`
     /// § Per-account "forward all"). Seeded only from a nest-confirmed read
-    /// ([`Self::apply_forwarding`]), edited by keystroke, committed on
+    /// ([`Self::apply_account_read`]), edited by keystroke, committed on
     /// Enter/click (`Action::MailCommitForwardAllTo`) — the
     /// `mail-spam-threshold-override-input` shape, so a gesture elsewhere on
     /// the page can never clobber an uncommitted edit.
@@ -153,38 +153,77 @@ pub struct MailState {
     /// the value — the field's bound, never hard-coded here. `None` until the
     /// first read resolves; the limit commit is inert until then.
     pub forward_per_hour_ceiling: Option<u32>,
+    /// The receive / send / scan-result switches as the nest last confirmed
+    /// them (`mail-settings-receive-toggle` / `-send-toggle` /
+    /// `-scan-result-visible-toggle`; `mail-policy-config.md` § Tier 3). `None`
+    /// until the first read resolves — every toggle is inert until then, so a
+    /// click can never write a guessed value.
+    pub switches: Option<fauna_protocol::bridge_routing::GetMailSwitchesReply>,
+    /// The automatic reply as the filter rules last read it
+    /// (`mail-settings-autorespond-toggle`; `email-filters.md` § The
+    /// auto-respond setting). `None` until the first read; the toggle is inert
+    /// until then.
+    pub autorespond: Option<fauna_client_email::AutoRespond>,
+    /// The `mail-settings-autorespond-message-input` draft, the
+    /// [`Self::forward_all_to_input`] lifecycle: seeded only from a confirmed
+    /// read, committed on Enter (`Action::MailCommitAutorespondMessage`).
+    pub autorespond_message_input: String,
+    /// The last `get_mail_quotas` read — the `mail-settings-mailbox-quota`
+    /// readout and the `mail-settings-over-quota-notice`. `None` until it
+    /// resolves (nothing painted).
+    pub quotas: Option<fauna_protocol::bridge_routing::GetMailQuotasReply>,
 }
 
-/// One nest-confirmed read of the Forwarding section. Each half is `None` when
-/// the op did not touch it, so committing one field never repaints the other's
-/// uncommitted draft; each carries its own failure, bridged onto
-/// `error-message` in the single fold.
+/// One nest-confirmed read of the page's per-account mail settings — the
+/// Forwarding pair, the receive / send switches, the automatic reply and the
+/// quotas. Each part is `None` when the op did not touch it, so committing one
+/// field never repaints another's uncommitted draft; each carries its own
+/// failure, bridged onto `error-message` in the single fold.
 #[derive(Debug)]
-pub(crate) struct MailForwardingRead {
+pub(crate) struct MailAccountRead {
     pub(super) forward_all_to: Option<Result<Option<String>, String>>,
     pub(super) forward_per_hour:
         Option<Result<fauna_protocol::bridge_routing::GetForwardPerHourReply, String>>,
+    pub(super) switches:
+        Option<Result<fauna_protocol::bridge_routing::GetMailSwitchesReply, String>>,
+    pub(super) autorespond: Option<Result<fauna_client_email::AutoRespond, String>>,
+    pub(super) quotas: Option<Result<fauna_protocol::bridge_routing::GetMailQuotasReply, String>>,
 }
 
-impl MailForwardingRead {
-    /// The first failure either half carries, for the page's `error-message`.
-    pub(super) fn error(&self) -> Option<String> {
-        self.forward_all_to
-            .as_ref()
-            .and_then(|r| r.as_ref().err().cloned())
-            .or_else(|| {
-                self.forward_per_hour
-                    .as_ref()
-                    .and_then(|r| r.as_ref().err().cloned())
-            })
+impl MailAccountRead {
+    /// A read that touched nothing — the base each single-part op fills in.
+    pub(super) fn none() -> Self {
+        Self {
+            forward_all_to: None,
+            forward_per_hour: None,
+            switches: None,
+            autorespond: None,
+            quotas: None,
+        }
     }
 }
 
-/// Read both Forwarding values — the page hydrate's second half. Replay-safe
-/// pure reads over the shared `MailAccountClient`.
-pub(super) async fn read_forwarding(nest: Arc<fauna_client::NestClient>) -> MailForwardingRead {
+impl MailAccountRead {
+    /// The first failure any part carries, for the page's `error-message`.
+    pub(super) fn error(&self) -> Option<String> {
+        fn err<T>(part: &Option<Result<T, String>>) -> Option<String> {
+            part.as_ref().and_then(|r| r.as_ref().err().cloned())
+        }
+        err(&self.forward_all_to)
+            .or_else(|| err(&self.forward_per_hour))
+            .or_else(|| err(&self.switches))
+            .or_else(|| err(&self.autorespond))
+            .or_else(|| err(&self.quotas))
+    }
+}
+
+/// Read every per-account value the page shows — the page hydrate's second
+/// half. Replay-safe pure reads over the shared `MailAccountClient` and the
+/// `fauna-client-email` auto-respond facade.
+pub(super) async fn read_account(nest: Arc<fauna_client::NestClient>) -> MailAccountRead {
+    let email = fauna_client_email::EmailClient::new(nest.clone());
     let client = fauna_client_bridges::MailAccountClient::new(nest);
-    MailForwardingRead {
+    MailAccountRead {
         forward_all_to: Some(client.get_forward_all_to().await.map_err(|e| e.to_string())),
         forward_per_hour: Some(
             client
@@ -192,6 +231,65 @@ pub(super) async fn read_forwarding(nest: Arc<fauna_client::NestClient>) -> Mail
                 .await
                 .map_err(|e| e.to_string()),
         ),
+        switches: Some(client.get_mail_switches().await.map_err(|e| e.to_string())),
+        autorespond: Some(email.autorespond_get().await.map_err(|e| e.to_string())),
+        quotas: Some(client.get_mail_quotas().await.map_err(|e| e.to_string())),
+    }
+}
+
+/// Write one receive / send switch (`None` keeps the other's stored value),
+/// then re-read both so the toggles reflect the **persisted** values.
+pub(super) async fn set_mail_switches(
+    nest: Arc<fauna_client::NestClient>,
+    receive_enabled: Option<bool>,
+    send_enabled: Option<bool>,
+) -> MailAccountRead {
+    MailAccountRead {
+        switches: Some(
+            fauna_client_bridges::MailAccountClient::new(nest)
+                .set_mail_switches_and_reload(receive_enabled, send_enabled)
+                .await
+                .map_err(|e| e.to_string()),
+        ),
+        ..MailAccountRead::none()
+    }
+}
+
+/// Write the scan-result switch (`mail-content-scanning.md` § Per-account
+/// opt-out for visible scan details), then re-read every switch.
+pub(super) async fn set_scan_result_visible(
+    nest: Arc<fauna_client::NestClient>,
+    visible: bool,
+) -> MailAccountRead {
+    MailAccountRead {
+        switches: Some(
+            fauna_client_bridges::MailAccountClient::new(nest)
+                .set_scan_result_visible_and_reload(visible)
+                .await
+                .map_err(|e| e.to_string()),
+        ),
+        ..MailAccountRead::none()
+    }
+}
+
+/// Turn the automatic reply on with `message` (or change it), or off when
+/// `None`, through the shared facade; then re-read the setting.
+pub(super) async fn set_autorespond(
+    nest: Arc<fauna_client::NestClient>,
+    message: Option<String>,
+) -> MailAccountRead {
+    let email = fauna_client_email::EmailClient::new(nest);
+    let written = match &message {
+        Some(message) => email.autorespond_set(message).await,
+        None => email.autorespond_clear().await,
+    };
+    let autorespond = match written {
+        Ok(()) => email.autorespond_get().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    MailAccountRead {
+        autorespond: Some(autorespond),
+        ..MailAccountRead::none()
     }
 }
 
@@ -200,15 +298,15 @@ pub(super) async fn read_forwarding(nest: Arc<fauna_client::NestClient>) -> Mail
 pub(super) async fn set_forward_all_to(
     nest: Arc<fauna_client::NestClient>,
     value: Option<String>,
-) -> MailForwardingRead {
-    MailForwardingRead {
+) -> MailAccountRead {
+    MailAccountRead {
         forward_all_to: Some(
             fauna_client_bridges::MailAccountClient::new(nest)
                 .set_forward_all_to_and_reload(value)
                 .await
                 .map_err(|e| e.to_string()),
         ),
-        forward_per_hour: None,
+        ..MailAccountRead::none()
     }
 }
 
@@ -216,15 +314,15 @@ pub(super) async fn set_forward_all_to(
 pub(super) async fn set_forward_per_hour(
     nest: Arc<fauna_client::NestClient>,
     value: u32,
-) -> MailForwardingRead {
-    MailForwardingRead {
-        forward_all_to: None,
+) -> MailAccountRead {
+    MailAccountRead {
         forward_per_hour: Some(
             fauna_client_bridges::MailAccountClient::new(nest)
                 .set_forward_per_hour_and_reload(value)
                 .await
                 .map_err(|e| e.to_string()),
         ),
+        ..MailAccountRead::none()
     }
 }
 
@@ -254,17 +352,32 @@ impl MailState {
         self.shown_token = None;
     }
 
-    /// Fold a nest-confirmed Forwarding read. The only writer of the two drafts
-    /// and the ceiling — each half reseeds its field from the persisted value
-    /// only when the op touched it and it succeeded; a failed half keeps the
-    /// draft (its error already rides `error-message`).
-    pub(super) fn apply_forwarding(&mut self, read: MailForwardingRead) {
+    /// Fold a nest-confirmed per-account read. The only writer of the drafts,
+    /// the ceiling, the switches, the automatic reply and the quotas — each part
+    /// reseeds its field from the persisted value only when the op touched it
+    /// and it succeeded; a failed part keeps what it had (its error already
+    /// rides `error-message`).
+    pub(super) fn apply_account_read(&mut self, read: MailAccountRead) {
         if let Some(Ok(address)) = read.forward_all_to {
             self.forward_all_to_input = address.unwrap_or_default();
         }
         if let Some(Ok(reply)) = read.forward_per_hour {
             self.forward_per_hour_input = reply.forward_per_hour.to_string();
             self.forward_per_hour_ceiling = Some(reply.forward_per_hour_ceiling);
+        }
+        if let Some(Ok(switches)) = read.switches {
+            self.switches = Some(switches);
+        }
+        if let Some(Ok(autorespond)) = read.autorespond {
+            // An off reply has no body; keep the user's draft rather than
+            // blanking it, so turning the reply back on sends the last words.
+            if autorespond.enabled {
+                self.autorespond_message_input = autorespond.message.clone();
+            }
+            self.autorespond = Some(autorespond);
+        }
+        if let Some(Ok(quotas)) = read.quotas {
+            self.quotas = Some(quotas);
         }
     }
 
@@ -324,7 +437,7 @@ impl MailState {
 /// destructive disable confirm), the rotate-keys inline confirm form
 /// ([`rotate_keys_form`]), the credential-management controls (add, keys info,
 /// rotate), the serve-here toggle, and the MUA-instructions block
-/// ([`mua_elements`]). The `mail-settings-credentials-list` rows are not painted
+/// ([`mua_elements`]). The app-password rows (`connected-apps-item*`) are not painted
 /// here: on tui they render on Connected apps.
 ///
 /// `settings-nav-back` returns to the Settings hub, the same rail-sub-page
@@ -364,6 +477,18 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
     // answer, which is what the e2e reads (`get_attr(id, "state")`): the derived
     // status text is not a proxy for it, because a `Syncing` snapshot of an
     // already-enabled mailbox still reports "syncing" while `enabled` is true.
+    //
+    // On a box that cannot enable mail (the shared machine's
+    // `mail_unavailable_here`, read — never re-derived) the toggle reads
+    // `unavailable` and is disabled, and the notice stands in for the enable
+    // explanation (§ Layout & flow). A mailbox already on keeps its toggle, so
+    // the user can still turn it off.
+    let unavailable = !enabled && snap.is_some_and(|s| s.mail_unavailable_here);
+    let state = match (enabled, unavailable) {
+        (true, _) => "on",
+        (false, true) => "unavailable",
+        (false, false) => "off",
+    };
     els.push(
         Element::checkbox_gesture(
             ids::MAIL_SETTINGS_ENABLED_TOGGLE,
@@ -371,9 +496,17 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
             enabled,
             Gesture::Settings(Action::ToggleMailEnabled),
         )
-        .attr("state", if enabled { "on" } else { "off" }),
+        .attr("state", state)
+        .enabled(!unavailable),
     );
-    els.push(Element::chrome(t::ENABLE_SUBTITLE));
+    if unavailable {
+        els.push(Element::label(
+            ids::MAIL_SETTINGS_UNAVAILABLE_NOTICE,
+            fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE,
+        ));
+    } else {
+        els.push(Element::chrome(t::ENABLE_SUBTITLE));
+    }
 
     // `mail-settings-status-indicator` — the shared label (§ Status indicator:
     // "The decision lives in shared Rust … one source of truth all apps
@@ -504,6 +637,9 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
     // shape: the draft is checked by the shared `forwarding` parsers first, and
     // a committed value repaints from the nest's re-read.
     if enabled {
+        els.extend(account_switch_elements(m));
+        els.extend(autorespond_elements(m));
+        els.extend(quota_elements(m));
         els.extend(forwarding_elements(m));
     }
 
@@ -517,6 +653,94 @@ pub(super) fn mail_elements(state: &SettingsState) -> Vec<Element> {
         .nav_back(),
     );
 
+    els
+}
+
+/// The receive / send / scan-result switches (`mail-policy-config.md` § Tier
+/// 3). Each is non-optimistic, the `mail-settings-serve-here-toggle` shape:
+/// its `state` attr flips only once the nest's re-read lands. Absent until the
+/// first read.
+fn account_switch_elements(m: &MailState) -> Vec<Element> {
+    let Some(switches) = m.switches.as_ref() else {
+        return Vec::new();
+    };
+    let toggle = |id, label, on: bool, action| {
+        Element::checkbox_gesture(id, label, on, Gesture::Settings(action))
+            .attr("state", if on { "on" } else { "off" })
+    };
+    vec![
+        toggle(
+            ids::MAIL_SETTINGS_RECEIVE_TOGGLE,
+            ms::RECEIVE_LABEL,
+            switches.receive_enabled,
+            Action::MailToggleReceive,
+        ),
+        Element::chrome(ms::RECEIVE_SUBTITLE),
+        toggle(
+            ids::MAIL_SETTINGS_SEND_TOGGLE,
+            ms::SEND_LABEL,
+            switches.send_enabled,
+            Action::MailToggleSend,
+        ),
+        Element::chrome(ms::SEND_SUBTITLE),
+        toggle(
+            ids::MAIL_SETTINGS_SCAN_RESULT_VISIBLE_TOGGLE,
+            ms::SCAN_RESULT_VISIBLE_LABEL,
+            switches.scan_result_visible,
+            Action::MailToggleScanResultVisible,
+        ),
+        Element::chrome(ms::SCAN_RESULT_VISIBLE_SUBTITLE),
+    ]
+}
+
+/// The automatic reply: its toggle (absent until the first read) and the
+/// message input, committed on Enter — which also turns the reply on.
+fn autorespond_elements(m: &MailState) -> Vec<Element> {
+    let mut els = Vec::new();
+    if let Some(autorespond) = m.autorespond.as_ref() {
+        els.push(
+            Element::checkbox_gesture(
+                ids::MAIL_SETTINGS_AUTORESPOND_TOGGLE,
+                ms::AUTORESPOND_LABEL,
+                autorespond.enabled,
+                Gesture::Settings(Action::MailToggleAutorespond),
+            )
+            .attr("state", if autorespond.enabled { "on" } else { "off" }),
+        );
+        els.push(Element::chrome(ms::AUTORESPOND_SUBTITLE));
+    }
+    els.push(
+        Element::input_commit(
+            ids::MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT,
+            m.autorespond_message_input.clone(),
+            Field::Settings(SettingsField::MailAutorespondMessage),
+            Gesture::Settings(Action::MailCommitAutorespondMessage),
+        )
+        .labelled(ms::AUTORESPOND_MESSAGE_LABEL),
+    );
+    els
+}
+
+/// The mailbox quota readout and, only when a limit has run out, the notice —
+/// both decided and worded by the shared `quota` helpers.
+fn quota_elements(m: &MailState) -> Vec<Element> {
+    let Some(quotas) = m.quotas.as_ref() else {
+        return Vec::new();
+    };
+    let mut els = vec![Element::label(
+        ids::MAIL_SETTINGS_MAILBOX_QUOTA,
+        fauna_client_mail_settings::mail_quota_text(quotas, fauna_i18n::strings::lookup),
+    )];
+    els.push(Element::label(
+        ids::MAIL_SETTINGS_SUBMISSION_QUOTA,
+        fauna_client_mail_settings::mail_submission_quota_text(quotas, fauna_i18n::strings::lookup),
+    ));
+    if let Some(notice) = fauna_client_mail_settings::mail_over_quota_notice(quotas) {
+        els.push(Element::label(
+            ids::MAIL_SETTINGS_OVER_QUOTA_NOTICE,
+            crate::wizard::localized(&notice),
+        ));
+    }
     els
 }
 

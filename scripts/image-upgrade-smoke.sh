@@ -156,17 +156,17 @@ trap cleanup EXIT
 # Boot $1 (image) as container $2 on the shared volume; wait until /api/v1/health
 # reports status ok (bounded). Ephemeral host port: parallel-safe on dev boxes,
 # harmless on a CI runner. FAUNA_PORT/FAUNA_MODE mirror build-nest-image.yml's fresh
-# smoke (the entrypoint defaults FAUNA_PORT to 3000, so the mapped port MUST be
-# set explicitly — the 2026-06-13 smoke-test lesson).
+# smoke: the nest's listener binds container loopback, so the probe goes through
+# the SNI router's :443, the production path (deployment-threat-model.md § Concern 1a).
 boot_and_wait_healthy() {
     local image=$1 cname=$2 port body
     docker run -d --name "$cname" \
         -v "$VOLUME":/data \
-        -p 127.0.0.1::8443 \
-        -e FAUNA_PORT=8443 \
+        -p 127.0.0.1::443 \
+        -e FAUNA_PORT=3000 \
         -e FAUNA_MODE=public \
         "$image" >/dev/null
-    port=$(docker port "$cname" 8443/tcp | head -1 | sed 's/.*://')
+    port=$(docker port "$cname" 443/tcp | head -1 | sed 's/.*://')
     local deadline=$(( $(date +%s) + TIMEOUT ))
     while :; do
         body=$(curl -fsk "https://127.0.0.1:$port/api/v1/health" 2>/dev/null \

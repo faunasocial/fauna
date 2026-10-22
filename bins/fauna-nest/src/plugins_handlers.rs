@@ -461,6 +461,9 @@ fn install_info(f: InstallFacts<'_>) -> ConsentInstallInfo {
         hosts: f.hosts.to_vec(),
         ingress_paths: crate::plugin_runner::ingress_prefixes(f.ingress),
         development: f.development,
+        // Set on a bind card's projection (`project_consent_row`), which is
+        // what tells the approving app the card is a consent that mints.
+        bind: false,
         ingress_names: crate::plugin_runner::ingress_labels(f.ingress)
             .iter()
             .map(|label| format!("{label}.{}", f.apex))

@@ -1,7 +1,8 @@
 package com.fauna.app.core.feed
 
-import com.fauna.app.core.ApiClient
 import com.fauna.ffi.FfiFeedManager
+import com.fauna.ffi.FfiPostBlobHome
+import com.fauna.ffi.FfiPostBlobHostsInterface
 import com.fauna.ffi.detectMediaC2pa
 
 /**
@@ -21,15 +22,22 @@ import com.fauna.ffi.detectMediaC2pa
  * gated" argument and offers no second entry point. windows draws the same line
  * (`FaunaApp.Core.Helpers.PostMediaOpen`).
  *
- * Split out of [com.fauna.app.ui.viewmodel.FeedVM.fetchBlobBytes] so the routing
+ * Split out of [com.fauna.app.ui.viewmodel.FeedVM.fetchPostBlobBytes] so the routing
  * decision is pinned headlessly; the bitmap decode stays in the composable. The
- * fetch stays app glue — the shared manager is WS-RPC-only and never pulls bulk
- * blob bytes itself, the same division `unlockGatedPost` already draws.
+ * fetch is the shared post-blob plane ([FfiPostBlobHostsInterface]) — the shared
+ * manager is WS-RPC-only and never pulls bulk blob bytes itself, the same
+ * division `unlockGatedPost` already draws. **Which nest the bytes rest on is
+ * the post's, not this app's**: every leg takes the `postBlobHome` the post
+ * names and hands it to the plane unchanged (`feed.md` § The read model →
+ * *A post homed on another nest*).
  */
 object PostMediaOpen {
     /**
-     * GET the blob by [hash], then hand the bytes to the manager.
+     * GET the blob by [hash] from [home] (`null` = this nest) through [hosts],
+     * then hand the bytes to the manager.
      *
+     * @param hosts the session's post-blob planes, or `null` before the nest is
+     *   connected — nothing can be fetched then.
      * @param manager the session's feed manager, or `null` before one is built. A
      *   `null` manager holds no per-post keys, so there is nothing it could open and
      *   the fetched bytes come back unchanged — the answer it would give for an
@@ -39,8 +47,13 @@ object PostMediaOpen {
      *   existing placeholder. Never the ciphertext: AEAD bytes handed to
      *   `BitmapFactory` fail exactly like a corrupt image and hide a real key failure.
      */
-    suspend fun fetchAndOpen(api: ApiClient, manager: FfiFeedManager?, hash: String): ByteArray? {
-        val fetched = runCatching { api.fetchBlobBytes(hash) }.getOrNull() ?: return null
+    suspend fun fetchAndOpen(
+        hosts: FfiPostBlobHostsInterface?,
+        manager: FfiFeedManager?,
+        home: FfiPostBlobHome?,
+        hash: String,
+    ): ByteArray? {
+        val fetched = runCatching { hosts?.get(home, hash) }.getOrNull() ?: return null
         if (manager == null) return fetched
         return manager.openMediaBytes(hash, fetched)
     }
@@ -53,9 +66,16 @@ object PostMediaOpen {
      * through the shared `detectMediaC2pa` export (bytes only, no MIME). Any failure
      * to fetch or open is "no badge".
      */
-    suspend fun verifiedC2pa(api: ApiClient, manager: FfiFeedManager?, hash: String): Boolean {
-        if (!runCatching { api.checkBlobC2pa(hash) }.getOrDefault(false)) return false
-        val bytes = fetchAndOpen(api, manager, hash) ?: return false
+    suspend fun verifiedC2pa(
+        hosts: FfiPostBlobHostsInterface?,
+        manager: FfiFeedManager?,
+        home: FfiPostBlobHome?,
+        hash: String,
+    ): Boolean {
+        if (!runCatching { hosts?.headHasC2pa(home, hash) }.getOrNull().orFalse()) return false
+        val bytes = fetchAndOpen(hosts, manager, home, hash) ?: return false
         return detectMediaC2pa(bytes)
     }
+
+    private fun Boolean?.orFalse(): Boolean = this ?: false
 }

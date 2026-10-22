@@ -49,6 +49,13 @@ struct IdentityCreatedView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
+            // A confirm whose keychain write failed lands back here with the
+            // shared machine's `identity_commit_failed` message.
+            if let error = vm.errorMessage {
+                ErrorBanner(message: error)
+                    .padding(.horizontal, 24)
+            }
+
             Spacer()
 
             Button(L.onboarding.identityCreated.`continue`) {

@@ -566,6 +566,18 @@ pub struct SubscribeRequest {
     /// `None`, and the wrap side validates length + degrades to classical on any mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mlkem_encaps_key: Option<ByteBuf>,
+    /// The author's home nest, when the author is homed on another nest than
+    /// the caller's own (`federated-follow.md` § Decision 2): the caller's nest
+    /// then relays the request there instead of refusing an author it does not
+    /// host. `None` = a same-nest author. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
+    /// The subscriber's own signed `fauna_core::subscription::types::FollowIntent`
+    /// in the embed-as-bytes wire shape, required with `home_nest_url` — what
+    /// the author's nest verifies, since the caller's nest never signs for its
+    /// user. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<EmbedAsBytes>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -596,6 +608,18 @@ pub enum SubscribeReply {
 pub struct UnsubscribeRequest {
     /// Rides as a 32-byte CBOR byte string — `ActorId`'s wire shape.
     pub author_id: ActorId,
+    /// The author's home nest, when the author is homed on another nest than
+    /// the caller's own (`federated-follow.md` § Decision 2): the caller's nest
+    /// then relays the request there instead of refusing an author it does not
+    /// host. `None` = a same-nest author. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
+    /// The subscriber's own signed `fauna_core::subscription::types::FollowIntent`
+    /// in the embed-as-bytes wire shape, required with `home_nest_url` — what
+    /// the author's nest verifies, since the caller's nest never signs for its
+    /// user. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<EmbedAsBytes>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -713,6 +737,12 @@ pub struct MineSubscription {
     /// When the subscription reached its current state: `approved_at` for
     /// `active`, `created_at` for `pending`. Epoch micros (the wire convention).
     pub since: Timestamp,
+    /// The creator's home nest when it is not the caller's own — a follow
+    /// relayed across nests (`federated-follow.md` § Decision 2) — so the page
+    /// can say where the creator lives. `None` = a creator on this nest.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_url: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
@@ -763,6 +793,12 @@ pub struct PendingRequest {
     /// author approves by hand — fail-safe).
     #[serde(default)]
     pub payment_entitled: bool,
+    /// Where the subscriber lives when it is not this nest — the URL of the
+    /// home nest that carried the follow (`federated-follow.md` § Decision 2),
+    /// for display beside the request. `None` = a subscriber on this nest.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).

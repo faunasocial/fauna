@@ -22,10 +22,11 @@ import {
   type ContentRenderVerdict,
   type ContentRender,
   type RegionItem,
-} from '$lib/wasm';
-import { familyStatus, spamGetPreferences, loadHiddenContent } from '$lib/rpc';
-import { regionRender } from '$lib/region.svelte';
-import { registerActorScopedReset } from '$lib/actorScope';
+} from '#lib/wasm';
+import { familyStatus, spamGetPreferences, loadHiddenContent } from '#lib/rpc';
+import { regionRender } from '#lib/region.svelte';
+import { registerActorScopedReset } from '#lib/actorScope';
+import { openRuleEditorForGuardian } from '#lib/wasm';
 
 // The supervised viewer's own guardian content policy (`fauna.family.status`).
 // `null` for an unsupervised account — no floor; only the viewer's own
@@ -147,10 +148,35 @@ export function contentRender(labels: ContentLabelEntry[] | undefined, item: Reg
   return composed ?? { verdict: contentVerdict(labels), placeholder: null };
 }
 
+/** The guardian's own reason, verbatim, when a rule of the guardian's document
+ *  drove `render`'s `block`/`collapse` — `null` for a floor, an unreadable
+ *  document, the viewer's own threshold or any other source (`nest-rules.md`
+ *  § The shared rule editor → *The reason is the member's to read*). The shared
+ *  engine decides which; the surface only paints it beside the fixed frame. */
+export function guardianReasonOf(render: ContentRender): string | null {
+  const reason = render.guardianPlaceholder?.reason;
+  return reason ? reason : null;
+}
+
 /** The cached guardian content policy (or `null` for an unsupervised viewer) — the
  *  Guardian Notify buffer reads it to attribute enforcement events to categories. */
 export function guardianContentPolicy(): ContentPolicyValue | null {
   return wardContentPolicy;
+}
+
+/** How many rules the guardian's document holds on this device, read through the
+ *  shared editor's own view (never counted here) — the e2e agent's
+ *  `ward_rule_document_rules` state field; `null` for an unsupervised viewer or a
+ *  policy with no document. */
+export function wardRuleDocumentRules(): number | null {
+  const policy = wardContentPolicy;
+  if (!policy || !policy.document) return null;
+  const editor = openRuleEditorForGuardian(policy);
+  try {
+    return editor.view().rows.length;
+  } finally {
+    editor.free();
+  }
 }
 
 /** Whether the guardian's Guardian Notify knob is on — the buffer counts + reports

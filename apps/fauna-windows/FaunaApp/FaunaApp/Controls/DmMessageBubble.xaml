@@ -186,24 +186,21 @@
                 Visibility="Collapsed"
                 ToolTipService.ToolTip="{loc:Localize Key=conversations/detail/badge_encrypted}" />
             <TextBlock
-                x:Name="VerifiedBadge"
-                AutomationProperties.AutomationId="{x:Bind ids:Ids.VerifiedBadge}"
-                Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
-                FontSize="10"
-                Visibility="Collapsed"
-                VerticalAlignment="Center" />
-            <TextBlock
                 x:Name="SignedBadge"
                 AutomationProperties.AutomationId="{x:Bind ids:Ids.SignedBadge}"
                 Text="&#xED2E;" FontFamily="Segoe MDL2 Assets"
                 FontSize="10"
                 Visibility="Collapsed"
-                VerticalAlignment="Center" />
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/detail/badge_signed}" />
             <TextBlock
-                x:Name="SignatureText"
+                x:Name="VerifiedBadge"
+                AutomationProperties.AutomationId="{x:Bind ids:Ids.VerifiedBadge}"
+                Text="&#xE73E;" FontFamily="Segoe MDL2 Assets"
                 FontSize="10"
-                Opacity="0.5"
-                VerticalAlignment="Center" />
+                Visibility="Collapsed"
+                VerticalAlignment="Center"
+                ToolTipService.ToolTip="{loc:Localize Key=conversations/detail/badge_verified}" />
         </StackPanel>
         <!-- Per-message bubble timestamp (today → local HH:MM / Yesterday /
              weekday / older → date), formatted by the shared bucketer

@@ -202,9 +202,15 @@ fn message(id: &str, ts: i64) -> MessageSnapshot {
         deleted: false,
         is_own: false,
         legal_takedown_ref: None,
+        admin_block_reason: None,
         labels: vec![],
         plane_ref: None,
         can_delete: false,
+        undelivered: false,
+        warmup_hold: None,
+        scan_result_lines: Vec::new(),
+        delivered_to: None,
+        withheld: None,
     }
 }
 

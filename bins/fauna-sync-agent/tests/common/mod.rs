@@ -351,10 +351,10 @@ pub async fn start_nest() -> (String, Arc<fauna_nest::routes::AppState>) {
 
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
 
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    // Outlives the test process; the temp root is reaped by the OS.
-    std::mem::forget(blob_dir);
+    // The blob store lives under the state's scratch root, removed when the
+    // state (held by the spawned server and the returned `Arc`) drops.
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc = Arc::new(
         fauna_nest::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
             .unwrap(),
@@ -404,7 +404,7 @@ pub async fn start_nest() -> (String, Arc<fauna_nest::routes::AppState>) {
             ..Default::default()
         },
         nest_signing_key: Some(deployment_key()),
-        ..AppState::for_test(db)
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());

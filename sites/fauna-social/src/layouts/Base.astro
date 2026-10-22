@@ -1,0 +1,71 @@
+---
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+import '@fontsource-variable/nunito';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description: string;
+  /** Keep a page out of search indexes (the 404 page, the talk slides). */
+  noindex?: boolean;
+  /** A full-screen page with no site header or footer — the talk slides
+      under src/pages/talks/, which are shown on a screen, not browsed. */
+  standalone?: boolean;
+  /** Pin the page to the light palette (global.css guards the dark tokens
+      behind `:root:not(.daylight)`). The talk slides use it: they are
+      presented in a lit room and must look the same whatever the presenting
+      laptop's colour scheme prefers. */
+  daylight?: boolean;
+}
+
+const { title, description, noindex = false, standalone = false, daylight = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+/* Crawlers do not resolve a relative og:image — it must carry a full origin.
+   The card itself is generated from the brand mark. */
+const ogImage = new URL('/og-image.png', Astro.site);
+---
+<!DOCTYPE html>
+<html lang="en" class:list={[{ daylight }]}>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content={description} />
+  {noindex && <meta name="robots" content="noindex, follow" />}
+  <link rel="canonical" href={canonical} />
+  <meta property="og:title" content={title} />
+  <meta property="og:description" content={description} />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content={canonical} />
+  <meta property="og:site_name" content="Fauna Social" />
+  <meta property="og:locale" content="en" />
+  <meta property="og:image" content={ogImage} />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:alt" content="Fauna's beaver mark" />
+  {/* `summary` would render this 1200x630 card as a small square thumbnail. */}
+  <meta name="twitter:card" content="summary_large_image" />
+  {/* Tells the browser both themes exist, so form controls, scrollbars and the
+      canvas behind the page follow the dark palette instead of staying light —
+      except on a daylight page, which declares only the light one. */}
+  <meta name="color-scheme" content={daylight ? 'light' : 'light dark'} />
+  {daylight ? (
+    <meta name="theme-color" content="#faf7ef" />
+  ) : (
+    <>
+      <meta name="theme-color" content="#faf7ef" media="(prefers-color-scheme: light)" />
+      <meta name="theme-color" content="#20251e" media="(prefers-color-scheme: dark)" />
+    </>
+  )}
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <title>{title}</title>
+</head>
+<body>
+  {!standalone && <Header />}
+  <main id="main">
+    <slot />
+  </main>
+  {!standalone && <Footer />}
+</body>
+</html>

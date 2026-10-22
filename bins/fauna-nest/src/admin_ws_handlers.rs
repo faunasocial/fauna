@@ -88,6 +88,7 @@ use fauna_protocol::admin::{
     AdminStatusRequest,
     AdminTier,
     AdminTierCreateRequest,
+    AdminTierDeleteRequest,
     AdminTierUpdateRequest,
     AdminTiersListReply,
     AdminTiersListRequest,
@@ -118,7 +119,7 @@ use fauna_core::secret::SecretString;
 use zeroize::Zeroizing;
 
 use crate::db::nest_rotation::RotationRefusal;
-use crate::db::{InviteCodeRow, InviteRequestRow, TierRow, UserRow};
+use crate::db::{InviteCodeRow, InviteRequestRow, TierDeleteOutcome, TierRow, UserRow};
 use crate::pending_actions::ActionType;
 use crate::registration::validate_handle;
 use crate::routes::AppState;
@@ -251,7 +252,12 @@ fn push_account_updated(state: &AppState, target: &[u8; 32], change: &str) {
 /// inspected only `to_string()` and so silently `500`ed on a duplicate; the
 /// kinds return the intended conflict.)
 fn unique_conflict(e: anyhow::Error, conflict_msg: &'static str) -> RpcError {
-    if format!("{e:#}").contains("UNIQUE") {
+    // A handle an alias, forwarder or list holds is taken like a UNIQUE one
+    // (`mail-aliases.md` § Cross-user uniqueness — the writer refuses it).
+    if format!("{e:#}").contains("UNIQUE")
+        || e.downcast_ref::<crate::db::mail_aliases::HandleHeldByAlias>()
+            .is_some()
+    {
         conflict(conflict_msg)
     } else {
         internal(e)
@@ -361,7 +367,7 @@ async fn require_registered_user(state: &AppState, target: &[u8; 32]) -> Result<
     // that can never log in again. Granting it would count dead weight in
     // `admin_count` and the removal quorum, and the row would later leave with
     // the successor's deletion chain rather than through `admin.remove`'s floor
-    // (`admin.md` § Admin continuity and succession). The successor is who
+    // (`admin.md` § Cutting a user off, the `Admin ⊇ User` paragraph). The successor is who
     // holds the account now.
     if crate::auth_core::successor_of(state, target)
         .await
@@ -1310,6 +1316,38 @@ fn tiers_update_handler() -> RpcHandler {
     })
 }
 
+/// `fauna.admin.tiers.delete` — remove a tier nobody is on
+/// (`docs/goal/behavior/admin.md` § 3. Settings → *Removing a tier*). `free`
+/// is never removable: the nest itself names it (a member admitted without an
+/// invite code lands on it, and it is [`DEFAULT_LAPSE_TIER`]), so removing it
+/// would break every later admission even with nobody on it today.
+fn tiers_delete_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.admin.tiers.delete").await?;
+            let req: AdminTierDeleteRequest = decode(&payload).map_err(malformed)?;
+            if req.name == DEFAULT_LAPSE_TIER {
+                return Err(conflict("the nest's default tier is never removed"));
+            }
+            match state.db.delete_tier(&req.name).await.map_err(internal)? {
+                TierDeleteOutcome::Deleted => {}
+                TierDeleteOutcome::NotFound => return Err(not_found("tier not found")),
+                TierDeleteOutcome::InUse(why) => {
+                    return Err(conflict(format!("tier still in use: {why}")));
+                }
+            }
+            let _ = state
+                .db
+                .audit(Some(&actor_id[..]), "tier.delete", Some(&req.name), None)
+                .await;
+            encode_reply(&AdminOkReply {
+                ok: true,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
 // ── Invite codes (≡ /admin/api/invite-codes) ─────────────────────────────────
 
 fn invite_codes_list_handler() -> RpcHandler {
@@ -1884,19 +1922,23 @@ fn stats_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.admin.stats").await?;
-            let _req: AdminStatsRequest = decode(&payload).map_err(malformed)?;
-
-            let s = state.db.get_stats().await.map_err(internal)?;
-            encode_reply(&AdminStatsReply {
-                total_users: s.total_users,
-                users_by_tier: s.users_by_tier,
-                suspended_users: s.suspended_users,
-                total_inbox_bytes: s.total_inbox_bytes,
-                total_storage_bytes: s.total_storage_bytes,
-                ws_connections: state.ws.connection_count() as i64,
-                extra: Default::default(),
-            })
+            stats_reply(&state, &payload).await
         })
+    })
+}
+
+/// The dashboard's counts.
+async fn stats_reply(state: &AppState, payload: &[u8]) -> Result<bytes::Bytes, RpcError> {
+    let _req: AdminStatsRequest = decode(payload).map_err(malformed)?;
+    let s = state.db.get_stats().await.map_err(internal)?;
+    encode_reply(&AdminStatsReply {
+        total_users: s.total_users,
+        users_by_tier: s.users_by_tier,
+        suspended_users: s.suspended_users,
+        total_inbox_bytes: s.total_inbox_bytes,
+        total_storage_bytes: s.total_storage_bytes,
+        ws_connections: state.ws.connection_count() as i64,
+        extra: Default::default(),
     })
 }
 
@@ -1906,25 +1948,29 @@ fn status_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.admin.status").await?;
-            let _req: AdminStatusRequest = decode(&payload).map_err(malformed)?;
-
-            let update_available = match state.update_status.borrow().clone() {
-                Some(fauna_update::UpdateStatus::Available {
-                    version,
-                    release_url,
-                }) => Some(AdminUpdateAvailable {
-                    version,
-                    url: release_url,
-                    extra: Default::default(),
-                }),
-                _ => None,
-            };
-            encode_reply(&AdminStatusReply {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                update_available,
-                extra: Default::default(),
-            })
+            status_reply(&state, &payload)
         })
+    })
+}
+
+/// The running version and the update notice.
+fn status_reply(state: &AppState, payload: &[u8]) -> Result<bytes::Bytes, RpcError> {
+    let _req: AdminStatusRequest = decode(payload).map_err(malformed)?;
+    let update_available = match state.update_status.borrow().clone() {
+        Some(fauna_update::UpdateStatus::Available {
+            version,
+            release_url,
+        }) => Some(AdminUpdateAvailable {
+            version,
+            url: release_url,
+            extra: Default::default(),
+        }),
+        _ => None,
+    };
+    encode_reply(&AdminStatusReply {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        update_available,
+        extra: Default::default(),
     })
 }
 
@@ -2331,11 +2377,20 @@ fn folder_add_member_handler() -> RpcHandler {
             let device_id = bytes32_from_wire(&req.device_id, "device_id")?;
             let fs =
                 resolve_folder_by_name(&state, &req.name, &req.name_hash, &req.actor_id).await?;
+            // The user door's write, keyed by the FOLDER OWNER (never the
+            // admin caller): a seat admits only a device the owner has
+            // registered (`devices.md` § Removing a Device, step 4).
             state
                 .db
-                .add_folder_member(fs.id, &device_id, &req.flags)
+                .set_folder_place_flags(fs.id, &fs.actor_id, &device_id, &req.flags)
                 .await
-                .map_err(internal)?;
+                .map_err(|e| {
+                    if format!("{e:#}").contains("not owned") {
+                        not_found("device not registered to the folder's owner")
+                    } else {
+                        internal(e)
+                    }
+                })?;
             encode_reply(&AdminOkReply {
                 ok: true,
                 extra: Default::default(),
@@ -2493,6 +2548,7 @@ fn factory_reset_handler() -> RpcHandler {
             // MTA-down reconcile must match what the running supervisor was gated
             // on, not the boot seed.
             let node_mode = *state.node_mode.read().await;
+            let scanners = state.content_scanners;
             // spawn-ok(cross-generation-messenger): schedules the factory-reset process exit — supervision boundary, not a generation task
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(750)).await;
@@ -2508,10 +2564,12 @@ fn factory_reset_handler() -> RpcHandler {
                 // boot → fresh `request_enrollment`. Best-effort (socket absent on
                 // a dev box / e2e harness is a no-op). All protocols off → the
                 // MDA (IMAP + CalDAV + CardDAV + WebDAV) goes down too. (All off
-                // ⇒ the node_mode gate is moot here, but the signature carries
-                // it.)
-                crate::mail_enable::reconcile_supervisor(node_mode, false, false, false, false)
-                    .await;
+                // ⇒ the node_mode and scanner gates are moot here, but the
+                // signature carries them.)
+                crate::mail_enable::reconcile_supervisor(
+                    node_mode, scanners, false, false, false, false,
+                )
+                .await;
                 if let Err(e) = db.flush().await {
                     tracing::error!("factory_reset: db flush before exit failed: {e}");
                 }
@@ -2549,6 +2607,88 @@ fn factory_reset_handler() -> RpcHandler {
 /// All `forbid_replay = false` @5 s — except `deployment_seed.rotate` @60 s (its
 /// transaction re-keys the KEK satellites). Replay semantics + rationale: see
 /// `KindRegistry::register_admin_kinds`.
+/// This module's admin-plane kinds for an admin-consented principal — each
+/// its actor handler behind [`crate::principal_handlers::admin_twin`]
+/// (`apps/bridges.md` § Capability-allowlist enforcement → rule (e)): the
+/// dashboard's two reads, the users page's reads and non-sovereign writes,
+/// the settings page's tier definitions and membership designations, the
+/// nest page's services, worker, cluster and garbage-collection kinds, and
+/// the logs page's three reads (`authorization-server.md` § Scope grammar →
+/// *The admin arms* names the set; the sovereign ones — the factory reset,
+/// the deployment seed, custody hosting — are absent).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, RpcHandler); 32] = [
+        ("fauna.admin.stats", stats_handler()),
+        ("fauna.admin.status", status_handler()),
+        ("fauna.admin.users.list", list_handler()),
+        ("fauna.admin.users.get", get_handler()),
+        ("fauna.admin.users.create", create_handler()),
+        ("fauna.admin.users.update", update_handler()),
+        ("fauna.admin.users.suspend", suspend_handler()),
+        (
+            "fauna.admin.users.cancel_eviction",
+            cancel_eviction_handler(),
+        ),
+        ("fauna.admin.evictions.list", evictions_list_handler()),
+        ("fauna.admin.tiers.list", tiers_list_handler()),
+        ("fauna.admin.invite_codes.list", invite_codes_list_handler()),
+        (
+            "fauna.admin.invite_codes.create",
+            invite_codes_create_handler(),
+        ),
+        (
+            "fauna.admin.invite_codes.delete",
+            invite_codes_delete_handler(),
+        ),
+        (
+            "fauna.admin.invite_requests.list",
+            invite_requests_list_handler(),
+        ),
+        (
+            "fauna.admin.invite_requests.approve",
+            invite_requests_approve_handler(),
+        ),
+        (
+            "fauna.admin.invite_requests.deny",
+            invite_requests_deny_handler(),
+        ),
+        ("fauna.admin.admins.list", admins_list_handler()),
+        (
+            "fauna.admin.pending_actions.list",
+            pending_actions_list_handler(),
+        ),
+        ("fauna.admin.tiers.create", tiers_create_handler()),
+        ("fauna.admin.tiers.update", tiers_update_handler()),
+        ("fauna.admin.tiers.delete", tiers_delete_handler()),
+        (
+            "fauna.admin.membership_tiers.list",
+            membership_tiers_list_handler(),
+        ),
+        (
+            "fauna.admin.membership_tiers.set",
+            membership_tiers_set_handler(),
+        ),
+        (
+            "fauna.admin.membership_tiers.clear",
+            membership_tiers_clear_handler(),
+        ),
+        ("fauna.admin.services.list", services_list_handler()),
+        ("fauna.admin.services.update", services_update_handler()),
+        ("fauna.admin.worker.status", worker_status_handler()),
+        ("fauna.admin.cluster.status", cluster_status_handler()),
+        ("fauna.admin.gc", gc_handler()),
+        ("fauna.admin.logs", logs_handler()),
+        ("fauna.admin.audit.list", audit_list_handler()),
+        ("fauna.admin.audit.integrity", audit_integrity_handler()),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_admin_handlers(b: &mut RpcRouterBuilder) {
     fn meta(handler: RpcHandler) -> RpcKindMeta {
         RpcKindMeta {
@@ -2579,6 +2719,7 @@ pub fn register_admin_handlers(b: &mut RpcRouterBuilder) {
     b.add("fauna.admin.tiers.list", meta(tiers_list_handler()));
     b.add("fauna.admin.tiers.create", meta(tiers_create_handler()));
     b.add("fauna.admin.tiers.update", meta(tiers_update_handler()));
+    b.add("fauna.admin.tiers.delete", meta(tiers_delete_handler()));
     b.add(
         "fauna.admin.membership_tiers.list",
         meta(membership_tiers_list_handler()),

@@ -505,6 +505,10 @@ pub mod onboarding {
         pub const TAGLINE: &str = "Private messaging and file sync,\nbuilt on your own server.";
     }
 
+    pub mod terms {
+        pub const NOTICE: &str = "By continuing you agree to the Fauna terms and content guidelines";
+    }
+
     pub mod launch {
         pub const TRANSIENT_ERROR: &str = "Couldn't reach your nest. Check your connection and try again.";
 
@@ -608,11 +612,11 @@ pub mod onboarding {
     pub mod identity_created {
         pub const TITLE: &str = "Identity Created";
 
-        pub const DESC: &str = "Your new identity has been generated. Save this secret key — it's your only way to recover your account.";
+        pub const DESC: &str = "Your new identity has been generated. Save this secret key — it's how you sign in on another device.";
 
         pub const SECRET_KEY_LABEL: &str = "Your secret key:";
 
-        pub const WARNING: &str = "Write this down or save it in a password manager. If you lose it, your account cannot be recovered.";
+        pub const WARNING: &str = "Write this down or save it in a password manager. Without it or a recovery kit, your account cannot be recovered.";
 
         pub const CONTINUE: &str = "Continue";
 
@@ -648,7 +652,7 @@ pub mod onboarding {
 
         pub const ACCOUNT_NEEDED: &str = "Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.";
 
-        pub const ACCOUNT_MALFORMED: &str = "Enter the full handle including the domain, like alice@fauna.social — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.";
+        pub const ACCOUNT_MALFORMED: &str = "Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.";
 
         pub const ACCOUNT_UNKNOWN: &str = "No account named {account} exists on that nest.";
         pub fn account_unknown(account: &str) -> String {
@@ -751,9 +755,9 @@ pub mod onboarding {
 
         pub const SELFHOSTED_TITLE: &str = "Install on your own server";
 
-        pub const SELFHOSTED_DESC: &str = "Run the installer below on a fresh box. It carries your saved deployment identity, so the rebuilt box re-presents the same nest identity and your pinned devices reconnect automatically once its DNS is re-pointed.";
+        pub const SELFHOSTED_DESC: &str = "Put your server's key, from the line below, into the setup file of a fresh box before you start it for the first time — the setup guide's section on rebuilding after a total loss shows where it goes and how to write it. The rebuilt box is then the same nest, and your installed Fauna apps reconnect to it automatically once it's back online, with no warning that its identity changed.";
 
-        pub const SELFHOSTED_COMMAND_PENDING: &str = "The installer command with your recovery seed will appear here.";
+        pub const SELFHOSTED_COMMAND_PENDING: &str = "The line with your server's key will appear here.";
 
         pub const SELFHOSTED_CONTINUE: &str = "Done";
 
@@ -1137,9 +1141,19 @@ pub mod onboarding {
 
         pub const UPDATE_CHANNEL_DEV_DESC_SAME_VERSION: &str = "The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.";
 
+        pub const UPDATE_CHANNEL_STABLE_DESC_NO_BUILD: &str = "No build has been published on this channel yet — choose another channel.";
+
+        pub const UPDATE_CHANNEL_TEST_DESC_NO_BUILD: &str = "No build has been published on this channel yet — choose another channel.";
+
+        pub const UPDATE_CHANNEL_DEV_DESC_NO_BUILD: &str = "No build has been published on this channel yet — choose another channel.";
+
         pub const MAIL_MODE_LABEL: &str = "Run mail on this box";
 
         pub const MAIL_MODE_DESC: &str = "A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS.";
+
+        pub const SSH_DOOR_LABEL: &str = "Keep an SSH door to this server";
+
+        pub const SSH_DOOR_WARNING: &str = "This reduces your server's security. An SSH door is a second way into the server that Fauna never needs. The key is made on this device and Fauna keeps no copy; the door admits only the address you set the server up from. You alone are responsible for the key, that address and anything done through the door — changes made through it are not supported and may be undone by updates. The door cannot be added later.";
     }
 
     pub mod nest_provisioning {
@@ -1178,6 +1192,20 @@ pub mod onboarding {
         pub fn bom_line_domain(label: &str, price: &str, renewal: &str) -> String {
             format!("{label}: {price} for the first year, then {renewal}/year")
         }
+
+        pub const SSH_DOOR_COMMAND_TEMPLATE: &str = "SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})";
+        pub fn ssh_door_command_template(command: &str, address: &str, path: &str, fingerprint: &str) -> String {
+            format!("SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})")
+        }
+
+        pub const SSH_DOOR_COMMAND_NO_PATH_TEMPLATE: &str = "SSH door: {command} (admits only {address}; fingerprint {fingerprint})";
+        pub fn ssh_door_command_no_path_template(command: &str, address: &str, fingerprint: &str) -> String {
+            format!("SSH door: {command} (admits only {address}; fingerprint {fingerprint})")
+        }
+
+        pub const SSH_DOOR_ADDRESS_UNKNOWN: &str = "the address you set the server up from";
+
+        pub const SSH_DOOR_SAVE_KEY_BUTTON: &str = "Save the key file";
     }
 
     pub mod dns_post_instructions {
@@ -1524,13 +1552,13 @@ pub mod launch {
 pub mod credential_store {
     pub const SECTION_TITLE: &str = "Credential store";
 
-    pub const STATUS_SEALED: &str = "Your sign-in keys rest in a file on this device, sealed under your passphrase.";
+    pub const STATUS_SEALED: &str = "Your sign-in keys are kept on this device, encrypted with your passphrase.";
 
     pub const REKEY_BUTTON: &str = "Change passphrase…";
 
     pub const REKEY_TITLE: &str = "Change passphrase";
 
-    pub const SEED_NUDGE: &str = "Back up your recovery seed first (Identity export, above). The sealed store has no recovery path of its own — if the new passphrase is forgotten, the seed is the only way back into your account.";
+    pub const SEED_NUDGE: &str = "Back up your identity first (Export Identity, above). Nobody can reset a forgotten passphrase — if you forget the new one and nothing else opens the store, your identity comes back only from another device where you're signed in, an exported copy of your key, or your recovery kit.";
 
     pub const CURRENT_LABEL: &str = "Current passphrase";
 
@@ -1546,22 +1574,35 @@ pub mod credential_store {
 
     pub const ERROR_MISMATCH: &str = "The two new entries don't match";
 
-    pub const ERROR_WRONG: &str = "Wrong passphrase, or the store file is corrupt";
+    pub const ERROR_WRONG: &str = "Wrong passphrase, or the stored identity is damaged";
 
     pub const ERROR_FAILED: &str = "Could not change the passphrase: {message}";
     pub fn error_failed(message: &str) -> String {
         format!("Could not change the passphrase: {message}")
     }
+
+    pub const PASSKEY_ADD_BUTTON: &str = "Add a passkey";
+
+    pub const PASSKEY_REMOVE_BUTTON: &str = "Remove the passkey";
+
+    pub const PASSKEY_ERROR: &str = "Could not change the passkey: {message}";
+    pub fn passkey_error(message: &str) -> String {
+        format!("Could not change the passkey: {message}")
+    }
+
+    pub const PASSKEY_STATUS: &str = "A passkey also unlocks your encrypted sign-in keys in this browser. Your passphrase still works.";
+
+    pub const PASSKEY_EXPLAINER: &str = "Add a passkey to unlock this browser's encrypted sign-in keys with your device's screen lock or a security key instead of typing your passphrase. Your passphrase keeps working, and your nest isn't involved.";
 }
 
-pub mod tui_unlock {
+pub mod unlock {
     pub const UNLOCK_TITLE: &str = "Unlock your credentials";
 
     pub const UNLOCK_PROMPT: &str = "Your credentials are protected by a passphrase on this machine. Enter it to sign in.";
 
     pub const CREATE_TITLE: &str = "Protect your credentials";
 
-    pub const CREATE_PROMPT: &str = "No secure OS key store is reachable here, so your sign-in keys will rest in a file protected by a passphrase. Choose one to continue — you'll need it at every launch.";
+    pub const CREATE_PROMPT: &str = "There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.";
 
     pub const PASSPHRASE_LABEL: &str = "Passphrase";
 
@@ -1575,12 +1616,27 @@ pub mod tui_unlock {
 
     pub const ERROR_MISMATCH: &str = "The two entries don't match";
 
-    pub const ERROR_WRONG: &str = "Wrong passphrase, or the store file is corrupt";
+    pub const ERROR_WRONG: &str = "Wrong passphrase, or the stored identity is damaged";
 
     pub const ERROR_FAILED: &str = "Could not open the credential store: {message}";
     pub fn error_failed(message: &str) -> String {
         format!("Could not open the credential store: {message}")
     }
+
+    pub const RESET_BUTTON: &str = "Forgot the passphrase? Start over";
+
+    pub const RESET_CONFIRM_BUTTON: &str = "Erase this browser's sign-in keys and start over";
+
+    pub const RESET_EXPLAINER: &str = "Starting over erases this browser's copy of your sign-in keys and nothing else. You can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit.";
+
+    pub const PASSKEY_BUTTON: &str = "Unlock with a passkey";
+
+    pub const PASSKEY_ERROR: &str = "Could not open with the passkey: {message}";
+    pub fn passkey_error(message: &str) -> String {
+        format!("Could not open with the passkey: {message}")
+    }
+
+    pub const PASSKEY_UNAVAILABLE: &str = "This browser or authenticator can't use a passkey to unlock your sign-in keys. Your passphrase still works.";
 }
 
 pub mod tui_nav_hints {
@@ -1626,6 +1682,8 @@ pub mod tui_settings {
 
 pub mod feed {
     pub const COMPOSE_EMPTY: &str = "Post cannot be empty";
+
+    pub const VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE: &str = "Open this video externally?";
 
     pub const COMPOSE_GATE_PREVIEW_EMPTY: &str = "Add a public teaser for a gated post";
 
@@ -1920,6 +1978,8 @@ pub mod feed {
 
         pub const BUY_BUTTON: &str = "Buy";
 
+        pub const PURCHASE_PENDING: &str = "Purchase pending — waiting for the author's approval";
+
         pub const OPEN_RICH_COMPOSE: &str = "Open rich compose dialog";
 
         pub const POSTING: &str = "Posting…";
@@ -2154,6 +2214,19 @@ pub mod conversations {
             format!("Could not withdraw this invitation: {message}")
         }
 
+        pub const ERROR_ROOM_SEARCH: &str = "Could not search this room: {message}";
+        pub fn error_room_search(message: &str) -> String {
+            format!("Could not search this room: {message}")
+        }
+
+        pub const ROOM_SEARCH_HIT_PENDING: &str = "Not on this device yet";
+
+        pub const ROOM_SEARCH_NO_RESULTS: &str = "Nothing in this room matches.";
+
+        pub const ROOM_SEARCH: &str = "Search this room";
+
+        pub const ROOM_SEARCH_PLACEHOLDER: &str = "Search this room's messages and posts";
+
         pub const ROOM_CLASS_END_TO_END: &str = "End-to-end encrypted";
 
         pub const ROOM_CLASS_COMMUNITY: &str = "Community — searched and labelled by the home nest";
@@ -2171,6 +2244,24 @@ pub mod conversations {
         pub const ROOM_NOTICE_MODERATION_UNVERIFIED: &str = "Some moderation in this room couldn't be verified on this device, so the affected messages are still shown.";
 
         pub const ROOM_NOTICE_AWAITING_KEY: &str = "Waiting for a room key — messages will appear once an owner or admin keys you in.";
+
+        pub const ROOM_NOTICE_BRIDGE_DISCONNECTED: &str = "The app that carried this conversation is no longer connected. You can still read it, but you can't send.";
+
+        pub const DM_MESSAGE_UNDELIVERED: &str = "Not delivered — the app that carried this conversation was disconnected before it went out.";
+
+        pub const DM_MESSAGE_WARMUP_DEFERRED: &str = "Delivery deferred until {date} per IP warm-up schedule.";
+        pub fn dm_message_warmup_deferred(date: &str) -> String {
+            format!("Delivery deferred until {date} per IP warm-up schedule.")
+        }
+
+        pub const DM_MESSAGE_WARMUP_QUEUE_NEXT: &str = "Next in the queue.";
+
+        pub const DM_MESSAGE_WARMUP_QUEUE_ONE: &str = "1 message ahead in the queue.";
+
+        pub const DM_MESSAGE_WARMUP_QUEUE: &str = "{count} messages ahead in the queue.";
+        pub fn dm_message_warmup_queue(count: &str) -> String {
+            format!("{count} messages ahead in the queue.")
+        }
 
         pub const ROOM_ROLE_OWNER: &str = "owner";
 
@@ -2310,6 +2401,45 @@ pub mod conversations {
 
         pub const TOPIC_TOGGLE_ADD: &str = "+ topic";
     }
+
+    pub mod scan_result {
+        pub const CLAMAV_CLEAN: &str = "ClamAV: clean";
+
+        pub const CLAMAV_INFECTED: &str = "ClamAV: infected ({signature})";
+        pub fn clamav_infected(signature: &str) -> String {
+            format!("ClamAV: infected ({signature})")
+        }
+
+        pub const CLAMAV_ERROR: &str = "ClamAV: the scan failed";
+
+        pub const CLAMAV_BYPASSED_OVERSIZE: &str = "ClamAV: not scanned (too large)";
+
+        pub const CLAMAV_NOT_SCANNED: &str = "ClamAV: not scanned";
+
+        pub const CLAMAV_UNKNOWN: &str = "ClamAV: unrecognised verdict";
+
+        pub const RSPAMD_SCORE: &str = "Rspamd score: {score}";
+        pub fn rspamd_score(score: &str) -> String {
+            format!("Rspamd score: {score}")
+        }
+
+        pub const RSPAMD_SCORE_RULES: &str = "Rspamd score: {score} ({rules})";
+        pub fn rspamd_score_rules(score: &str, rules: &str) -> String {
+            format!("Rspamd score: {score} ({rules})")
+        }
+
+        pub const RSPAMD_NOT_SCANNED: &str = "Rspamd: not scanned";
+
+        pub const ACTION_DELIVERED: &str = "Action: delivered to Inbox";
+
+        pub const ACTION_JUNKED: &str = "Action: delivered to Junk";
+
+        pub const ACTION_TAGGED: &str = "Action: delivered with scan headers added";
+
+        pub const ACTION_REJECTED_MALWARE: &str = "Action: rejected as malware";
+
+        pub const ACTION_UNKNOWN: &str = "Action: unrecognised";
+    }
 }
 
 pub mod contacts {
@@ -2322,11 +2452,13 @@ pub mod contacts {
     pub mod find_user {
         pub const TITLE: &str = "Find User";
 
-        pub const DESCRIPTION: &str = "Enter a handle (e.g. alice@fauna.social) or actor ID hex to find a user.";
+        pub const DESCRIPTION: &str = "Enter a handle (e.g. alice@example.com) or actor ID hex to find a user.";
 
-        pub const PLACEHOLDER: &str = "alice@fauna.social or actor ID hex";
+        pub const PLACEHOLDER: &str = "alice@example.com or actor ID hex";
 
         pub const FIND: &str = "Find";
+
+        pub const OPEN_PROFILE: &str = "View profile";
     }
 
     pub const MESSAGE: &str = "Message";
@@ -2338,6 +2470,8 @@ pub mod contacts {
     pub const ASK_GUARDIAN: &str = "Ask your guardian";
 
     pub const CONTACT_REQUEST_PENDING: &str = "Asked — waiting for your guardian";
+
+    pub const KNOCK_GUARDIAN_PENDING: &str = "Waiting for your guardian's approval";
 
     pub mod message_requests {
         pub const TITLE: &str = "Message Requests";
@@ -2725,7 +2859,7 @@ pub mod groups {
 
     pub const INVITE_MEMBER: &str = "Invite Member";
 
-    pub const INVITE_PLACEHOLDER: &str = "alice@fauna.social or actor ID";
+    pub const INVITE_PLACEHOLDER: &str = "alice@example.com or actor ID";
 
     pub const INVITE_NEST_URL_PLACEHOLDER: &str = "Nest URL (optional, for cross-nest)";
 
@@ -2814,6 +2948,8 @@ pub mod atproto_settings {
 
     pub const MINT_BUTTON: &str = "New app credential";
 
+    pub const MINT_DM_ACCESS_LABEL: &str = "Let this app password read and send my Bluesky direct messages";
+
     pub const DEFAULT_CREDENTIAL_LABEL: &str = "App credential {count}";
     pub fn default_credential_label(count: &str) -> String {
         format!("App credential {count}")
@@ -2834,6 +2970,8 @@ pub mod atproto_settings {
     }
 
     pub const CREDENTIAL_NEVER_USED: &str = "Never used";
+
+    pub const CREDENTIAL_DM_ACCESS: &str = "Direct messages allowed";
 
     pub const CONNECTED_APPS_HEADING: &str = "Connected apps";
 
@@ -3283,6 +3421,15 @@ pub mod bridges {
 
     pub const REMOVE_FOLLOW: &str = "Remove Follow";
 
+    pub const FOLLOW_REQUESTS: &str = "Follow requests ({count})";
+    pub fn follow_requests(count: &str) -> String {
+        format!("Follow requests ({count})")
+    }
+
+    pub const APPROVE_FOLLOW_REQUEST: &str = "Approve";
+
+    pub const REFUSE_FOLLOW_REQUEST: &str = "Refuse";
+
     pub const REFRESH_LIST: &str = "Refresh bridge list";
 
     pub const LINK_ACTION: &str = "Link";
@@ -3375,6 +3522,71 @@ pub mod bridges {
     pub const SOURCE_REQUEST_PENDING: &str = "Asked — waiting for your guardian";
 
     pub const SOURCE_REQUEST_APPROVED: &str = "Approved — try again";
+
+    pub const PLUGINS_HEADING: &str = "Plugins on this nest";
+
+    pub const PLUGINS_EMPTY: &str = "No plugins installed.";
+
+    pub const PLUGIN_INSTALL_LABEL: &str = "Plugin document URL";
+
+    pub const PLUGIN_INSTALL_SUBMIT: &str = "Install";
+
+    pub const PLUGIN_INSTALL_OPENED: &str = "Review the install card in Settings → Connected apps → Requests.";
+
+    pub const PLUGIN_PUBLISHER: &str = "{domain} — {key}";
+    pub fn plugin_publisher(domain: &str, key: &str) -> String {
+        format!("{domain} — {key}")
+    }
+
+    pub const PLUGIN_PUBLISHER_DEVELOPMENT: &str = "Development plugin";
+
+    pub const PLUGIN_STATE_RUNNING: &str = "Running";
+
+    pub const PLUGIN_STATE_RESTARTING: &str = "Restarting";
+
+    pub const PLUGIN_STATE_STOPPED: &str = "Stopped";
+
+    pub const PLUGIN_STATE_OTHER: &str = "{state}";
+    pub fn plugin_state_other(state: &str) -> String {
+        state.to_string()
+    }
+
+    pub const PLUGIN_FAULTS: &str = "Faults since it started: {count}";
+    pub fn plugin_faults(count: &str) -> String {
+        format!("Faults since it started: {count}")
+    }
+
+    pub const PLUGIN_LAST_FAULT: &str = "Last fault: {text}";
+    pub fn plugin_last_fault(text: &str) -> String {
+        format!("Last fault: {text}")
+    }
+
+    pub const PLUGIN_REASON: &str = "Why: {text}";
+    pub fn plugin_reason(text: &str) -> String {
+        format!("Why: {text}")
+    }
+
+    pub const PLUGIN_UNINSTALL: &str = "Uninstall";
+
+    pub const PLUGIN_UNINSTALL_CONFIRM: &str = "Uninstall now";
+
+    pub const PLUGIN_UNINSTALL_CANCEL: &str = "Keep";
+
+    pub const PLUGIN_UNINSTALL_PROMPT: &str = "Uninstall {name}? Every account's connection to it ends and its stored data is deleted.";
+    pub fn plugin_uninstall_prompt(name: &str) -> String {
+        format!("Uninstall {name}? Every account's connection to it ends and its stored data is deleted.")
+    }
+
+    pub const PLUGIN_CARD_BADGE: &str = "Plugin · {form}";
+    pub fn plugin_card_badge(form: &str) -> String {
+        format!("Plugin · {form}")
+    }
+
+    pub const PLUGIN_CONNECT: &str = "Connect";
+
+    pub const PLUGIN_DISCONNECT: &str = "Disconnect";
+
+    pub const PLUGIN_BIND_OPENED: &str = "Review the request in Settings → Connected apps → Requests.";
 }
 
 pub mod media {
@@ -3665,6 +3877,37 @@ pub mod backups {
     pub const SELECT_SNAPSHOT: &str = "Select a snapshot to view files.";
 
     pub const NO_FILES_IN_SNAPSHOT: &str = "No files in this snapshot.";
+
+    pub const KIND_SNAPSHOT_RESTORES_BELOW: &str = "This snapshot holds messages, not files. Restore it from the Restore section below.";
+
+    pub const SNAPSHOT_RESTORE_DESTINATION_PLACEHOLDER: &str = "Folder to restore into, e.g. ~/Restored";
+
+    pub const SNAPSHOT_RESTORE_BUTTON: &str = "Restore all files";
+
+    pub const SNAPSHOT_RESTORE_PROGRESS: &str = "Restoring snapshot #{id} into {path}…";
+    pub fn snapshot_restore_progress(id: &str, path: &str) -> String {
+        format!("Restoring snapshot #{id} into {path}…")
+    }
+
+    pub const SNAPSHOT_RESTORE_DONE: &str = "Restored {files} files ({size}) into {path}";
+    pub fn snapshot_restore_done(files: &str, size: &str, path: &str) -> String {
+        format!("Restored {files} files ({size}) into {path}")
+    }
+
+    pub const SNAPSHOT_RESTORE_PARTIAL: &str = "Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}";
+    pub fn snapshot_restore_partial(files: &str, path: &str, failed: &str, paths: &str) -> String {
+        format!("Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}")
+    }
+
+    pub const SNAPSHOT_RESTORE_FAILED: &str = "Restore failed: {message}";
+    pub fn snapshot_restore_failed(message: &str) -> String {
+        format!("Restore failed: {message}")
+    }
+
+    pub const SNAPSHOT_RESTORE_DESTINATION_NOT_ABSOLUTE: &str = "Enter the full path of a folder to restore into (starting with / or ~/), not {path}";
+    pub fn snapshot_restore_destination_not_absolute(path: &str) -> String {
+        format!("Enter the full path of a folder to restore into (starting with / or ~/), not {path}")
+    }
 
     pub const CREATE_SNAPSHOT: &str = "Create Snapshot";
 
@@ -4013,6 +4256,21 @@ pub mod backups {
     pub const BACKUP_RESEED_REENROLL_FAILED: &str = "Your data is back on this nest, but this device could not sign up again as its backup: {reason}. Add this device as a backup destination to keep a copy here.";
     pub fn backup_reseed_reenroll_failed(reason: &str) -> String {
         format!("Your data is back on this nest, but this device could not sign up again as its backup: {reason}. Add this device as a backup destination to keep a copy here.")
+    }
+
+    pub const BACKUP_RESEED_PULL_BACK_CONFIRM_TITLE: &str = "Restore the copy on {name} to this nest?";
+    pub fn backup_reseed_pull_back_confirm_title(name: &str) -> String {
+        format!("Restore the copy on {name} to this nest?")
+    }
+
+    pub const BACKUP_RESEED_PULL_BACK_CONFIRM_BODY: &str = "This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. If this nest already holds your data, it stops rather than mixing the two.";
+    pub fn backup_reseed_pull_back_confirm_body(name: &str) -> String {
+        format!("This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. If this nest already holds your data, it stops rather than mixing the two.")
+    }
+
+    pub const BACKUP_RESEED_PULL_BACK_REENROLL_FAILED: &str = "Your data is back on this nest, but {name} could not be set up again as its backup: {reason}. Add {name} as a backup destination again to keep a copy there.";
+    pub fn backup_reseed_pull_back_reenroll_failed(name: &str, reason: &str) -> String {
+        format!("Your data is back on this nest, but {name} could not be set up again as its backup: {reason}. Add {name} as a backup destination again to keep a copy there.")
     }
 
     pub const RESEED_RESULT_WHOLE: &str = "Your data is back on this nest.";
@@ -4637,7 +4895,7 @@ pub mod devices {
 
     pub const CUSTODY_HOLDER_SECTION: &str = "Custodians — who holds sealed copies of your data";
 
-    pub const CUSTODY_HOLDER_SCOPE: &str = "Trusted to hold sealed copies — cannot read them";
+    pub const CUSTODY_HOLDER_SCOPE: &str = "Trusted to hold sealed copies — cannot read them, apart from what you published to everyone";
 
     pub const CUSTODY_RECEIPT_FRESH: &str = "Last confirmed {when}";
     pub fn custody_receipt_fresh(when: &str) -> String {
@@ -4658,7 +4916,7 @@ pub mod devices {
 
     pub const CUSTODY_REVOKE: &str = "Stop trusting this custodian";
 
-    pub const CUSTODY_REVOKE_BOUND_NOTE: &str = "Stops future copies and serving on honest devices. Copies already held stay held — and stay sealed forever.";
+    pub const CUSTODY_REVOKE_BOUND_NOTE: &str = "Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before.";
 
     pub const CUSTODY_HELD_SECTION: &str = "Held for others — sealed copies this device keeps";
 
@@ -4667,7 +4925,12 @@ pub mod devices {
         format!("Holding for {owner}")
     }
 
-    pub const CUSTODY_HELD_SCOPE_ACCOUNT: &str = "Their account's sealed planes — unreadable on this device";
+    pub const CUSTODY_HELD_SCOPE_ACCOUNT: &str = "Their account's sealed data — unreadable on this device, apart from what they published to everyone";
+
+    pub const CUSTODY_HELD_RESTORE_ADDRESS: &str = "If they lose every device, they can restore from this nest at {address} — give them this address yourself.";
+    pub fn custody_held_restore_address(address: &str) -> String {
+        format!("If they lose every device, they can restore from this nest at {address} — give them this address yourself.")
+    }
 
     pub const CUSTODY_BUDGET_LABEL: &str = "Keep at most (bytes)";
 
@@ -4684,7 +4947,7 @@ pub mod devices {
         format!("{owner} asks this device to hold sealed copies")
     }
 
-    pub const CUSTODY_OFFER_FLOOR: &str = "This device would store sealed data it cannot read. It would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.";
+    pub const CUSTODY_OFFER_FLOOR: &str = "This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.";
 
     pub const CUSTODY_OFFER_ACCEPT: &str = "Hold for them";
 
@@ -4704,7 +4967,7 @@ pub mod devices {
 
     pub const CUSTODY_MINT_HOST_PLACEHOLDER: &str = "Choose a contact";
 
-    pub const CUSTODY_MINT_FLOOR: &str = "Their device will store sealed copies it cannot read. They will see the shape of your data — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.";
+    pub const CUSTODY_MINT_FLOOR: &str = "Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.";
 
     pub const CUSTODY_MINT_CONFIRM: &str = "Send the request";
 
@@ -5281,6 +5544,30 @@ pub mod devices {
 
         pub const ON_DEMAND_MOUNT_FAILED: &str = "On-demand couldn't start for this folder, so only files already on this device are kept in sync. Turn on-demand off to keep every file here.";
 
+        pub const FREE_SPACE_BUTTON: &str = "Free up space";
+
+        pub const FREE_SPACE_RUNNING: &str = "Freeing up space…";
+
+        pub const FREE_SPACE_ON_DEVICE: &str = "{on_device} of {total} on this device";
+        pub fn free_space_on_device(on_device: &str, total: &str) -> String {
+            format!("{on_device} of {total} on this device")
+        }
+
+        pub const FREE_SPACE_RESULT: &str = "Freed {files} files ({size}).";
+        pub fn free_space_result(files: &str, size: &str) -> String {
+            format!("Freed {files} files ({size}).")
+        }
+
+        pub const FREE_SPACE_RESULT_KEPT: &str = "Freed {files} files ({size}). Kept {kept} files because this device may hold the only copy.";
+        pub fn free_space_result_kept(files: &str, size: &str, kept: &str) -> String {
+            format!("Freed {files} files ({size}). Kept {kept} files because this device may hold the only copy.")
+        }
+
+        pub const FREE_SPACE_KEPT_PINNED: &str = "Kept {count} files you chose to keep on this device.";
+        pub fn free_space_kept_pinned(count: &str) -> String {
+            format!("Kept {count} files you chose to keep on this device.")
+        }
+
         pub const REMOVE: &str = "Remove";
 
         pub const HELPER_UNAVAILABLE: &str = "Sync service is not running. Start it and try again.";
@@ -5667,6 +5954,8 @@ pub mod settings {
         format!("Version {version} is available. Get it at {url}")
     }
 
+    pub const TERMS_LINK: &str = "Terms and content guidelines";
+
     pub const MLS_AVAILABLE: &str = "MLS encryption: Available";
 
     pub const MLS_NOT_AVAILABLE: &str = "MLS encryption: Not available";
@@ -5685,6 +5974,8 @@ pub mod settings {
         pub const AGENT_UNREACHABLE: &str = "The Fauna sync agent is not running on this computer, so it cannot show notifications while Fauna is closed.";
 
         pub const NO_SINK: &str = "This computer has no desktop notification service, so notifications cannot be shown here.";
+
+        pub const NO_DISTRIBUTOR: &str = "This phone has no push service app, such as ntfy, so notifications cannot reach it while Fauna is closed.";
     }
 
     pub const CONFIGURATION: &str = "Configuration";
@@ -5779,7 +6070,7 @@ pub mod settings {
 
         pub const WEAK_PASSWORD_WARNING: &str = "A password you choose yourself limits how strongly your stored mail is protected at rest on an encrypted nest. Letting Fauna generate one is recommended.";
 
-        pub const TOKEN_WARNING: &str = "Copy this token into your mail app now — it is shown only once.";
+        pub const TOKEN_WARNING: &str = "Copy this token into your mail app now. You can show it again later from its row under Connected apps.";
 
         pub const COPY_TOKEN: &str = "Copy token";
 
@@ -6113,6 +6404,24 @@ pub mod settings {
 
         pub const KEEP_LOCAL_COPY: &str = "Keep a local copy";
 
+        pub const FILE_INTO_MAILBOX: &str = "Move to folder";
+
+        pub const ADD_LABEL: &str = "Label";
+
+        pub const AUTO_REPLY_SUBJECT: &str = "Reply subject";
+
+        pub const AUTO_REPLY_BODY: &str = "Reply message";
+
+        pub const AUTO_REPLY_INTERVAL_HOURS: &str = "Reply at most once per sender every (hours)";
+
+        pub const HEADER_VALUE: &str = "Header contains";
+
+        pub const SPAM_SCORE: &str = "Spam score at least";
+
+        pub const PRIORITY: &str = "Order (lower runs first)";
+
+        pub const CONTINUE_MATCHING: &str = "Keep checking later rules after this one matches";
+
         pub const SPAM_PREFERENCES: &str = "Spam Preferences";
 
         pub const INBOX_MODE_DESCRIPTION: &str = "Control who can send you messages";
@@ -6264,7 +6573,7 @@ pub mod settings {
 
     pub const NEW_NEST_URL: &str = "New Nest URL";
 
-    pub const NEW_NEST_URL_PLACEHOLDER: &str = "https://nest.fauna.social";
+    pub const NEW_NEST_URL_PLACEHOLDER: &str = "https://nest.example.com";
 
     pub const UPDATE_BUTTON: &str = "Update";
 
@@ -6343,6 +6652,41 @@ pub mod nests {
     pub fn custody_nest_label(host: &str) -> String {
         format!("{host}'s nest — trusted to hold sealed copies")
     }
+
+    pub const CUSTODY_RESTORE_BUTTON: &str = "Restore from a custodian nest…";
+
+    pub const CUSTODY_RESTORE_INPUT_LABEL: &str = "The custodian nest's address, as its host gave it to you (for example https://nest.example)";
+
+    pub const CUSTODY_RESTORE_SUBMIT: &str = "Restore";
+
+    pub const CUSTODY_RESTORE_CANCEL: &str = "Cancel";
+
+    pub const CUSTODY_RESTORE_ROW_BUTTON: &str = "Restore from this nest now";
+
+    pub const CUSTODY_RESTORE_RUNNING: &str = "Restoring from the custodian nest…";
+
+    pub const CUSTODY_RESTORE_REFUSED: &str = "That address can't be used: {reason}";
+    pub fn custody_restore_refused(reason: &str) -> String {
+        format!("That address can't be used: {reason}")
+    }
+
+    pub const CUSTODY_RESTORE_REVOKED: &str = "you revoked this nest's custody";
+
+    pub const CUSTODY_RESTORE_NOT_ADMITTED: &str = "That nest didn't let this device in. The address may be wrong, the nest may be down, or it may hold nothing for this account — this device can't tell which.";
+
+    pub const CUSTODY_RESTORE_RESTORED: &str = "Restored {count} of your account's records.";
+    pub fn custody_restore_restored(count: &str) -> String {
+        format!("Restored {count} of your account's records.")
+    }
+
+    pub const CUSTODY_RESTORE_SEALED: &str = "{count} came back sealed and stay unreadable until this device has their key.";
+    pub fn custody_restore_sealed(count: &str) -> String {
+        format!("{count} came back sealed and stay unreadable until this device has their key.")
+    }
+
+    pub const CUSTODY_RESTORE_NOTHING_NEW: &str = "Nothing new — this device already has everything that nest holds for you.";
+
+    pub const CUSTODY_RESTORE_MISMATCH: &str = "Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest.";
 
     pub const TRUSTED_TO_READ: &str = "Trusted to read:";
 
@@ -6456,6 +6800,8 @@ pub mod nests {
     pub const GENERATION_STATUS_LISTED: &str = "Can be restored";
 
     pub const GENERATION_STATUS_UNREACHABLE: &str = "Could not reach this destination";
+
+    pub const HOLDERS_STATUS_UNREACHABLE: &str = "Could not ask this nest which services it trusts";
 
     pub const GENERATION_RESTORE: &str = "Restore this version";
 
@@ -6571,6 +6917,8 @@ pub mod logs {
 pub mod mail_settings {
     pub const TITLE: &str = "Mail & Calendar";
 
+    pub const UNAVAILABLE_NOTICE: &str = "Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.";
+
     pub const KEYS_INFO: &str = "Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate.";
 
     pub const CREDENTIALS_ON_CONNECTED_APPS: &str = "Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.";
@@ -6601,6 +6949,43 @@ pub mod mail_settings {
     pub const FORWARD_PER_HOUR_ABOVE_CEILING: &str = "The hourly forwarding limit can't be more than {ceiling}.";
     pub fn forward_per_hour_above_ceiling(ceiling: &str) -> String {
         format!("The hourly forwarding limit can't be more than {ceiling}.")
+    }
+
+    pub const RECEIVE_LABEL: &str = "Receive mail";
+
+    pub const RECEIVE_SUBTITLE: &str = "When off, mail sent to your addresses is refused. Mail you already have stays.";
+
+    pub const SEND_LABEL: &str = "Send mail";
+
+    pub const SEND_SUBTITLE: &str = "When off, you can't send mail from your account. Automatic replies and forwards you have set up still go out.";
+
+    pub const SCAN_RESULT_VISIBLE_LABEL: &str = "Show scan results on received mail";
+
+    pub const SCAN_RESULT_VISIBLE_SUBTITLE: &str = "When off, received messages don't show the spam and virus check line. The check still runs.";
+
+    pub const AUTORESPOND_LABEL: &str = "Automatic reply";
+
+    pub const AUTORESPOND_SUBTITLE: &str = "Answers each sender once a week while it is on.";
+
+    pub const AUTORESPOND_MESSAGE_LABEL: &str = "Automatic reply message";
+
+    pub const AUTORESPOND_MESSAGE_EMPTY: &str = "Write the automatic reply's message first.";
+
+    pub const MAILBOX_QUOTA: &str = "{used} of {limit} · {messages} of {message_limit} messages";
+    pub fn mailbox_quota(used: &str, limit: &str, messages: &str, message_limit: &str) -> String {
+        format!("{used} of {limit} · {messages} of {message_limit} messages")
+    }
+
+    pub const SUBMISSION_QUOTA: &str = "{used} of {limit} recipients today";
+    pub fn submission_quota(used: &str, limit: &str) -> String {
+        format!("{used} of {limit} recipients today")
+    }
+
+    pub const OVER_QUOTA_MAILBOX: &str = "Your mailbox is full. New mail is refused until you delete some.";
+
+    pub const OVER_QUOTA_SENDING: &str = "You've sent to today's limit of {limit} recipients. Sending resumes tomorrow.";
+    pub fn over_quota_sending(limit: &str) -> String {
+        format!("You've sent to today's limit of {limit} recipients. Sending resumes tomorrow.")
     }
 }
 
@@ -6719,6 +7104,10 @@ pub mod mail_aliases {
 
     pub const SHOW_AUDIT: &str = "Show audit";
 
+    pub const HIDE_AUDIT: &str = "Hide audit";
+
+    pub const AUDIT_EMPTY: &str = "Nothing has arrived on this address yet.";
+
     pub const DISABLED_BADGE: &str = "disabled";
 
     pub const ACTIVE_TOGGLE_LABEL: &str = "Active";
@@ -6745,6 +7134,11 @@ pub mod mail_aliases {
 
     pub const KIND_OTHER: &str = "Alias";
 
+    pub const DELIVERED_TO: &str = "Delivered to: {address} [{label}]";
+    pub fn delivered_to(address: &str, label: &str) -> String {
+        format!("Delivered to: {address} [{label}]")
+    }
+
     pub const NO_DEFAULT_DOMAIN: &str = "Enable mail before adding aliases.";
 
     pub const HITS: &str = "{count} hits";
@@ -6756,6 +7150,15 @@ pub mod mail_aliases {
     pub fn hits_with_last(count: &str, date: &str) -> String {
         format!("{count} hits · last {date}")
     }
+
+    pub const EXPIRES_ON: &str = "Expires {date}";
+    pub fn expires_on(date: &str) -> String {
+        format!("Expires {date}")
+    }
+
+    pub const EXPIRED: &str = "Expired";
+
+    pub const EXTEND: &str = "Extend";
 
     pub const IMPORT_BUTTON: &str = "Import addresses";
 
@@ -7052,6 +7455,8 @@ pub mod mail_import {
 
     pub const SOURCE_OUTLOOK_ADDRESS_LABEL: &str = "Your Outlook address";
 
+    pub const SOURCE_FORGET_BUTTON: &str = "Forget saved server details";
+
     pub const MICROSOFT_CODE_FMT: &str = "Go to {url} and enter the code {code}.";
     pub fn microsoft_code_fmt(url: &str, code: &str) -> String {
         format!("Go to {url} and enter the code {code}.")
@@ -7128,6 +7533,8 @@ pub mod mail_import {
 
     pub const SCOPE_MAILBOX_MAPPING_LABEL: &str = "Mailboxes map 1:1 by name — INBOX to INBOX, Sent to Sent, and so on. Mailboxes with no matching Fauna mailbox are created, named after the source.";
 
+    pub const SCOPE_IMPORT_DUPLICATES_LABEL: &str = "Import duplicates anyway (advanced) — mail you already have is stored a second time and counts against your storage.";
+
     pub const CONFIRM_TITLE: &str = "Step 3 — Confirm";
 
     pub const CONFIRM_SUMMARY_FMT: &str = "{source} · {mailboxes} mailbox(es) · {messages} messages";
@@ -7165,9 +7572,30 @@ pub mod mail_import {
 
     pub const CANCEL_BUTTON: &str = "Cancel";
 
+    pub const DISMISS_FAILED_BUTTON: &str = "Dismiss";
+
+    pub const FAILED_IMPORT_CONTROL: &str = "This import failed — it can no longer be paused, resumed or cancelled. Dismiss it and start a new import.";
+
+    pub const CANCELLED_IMPORT_CONTROL: &str = "This import was cancelled — it can no longer be paused, resumed or cancelled.";
+
+    pub const DISMISS_LIVE_IMPORT: &str = "This import is still under way — cancel it first. Mail already imported is kept.";
+
     pub const PAUSED_MAILBOX_FULL: &str = "Import paused: your Fauna mailbox is full. Ask your admin for more room, then resume — the import picks up from the first message that did not fit.";
 
+    pub const QUOTA_NOTICE: &str = "Your Fauna mailbox is full. Ask your admin for more room, then resume. Or skip the messages not imported yet, or cancel the import.";
+
+    pub const QUOTA_SKIP_REST_BUTTON: &str = "Skip the rest";
+
     pub const PAUSED_CONNECTION_LOST: &str = "Import paused: the connection was lost and did not come back after several tries. Check your network, then resume — the import picks up where it stopped.";
+
+    pub const MAILBOX_REBUILT_FMT: &str = "{mailbox}: your old provider rebuilt this mailbox since the import began, so the place the import had reached no longer points at the right messages. It was not imported further.";
+    pub fn mailbox_rebuilt_fmt(mailbox: &str) -> String {
+        format!("{mailbox}: your old provider rebuilt this mailbox since the import began, so the place the import had reached no longer points at the right messages. It was not imported further.")
+    }
+
+    pub const PAUSED_MAILBOX_REBUILT: &str = "Import paused: your old provider rebuilt a mailbox since the import began. Restart it to import it again from its first message — mail that already arrived is skipped.";
+
+    pub const RESTART_BUTTON: &str = "Restart rebuilt mailbox";
 
     pub const ERROR_LOG_TITLE: &str = "Skipped / errored messages";
 
@@ -8019,6 +8447,71 @@ pub mod admin {
         pub const DELETE: &str = "Delete";
     }
 
+    pub mod mail_reports_page {
+        pub const TITLE: &str = "Mail reports";
+
+        pub const DESCRIPTION: &str = "Other mail servers send daily reports about mail that claims to come from your domains: how much they saw, and whether it passed the checks that prove it is really yours.";
+
+        pub const REFRESH: &str = "Refresh";
+
+        pub const WINDOW_LABEL: &str = "Period";
+
+        pub const WINDOW_DAYS: &str = "Last {days} days";
+        pub fn window_days(days: &str) -> String {
+            format!("Last {days} days")
+        }
+
+        pub const DOMAIN_LABEL: &str = "Domain";
+
+        pub const EVERY_DOMAIN: &str = "All domains";
+
+        pub const SUMMARY_TITLE: &str = "Summary";
+
+        pub const MESSAGES: &str = "{messages} messages reported · {reports} reports · {peers} reporting servers";
+        pub fn messages(messages: &str, reports: &str, peers: &str) -> String {
+            format!("{messages} messages reported · {reports} reports · {peers} reporting servers")
+        }
+
+        pub const ALIGNMENT: &str = "DMARC pass {dmarc} ({dmarc_share}%) · DKIM aligned {dkim} ({dkim_share}%) · SPF aligned {spf} ({spf_share}%)";
+        pub fn alignment(dmarc: &str, dmarc_share: &str, dkim: &str, dkim_share: &str, spf: &str, spf_share: &str) -> String {
+            format!("DMARC pass {dmarc} ({dmarc_share}%) · DKIM aligned {dkim} ({dkim_share}%) · SPF aligned {spf} ({spf_share}%)")
+        }
+
+        pub const DISPOSITIONS: &str = "Delivered {none} · Quarantined {quarantine} · Rejected {reject}";
+        pub fn dispositions(none: &str, quarantine: &str, reject: &str) -> String {
+            format!("Delivered {none} · Quarantined {quarantine} · Rejected {reject}")
+        }
+
+        pub const TRUNCATED: &str = "Only the newest 1,000 reports in this period are counted.";
+
+        pub const EMPTY: &str = "No DMARC reports yet. Peer mail servers usually send the first report one to seven days after the policy was published.";
+
+        pub const SOURCES_TITLE: &str = "Top sources by reported messages";
+
+        pub const SENDERS_TITLE: &str = "Top senders by reported messages";
+
+        pub const REPORTS_TITLE: &str = "Reports";
+
+        pub const ROW_MESSAGES: &str = "{count} messages";
+        pub fn row_messages(count: &str) -> String {
+            format!("{count} messages")
+        }
+
+        pub const REPORT_PERIOD: &str = "{begin} – {end}";
+        pub fn report_period(begin: &str, end: &str) -> String {
+            format!("{begin} – {end}")
+        }
+
+        pub const REPORT_PASS: &str = "{passed} of {count} passed DMARC";
+        pub fn report_pass(passed: &str, count: &str) -> String {
+            format!("{passed} of {count} passed DMARC")
+        }
+
+        pub const VIEW: &str = "View";
+
+        pub const RAW_TITLE: &str = "Report XML";
+    }
+
     pub mod aliases_page {
         pub const TITLE: &str = "External Forwarders";
 
@@ -8154,6 +8647,15 @@ pub mod admin {
         pub const ADD_TIER_ERROR_EMPTY_NAME: &str = "Can't add this tier — give it a name.";
 
         pub const ADD_TIER_ERROR_INVALID_CAP: &str = "Can't add this tier — every limit must be a whole number.";
+
+        pub const DELETE_TIER: &str = "Delete";
+
+        pub const DELETE_TIER_ERROR: &str = "Failed to delete tier: {message}";
+        pub fn delete_tier_error(message: &str) -> String {
+            format!("Failed to delete tier: {message}")
+        }
+
+        pub const DELETE_TIER_ERROR_IN_USE: &str = "A member, an invite code or a paid membership still uses this tier, or it's the nest's default tier — move them off it first.";
 
         pub const MEMBERSHIP_SECTION: &str = "Membership";
 
@@ -8330,6 +8832,63 @@ pub mod admin {
             format!("Failed to save the web app choice: {message}")
         }
 
+        pub const UPDATE_CHANNEL_LABEL: &str = "Updates";
+
+        pub const UPDATE_CHANNEL_DESC: &str = "Which builds this server installs on its own. A server never moves to an older version: switching to a channel that is behind waits until it catches up.";
+
+        pub const UPDATE_CHANNEL_SAVE: &str = "Save update channel";
+
+        pub const UPDATE_CHANNEL_LOADING: &str = "Loading the update channel…";
+
+        pub const UPDATE_CHANNEL_STATUS_FOLLOWING_STABLE: &str = "Following Stable — new releases are picked up within the hour. This server runs {version}.";
+        pub fn update_channel_status_following_stable(version: &str) -> String {
+            format!("Following Stable — new releases are picked up within the hour. This server runs {version}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_FOLLOWING_TEST: &str = "Following Test — new builds are picked up within about a minute. This server runs {version}.";
+        pub fn update_channel_status_following_test(version: &str) -> String {
+            format!("Following Test — new builds are picked up within about a minute. This server runs {version}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_FOLLOWING_DEV: &str = "Following Dev — new builds are picked up within about a minute. This server runs {version}.";
+        pub fn update_channel_status_following_dev(version: &str) -> String {
+            format!("Following Dev — new builds are picked up within about a minute. This server runs {version}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_HOLD_STABLE: &str = "Following Stable from the next Stable release that is at least {running}; this server runs {running}, and Stable is at {head}.";
+        pub fn update_channel_status_hold_stable(running: &str, head: &str) -> String {
+            format!("Following Stable from the next Stable release that is at least {running}; this server runs {running}, and Stable is at {head}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_HOLD_TEST: &str = "Following Test from the next Test build that is at least {running}; this server runs {running}, and Test is at {head}.";
+        pub fn update_channel_status_hold_test(running: &str, head: &str) -> String {
+            format!("Following Test from the next Test build that is at least {running}; this server runs {running}, and Test is at {head}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_HOLD_DEV: &str = "Following Dev from the next Dev build that is at least {running}; this server runs {running}, and Dev is at {head}.";
+        pub fn update_channel_status_hold_dev(running: &str, head: &str) -> String {
+            format!("Following Dev from the next Dev build that is at least {running}; this server runs {running}, and Dev is at {head}.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_PINNED: &str = "This server runs {version} and follows no channel until one is chosen.";
+        pub fn update_channel_status_pinned(version: &str) -> String {
+            format!("This server runs {version} and follows no channel until one is chosen.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_NOT_FROM_IMAGE: &str = "This server runs {version}. It was not installed from Fauna's container image, so it follows no update channel: update it the same way it was installed.";
+        pub fn update_channel_status_not_from_image(version: &str) -> String {
+            format!("This server runs {version}. It was not installed from Fauna's container image, so it follows no update channel: update it the same way it was installed.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_UNKNOWN: &str = "This server follows an update channel this app doesn't recognize ({channel}). Update the app to change it.";
+        pub fn update_channel_status_unknown(channel: &str) -> String {
+            format!("This server follows an update channel this app doesn't recognize ({channel}). Update the app to change it.")
+        }
+
+        pub const UPDATE_CHANNEL_STATUS_PREDATES: &str = "This server is too old to choose its update channel from the app. Update the server to change it.";
+
+        pub const OS_NO_HOST_DATA: &str = "OS status not reported by this host";
+
         pub const OS_UP_TO_DATE: &str = "OS up to date";
 
         pub const OS_UPDATES_PENDING: &str = "Security updates pending";
@@ -8421,7 +8980,7 @@ pub mod admin {
 
         pub const TAKEDOWN_LABEL: &str = "Legal takedown";
 
-        pub const TAKEDOWN_DESC: &str = "The one nest-wide content removal, for legal compulsion only (a court order, a statutory demand). Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever.";
+        pub const TAKEDOWN_DESC: &str = "One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever.";
 
         pub const TAKEDOWN_CONTENT_ID_LABEL: &str = "Content id";
 
@@ -8441,9 +9000,9 @@ pub mod admin {
 
         pub const TAKEDOWN_BLOCKED_NO_REFERENCE: &str = "A legal reference is required — a takedown without one is refused.";
 
-        pub const TAKEDOWN_CONFIRM_TAKEDOWN: &str = "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit row records this action.";
+        pub const TAKEDOWN_CONFIRM_TAKEDOWN: &str = "Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.";
         pub fn takedown_confirm_takedown(content_type: &str, content_id: &str, reference: &str) -> String {
-            format!("Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit row records this action.")
+            format!("Take down {content_type} {content_id}, citing \"{reference}\"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.")
         }
 
         pub const TAKEDOWN_CONFIRM_RESTORE: &str = "Overturn the takedown of {content_type} {content_id}? The content serves again; the takedown record remains as history.";
@@ -8459,7 +9018,7 @@ pub mod admin {
 
         pub const TAKEDOWN_WORKING: &str = "Submitting…";
 
-        pub const TAKEDOWN_DONE: &str = "Taken down. A tombstone is served in its place and the author can appeal.";
+        pub const TAKEDOWN_DONE: &str = "Taken down. A tombstone is served in its place and the author of a post can appeal.";
 
         pub const TAKEDOWN_RESTORED: &str = "Restored. The content is served again; the takedown stays on record.";
 
@@ -8470,7 +9029,7 @@ pub mod admin {
 
         pub const REPORTS_LABEL: &str = "Reports";
 
-        pub const REPORTS_DESC: &str = "Reports from users of this nest, and reports forwarded from other nests about accounts hosted here. A report is evidence for you to weigh; it removes nothing by itself. Acting means the legal-takedown console or a suspension — resolving a row only records what you decided.";
+        pub const REPORTS_DESC: &str = "Reports from users of this nest, and reports forwarded from other nests about accounts hosted here. A report is evidence for you to weigh; it removes nothing by itself. Acting means the legal-takedown console, a suspension or, where this page offers it, blocking the reported item — resolving a row only records what you decided.";
 
         pub const REPORTS_LOADING: &str = "Loading reports…";
 
@@ -8500,6 +9059,51 @@ pub mod admin {
         pub fn reports_failed(error: &str) -> String {
             format!("Could not update the report: {error}")
         }
+
+        pub const BLOCK_ARM_BLOCK: &str = "Block…";
+
+        pub const BLOCK_ARM_UNBLOCK: &str = "Unblock…";
+
+        pub const BLOCK_BLOCKED_NOT_ITEM: &str = "A block is of one post or message. An account report has the account levers — suspension on the users page.";
+
+        pub const BLOCK_ITEM_POST: &str = "post";
+
+        pub const BLOCK_ITEM_MESSAGE: &str = "message";
+
+        pub const BLOCK_CONFIRM_BLOCK: &str = "Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.";
+        pub fn block_confirm_block(item: &str, content_id: &str, reason: &str) -> String {
+            format!("Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.")
+        }
+
+        pub const BLOCK_CONFIRM_UNBLOCK: &str = "Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.";
+        pub fn block_confirm_unblock(item: &str, content_id: &str, reason: &str) -> String {
+            format!("Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.")
+        }
+
+        pub const BLOCK_CONFIRM_BUTTON_BLOCK: &str = "Confirm block";
+
+        pub const BLOCK_CONFIRM_BUTTON_UNBLOCK: &str = "Confirm unblock";
+
+        pub const BLOCK_DONE: &str = "Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.";
+
+        pub const BLOCK_RESTORED: &str = "Unblocked. The item is served again; the block stays on record.";
+
+        pub const BLOCK_FAILED: &str = "The nest refused the request: {error}";
+        pub fn block_failed(error: &str) -> String {
+            format!("The nest refused the request: {error}")
+        }
+
+        pub const BLOCK_CANCEL_BUTTON: &str = "Cancel";
+
+        pub const BLOCK_WORKING: &str = "Submitting…";
+
+        pub const BLOCKED_LABEL: &str = "Blocked items";
+
+        pub const BLOCKED_DESC: &str = "Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was.";
+
+        pub const BLOCKED_LOADING: &str = "Loading blocked items…";
+
+        pub const BLOCKED_EMPTY: &str = "Nothing is blocked.";
 
         pub const OAUTH_LABEL: &str = "Outside-app sign-in keys";
 
@@ -8706,6 +9310,47 @@ pub mod admin {
         pub const DESCRIPTION: &str = "Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where.";
 
         pub const EMPTY: &str = "No nest log entries yet.";
+
+        pub const AUDIT_TITLE: &str = "Admin actions";
+
+        pub const AUDIT_EMPTY: &str = "No admin actions recorded yet.";
+
+        pub const AUDIT_ENTRY: &str = "{who} — {action} on {target}";
+        pub fn audit_entry(who: &str, action: &str, target: &str) -> String {
+            format!("{who} — {action} on {target}")
+        }
+
+        pub const AUDIT_ENTRY_NO_TARGET: &str = "{who} — {action}";
+        pub fn audit_entry_no_target(who: &str, action: &str) -> String {
+            format!("{who} — {action}")
+        }
+
+        pub const AUDIT_ENTRY_SYSTEM: &str = "The nest — {action} on {target}";
+        pub fn audit_entry_system(action: &str, target: &str) -> String {
+            format!("The nest — {action} on {target}")
+        }
+
+        pub const AUDIT_ENTRY_SYSTEM_NO_TARGET: &str = "The nest — {action}";
+        pub fn audit_entry_system_no_target(action: &str) -> String {
+            format!("The nest — {action}")
+        }
+
+        pub const AUDIT_MORE: &str = "Show older";
+
+        pub const AUDIT_VERIFIED: &str = "The record checks out through the {count} entries shown.";
+        pub fn audit_verified(count: &str) -> String {
+            format!("The record checks out through the {count} entries shown.")
+        }
+
+        pub const AUDIT_UNCHECKABLE: &str = "The record checks out through the entries shown, except {count} this app cannot check.";
+        pub fn audit_uncheckable(count: &str) -> String {
+            format!("The record checks out through the entries shown, except {count} this app cannot check.")
+        }
+
+        pub const AUDIT_BROKEN: &str = "Entry {id} does not check out — the record may have been altered.";
+        pub fn audit_broken(id: &str) -> String {
+            format!("Entry {id} does not check out — the record may have been altered.")
+        }
     }
 
     pub mod custody_hosting {
@@ -8811,6 +9456,16 @@ pub mod admin {
         pub const CANCEL: &str = "Cancel";
     }
 
+    pub mod bridges_reject {
+        pub const TITLE: &str = "Reject this bridge?";
+
+        pub const WARNING: &str = "It will not be able to connect again until an admin re-approves a fresh keypair.";
+
+        pub const CONFIRM: &str = "Reject bridge";
+
+        pub const CANCEL: &str = "Cancel";
+    }
+
     pub mod mail_page {
         pub const TITLE: &str = "Mail";
 
@@ -8869,15 +9524,64 @@ pub mod admin {
 
         pub const HEALTH_DELIST: &str = "Request removal from the blocklist";
 
+        pub const HEALTH_SENDER_DASHBOARDS_NOTE: &str = "Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).";
+
+        pub const HEALTH_SENDER_DASHBOARD_GMAIL: &str = "Gmail Postmaster Tools";
+
+        pub const HEALTH_SENDER_DASHBOARD_OUTLOOK: &str = "Outlook SNDS";
+
         pub const HEALTH_RECHECK: &str = "Check again";
 
         pub const HEALTH_WARMUP_RESET: &str = "Restart warm-up";
 
         pub const HEALTH_WARMUP_RESET_CONFIRM: &str = "Restart the sending warm-up at day 1? Do this only after the server's outgoing IP address changed.";
 
+        pub const SECRETS_GROUP_TITLE: &str = "Secrets";
+
+        pub const SECRETS_GROUP_DESC: &str = "Rotate a secret only when it may have leaked. Its value is never shown.";
+
+        pub const LIST_UNSUBSCRIBE_SECRET_ROTATE: &str = "Rotate the newsletter unsubscribe secret";
+
+        pub const LIST_UNSUBSCRIBE_SECRET_ROTATE_CONFIRM: &str = "Rotate the unsubscribe secret? Unsubscribe links in newsletters already sent will stop working.";
+
+        pub const LIST_UNSUBSCRIBE_SECRET_ROTATED: &str = "Unsubscribe secret rotated — {count} subscriptions now have new links. New issues carry them.";
+        pub fn list_unsubscribe_secret_rotated(count: &str) -> String {
+            format!("Unsubscribe secret rotated — {count} subscriptions now have new links. New issues carry them.")
+        }
+
+        pub const FORWARD_SRS_SECRET_ROTATE: &str = "Rotate the forwarding secret";
+
+        pub const FORWARD_SRS_SECRET_ROTATE_CONFIRM: &str = "Rotate the forwarding secret? Bounces to mail forwarded before still come back while the old secret is kept.";
+
+        pub const FORWARD_SRS_SECRET_ROTATED: &str = "Forwarding secret rotated. The previous one is still honoured for bounces to mail already forwarded.";
+
         pub const AUTO_ENABLE_NEW_USERS_LABEL: &str = "Auto-enable mail for new users";
 
         pub const AUTO_ENABLE_NEW_USERS_SUBTITLE: &str = "New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.";
+
+        pub const MICROSOFT_GROUP_TITLE: &str = "Microsoft sign-in for the Outlook import";
+
+        pub const MICROSOFT_GROUP_DESC: &str = "The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.";
+
+        pub const MICROSOFT_REQUIREMENTS: &str = "The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory.";
+
+        pub const MICROSOFT_CLIENT_ID_LABEL: &str = "Application (client) ID";
+
+        pub const MICROSOFT_TENANT_LABEL: &str = "Directory (tenant)";
+
+        pub const MICROSOFT_TENANT_SUBTITLE: &str = "A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.";
+
+        pub const MICROSOFT_SAVE: &str = "Save Microsoft registration";
+
+        pub const MICROSOFT_USING_DEFAULT: &str = "Using the default registration.";
+
+        pub const MICROSOFT_USING_OWN: &str = "Using your organisation's registration.";
+
+        pub const MICROSOFT_CLIENT_ID_INVALID: &str = "The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.";
+
+        pub const MICROSOFT_TENANT_INVALID: &str = "The directory must be a tenant ID, a domain name, or common, organizations or consumers.";
+
+        pub const MICROSOFT_TENANT_NEEDS_CLIENT_ID: &str = "Enter the application (client) ID that goes with this directory.";
 
         pub const SPAM_GROUP_TITLE: &str = "Spam and inbound perimeter";
 
@@ -8948,6 +9652,8 @@ pub mod admin {
         pub const SPAM_SAVE: &str = "Save spam policy";
 
         pub const PUBLISH_SPAM_BASELINE_BUTTON: &str = "Publish deployment baseline";
+
+        pub const PUBLISH_SPAM_BASELINE_CONFIRM: &str = "Publish the baseline? It reflects the spam training of the members who opted in, and new users' filters start from it.";
 
         pub const PUBLISH_SPAM_BASELINE_SUBTITLE: &str = "Aggregate every opted-in user's spam training into a baseline that new users start from. Never reveals who contributed, and needs at least 3 contributors.";
 
@@ -9104,6 +9810,24 @@ pub mod admin {
         pub const ALIAS_WILDCARD_PREFIX_SUBTITLE: &str = "Allow name-prefixed aliases that route to the same user.";
 
         pub const ALIAS_SAVE: &str = "Save alias policy";
+
+        pub const DMARC_GROUP_TITLE: &str = "DMARC reports";
+
+        pub const DMARC_GROUP_DESC: &str = "The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.";
+
+        pub const DMARC_RUF_PUBLISH_LABEL: &str = "Ask for forensic reports";
+
+        pub const DMARC_RUF_WARNING: &str = "Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.";
+
+        pub const DMARC_FO_MODE_LABEL: &str = "Report a message when";
+
+        pub const DMARC_AGGREGATE_RETENTION_LABEL: &str = "Keep aggregate reports (days, 1–365)";
+
+        pub const DMARC_FORENSIC_RETENTION_LABEL: &str = "Keep forensic reports (days, 1–90)";
+
+        pub const DMARC_FORENSIC_RETENTION_WARNING: &str = "Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.";
+
+        pub const DMARC_SAVE: &str = "Save DMARC policy";
     }
 
     pub mod dns {
@@ -9149,6 +9873,18 @@ pub mod admin {
         pub const PRIMARY_BADGE: &str = "Primary";
 
         pub const REMOVE: &str = "Remove";
+
+        pub const REMOVE_CONFIRM_TITLE: &str = "Remove {domain}?";
+        pub fn remove_confirm_title(domain: &str) -> String {
+            format!("Remove {domain}?")
+        }
+
+        pub const REMOVE_CONFIRM_BODY: &str = "{domain} will stop receiving mail: the addresses your members have on it stop working, and mail sent to them is refused. You can restore the domain for 30 days, and those addresses come back with it. After 30 days the domain, its signing key and the aliases on it are gone for good, and adding it again starts with a new key. Mail already on its way may still arrive.";
+        pub fn remove_confirm_body(domain: &str) -> String {
+            format!("{domain} will stop receiving mail: the addresses your members have on it stop working, and mail sent to them is refused. You can restore the domain for 30 days, and those addresses come back with it. After 30 days the domain, its signing key and the aliases on it are gone for good, and adding it again starts with a new key. Mail already on its way may still arrive.")
+        }
+
+        pub const REMOVE_CONFIRM: &str = "Remove domain";
 
         pub const REMOVED_TITLE: &str = "Recently removed";
 
@@ -9231,6 +9967,21 @@ pub mod admin {
             pub const RENEWALS_AUTOMATED: &str = "Renewals automated";
 
             pub const DELEGATE_NO_ZONES: &str = "Add a DNS-provider credential first to delegate renewals.";
+
+            pub const ISSUANCE_FAILED_DOMAIN: &str = "Certificate request failed ({date}): {error}";
+            pub fn issuance_failed_domain(date: &str, error: &str) -> String {
+                format!("Certificate request failed ({date}): {error}")
+            }
+
+            pub const ISSUANCE_FAILED_IP: &str = "IP address certificate request failed ({date}): {error}";
+            pub fn issuance_failed_ip(date: &str, error: &str) -> String {
+                format!("IP address certificate request failed ({date}): {error}")
+            }
+
+            pub const ISSUANCE_FAILED: &str = "Certificate request failed ({date}): {error}";
+            pub fn issuance_failed(date: &str, error: &str) -> String {
+                format!("Certificate request failed ({date}): {error}")
+            }
         }
 
         pub mod rename {
@@ -9420,6 +10171,13 @@ pub mod moderation {
         format!("Appeal failed: {error}")
     }
 
+    pub mod queue {
+        pub const ISSUED_BY: &str = "decided by {nest}";
+        pub fn issued_by(nest: &str) -> String {
+            format!("decided by {nest}")
+        }
+    }
+
     pub mod report {
         pub const TITLE: &str = "Report";
 
@@ -9495,7 +10253,7 @@ pub mod moderation {
 
         pub const WITHDRAW: &str = "Withdraw";
 
-        pub const WITHDRAWN: &str = "Report withdrawn. Your note and any attached text were deleted everywhere they went.";
+        pub const WITHDRAWN: &str = "Report withdrawn. Your note and any attached text were deleted here, and every nest the report went to is asked to delete them too.";
     }
 
     pub mod category {
@@ -9526,6 +10284,8 @@ pub mod moderation {
         pub const FLAGGED: &str = "Flagged";
 
         pub const TAKEN_DOWN: &str = "Removed under legal obligation";
+
+        pub const BLOCKED: &str = "Blocked by this nest's admin";
     }
 
     pub mod legal_takedown {
@@ -9534,12 +10294,19 @@ pub mod moderation {
             format!("Removed under legal obligation ({reference})")
         }
     }
+
+    pub mod admin_block {
+        pub const NOTICE: &str = "Blocked by this nest's admin after a report: {reason}";
+        pub fn notice(reason: &str) -> String {
+            format!("Blocked by this nest's admin after a report: {reason}")
+        }
+    }
 }
 
 pub mod muted_words {
     pub const TITLE: &str = "Muted words";
 
-    pub const DESCRIPTION: &str = "Conversation messages containing one of these words are collapsed behind a “Show anyway” button. This list stays on your devices — the server never sees it.";
+    pub const DESCRIPTION: &str = "A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.";
 
     pub const INPUT_PLACEHOLDER: &str = "Add a word to mute";
 
@@ -9548,6 +10315,14 @@ pub mod muted_words {
     pub const EMPTY: &str = "You haven’t muted any words yet.";
 
     pub const REMOVE: &str = "Un-mute";
+
+    pub const LEVEL_HIDE: &str = "Hide";
+
+    pub const LEVEL_SHOW_LESS: &str = "Show less";
+
+    pub const COLLAPSED: &str = "Muted word";
+
+    pub const REVEAL: &str = "Show anyway";
 }
 
 pub mod personalization {
@@ -10009,6 +10784,8 @@ pub mod features {
 pub mod family {
     pub const TITLE: &str = "Family";
 
+    pub const KIDS_INELIGIBLE_MESSAGE: &str = "Fauna Kids is for supervised accounts, and this account is not supervised. Sign out to use a different account.";
+
     pub const SUPERVISED_INDICATOR: &str = "This account is supervised by {guardian}";
     pub fn supervised_indicator(guardian: &str) -> String {
         format!("This account is supervised by {guardian}")
@@ -10049,6 +10826,8 @@ pub mod family {
     pub const POLICY_CONTENT_COMMERCIAL_LABEL: &str = "Ads and promotions";
 
     pub const POLICY_CONTENT_NOTIFY_LABEL: &str = "Notify me about flagged content";
+
+    pub const POLICY_CONTENT_HINT: &str = "The apps themselves don't detect adult content or ads and promotions yet. A limit you set on them is saved, and applies as soon as a post or message is labelled that way.";
 
     pub const POLICY_SCREEN_HEADING: &str = "Screen time";
 
@@ -10132,6 +10911,24 @@ pub mod family {
     }
 
     pub const SCREEN_LOCK_FAMILY_HINT: &str = "You can still open Family to see your settings.";
+
+    pub mod store_consent_lock {
+        pub const TITLE: &str = "A change to this app needs your parent's approval";
+
+        pub const WHAT_CHANGED: &str = "What changed:";
+
+        pub const RATING_CHANGED: &str = "This app's age rating changed.";
+
+        pub const STATE_PENDING: &str = "Waiting for your parent to say yes.";
+
+        pub const STATE_DECLINED: &str = "Your parent said no.";
+
+        pub const ASK_BUTTON: &str = "Ask your parent";
+
+        pub const ASK_HINT: &str = "Tap the button to ask your parent. The app unlocks when they say yes.";
+
+        pub const PLAY_HINT: &str = "Google Play asks your parent for you. The app checks again each time you come back to it.";
+    }
 
     pub const APPROVALS_HEADING: &str = "Approvals";
 
@@ -10238,9 +11035,9 @@ pub mod family {
             format!("Your age range ({band}) from {store} will be shared with this nest's admin, verified by {verifier}")
         }
 
-        pub const NOTICE_DECLARED: &str = "Your age range ({band}) will be shared with this nest's admin as declared, not verified";
+        pub const NOTICE_DECLARED: &str = "Your age range ({band}) goes to this nest as declared, not verified";
         pub fn notice_declared(band: &str) -> String {
-            format!("Your age range ({band}) will be shared with this nest's admin as declared, not verified")
+            format!("Your age range ({band}) goes to this nest as declared, not verified")
         }
 
         pub const STORE_ANDROID: &str = "Google Play";
@@ -10345,9 +11142,9 @@ pub mod notifications {
 
     pub const UPDATE_AVAILABLE_SUMMARY: &str = "Fauna update available";
 
-    pub const UPDATE_AVAILABLE_BODY: &str = "Version {version} is available. Visit fauna.social to download.";
+    pub const UPDATE_AVAILABLE_BODY: &str = "Version {version} is available from the project's releases page.";
     pub fn update_available_body(version: &str) -> String {
-        format!("Version {version} is available. Visit fauna.social to download.")
+        format!("Version {version} is available from the project's releases page.")
     }
 
     pub const ROW_LIKE: &str = "{sender} liked your post";
@@ -10384,6 +11181,10 @@ pub mod notifications {
     pub fn row_interaction(sender: &str) -> String {
         format!("{sender} interacted with your content")
     }
+
+    pub const DISMISS: &str = "Dismiss";
+
+    pub const CLEAR_ALL: &str = "Clear all";
 
     pub const ROW_TIP_SATS: &str = "{sender} tipped {value} sats on your post";
     pub fn row_tip_sats(sender: &str, value: &str) -> String {
@@ -10507,14 +11308,14 @@ pub mod notifications {
         format!("Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.")
     }
 
-    pub const ROW_SECURITY_ARCHIVE_EXPORTED: &str = "Security: your full account archive was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.";
+    pub const ROW_SECURITY_ARCHIVE_EXPORTED: &str = "Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.";
     pub fn row_security_archive_exported(ip: &str) -> String {
-        format!("Security: your full account archive was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.")
+        format!("Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.")
     }
 
-    pub const ROW_SECURITY_MAILBOX_EXPORT_DOWNLOADED: &str = "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.";
+    pub const ROW_SECURITY_MAILBOX_EXPORT_DOWNLOADED: &str = "Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.";
     pub fn row_security_mailbox_export_downloaded(format: &str, ip: &str) -> String {
-        format!("Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.")
+        format!("Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.")
     }
 }
 
@@ -10602,6 +11403,8 @@ pub mod profile {
     pub const EDIT_BANNER: &str = "Banner image path";
 
     pub const EDIT_REMOVE_BANNER: &str = "Remove banner";
+
+    pub const EDIT_AUDIENCE_TOGGLE: &str = "People on other nests can see your profile";
 
     pub const EDIT_SAVE: &str = "Save";
 
@@ -10730,6 +11533,10 @@ pub mod subscriptions {
 
     pub const WEBHOOK_URL_LABEL: &str = "Webhook URL:";
 
+    pub const RETURN_URL_LABEL: &str = "Return URL:";
+
+    pub const RETURN_URL_UNAVAILABLE: &str = "Turn on your public web address (Settings, Web) to get a return URL";
+
     pub const REDEEM_CLAIM_TITLE: &str = "Redeem a claim code";
 
     pub const CLAIM_CODE: &str = "Claim code";
@@ -10755,6 +11562,17 @@ pub mod subscriptions {
     pub const CLAIM_STATUS_REDEEMED: &str = "Redeemed";
 
     pub const CLAIM_STATUS_VOIDED: &str = "Voided";
+
+    pub const VOID_CLAIM: &str = "Void";
+
+    pub const VOID_CLAIM_CONFIRM_UNREDEEMED: &str = "Void now — this code will stop working";
+
+    pub const VOID_CLAIM_CONFIRM_REDEEMED: &str = "Void now — {redeemer} loses access to {tier}";
+    pub fn void_claim_confirm_redeemed(redeemer: &str, tier: &str) -> String {
+        format!("Void now — {redeemer} loses access to {tier}")
+    }
+
+    pub const VOID_CLAIM_CANCEL: &str = "Keep";
 
     pub const PROVIDER_STATUS_CONFIGURED: &str = "Configured";
 
@@ -10938,6 +11756,8 @@ pub mod error {
         pub const IMPORT_SOURCE_LOCKED: &str = "This account is already being imported, here or on another of your devices. Finish or cancel that import first.";
 
         pub const OVER_QUOTA: &str = "Your storage is full, so this wasn't saved. Delete something to make room, or ask your nest admin for more space.";
+
+        pub const MAIL_UNAVAILABLE_HERE: &str = "Mail wasn't turned on: this server was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.";
 
         pub const ADDRESS_REFUSED: &str = "None of your connected bridges can reach that address. Check how it is written.";
 
@@ -11349,7 +12169,7 @@ pub mod provisioning {
 
         pub const CONSUMER_KEY: &str = "Consumer key";
 
-        pub const PROJECT: &str = "Project";
+        pub const LOCATION: &str = "Region";
     }
 
     pub mod linode {
@@ -11424,6 +12244,192 @@ pub mod region {
     pub const STALE_WARNING: &str = "Could not check for policy updates recently — the policies above stay in force";
 }
 
+pub mod nest_rules {
+    pub const BLOCKED_NOTICE: &str = "Not shown on {nest} — blocked under this nest’s rules";
+    pub fn blocked_notice(nest: &str) -> String {
+        format!("Not shown on {nest} — blocked under this nest’s rules")
+    }
+
+    pub const COLLAPSED_NOTICE: &str = "Hidden on {nest} under this nest’s rules — select to show";
+    pub fn collapsed_notice(nest: &str) -> String {
+        format!("Hidden on {nest} under this nest’s rules — select to show")
+    }
+
+    pub const CHANGED_NOTICE: &str = "{nest} changed its rules — see what is in force";
+    pub fn changed_notice(nest: &str) -> String {
+        format!("{nest} changed its rules — see what is in force")
+    }
+
+    pub const REVEAL_BUTTON: &str = "Show";
+
+    pub const SETTINGS_TITLE: &str = "Rules of {nest}";
+    pub fn settings_title(nest: &str) -> String {
+        format!("Rules of {nest}")
+    }
+
+    pub const VERSION: &str = "Version {sequence}, issued {issued}";
+    pub fn version(sequence: &str, issued: &str) -> String {
+        format!("Version {sequence}, issued {issued}")
+    }
+
+    pub const RULE_LINE: &str = "{verdict} · {level} — {reason}";
+    pub fn rule_line(verdict: &str, level: &str, reason: &str) -> String {
+        format!("{verdict} · {level} — {reason}")
+    }
+
+    pub const RULE_LINE_NO_LEVEL: &str = "{verdict} — {reason}";
+    pub fn rule_line_no_level(verdict: &str, reason: &str) -> String {
+        format!("{verdict} — {reason}")
+    }
+}
+
+pub mod rule_editor {
+    pub mod kind {
+        pub const CATEGORY: &str = "Category";
+
+        pub const KEYWORDS: &str = "Keywords";
+
+        pub const LABELER: &str = "Labeler";
+
+        pub const PROMPT: &str = "Prompt";
+
+        pub const LIST: &str = "Content list";
+    }
+
+    pub mod verdict {
+        pub const BLOCK: &str = "Block";
+
+        pub const COLLAPSE: &str = "Hide behind a warning";
+    }
+
+    pub mod level {
+        pub const VERY_STRICT: &str = "Very strict";
+
+        pub const STRICT: &str = "Strict";
+
+        pub const STANDARD: &str = "Standard";
+
+        pub const LENIENT: &str = "Lenient";
+
+        pub const VERY_LENIENT: &str = "Very lenient";
+    }
+
+    pub const PROMPT_NOT_APPLIED: &str = "Not applied on this device";
+
+    pub const NEWER_VERSION: &str = "These rules were written by a newer version of Fauna. Update the app to edit them.";
+
+    pub const ITEM_LABEL: &str = "Rule {rule}";
+    pub fn item_label(rule: &str) -> String {
+        format!("Rule {rule}")
+    }
+
+    pub const KIND_LABEL: &str = "Kind";
+
+    pub const CATEGORY_LABEL: &str = "Category";
+
+    pub const KEYWORDS_LABEL: &str = "Keywords (separate with commas)";
+
+    pub const LABELER_LABEL: &str = "Labeler";
+
+    pub const PROMPT_LABEL: &str = "Prompt";
+
+    pub const VERDICT_LABEL: &str = "Verdict";
+
+    pub const LEVEL_LABEL: &str = "Level";
+
+    pub const REASON_LABEL: &str = "Reason shown to the member";
+
+    pub const ADD_BUTTON: &str = "Add rule";
+
+    pub const REMOVE_BUTTON: &str = "Remove";
+
+    pub const SAVE_BUTTON: &str = "Save rules";
+
+    pub const LOADING: &str = "Loading rules…";
+
+    pub const SAVING: &str = "Saving…";
+
+    pub const SAVED: &str = "Saved";
+
+    pub const SAVED_VERSION: &str = "Saved — version {sequence}";
+    pub fn saved_version(sequence: &str) -> String {
+        format!("Saved — version {sequence}")
+    }
+
+    pub const NO_RULES: &str = "No rules yet";
+
+    pub const NEST_SECTION: &str = "Nest rules";
+
+    pub const FAMILY_SECTION: &str = "Content rules";
+
+    pub mod defect {
+        pub const NO_REASON: &str = "Rule {rule} needs a reason.";
+        pub fn no_reason(rule: &str) -> String {
+            format!("Rule {rule} needs a reason.")
+        }
+
+        pub const NO_REASON_CODE: &str = "Rule {rule} is missing its identifier. Remove it and add it again.";
+        pub fn no_reason_code(rule: &str) -> String {
+            format!("Rule {rule} is missing its identifier. Remove it and add it again.")
+        }
+
+        pub const LEVEL_OUT_OF_RANGE: &str = "Rule {rule} has a level outside the scale. Pick a level.";
+        pub fn level_out_of_range(rule: &str) -> String {
+            format!("Rule {rule} has a level outside the scale. Pick a level.")
+        }
+
+        pub const NO_SUBJECT: &str = "Rule {rule} needs something to apply to.";
+        pub fn no_subject(rule: &str) -> String {
+            format!("Rule {rule} needs something to apply to.")
+        }
+
+        pub const MISSING_SCORER: &str = "Rule {rule} refers to something these rules do not include. Remove it and add it again.";
+        pub fn missing_scorer(rule: &str) -> String {
+            format!("Rule {rule} refers to something these rules do not include. Remove it and add it again.")
+        }
+
+        pub const MALFORMED_SCORER: &str = "Rule {rule} cannot be read. Remove it and add it again.";
+        pub fn malformed_scorer(rule: &str) -> String {
+            format!("Rule {rule} cannot be read. Remove it and add it again.")
+        }
+
+        pub const LIST_NOT_ADMITTED: &str = "Rule {rule} is a content list, which only a region authority may publish. Remove it.";
+        pub fn list_not_admitted(rule: &str) -> String {
+            format!("Rule {rule} is a content list, which only a region authority may publish. Remove it.")
+        }
+
+        pub const SCORER_TOO_LARGE: &str = "Rule {rule} is too large.";
+        pub fn scorer_too_large(rule: &str) -> String {
+            format!("Rule {rule} is too large.")
+        }
+
+        pub const NO_KEYWORD: &str = "Rule {rule} needs at least one keyword.";
+        pub fn no_keyword(rule: &str) -> String {
+            format!("Rule {rule} needs at least one keyword.")
+        }
+
+        pub const KEYWORD_TOO_LONG: &str = "Rule {rule} has a keyword longer than {max} characters.";
+        pub fn keyword_too_long(rule: &str, max: &str) -> String {
+            format!("Rule {rule} has a keyword longer than {max} characters.")
+        }
+
+        pub const NO_PROMPT: &str = "Rule {rule} needs a prompt.";
+        pub fn no_prompt(rule: &str) -> String {
+            format!("Rule {rule} needs a prompt.")
+        }
+
+        pub const NO_LABELER: &str = "Rule {rule} needs a labeler.";
+        pub fn no_labeler(rule: &str) -> String {
+            format!("Rule {rule} needs a labeler.")
+        }
+
+        pub const UNUSED_SCORER: &str = "These rules include “{name}”, which cannot be read and no rule uses.";
+        pub fn unused_scorer(name: &str) -> String {
+            format!("These rules include “{name}”, which cannot be read and no rule uses.")
+        }
+    }
+}
+
 pub mod connected_apps {
     pub const TITLE: &str = "Connected apps";
 
@@ -11472,6 +12478,8 @@ pub mod connected_apps {
     pub fn revoke_prompt(name: &str) -> String {
         format!("Disconnect {name}? It will no longer be able to act for you.")
     }
+
+    pub const SETTINGS_LINK: &str = "Plugin settings";
 
     pub const PUBLISHER: &str = "From {domain}";
     pub fn publisher(domain: &str) -> String {
@@ -11568,6 +12576,11 @@ pub mod connected_apps {
         format!("Failed to block the app: {message}")
     }
 
+    pub const ERROR_BIND: &str = "Failed to connect the plugin: {message}";
+    pub fn error_bind(message: &str) -> String {
+        format!("Failed to connect the plugin: {message}")
+    }
+
     pub const ERROR_SECRET: &str = "Could not read the secret: {message}";
     pub fn error_secret(message: &str) -> String {
         format!("Could not read the secret: {message}")
@@ -11576,6 +12589,11 @@ pub mod connected_apps {
     pub const ERROR_RECORD: &str = "Could not read what your nest did for this app: {message}";
     pub fn error_record(message: &str) -> String {
         format!("Could not read what your nest did for this app: {message}")
+    }
+
+    pub const ERROR_EXTERNAL_APPS: &str = "Failed to change the external-apps switch: {message}";
+    pub fn error_external_apps(message: &str) -> String {
+        format!("Failed to change the external-apps switch: {message}")
     }
 
     pub const ORACLE_OPS: &str = "Your nest used your keys for this app {count} times in the current window";
@@ -11612,6 +12630,48 @@ pub mod connected_apps {
     }
 
     pub const UNBLOCK: &str = "Allow requests again";
+
+    pub const INSTALL_HEADING: &str = "Install this plugin on your nest";
+
+    pub const INSTALL_FRAMING: &str = "Installing runs this code on your nest. It gets no access to anyone's private data until that person connects it from their own app.";
+
+    pub const INSTALL_HEADING_BIND: &str = "Connect this plugin on your nest to your account";
+
+    pub const INSTALL_FORM: &str = "Runs as: {form}";
+    pub fn install_form(form: &str) -> String {
+        format!("Runs as: {form}")
+    }
+
+    pub const INSTALL_PUBLISHER: &str = "Publisher: {domain} — {key}";
+    pub fn install_publisher(domain: &str, key: &str) -> String {
+        format!("Publisher: {domain} — {key}")
+    }
+
+    pub const INSTALL_PUBLISHER_DEVELOPMENT: &str = "Publisher: Development plugin";
+
+    pub const INSTALL_DIGEST: &str = "Module: {digest}";
+    pub fn install_digest(digest: &str) -> String {
+        format!("Module: {digest}")
+    }
+
+    pub const INSTALL_KINDS_HEADING: &str = "Kinds of data it defines:";
+
+    pub const INSTALL_KINDS_NONE: &str = "Kinds of data it defines: none";
+
+    pub const INSTALL_HOSTS_HEADING: &str = "Sites it may reach:";
+
+    pub const INSTALL_HOSTS_NONE: &str = "Sites it may reach: none";
+
+    pub const INSTALL_INGRESS_HEADING: &str = "Addresses it answers on your nest:";
+
+    pub const INSTALL_SETTINGS_HEADING: &str = "Settings:";
+
+    pub const INSTALL_SETTINGS_NONE: &str = "Settings: none";
+
+    pub const INSTALL_SETTING: &str = "{label} ({kind})";
+    pub fn install_setting(label: &str, kind: &str) -> String {
+        format!("{label} ({kind})")
+    }
 }
 
 pub mod share_link {
@@ -11930,6 +12990,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.welcome.title" => Some(onboarding::welcome::TITLE),
         "onboarding.welcome.subtitle" => Some(onboarding::welcome::SUBTITLE),
         "onboarding.welcome.tagline" => Some(onboarding::welcome::TAGLINE),
+        "onboarding.terms.notice" => Some(onboarding::terms::NOTICE),
         "onboarding.launch.transient_error" => Some(onboarding::launch::TRANSIENT_ERROR),
         "onboarding.launch.use_different_nest" => Some(onboarding::launch::USE_DIFFERENT_NEST),
         "onboarding.launch.launch_failed" => Some(onboarding::launch::LAUNCH_FAILED),
@@ -12179,8 +13240,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.vps_config.update_channel_dev_label" => Some(onboarding::vps_config::UPDATE_CHANNEL_DEV_LABEL),
         "onboarding.vps_config.update_channel_dev_desc" => Some(onboarding::vps_config::UPDATE_CHANNEL_DEV_DESC),
         "onboarding.vps_config.update_channel_dev_desc_same_version" => Some(onboarding::vps_config::UPDATE_CHANNEL_DEV_DESC_SAME_VERSION),
+        "onboarding.vps_config.update_channel_stable_desc_no_build" => Some(onboarding::vps_config::UPDATE_CHANNEL_STABLE_DESC_NO_BUILD),
+        "onboarding.vps_config.update_channel_test_desc_no_build" => Some(onboarding::vps_config::UPDATE_CHANNEL_TEST_DESC_NO_BUILD),
+        "onboarding.vps_config.update_channel_dev_desc_no_build" => Some(onboarding::vps_config::UPDATE_CHANNEL_DEV_DESC_NO_BUILD),
         "onboarding.vps_config.mail_mode_label" => Some(onboarding::vps_config::MAIL_MODE_LABEL),
         "onboarding.vps_config.mail_mode_desc" => Some(onboarding::vps_config::MAIL_MODE_DESC),
+        "onboarding.vps_config.ssh_door_label" => Some(onboarding::vps_config::SSH_DOOR_LABEL),
+        "onboarding.vps_config.ssh_door_warning" => Some(onboarding::vps_config::SSH_DOOR_WARNING),
         "onboarding.nest_provisioning.title" => Some(onboarding::nest_provisioning::TITLE),
         "onboarding.nest_provisioning.start_button" => Some(onboarding::nest_provisioning::START_BUTTON),
         "onboarding.nest_provisioning.elapsed_template" => Some(onboarding::nest_provisioning::ELAPSED_TEMPLATE),
@@ -12193,6 +13259,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "onboarding.nest_provisioning.bom_line" => Some(onboarding::nest_provisioning::BOM_LINE),
         "onboarding.nest_provisioning.bom_line_recurring" => Some(onboarding::nest_provisioning::BOM_LINE_RECURRING),
         "onboarding.nest_provisioning.bom_line_domain" => Some(onboarding::nest_provisioning::BOM_LINE_DOMAIN),
+        "onboarding.nest_provisioning.ssh_door_command_template" => Some(onboarding::nest_provisioning::SSH_DOOR_COMMAND_TEMPLATE),
+        "onboarding.nest_provisioning.ssh_door_command_no_path_template" => Some(onboarding::nest_provisioning::SSH_DOOR_COMMAND_NO_PATH_TEMPLATE),
+        "onboarding.nest_provisioning.ssh_door_address_unknown" => Some(onboarding::nest_provisioning::SSH_DOOR_ADDRESS_UNKNOWN),
+        "onboarding.nest_provisioning.ssh_door_save_key_button" => Some(onboarding::nest_provisioning::SSH_DOOR_SAVE_KEY_BUTTON),
         "onboarding.dns_post_instructions.title" => Some(onboarding::dns_post_instructions::TITLE),
         "onboarding.dns_post_instructions.description" => Some(onboarding::dns_post_instructions::DESCRIPTION),
         "onboarding.dns_post_instructions.copy_button" => Some(onboarding::dns_post_instructions::COPY_BUTTON),
@@ -12312,18 +13382,29 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "credential_store.error_mismatch" => Some(credential_store::ERROR_MISMATCH),
         "credential_store.error_wrong" => Some(credential_store::ERROR_WRONG),
         "credential_store.error_failed" => Some(credential_store::ERROR_FAILED),
-        "tui_unlock.unlock_title" => Some(tui_unlock::UNLOCK_TITLE),
-        "tui_unlock.unlock_prompt" => Some(tui_unlock::UNLOCK_PROMPT),
-        "tui_unlock.create_title" => Some(tui_unlock::CREATE_TITLE),
-        "tui_unlock.create_prompt" => Some(tui_unlock::CREATE_PROMPT),
-        "tui_unlock.passphrase_label" => Some(tui_unlock::PASSPHRASE_LABEL),
-        "tui_unlock.confirm_label" => Some(tui_unlock::CONFIRM_LABEL),
-        "tui_unlock.unlock_button" => Some(tui_unlock::UNLOCK_BUTTON),
-        "tui_unlock.create_button" => Some(tui_unlock::CREATE_BUTTON),
-        "tui_unlock.error_empty" => Some(tui_unlock::ERROR_EMPTY),
-        "tui_unlock.error_mismatch" => Some(tui_unlock::ERROR_MISMATCH),
-        "tui_unlock.error_wrong" => Some(tui_unlock::ERROR_WRONG),
-        "tui_unlock.error_failed" => Some(tui_unlock::ERROR_FAILED),
+        "credential_store.passkey_add_button" => Some(credential_store::PASSKEY_ADD_BUTTON),
+        "credential_store.passkey_remove_button" => Some(credential_store::PASSKEY_REMOVE_BUTTON),
+        "credential_store.passkey_error" => Some(credential_store::PASSKEY_ERROR),
+        "credential_store.passkey_status" => Some(credential_store::PASSKEY_STATUS),
+        "credential_store.passkey_explainer" => Some(credential_store::PASSKEY_EXPLAINER),
+        "unlock.unlock_title" => Some(unlock::UNLOCK_TITLE),
+        "unlock.unlock_prompt" => Some(unlock::UNLOCK_PROMPT),
+        "unlock.create_title" => Some(unlock::CREATE_TITLE),
+        "unlock.create_prompt" => Some(unlock::CREATE_PROMPT),
+        "unlock.passphrase_label" => Some(unlock::PASSPHRASE_LABEL),
+        "unlock.confirm_label" => Some(unlock::CONFIRM_LABEL),
+        "unlock.unlock_button" => Some(unlock::UNLOCK_BUTTON),
+        "unlock.create_button" => Some(unlock::CREATE_BUTTON),
+        "unlock.error_empty" => Some(unlock::ERROR_EMPTY),
+        "unlock.error_mismatch" => Some(unlock::ERROR_MISMATCH),
+        "unlock.error_wrong" => Some(unlock::ERROR_WRONG),
+        "unlock.error_failed" => Some(unlock::ERROR_FAILED),
+        "unlock.reset_button" => Some(unlock::RESET_BUTTON),
+        "unlock.reset_confirm_button" => Some(unlock::RESET_CONFIRM_BUTTON),
+        "unlock.reset_explainer" => Some(unlock::RESET_EXPLAINER),
+        "unlock.passkey_button" => Some(unlock::PASSKEY_BUTTON),
+        "unlock.passkey_error" => Some(unlock::PASSKEY_ERROR),
+        "unlock.passkey_unavailable" => Some(unlock::PASSKEY_UNAVAILABLE),
         "tui_nav_hints.pane" => Some(tui_nav_hints::PANE),
         "tui_nav_hints.move_focus" => Some(tui_nav_hints::MOVE_FOCUS),
         "tui_nav_hints.open" => Some(tui_nav_hints::OPEN),
@@ -12336,6 +13417,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "tui_settings.external_media_always" => Some(tui_settings::EXTERNAL_MEDIA_ALWAYS),
         "tui_settings.external_media_never" => Some(tui_settings::EXTERNAL_MEDIA_NEVER),
         "feed.compose_empty" => Some(feed::COMPOSE_EMPTY),
+        "feed.video_external_open_confirm_title" => Some(feed::VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE),
         "feed.compose_gate_preview_empty" => Some(feed::COMPOSE_GATE_PREVIEW_EMPTY),
         "feed.compose_gate_no_key" => Some(feed::COMPOSE_GATE_NO_KEY),
         "feed.compose_room_no_key" => Some(feed::COMPOSE_ROOM_NO_KEY),
@@ -12448,6 +13530,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "feed.post.sell_asking_price_placeholder" => Some(feed::post::SELL_ASKING_PRICE_PLACEHOLDER),
         "feed.post.sell_subscribers_free" => Some(feed::post::SELL_SUBSCRIBERS_FREE),
         "feed.post.buy_button" => Some(feed::post::BUY_BUTTON),
+        "feed.post.purchase_pending" => Some(feed::post::PURCHASE_PENDING),
         "feed.post.open_rich_compose" => Some(feed::post::OPEN_RICH_COMPOSE),
         "feed.post.posting" => Some(feed::post::POSTING),
         "feed.post.post_detail" => Some(feed::post::POST_DETAIL),
@@ -12529,6 +13612,11 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.error_set_room_policy" => Some(conversations::unified::ERROR_SET_ROOM_POLICY),
         "conversations.unified.error_room_invitation" => Some(conversations::unified::ERROR_ROOM_INVITATION),
         "conversations.unified.error_withdraw_room_invite" => Some(conversations::unified::ERROR_WITHDRAW_ROOM_INVITE),
+        "conversations.unified.error_room_search" => Some(conversations::unified::ERROR_ROOM_SEARCH),
+        "conversations.unified.room_search_hit_pending" => Some(conversations::unified::ROOM_SEARCH_HIT_PENDING),
+        "conversations.unified.room_search_no_results" => Some(conversations::unified::ROOM_SEARCH_NO_RESULTS),
+        "conversations.unified.room_search" => Some(conversations::unified::ROOM_SEARCH),
+        "conversations.unified.room_search_placeholder" => Some(conversations::unified::ROOM_SEARCH_PLACEHOLDER),
         "conversations.unified.room_class_end_to_end" => Some(conversations::unified::ROOM_CLASS_END_TO_END),
         "conversations.unified.room_class_community" => Some(conversations::unified::ROOM_CLASS_COMMUNITY),
         "conversations.unified.room_class_transport_only" => Some(conversations::unified::ROOM_CLASS_TRANSPORT_ONLY),
@@ -12538,6 +13626,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.bridged_no_recipient_key" => Some(conversations::unified::BRIDGED_NO_RECIPIENT_KEY),
         "conversations.unified.room_notice_moderation_unverified" => Some(conversations::unified::ROOM_NOTICE_MODERATION_UNVERIFIED),
         "conversations.unified.room_notice_awaiting_key" => Some(conversations::unified::ROOM_NOTICE_AWAITING_KEY),
+        "conversations.unified.room_notice_bridge_disconnected" => Some(conversations::unified::ROOM_NOTICE_BRIDGE_DISCONNECTED),
+        "conversations.unified.dm_message_undelivered" => Some(conversations::unified::DM_MESSAGE_UNDELIVERED),
+        "conversations.unified.dm_message_warmup_deferred" => Some(conversations::unified::DM_MESSAGE_WARMUP_DEFERRED),
+        "conversations.unified.dm_message_warmup_queue_next" => Some(conversations::unified::DM_MESSAGE_WARMUP_QUEUE_NEXT),
+        "conversations.unified.dm_message_warmup_queue_one" => Some(conversations::unified::DM_MESSAGE_WARMUP_QUEUE_ONE),
+        "conversations.unified.dm_message_warmup_queue" => Some(conversations::unified::DM_MESSAGE_WARMUP_QUEUE),
         "conversations.unified.room_role_owner" => Some(conversations::unified::ROOM_ROLE_OWNER),
         "conversations.unified.room_role_admin" => Some(conversations::unified::ROOM_ROLE_ADMIN),
         "conversations.unified.room_join_rule_label" => Some(conversations::unified::ROOM_JOIN_RULE_LABEL),
@@ -12589,6 +13683,20 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "conversations.unified.to_line_label" => Some(conversations::unified::TO_LINE_LABEL),
         "conversations.unified.topic_input_placeholder" => Some(conversations::unified::TOPIC_INPUT_PLACEHOLDER),
         "conversations.unified.topic_toggle_add" => Some(conversations::unified::TOPIC_TOGGLE_ADD),
+        "conversations.scan_result.clamav_clean" => Some(conversations::scan_result::CLAMAV_CLEAN),
+        "conversations.scan_result.clamav_infected" => Some(conversations::scan_result::CLAMAV_INFECTED),
+        "conversations.scan_result.clamav_error" => Some(conversations::scan_result::CLAMAV_ERROR),
+        "conversations.scan_result.clamav_bypassed_oversize" => Some(conversations::scan_result::CLAMAV_BYPASSED_OVERSIZE),
+        "conversations.scan_result.clamav_not_scanned" => Some(conversations::scan_result::CLAMAV_NOT_SCANNED),
+        "conversations.scan_result.clamav_unknown" => Some(conversations::scan_result::CLAMAV_UNKNOWN),
+        "conversations.scan_result.rspamd_score" => Some(conversations::scan_result::RSPAMD_SCORE),
+        "conversations.scan_result.rspamd_score_rules" => Some(conversations::scan_result::RSPAMD_SCORE_RULES),
+        "conversations.scan_result.rspamd_not_scanned" => Some(conversations::scan_result::RSPAMD_NOT_SCANNED),
+        "conversations.scan_result.action_delivered" => Some(conversations::scan_result::ACTION_DELIVERED),
+        "conversations.scan_result.action_junked" => Some(conversations::scan_result::ACTION_JUNKED),
+        "conversations.scan_result.action_tagged" => Some(conversations::scan_result::ACTION_TAGGED),
+        "conversations.scan_result.action_rejected_malware" => Some(conversations::scan_result::ACTION_REJECTED_MALWARE),
+        "conversations.scan_result.action_unknown" => Some(conversations::scan_result::ACTION_UNKNOWN),
         "contacts.title" => Some(contacts::TITLE),
         "contacts.detail_title" => Some(contacts::DETAIL_TITLE),
         "contacts.sign_in_prompt" => Some(contacts::SIGN_IN_PROMPT),
@@ -12596,11 +13704,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "contacts.find_user.description" => Some(contacts::find_user::DESCRIPTION),
         "contacts.find_user.placeholder" => Some(contacts::find_user::PLACEHOLDER),
         "contacts.find_user.find" => Some(contacts::find_user::FIND),
+        "contacts.find_user.open_profile" => Some(contacts::find_user::OPEN_PROFILE),
         "contacts.message" => Some(contacts::MESSAGE),
         "contacts.handle_not_found" => Some(contacts::HANDLE_NOT_FOUND),
         "contacts.guardian_approval_required" => Some(contacts::GUARDIAN_APPROVAL_REQUIRED),
         "contacts.ask_guardian" => Some(contacts::ASK_GUARDIAN),
         "contacts.contact_request_pending" => Some(contacts::CONTACT_REQUEST_PENDING),
+        "contacts.knock_guardian_pending" => Some(contacts::KNOCK_GUARDIAN_PENDING),
         "contacts.message_requests.title" => Some(contacts::message_requests::TITLE),
         "contacts.message_requests.none" => Some(contacts::message_requests::NONE),
         "contacts.message_requests.count" => Some(contacts::message_requests::COUNT),
@@ -12804,12 +13914,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "atproto_settings.app_credentials_heading" => Some(atproto_settings::APP_CREDENTIALS_HEADING),
         "atproto_settings.app_credentials_empty" => Some(atproto_settings::APP_CREDENTIALS_EMPTY),
         "atproto_settings.mint_button" => Some(atproto_settings::MINT_BUTTON),
+        "atproto_settings.mint_dm_access_label" => Some(atproto_settings::MINT_DM_ACCESS_LABEL),
         "atproto_settings.default_credential_label" => Some(atproto_settings::DEFAULT_CREDENTIAL_LABEL),
         "atproto_settings.reveal_button" => Some(atproto_settings::REVEAL_BUTTON),
         "atproto_settings.revoke_button" => Some(atproto_settings::REVOKE_BUTTON),
         "atproto_settings.credential_created_prefix" => Some(atproto_settings::CREDENTIAL_CREATED_PREFIX),
         "atproto_settings.credential_last_used_prefix" => Some(atproto_settings::CREDENTIAL_LAST_USED_PREFIX),
         "atproto_settings.credential_never_used" => Some(atproto_settings::CREDENTIAL_NEVER_USED),
+        "atproto_settings.credential_dm_access" => Some(atproto_settings::CREDENTIAL_DM_ACCESS),
         "atproto_settings.connected_apps_heading" => Some(atproto_settings::CONNECTED_APPS_HEADING),
         "atproto_settings.connected_apps_empty" => Some(atproto_settings::CONNECTED_APPS_EMPTY),
         "atproto_settings.session_created_prefix" => Some(atproto_settings::SESSION_CREATED_PREFIX),
@@ -12948,6 +14060,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "bridges.detail_title" => Some(bridges::DETAIL_TITLE),
         "bridges.follows" => Some(bridges::FOLLOWS),
         "bridges.remove_follow" => Some(bridges::REMOVE_FOLLOW),
+        "bridges.follow_requests" => Some(bridges::FOLLOW_REQUESTS),
+        "bridges.approve_follow_request" => Some(bridges::APPROVE_FOLLOW_REQUEST),
+        "bridges.refuse_follow_request" => Some(bridges::REFUSE_FOLLOW_REQUEST),
         "bridges.refresh_list" => Some(bridges::REFRESH_LIST),
         "bridges.link_action" => Some(bridges::LINK_ACTION),
         "bridges.unlink_action" => Some(bridges::UNLINK_ACTION),
@@ -12990,6 +14105,28 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "bridges.source_request_button" => Some(bridges::SOURCE_REQUEST_BUTTON),
         "bridges.source_request_pending" => Some(bridges::SOURCE_REQUEST_PENDING),
         "bridges.source_request_approved" => Some(bridges::SOURCE_REQUEST_APPROVED),
+        "bridges.plugins_heading" => Some(bridges::PLUGINS_HEADING),
+        "bridges.plugins_empty" => Some(bridges::PLUGINS_EMPTY),
+        "bridges.plugin_install_label" => Some(bridges::PLUGIN_INSTALL_LABEL),
+        "bridges.plugin_install_submit" => Some(bridges::PLUGIN_INSTALL_SUBMIT),
+        "bridges.plugin_install_opened" => Some(bridges::PLUGIN_INSTALL_OPENED),
+        "bridges.plugin_publisher" => Some(bridges::PLUGIN_PUBLISHER),
+        "bridges.plugin_publisher_development" => Some(bridges::PLUGIN_PUBLISHER_DEVELOPMENT),
+        "bridges.plugin_state_running" => Some(bridges::PLUGIN_STATE_RUNNING),
+        "bridges.plugin_state_restarting" => Some(bridges::PLUGIN_STATE_RESTARTING),
+        "bridges.plugin_state_stopped" => Some(bridges::PLUGIN_STATE_STOPPED),
+        "bridges.plugin_state_other" => Some(bridges::PLUGIN_STATE_OTHER),
+        "bridges.plugin_faults" => Some(bridges::PLUGIN_FAULTS),
+        "bridges.plugin_last_fault" => Some(bridges::PLUGIN_LAST_FAULT),
+        "bridges.plugin_reason" => Some(bridges::PLUGIN_REASON),
+        "bridges.plugin_uninstall" => Some(bridges::PLUGIN_UNINSTALL),
+        "bridges.plugin_uninstall_confirm" => Some(bridges::PLUGIN_UNINSTALL_CONFIRM),
+        "bridges.plugin_uninstall_cancel" => Some(bridges::PLUGIN_UNINSTALL_CANCEL),
+        "bridges.plugin_uninstall_prompt" => Some(bridges::PLUGIN_UNINSTALL_PROMPT),
+        "bridges.plugin_card_badge" => Some(bridges::PLUGIN_CARD_BADGE),
+        "bridges.plugin_connect" => Some(bridges::PLUGIN_CONNECT),
+        "bridges.plugin_disconnect" => Some(bridges::PLUGIN_DISCONNECT),
+        "bridges.plugin_bind_opened" => Some(bridges::PLUGIN_BIND_OPENED),
         "media.title" => Some(media::TITLE),
         "media.view_list" => Some(media::VIEW_LIST),
         "media.view_grid" => Some(media::VIEW_GRID),
@@ -13091,6 +14228,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.snapshot_title" => Some(backups::SNAPSHOT_TITLE),
         "backups.select_snapshot" => Some(backups::SELECT_SNAPSHOT),
         "backups.no_files_in_snapshot" => Some(backups::NO_FILES_IN_SNAPSHOT),
+        "backups.kind_snapshot_restores_below" => Some(backups::KIND_SNAPSHOT_RESTORES_BELOW),
+        "backups.snapshot_restore_destination_placeholder" => Some(backups::SNAPSHOT_RESTORE_DESTINATION_PLACEHOLDER),
+        "backups.snapshot_restore_button" => Some(backups::SNAPSHOT_RESTORE_BUTTON),
+        "backups.snapshot_restore_progress" => Some(backups::SNAPSHOT_RESTORE_PROGRESS),
+        "backups.snapshot_restore_done" => Some(backups::SNAPSHOT_RESTORE_DONE),
+        "backups.snapshot_restore_partial" => Some(backups::SNAPSHOT_RESTORE_PARTIAL),
+        "backups.snapshot_restore_failed" => Some(backups::SNAPSHOT_RESTORE_FAILED),
+        "backups.snapshot_restore_destination_not_absolute" => Some(backups::SNAPSHOT_RESTORE_DESTINATION_NOT_ABSOLUTE),
         "backups.create_snapshot" => Some(backups::CREATE_SNAPSHOT),
         "backups.snapshots_title" => Some(backups::SNAPSHOTS_TITLE),
         "backups.last_backed_up_never" => Some(backups::LAST_BACKED_UP_NEVER),
@@ -13222,6 +14367,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "backups.backup_reseed_no_agent" => Some(backups::BACKUP_RESEED_NO_AGENT),
         "backups.backup_reseed_failed" => Some(backups::BACKUP_RESEED_FAILED),
         "backups.backup_reseed_reenroll_failed" => Some(backups::BACKUP_RESEED_REENROLL_FAILED),
+        "backups.backup_reseed_pull_back_confirm_title" => Some(backups::BACKUP_RESEED_PULL_BACK_CONFIRM_TITLE),
+        "backups.backup_reseed_pull_back_confirm_body" => Some(backups::BACKUP_RESEED_PULL_BACK_CONFIRM_BODY),
+        "backups.backup_reseed_pull_back_reenroll_failed" => Some(backups::BACKUP_RESEED_PULL_BACK_REENROLL_FAILED),
         "backups.reseed_result_whole" => Some(backups::RESEED_RESULT_WHOLE),
         "backups.reseed_result_incomplete" => Some(backups::RESEED_RESULT_INCOMPLETE),
         "backups.reseed_set_mail" => Some(backups::RESEED_SET_MAIL),
@@ -13463,6 +14611,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.custody_held_section" => Some(devices::CUSTODY_HELD_SECTION),
         "devices.custody_held_owner" => Some(devices::CUSTODY_HELD_OWNER),
         "devices.custody_held_scope_account" => Some(devices::CUSTODY_HELD_SCOPE_ACCOUNT),
+        "devices.custody_held_restore_address" => Some(devices::CUSTODY_HELD_RESTORE_ADDRESS),
         "devices.custody_budget_label" => Some(devices::CUSTODY_BUDGET_LABEL),
         "devices.custody_stop" => Some(devices::CUSTODY_STOP),
         "devices.custody_stopped_bytes_remain" => Some(devices::CUSTODY_STOPPED_BYTES_REMAIN),
@@ -13702,6 +14851,12 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "devices.sync_locations.on_demand_unavailable" => Some(devices::sync_locations::ON_DEMAND_UNAVAILABLE),
         "devices.sync_locations.on_demand_mount_refused" => Some(devices::sync_locations::ON_DEMAND_MOUNT_REFUSED),
         "devices.sync_locations.on_demand_mount_failed" => Some(devices::sync_locations::ON_DEMAND_MOUNT_FAILED),
+        "devices.sync_locations.free_space_button" => Some(devices::sync_locations::FREE_SPACE_BUTTON),
+        "devices.sync_locations.free_space_running" => Some(devices::sync_locations::FREE_SPACE_RUNNING),
+        "devices.sync_locations.free_space_on_device" => Some(devices::sync_locations::FREE_SPACE_ON_DEVICE),
+        "devices.sync_locations.free_space_result" => Some(devices::sync_locations::FREE_SPACE_RESULT),
+        "devices.sync_locations.free_space_result_kept" => Some(devices::sync_locations::FREE_SPACE_RESULT_KEPT),
+        "devices.sync_locations.free_space_kept_pinned" => Some(devices::sync_locations::FREE_SPACE_KEPT_PINNED),
         "devices.sync_locations.remove" => Some(devices::sync_locations::REMOVE),
         "devices.sync_locations.helper_unavailable" => Some(devices::sync_locations::HELPER_UNAVAILABLE),
         "sessions.title" => Some(sessions::TITLE),
@@ -13825,6 +14980,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.up_to_date" => Some(settings::UP_TO_DATE),
         "settings.check_failed" => Some(settings::CHECK_FAILED),
         "settings.update_available_notice" => Some(settings::UPDATE_AVAILABLE_NOTICE),
+        "settings.terms_link" => Some(settings::TERMS_LINK),
         "settings.mls_available" => Some(settings::MLS_AVAILABLE),
         "settings.mls_not_available" => Some(settings::MLS_NOT_AVAILABLE),
         "settings.push_notifications.title" => Some(settings::push_notifications::TITLE),
@@ -13834,6 +14990,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.push_notifications.opt_in_label" => Some(settings::push_notifications::OPT_IN_LABEL),
         "settings.push_notifications.agent_unreachable" => Some(settings::push_notifications::AGENT_UNREACHABLE),
         "settings.push_notifications.no_sink" => Some(settings::push_notifications::NO_SINK),
+        "settings.push_notifications.no_distributor" => Some(settings::push_notifications::NO_DISTRIBUTOR),
         "settings.configuration" => Some(settings::CONFIGURATION),
         "settings.privacy" => Some(settings::PRIVACY),
         "settings.moderation" => Some(settings::MODERATION),
@@ -14014,6 +15171,15 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "settings.privacy_page.action" => Some(settings::privacy_page::ACTION),
         "settings.privacy_page.forward_address" => Some(settings::privacy_page::FORWARD_ADDRESS),
         "settings.privacy_page.keep_local_copy" => Some(settings::privacy_page::KEEP_LOCAL_COPY),
+        "settings.privacy_page.file_into_mailbox" => Some(settings::privacy_page::FILE_INTO_MAILBOX),
+        "settings.privacy_page.add_label" => Some(settings::privacy_page::ADD_LABEL),
+        "settings.privacy_page.auto_reply_subject" => Some(settings::privacy_page::AUTO_REPLY_SUBJECT),
+        "settings.privacy_page.auto_reply_body" => Some(settings::privacy_page::AUTO_REPLY_BODY),
+        "settings.privacy_page.auto_reply_interval_hours" => Some(settings::privacy_page::AUTO_REPLY_INTERVAL_HOURS),
+        "settings.privacy_page.header_value" => Some(settings::privacy_page::HEADER_VALUE),
+        "settings.privacy_page.spam_score" => Some(settings::privacy_page::SPAM_SCORE),
+        "settings.privacy_page.priority" => Some(settings::privacy_page::PRIORITY),
+        "settings.privacy_page.continue_matching" => Some(settings::privacy_page::CONTINUE_MATCHING),
         "settings.privacy_page.spam_preferences" => Some(settings::privacy_page::SPAM_PREFERENCES),
         "settings.privacy_page.inbox_mode_description" => Some(settings::privacy_page::INBOX_MODE_DESCRIPTION),
         "settings.privacy_page.inbox_mode_subtitle" => Some(settings::privacy_page::INBOX_MODE_SUBTITLE),
@@ -14115,6 +15281,19 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.not_trusted" => Some(nests::NOT_TRUSTED),
         "nests.escrow_holder_badge" => Some(nests::ESCROW_HOLDER_BADGE),
         "nests.custody_nest_label" => Some(nests::CUSTODY_NEST_LABEL),
+        "nests.custody_restore_button" => Some(nests::CUSTODY_RESTORE_BUTTON),
+        "nests.custody_restore_input_label" => Some(nests::CUSTODY_RESTORE_INPUT_LABEL),
+        "nests.custody_restore_submit" => Some(nests::CUSTODY_RESTORE_SUBMIT),
+        "nests.custody_restore_cancel" => Some(nests::CUSTODY_RESTORE_CANCEL),
+        "nests.custody_restore_row_button" => Some(nests::CUSTODY_RESTORE_ROW_BUTTON),
+        "nests.custody_restore_running" => Some(nests::CUSTODY_RESTORE_RUNNING),
+        "nests.custody_restore_refused" => Some(nests::CUSTODY_RESTORE_REFUSED),
+        "nests.custody_restore_revoked" => Some(nests::CUSTODY_RESTORE_REVOKED),
+        "nests.custody_restore_not_admitted" => Some(nests::CUSTODY_RESTORE_NOT_ADMITTED),
+        "nests.custody_restore_restored" => Some(nests::CUSTODY_RESTORE_RESTORED),
+        "nests.custody_restore_sealed" => Some(nests::CUSTODY_RESTORE_SEALED),
+        "nests.custody_restore_nothing_new" => Some(nests::CUSTODY_RESTORE_NOTHING_NEW),
+        "nests.custody_restore_mismatch" => Some(nests::CUSTODY_RESTORE_MISMATCH),
         "nests.trusted_to_read" => Some(nests::TRUSTED_TO_READ),
         "nests.scope_mail" => Some(nests::SCOPE_MAIL),
         "nests.scope_calendar" => Some(nests::SCOPE_CALENDAR),
@@ -14155,6 +15334,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "nests.generation_expires" => Some(nests::GENERATION_EXPIRES),
         "nests.generation_status_listed" => Some(nests::GENERATION_STATUS_LISTED),
         "nests.generation_status_unreachable" => Some(nests::GENERATION_STATUS_UNREACHABLE),
+        "nests.holders_status_unreachable" => Some(nests::HOLDERS_STATUS_UNREACHABLE),
         "nests.generation_restore" => Some(nests::GENERATION_RESTORE),
         "nests.generation_restored" => Some(nests::GENERATION_RESTORED),
         "nests.generation_past_window" => Some(nests::GENERATION_PAST_WINDOW),
@@ -14203,6 +15383,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "logs.clear_button" => Some(logs::CLEAR_BUTTON),
         "logs.empty" => Some(logs::EMPTY),
         "mail_settings.title" => Some(mail_settings::TITLE),
+        "mail_settings.unavailable_notice" => Some(mail_settings::UNAVAILABLE_NOTICE),
         "mail_settings.keys_info" => Some(mail_settings::KEYS_INFO),
         "mail_settings.credentials_on_connected_apps" => Some(mail_settings::CREDENTIALS_ON_CONNECTED_APPS),
         "mail_settings.serve_here_label" => Some(mail_settings::SERVE_HERE_LABEL),
@@ -14216,6 +15397,20 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_settings.forward_per_hour_not_a_number" => Some(mail_settings::FORWARD_PER_HOUR_NOT_A_NUMBER),
         "mail_settings.forward_per_hour_zero" => Some(mail_settings::FORWARD_PER_HOUR_ZERO),
         "mail_settings.forward_per_hour_above_ceiling" => Some(mail_settings::FORWARD_PER_HOUR_ABOVE_CEILING),
+        "mail_settings.receive_label" => Some(mail_settings::RECEIVE_LABEL),
+        "mail_settings.receive_subtitle" => Some(mail_settings::RECEIVE_SUBTITLE),
+        "mail_settings.send_label" => Some(mail_settings::SEND_LABEL),
+        "mail_settings.send_subtitle" => Some(mail_settings::SEND_SUBTITLE),
+        "mail_settings.scan_result_visible_label" => Some(mail_settings::SCAN_RESULT_VISIBLE_LABEL),
+        "mail_settings.scan_result_visible_subtitle" => Some(mail_settings::SCAN_RESULT_VISIBLE_SUBTITLE),
+        "mail_settings.autorespond_label" => Some(mail_settings::AUTORESPOND_LABEL),
+        "mail_settings.autorespond_subtitle" => Some(mail_settings::AUTORESPOND_SUBTITLE),
+        "mail_settings.autorespond_message_label" => Some(mail_settings::AUTORESPOND_MESSAGE_LABEL),
+        "mail_settings.autorespond_message_empty" => Some(mail_settings::AUTORESPOND_MESSAGE_EMPTY),
+        "mail_settings.mailbox_quota" => Some(mail_settings::MAILBOX_QUOTA),
+        "mail_settings.submission_quota" => Some(mail_settings::SUBMISSION_QUOTA),
+        "mail_settings.over_quota_mailbox" => Some(mail_settings::OVER_QUOTA_MAILBOX),
+        "mail_settings.over_quota_sending" => Some(mail_settings::OVER_QUOTA_SENDING),
         "web_settings.title" => Some(web_settings::TITLE),
         "web_settings.subdomain_toggle_label" => Some(web_settings::SUBDOMAIN_TOGGLE_LABEL),
         "web_settings.subdomain_toggle_subtitle" => Some(web_settings::SUBDOMAIN_TOGGLE_SUBTITLE),
@@ -14262,6 +15457,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_aliases.delete" => Some(mail_aliases::DELETE),
         "mail_aliases.edit" => Some(mail_aliases::EDIT),
         "mail_aliases.show_audit" => Some(mail_aliases::SHOW_AUDIT),
+        "mail_aliases.hide_audit" => Some(mail_aliases::HIDE_AUDIT),
+        "mail_aliases.audit_empty" => Some(mail_aliases::AUDIT_EMPTY),
         "mail_aliases.disabled_badge" => Some(mail_aliases::DISABLED_BADGE),
         "mail_aliases.active_toggle_label" => Some(mail_aliases::ACTIVE_TOGGLE_LABEL),
         "mail_aliases.active_toggle_tooltip" => Some(mail_aliases::ACTIVE_TOGGLE_TOOLTIP),
@@ -14275,9 +15472,13 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_aliases.kind_catchall" => Some(mail_aliases::KIND_CATCHALL),
         "mail_aliases.kind_forwarder" => Some(mail_aliases::KIND_FORWARDER),
         "mail_aliases.kind_other" => Some(mail_aliases::KIND_OTHER),
+        "mail_aliases.delivered_to" => Some(mail_aliases::DELIVERED_TO),
         "mail_aliases.no_default_domain" => Some(mail_aliases::NO_DEFAULT_DOMAIN),
         "mail_aliases.hits" => Some(mail_aliases::HITS),
         "mail_aliases.hits_with_last" => Some(mail_aliases::HITS_WITH_LAST),
+        "mail_aliases.expires_on" => Some(mail_aliases::EXPIRES_ON),
+        "mail_aliases.expired" => Some(mail_aliases::EXPIRED),
+        "mail_aliases.extend" => Some(mail_aliases::EXTEND),
         "mail_aliases.import_button" => Some(mail_aliases::IMPORT_BUTTON),
         "mail_aliases.import_title" => Some(mail_aliases::IMPORT_TITLE),
         "mail_aliases.import_subtitle" => Some(mail_aliases::IMPORT_SUBTITLE),
@@ -14402,6 +15603,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_import.source_app_password_help_icloud" => Some(mail_import::SOURCE_APP_PASSWORD_HELP_ICLOUD),
         "mail_import.source_oauth_button" => Some(mail_import::SOURCE_OAUTH_BUTTON),
         "mail_import.source_outlook_address_label" => Some(mail_import::SOURCE_OUTLOOK_ADDRESS_LABEL),
+        "mail_import.source_forget_button" => Some(mail_import::SOURCE_FORGET_BUTTON),
         "mail_import.microsoft_code_fmt" => Some(mail_import::MICROSOFT_CODE_FMT),
         "mail_import.microsoft_open_browser" => Some(mail_import::MICROSOFT_OPEN_BROWSER),
         "mail_import.microsoft_waiting" => Some(mail_import::MICROSOFT_WAITING),
@@ -14437,6 +15639,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_import.scope_date_from_placeholder" => Some(mail_import::SCOPE_DATE_FROM_PLACEHOLDER),
         "mail_import.scope_max_size_label" => Some(mail_import::SCOPE_MAX_SIZE_LABEL),
         "mail_import.scope_mailbox_mapping_label" => Some(mail_import::SCOPE_MAILBOX_MAPPING_LABEL),
+        "mail_import.scope_import_duplicates_label" => Some(mail_import::SCOPE_IMPORT_DUPLICATES_LABEL),
         "mail_import.confirm_title" => Some(mail_import::CONFIRM_TITLE),
         "mail_import.confirm_summary_fmt" => Some(mail_import::CONFIRM_SUMMARY_FMT),
         "mail_import.confirm_summary_sized_fmt" => Some(mail_import::CONFIRM_SUMMARY_SIZED_FMT),
@@ -14448,8 +15651,17 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "mail_import.pause_button" => Some(mail_import::PAUSE_BUTTON),
         "mail_import.resume_button" => Some(mail_import::RESUME_BUTTON),
         "mail_import.cancel_button" => Some(mail_import::CANCEL_BUTTON),
+        "mail_import.dismiss_failed_button" => Some(mail_import::DISMISS_FAILED_BUTTON),
+        "mail_import.failed_import_control" => Some(mail_import::FAILED_IMPORT_CONTROL),
+        "mail_import.cancelled_import_control" => Some(mail_import::CANCELLED_IMPORT_CONTROL),
+        "mail_import.dismiss_live_import" => Some(mail_import::DISMISS_LIVE_IMPORT),
         "mail_import.paused_mailbox_full" => Some(mail_import::PAUSED_MAILBOX_FULL),
+        "mail_import.quota_notice" => Some(mail_import::QUOTA_NOTICE),
+        "mail_import.quota_skip_rest_button" => Some(mail_import::QUOTA_SKIP_REST_BUTTON),
         "mail_import.paused_connection_lost" => Some(mail_import::PAUSED_CONNECTION_LOST),
+        "mail_import.mailbox_rebuilt_fmt" => Some(mail_import::MAILBOX_REBUILT_FMT),
+        "mail_import.paused_mailbox_rebuilt" => Some(mail_import::PAUSED_MAILBOX_REBUILT),
+        "mail_import.restart_button" => Some(mail_import::RESTART_BUTTON),
         "mail_import.error_log_title" => Some(mail_import::ERROR_LOG_TITLE),
         "mail_import.done_title" => Some(mail_import::DONE_TITLE),
         "mail_import.done_summary_fmt" => Some(mail_import::DONE_SUMMARY_FMT),
@@ -14784,6 +15996,27 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.users_page.age_verification_required_label" => Some(admin::users_page::AGE_VERIFICATION_REQUIRED_LABEL),
         "admin.users_page.cancel" => Some(admin::users_page::CANCEL),
         "admin.users_page.delete" => Some(admin::users_page::DELETE),
+        "admin.mail_reports_page.title" => Some(admin::mail_reports_page::TITLE),
+        "admin.mail_reports_page.description" => Some(admin::mail_reports_page::DESCRIPTION),
+        "admin.mail_reports_page.refresh" => Some(admin::mail_reports_page::REFRESH),
+        "admin.mail_reports_page.window_label" => Some(admin::mail_reports_page::WINDOW_LABEL),
+        "admin.mail_reports_page.window_days" => Some(admin::mail_reports_page::WINDOW_DAYS),
+        "admin.mail_reports_page.domain_label" => Some(admin::mail_reports_page::DOMAIN_LABEL),
+        "admin.mail_reports_page.every_domain" => Some(admin::mail_reports_page::EVERY_DOMAIN),
+        "admin.mail_reports_page.summary_title" => Some(admin::mail_reports_page::SUMMARY_TITLE),
+        "admin.mail_reports_page.messages" => Some(admin::mail_reports_page::MESSAGES),
+        "admin.mail_reports_page.alignment" => Some(admin::mail_reports_page::ALIGNMENT),
+        "admin.mail_reports_page.dispositions" => Some(admin::mail_reports_page::DISPOSITIONS),
+        "admin.mail_reports_page.truncated" => Some(admin::mail_reports_page::TRUNCATED),
+        "admin.mail_reports_page.empty" => Some(admin::mail_reports_page::EMPTY),
+        "admin.mail_reports_page.sources_title" => Some(admin::mail_reports_page::SOURCES_TITLE),
+        "admin.mail_reports_page.senders_title" => Some(admin::mail_reports_page::SENDERS_TITLE),
+        "admin.mail_reports_page.reports_title" => Some(admin::mail_reports_page::REPORTS_TITLE),
+        "admin.mail_reports_page.row_messages" => Some(admin::mail_reports_page::ROW_MESSAGES),
+        "admin.mail_reports_page.report_period" => Some(admin::mail_reports_page::REPORT_PERIOD),
+        "admin.mail_reports_page.report_pass" => Some(admin::mail_reports_page::REPORT_PASS),
+        "admin.mail_reports_page.view" => Some(admin::mail_reports_page::VIEW),
+        "admin.mail_reports_page.raw_title" => Some(admin::mail_reports_page::RAW_TITLE),
         "admin.aliases_page.title" => Some(admin::aliases_page::TITLE),
         "admin.aliases_page.loading" => Some(admin::aliases_page::LOADING),
         "admin.aliases_page.local_part" => Some(admin::aliases_page::LOCAL_PART),
@@ -14837,6 +16070,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.settings_page.add_tier_error" => Some(admin::settings_page::ADD_TIER_ERROR),
         "admin.settings_page.add_tier_error_empty_name" => Some(admin::settings_page::ADD_TIER_ERROR_EMPTY_NAME),
         "admin.settings_page.add_tier_error_invalid_cap" => Some(admin::settings_page::ADD_TIER_ERROR_INVALID_CAP),
+        "admin.settings_page.delete_tier" => Some(admin::settings_page::DELETE_TIER),
+        "admin.settings_page.delete_tier_error" => Some(admin::settings_page::DELETE_TIER_ERROR),
+        "admin.settings_page.delete_tier_error_in_use" => Some(admin::settings_page::DELETE_TIER_ERROR_IN_USE),
         "admin.settings_page.membership_section" => Some(admin::settings_page::MEMBERSHIP_SECTION),
         "admin.settings_page.loading_membership" => Some(admin::settings_page::LOADING_MEMBERSHIP),
         "admin.settings_page.no_membership_tiers" => Some(admin::settings_page::NO_MEMBERSHIP_TIERS),
@@ -14898,6 +16134,21 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.nest_page.web_app_origin_scope" => Some(admin::nest_page::WEB_APP_ORIGIN_SCOPE),
         "admin.nest_page.web_app_origin_load_error" => Some(admin::nest_page::WEB_APP_ORIGIN_LOAD_ERROR),
         "admin.nest_page.web_app_origin_save_error" => Some(admin::nest_page::WEB_APP_ORIGIN_SAVE_ERROR),
+        "admin.nest_page.update_channel_label" => Some(admin::nest_page::UPDATE_CHANNEL_LABEL),
+        "admin.nest_page.update_channel_desc" => Some(admin::nest_page::UPDATE_CHANNEL_DESC),
+        "admin.nest_page.update_channel_save" => Some(admin::nest_page::UPDATE_CHANNEL_SAVE),
+        "admin.nest_page.update_channel_loading" => Some(admin::nest_page::UPDATE_CHANNEL_LOADING),
+        "admin.nest_page.update_channel_status_following_stable" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_FOLLOWING_STABLE),
+        "admin.nest_page.update_channel_status_following_test" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_FOLLOWING_TEST),
+        "admin.nest_page.update_channel_status_following_dev" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_FOLLOWING_DEV),
+        "admin.nest_page.update_channel_status_hold_stable" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_HOLD_STABLE),
+        "admin.nest_page.update_channel_status_hold_test" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_HOLD_TEST),
+        "admin.nest_page.update_channel_status_hold_dev" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_HOLD_DEV),
+        "admin.nest_page.update_channel_status_pinned" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_PINNED),
+        "admin.nest_page.update_channel_status_not_from_image" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_NOT_FROM_IMAGE),
+        "admin.nest_page.update_channel_status_unknown" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_UNKNOWN),
+        "admin.nest_page.update_channel_status_predates" => Some(admin::nest_page::UPDATE_CHANNEL_STATUS_PREDATES),
+        "admin.nest_page.os_no_host_data" => Some(admin::nest_page::OS_NO_HOST_DATA),
         "admin.nest_page.os_up_to_date" => Some(admin::nest_page::OS_UP_TO_DATE),
         "admin.nest_page.os_updates_pending" => Some(admin::nest_page::OS_UPDATES_PENDING),
         "admin.nest_page.os_restart_pending" => Some(admin::nest_page::OS_RESTART_PENDING),
@@ -14964,6 +16215,24 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.nest_page.reports_resolved_acted" => Some(admin::nest_page::REPORTS_RESOLVED_ACTED),
         "admin.nest_page.reports_resolved_dismissed" => Some(admin::nest_page::REPORTS_RESOLVED_DISMISSED),
         "admin.nest_page.reports_failed" => Some(admin::nest_page::REPORTS_FAILED),
+        "admin.nest_page.block_arm_block" => Some(admin::nest_page::BLOCK_ARM_BLOCK),
+        "admin.nest_page.block_arm_unblock" => Some(admin::nest_page::BLOCK_ARM_UNBLOCK),
+        "admin.nest_page.block_blocked_not_item" => Some(admin::nest_page::BLOCK_BLOCKED_NOT_ITEM),
+        "admin.nest_page.block_item_post" => Some(admin::nest_page::BLOCK_ITEM_POST),
+        "admin.nest_page.block_item_message" => Some(admin::nest_page::BLOCK_ITEM_MESSAGE),
+        "admin.nest_page.block_confirm_block" => Some(admin::nest_page::BLOCK_CONFIRM_BLOCK),
+        "admin.nest_page.block_confirm_unblock" => Some(admin::nest_page::BLOCK_CONFIRM_UNBLOCK),
+        "admin.nest_page.block_confirm_button_block" => Some(admin::nest_page::BLOCK_CONFIRM_BUTTON_BLOCK),
+        "admin.nest_page.block_confirm_button_unblock" => Some(admin::nest_page::BLOCK_CONFIRM_BUTTON_UNBLOCK),
+        "admin.nest_page.block_done" => Some(admin::nest_page::BLOCK_DONE),
+        "admin.nest_page.block_restored" => Some(admin::nest_page::BLOCK_RESTORED),
+        "admin.nest_page.block_failed" => Some(admin::nest_page::BLOCK_FAILED),
+        "admin.nest_page.block_cancel_button" => Some(admin::nest_page::BLOCK_CANCEL_BUTTON),
+        "admin.nest_page.block_working" => Some(admin::nest_page::BLOCK_WORKING),
+        "admin.nest_page.blocked_label" => Some(admin::nest_page::BLOCKED_LABEL),
+        "admin.nest_page.blocked_desc" => Some(admin::nest_page::BLOCKED_DESC),
+        "admin.nest_page.blocked_loading" => Some(admin::nest_page::BLOCKED_LOADING),
+        "admin.nest_page.blocked_empty" => Some(admin::nest_page::BLOCKED_EMPTY),
         "admin.nest_page.oauth_label" => Some(admin::nest_page::OAUTH_LABEL),
         "admin.nest_page.oauth_desc" => Some(admin::nest_page::OAUTH_DESC),
         "admin.nest_page.oauth_keys_loading" => Some(admin::nest_page::OAUTH_KEYS_LOADING),
@@ -15039,6 +16308,16 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.logs_page.title" => Some(admin::logs_page::TITLE),
         "admin.logs_page.description" => Some(admin::logs_page::DESCRIPTION),
         "admin.logs_page.empty" => Some(admin::logs_page::EMPTY),
+        "admin.logs_page.audit_title" => Some(admin::logs_page::AUDIT_TITLE),
+        "admin.logs_page.audit_empty" => Some(admin::logs_page::AUDIT_EMPTY),
+        "admin.logs_page.audit_entry" => Some(admin::logs_page::AUDIT_ENTRY),
+        "admin.logs_page.audit_entry_no_target" => Some(admin::logs_page::AUDIT_ENTRY_NO_TARGET),
+        "admin.logs_page.audit_entry_system" => Some(admin::logs_page::AUDIT_ENTRY_SYSTEM),
+        "admin.logs_page.audit_entry_system_no_target" => Some(admin::logs_page::AUDIT_ENTRY_SYSTEM_NO_TARGET),
+        "admin.logs_page.audit_more" => Some(admin::logs_page::AUDIT_MORE),
+        "admin.logs_page.audit_verified" => Some(admin::logs_page::AUDIT_VERIFIED),
+        "admin.logs_page.audit_uncheckable" => Some(admin::logs_page::AUDIT_UNCHECKABLE),
+        "admin.logs_page.audit_broken" => Some(admin::logs_page::AUDIT_BROKEN),
         "admin.custody_hosting.title" => Some(admin::custody_hosting::TITLE),
         "admin.custody_hosting.description" => Some(admin::custody_hosting::DESCRIPTION),
         "admin.custody_hosting.empty" => Some(admin::custody_hosting::EMPTY),
@@ -15086,6 +16365,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.bridges_rotate.warning" => Some(admin::bridges_rotate::WARNING),
         "admin.bridges_rotate.confirm" => Some(admin::bridges_rotate::CONFIRM),
         "admin.bridges_rotate.cancel" => Some(admin::bridges_rotate::CANCEL),
+        "admin.bridges_reject.title" => Some(admin::bridges_reject::TITLE),
+        "admin.bridges_reject.warning" => Some(admin::bridges_reject::WARNING),
+        "admin.bridges_reject.confirm" => Some(admin::bridges_reject::CONFIRM),
+        "admin.bridges_reject.cancel" => Some(admin::bridges_reject::CANCEL),
         "admin.mail_page.title" => Some(admin::mail_page::TITLE),
         "admin.mail_page.description" => Some(admin::mail_page::DESCRIPTION),
         "admin.mail_page.enabled_label" => Some(admin::mail_page::ENABLED_LABEL),
@@ -15113,11 +16396,34 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.mail_page.health_never" => Some(admin::mail_page::HEALTH_NEVER),
         "admin.mail_page.health_status_line" => Some(admin::mail_page::HEALTH_STATUS_LINE),
         "admin.mail_page.health_delist" => Some(admin::mail_page::HEALTH_DELIST),
+        "admin.mail_page.health_sender_dashboards_note" => Some(admin::mail_page::HEALTH_SENDER_DASHBOARDS_NOTE),
+        "admin.mail_page.health_sender_dashboard_gmail" => Some(admin::mail_page::HEALTH_SENDER_DASHBOARD_GMAIL),
+        "admin.mail_page.health_sender_dashboard_outlook" => Some(admin::mail_page::HEALTH_SENDER_DASHBOARD_OUTLOOK),
         "admin.mail_page.health_recheck" => Some(admin::mail_page::HEALTH_RECHECK),
         "admin.mail_page.health_warmup_reset" => Some(admin::mail_page::HEALTH_WARMUP_RESET),
         "admin.mail_page.health_warmup_reset_confirm" => Some(admin::mail_page::HEALTH_WARMUP_RESET_CONFIRM),
+        "admin.mail_page.secrets_group_title" => Some(admin::mail_page::SECRETS_GROUP_TITLE),
+        "admin.mail_page.secrets_group_desc" => Some(admin::mail_page::SECRETS_GROUP_DESC),
+        "admin.mail_page.list_unsubscribe_secret_rotate" => Some(admin::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE),
+        "admin.mail_page.list_unsubscribe_secret_rotate_confirm" => Some(admin::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE_CONFIRM),
+        "admin.mail_page.list_unsubscribe_secret_rotated" => Some(admin::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATED),
+        "admin.mail_page.forward_srs_secret_rotate" => Some(admin::mail_page::FORWARD_SRS_SECRET_ROTATE),
+        "admin.mail_page.forward_srs_secret_rotate_confirm" => Some(admin::mail_page::FORWARD_SRS_SECRET_ROTATE_CONFIRM),
+        "admin.mail_page.forward_srs_secret_rotated" => Some(admin::mail_page::FORWARD_SRS_SECRET_ROTATED),
         "admin.mail_page.auto_enable_new_users_label" => Some(admin::mail_page::AUTO_ENABLE_NEW_USERS_LABEL),
         "admin.mail_page.auto_enable_new_users_subtitle" => Some(admin::mail_page::AUTO_ENABLE_NEW_USERS_SUBTITLE),
+        "admin.mail_page.microsoft_group_title" => Some(admin::mail_page::MICROSOFT_GROUP_TITLE),
+        "admin.mail_page.microsoft_group_desc" => Some(admin::mail_page::MICROSOFT_GROUP_DESC),
+        "admin.mail_page.microsoft_requirements" => Some(admin::mail_page::MICROSOFT_REQUIREMENTS),
+        "admin.mail_page.microsoft_client_id_label" => Some(admin::mail_page::MICROSOFT_CLIENT_ID_LABEL),
+        "admin.mail_page.microsoft_tenant_label" => Some(admin::mail_page::MICROSOFT_TENANT_LABEL),
+        "admin.mail_page.microsoft_tenant_subtitle" => Some(admin::mail_page::MICROSOFT_TENANT_SUBTITLE),
+        "admin.mail_page.microsoft_save" => Some(admin::mail_page::MICROSOFT_SAVE),
+        "admin.mail_page.microsoft_using_default" => Some(admin::mail_page::MICROSOFT_USING_DEFAULT),
+        "admin.mail_page.microsoft_using_own" => Some(admin::mail_page::MICROSOFT_USING_OWN),
+        "admin.mail_page.microsoft_client_id_invalid" => Some(admin::mail_page::MICROSOFT_CLIENT_ID_INVALID),
+        "admin.mail_page.microsoft_tenant_invalid" => Some(admin::mail_page::MICROSOFT_TENANT_INVALID),
+        "admin.mail_page.microsoft_tenant_needs_client_id" => Some(admin::mail_page::MICROSOFT_TENANT_NEEDS_CLIENT_ID),
         "admin.mail_page.spam_group_title" => Some(admin::mail_page::SPAM_GROUP_TITLE),
         "admin.mail_page.spam_group_desc" => Some(admin::mail_page::SPAM_GROUP_DESC),
         "admin.mail_page.threshold_junk_label" => Some(admin::mail_page::THRESHOLD_JUNK_LABEL),
@@ -15153,6 +16459,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.mail_page.unlisted_recipient_penalty_subtitle" => Some(admin::mail_page::UNLISTED_RECIPIENT_PENALTY_SUBTITLE),
         "admin.mail_page.spam_save" => Some(admin::mail_page::SPAM_SAVE),
         "admin.mail_page.publish_spam_baseline_button" => Some(admin::mail_page::PUBLISH_SPAM_BASELINE_BUTTON),
+        "admin.mail_page.publish_spam_baseline_confirm" => Some(admin::mail_page::PUBLISH_SPAM_BASELINE_CONFIRM),
         "admin.mail_page.publish_spam_baseline_subtitle" => Some(admin::mail_page::PUBLISH_SPAM_BASELINE_SUBTITLE),
         "admin.mail_page.spam_baseline_published" => Some(admin::mail_page::SPAM_BASELINE_PUBLISHED),
         "admin.mail_page.spam_baseline_withheld" => Some(admin::mail_page::SPAM_BASELINE_WITHHELD),
@@ -15225,6 +16532,15 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.mail_page.alias_wildcard_prefix_label" => Some(admin::mail_page::ALIAS_WILDCARD_PREFIX_LABEL),
         "admin.mail_page.alias_wildcard_prefix_subtitle" => Some(admin::mail_page::ALIAS_WILDCARD_PREFIX_SUBTITLE),
         "admin.mail_page.alias_save" => Some(admin::mail_page::ALIAS_SAVE),
+        "admin.mail_page.dmarc_group_title" => Some(admin::mail_page::DMARC_GROUP_TITLE),
+        "admin.mail_page.dmarc_group_desc" => Some(admin::mail_page::DMARC_GROUP_DESC),
+        "admin.mail_page.dmarc_ruf_publish_label" => Some(admin::mail_page::DMARC_RUF_PUBLISH_LABEL),
+        "admin.mail_page.dmarc_ruf_warning" => Some(admin::mail_page::DMARC_RUF_WARNING),
+        "admin.mail_page.dmarc_fo_mode_label" => Some(admin::mail_page::DMARC_FO_MODE_LABEL),
+        "admin.mail_page.dmarc_aggregate_retention_label" => Some(admin::mail_page::DMARC_AGGREGATE_RETENTION_LABEL),
+        "admin.mail_page.dmarc_forensic_retention_label" => Some(admin::mail_page::DMARC_FORENSIC_RETENTION_LABEL),
+        "admin.mail_page.dmarc_forensic_retention_warning" => Some(admin::mail_page::DMARC_FORENSIC_RETENTION_WARNING),
+        "admin.mail_page.dmarc_save" => Some(admin::mail_page::DMARC_SAVE),
         "admin.dns.title" => Some(admin::dns::TITLE),
         "admin.dns.description" => Some(admin::dns::DESCRIPTION),
         "admin.dns.empty" => Some(admin::dns::EMPTY),
@@ -15245,6 +16561,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.dns.add_domain_primary_warning" => Some(admin::dns::ADD_DOMAIN_PRIMARY_WARNING),
         "admin.dns.primary_badge" => Some(admin::dns::PRIMARY_BADGE),
         "admin.dns.remove" => Some(admin::dns::REMOVE),
+        "admin.dns.remove_confirm_title" => Some(admin::dns::REMOVE_CONFIRM_TITLE),
+        "admin.dns.remove_confirm_body" => Some(admin::dns::REMOVE_CONFIRM_BODY),
+        "admin.dns.remove_confirm" => Some(admin::dns::REMOVE_CONFIRM),
         "admin.dns.removed_title" => Some(admin::dns::REMOVED_TITLE),
         "admin.dns.removed_desc" => Some(admin::dns::REMOVED_DESC),
         "admin.dns.restore" => Some(admin::dns::RESTORE),
@@ -15284,6 +16603,9 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "admin.dns.cert.remove_delegation" => Some(admin::dns::cert::REMOVE_DELEGATION),
         "admin.dns.cert.renewals_automated" => Some(admin::dns::cert::RENEWALS_AUTOMATED),
         "admin.dns.cert.delegate_no_zones" => Some(admin::dns::cert::DELEGATE_NO_ZONES),
+        "admin.dns.cert.issuance_failed_domain" => Some(admin::dns::cert::ISSUANCE_FAILED_DOMAIN),
+        "admin.dns.cert.issuance_failed_ip" => Some(admin::dns::cert::ISSUANCE_FAILED_IP),
+        "admin.dns.cert.issuance_failed" => Some(admin::dns::cert::ISSUANCE_FAILED),
         "admin.dns.rename.button" => Some(admin::dns::rename::BUTTON),
         "admin.dns.rename.promote" => Some(admin::dns::rename::PROMOTE),
         "admin.dns.rename.renaming_to" => Some(admin::dns::rename::RENAMING_TO),
@@ -15361,6 +16683,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "moderation.appeal_blocked_reason_too_long" => Some(moderation::APPEAL_BLOCKED_REASON_TOO_LONG),
         "moderation.appeal_recorded" => Some(moderation::APPEAL_RECORDED),
         "moderation.appeal_failed" => Some(moderation::APPEAL_FAILED),
+        "moderation.queue.issued_by" => Some(moderation::queue::ISSUED_BY),
         "moderation.report.title" => Some(moderation::report::TITLE),
         "moderation.report.reason_label" => Some(moderation::report::REASON_LABEL),
         "moderation.report.reason.spam" => Some(moderation::report::reason::SPAM),
@@ -15405,13 +16728,19 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "moderation.action.labeled" => Some(moderation::action::LABELED),
         "moderation.action.flagged" => Some(moderation::action::FLAGGED),
         "moderation.action.taken_down" => Some(moderation::action::TAKEN_DOWN),
+        "moderation.action.blocked" => Some(moderation::action::BLOCKED),
         "moderation.legal_takedown.tombstone" => Some(moderation::legal_takedown::TOMBSTONE),
+        "moderation.admin_block.notice" => Some(moderation::admin_block::NOTICE),
         "muted_words.title" => Some(muted_words::TITLE),
         "muted_words.description" => Some(muted_words::DESCRIPTION),
         "muted_words.input_placeholder" => Some(muted_words::INPUT_PLACEHOLDER),
         "muted_words.add" => Some(muted_words::ADD),
         "muted_words.empty" => Some(muted_words::EMPTY),
         "muted_words.remove" => Some(muted_words::REMOVE),
+        "muted_words.level_hide" => Some(muted_words::LEVEL_HIDE),
+        "muted_words.level_show_less" => Some(muted_words::LEVEL_SHOW_LESS),
+        "muted_words.collapsed" => Some(muted_words::COLLAPSED),
+        "muted_words.reveal" => Some(muted_words::REVEAL),
         "personalization.title" => Some(personalization::TITLE),
         "personalization.feeds_link" => Some(personalization::FEEDS_LINK),
         "personalization.muted_words_link" => Some(personalization::MUTED_WORDS_LINK),
@@ -15571,6 +16900,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "features.no_effect_self" => Some(features::NO_EFFECT_SELF),
         "features.no_effect_other" => Some(features::NO_EFFECT_OTHER),
         "family.title" => Some(family::TITLE),
+        "family.kids_ineligible_message" => Some(family::KIDS_INELIGIBLE_MESSAGE),
         "family.supervised_indicator" => Some(family::SUPERVISED_INDICATOR),
         "family.supervised_notice_onboarding" => Some(family::SUPERVISED_NOTICE_ONBOARDING),
         "family.supervised_notice_onboarding_band" => Some(family::SUPERVISED_NOTICE_ONBOARDING_BAND),
@@ -15587,6 +16917,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "family.policy_content_phishing_label" => Some(family::POLICY_CONTENT_PHISHING_LABEL),
         "family.policy_content_commercial_label" => Some(family::POLICY_CONTENT_COMMERCIAL_LABEL),
         "family.policy_content_notify_label" => Some(family::POLICY_CONTENT_NOTIFY_LABEL),
+        "family.policy_content_hint" => Some(family::POLICY_CONTENT_HINT),
         "family.policy_screen_heading" => Some(family::POLICY_SCREEN_HEADING),
         "family.policy_screen_window_start_label" => Some(family::POLICY_SCREEN_WINDOW_START_LABEL),
         "family.policy_screen_window_end_label" => Some(family::POLICY_SCREEN_WINDOW_END_LABEL),
@@ -15618,6 +16949,14 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "family.screen_lock_window" => Some(family::SCREEN_LOCK_WINDOW),
         "family.screen_lock_budget" => Some(family::SCREEN_LOCK_BUDGET),
         "family.screen_lock_family_hint" => Some(family::SCREEN_LOCK_FAMILY_HINT),
+        "family.store_consent_lock.title" => Some(family::store_consent_lock::TITLE),
+        "family.store_consent_lock.what_changed" => Some(family::store_consent_lock::WHAT_CHANGED),
+        "family.store_consent_lock.rating_changed" => Some(family::store_consent_lock::RATING_CHANGED),
+        "family.store_consent_lock.state_pending" => Some(family::store_consent_lock::STATE_PENDING),
+        "family.store_consent_lock.state_declined" => Some(family::store_consent_lock::STATE_DECLINED),
+        "family.store_consent_lock.ask_button" => Some(family::store_consent_lock::ASK_BUTTON),
+        "family.store_consent_lock.ask_hint" => Some(family::store_consent_lock::ASK_HINT),
+        "family.store_consent_lock.play_hint" => Some(family::store_consent_lock::PLAY_HINT),
         "family.approvals_heading" => Some(family::APPROVALS_HEADING),
         "family.no_approvals" => Some(family::NO_APPROVALS),
         "family.approval_no_sender" => Some(family::APPROVAL_NO_SENDER),
@@ -15702,6 +17041,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "notifications.row_mention" => Some(notifications::ROW_MENTION),
         "notifications.row_follow" => Some(notifications::ROW_FOLLOW),
         "notifications.row_interaction" => Some(notifications::ROW_INTERACTION),
+        "notifications.dismiss" => Some(notifications::DISMISS),
+        "notifications.clear_all" => Some(notifications::CLEAR_ALL),
         "notifications.row_tip_sats" => Some(notifications::ROW_TIP_SATS),
         "notifications.row_tip_msats" => Some(notifications::ROW_TIP_MSATS),
         "notifications.row_tip" => Some(notifications::ROW_TIP),
@@ -15771,6 +17112,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "profile.edit_remove_avatar" => Some(profile::EDIT_REMOVE_AVATAR),
         "profile.edit_banner" => Some(profile::EDIT_BANNER),
         "profile.edit_remove_banner" => Some(profile::EDIT_REMOVE_BANNER),
+        "profile.edit_audience_toggle" => Some(profile::EDIT_AUDIENCE_TOGGLE),
         "profile.edit_save" => Some(profile::EDIT_SAVE),
         "profile.edit_cancel" => Some(profile::EDIT_CANCEL),
         "profile.private_title" => Some(profile::PRIVATE_TITLE),
@@ -15826,6 +17168,8 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "subscriptions.provider_tier_label" => Some(subscriptions::PROVIDER_TIER_LABEL),
         "subscriptions.webhook_secret" => Some(subscriptions::WEBHOOK_SECRET),
         "subscriptions.webhook_url_label" => Some(subscriptions::WEBHOOK_URL_LABEL),
+        "subscriptions.return_url_label" => Some(subscriptions::RETURN_URL_LABEL),
+        "subscriptions.return_url_unavailable" => Some(subscriptions::RETURN_URL_UNAVAILABLE),
         "subscriptions.redeem_claim_title" => Some(subscriptions::REDEEM_CLAIM_TITLE),
         "subscriptions.claim_code" => Some(subscriptions::CLAIM_CODE),
         "subscriptions.redeem" => Some(subscriptions::REDEEM),
@@ -15839,6 +17183,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "subscriptions.claim_status_unredeemed" => Some(subscriptions::CLAIM_STATUS_UNREDEEMED),
         "subscriptions.claim_status_redeemed" => Some(subscriptions::CLAIM_STATUS_REDEEMED),
         "subscriptions.claim_status_voided" => Some(subscriptions::CLAIM_STATUS_VOIDED),
+        "subscriptions.void_claim" => Some(subscriptions::VOID_CLAIM),
+        "subscriptions.void_claim_confirm_unredeemed" => Some(subscriptions::VOID_CLAIM_CONFIRM_UNREDEEMED),
+        "subscriptions.void_claim_confirm_redeemed" => Some(subscriptions::VOID_CLAIM_CONFIRM_REDEEMED),
+        "subscriptions.void_claim_cancel" => Some(subscriptions::VOID_CLAIM_CANCEL),
         "subscriptions.provider_status_configured" => Some(subscriptions::PROVIDER_STATUS_CONFIGURED),
         "subscriptions.provider_status_verified" => Some(subscriptions::PROVIDER_STATUS_VERIFIED),
         "subscriptions.provider_status_error" => Some(subscriptions::PROVIDER_STATUS_ERROR),
@@ -15905,6 +17253,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "error.bridges.reserved_local_part" => Some(error::bridges::RESERVED_LOCAL_PART),
         "error.bridges.import_source_locked" => Some(error::bridges::IMPORT_SOURCE_LOCKED),
         "error.bridges.over_quota" => Some(error::bridges::OVER_QUOTA),
+        "error.bridges.mail_unavailable_here" => Some(error::bridges::MAIL_UNAVAILABLE_HERE),
         "error.bridges.address_refused" => Some(error::bridges::ADDRESS_REFUSED),
         "error.bridges.conversation_store_full" => Some(error::bridges::CONVERSATION_STORE_FULL),
         "error.bridges.guardian_approval_required" => Some(error::bridges::GUARDIAN_APPROVAL_REQUIRED),
@@ -16060,7 +17409,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "provisioning.ovh.app_key" => Some(provisioning::ovh::APP_KEY),
         "provisioning.ovh.app_secret" => Some(provisioning::ovh::APP_SECRET),
         "provisioning.ovh.consumer_key" => Some(provisioning::ovh::CONSUMER_KEY),
-        "provisioning.ovh.project" => Some(provisioning::ovh::PROJECT),
+        "provisioning.ovh.location" => Some(provisioning::ovh::LOCATION),
         "provisioning.linode.name" => Some(provisioning::linode::NAME),
         "provisioning.linode.help" => Some(provisioning::linode::HELP),
         "provisioning.linode.api_token" => Some(provisioning::linode::API_TOKEN),
@@ -16083,6 +17432,60 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "region.malformed_notice" => Some(region::MALFORMED_NOTICE),
         "region.last_checked" => Some(region::LAST_CHECKED),
         "region.stale_warning" => Some(region::STALE_WARNING),
+        "nest_rules.blocked_notice" => Some(nest_rules::BLOCKED_NOTICE),
+        "nest_rules.collapsed_notice" => Some(nest_rules::COLLAPSED_NOTICE),
+        "nest_rules.changed_notice" => Some(nest_rules::CHANGED_NOTICE),
+        "nest_rules.reveal_button" => Some(nest_rules::REVEAL_BUTTON),
+        "nest_rules.settings_title" => Some(nest_rules::SETTINGS_TITLE),
+        "nest_rules.version" => Some(nest_rules::VERSION),
+        "nest_rules.rule_line" => Some(nest_rules::RULE_LINE),
+        "nest_rules.rule_line_no_level" => Some(nest_rules::RULE_LINE_NO_LEVEL),
+        "rule_editor.kind.category" => Some(rule_editor::kind::CATEGORY),
+        "rule_editor.kind.keywords" => Some(rule_editor::kind::KEYWORDS),
+        "rule_editor.kind.labeler" => Some(rule_editor::kind::LABELER),
+        "rule_editor.kind.prompt" => Some(rule_editor::kind::PROMPT),
+        "rule_editor.kind.list" => Some(rule_editor::kind::LIST),
+        "rule_editor.verdict.block" => Some(rule_editor::verdict::BLOCK),
+        "rule_editor.verdict.collapse" => Some(rule_editor::verdict::COLLAPSE),
+        "rule_editor.level.very_strict" => Some(rule_editor::level::VERY_STRICT),
+        "rule_editor.level.strict" => Some(rule_editor::level::STRICT),
+        "rule_editor.level.standard" => Some(rule_editor::level::STANDARD),
+        "rule_editor.level.lenient" => Some(rule_editor::level::LENIENT),
+        "rule_editor.level.very_lenient" => Some(rule_editor::level::VERY_LENIENT),
+        "rule_editor.prompt_not_applied" => Some(rule_editor::PROMPT_NOT_APPLIED),
+        "rule_editor.newer_version" => Some(rule_editor::NEWER_VERSION),
+        "rule_editor.item_label" => Some(rule_editor::ITEM_LABEL),
+        "rule_editor.kind_label" => Some(rule_editor::KIND_LABEL),
+        "rule_editor.category_label" => Some(rule_editor::CATEGORY_LABEL),
+        "rule_editor.keywords_label" => Some(rule_editor::KEYWORDS_LABEL),
+        "rule_editor.labeler_label" => Some(rule_editor::LABELER_LABEL),
+        "rule_editor.prompt_label" => Some(rule_editor::PROMPT_LABEL),
+        "rule_editor.verdict_label" => Some(rule_editor::VERDICT_LABEL),
+        "rule_editor.level_label" => Some(rule_editor::LEVEL_LABEL),
+        "rule_editor.reason_label" => Some(rule_editor::REASON_LABEL),
+        "rule_editor.add_button" => Some(rule_editor::ADD_BUTTON),
+        "rule_editor.remove_button" => Some(rule_editor::REMOVE_BUTTON),
+        "rule_editor.save_button" => Some(rule_editor::SAVE_BUTTON),
+        "rule_editor.loading" => Some(rule_editor::LOADING),
+        "rule_editor.saving" => Some(rule_editor::SAVING),
+        "rule_editor.saved" => Some(rule_editor::SAVED),
+        "rule_editor.saved_version" => Some(rule_editor::SAVED_VERSION),
+        "rule_editor.no_rules" => Some(rule_editor::NO_RULES),
+        "rule_editor.nest_section" => Some(rule_editor::NEST_SECTION),
+        "rule_editor.family_section" => Some(rule_editor::FAMILY_SECTION),
+        "rule_editor.defect.no_reason" => Some(rule_editor::defect::NO_REASON),
+        "rule_editor.defect.no_reason_code" => Some(rule_editor::defect::NO_REASON_CODE),
+        "rule_editor.defect.level_out_of_range" => Some(rule_editor::defect::LEVEL_OUT_OF_RANGE),
+        "rule_editor.defect.no_subject" => Some(rule_editor::defect::NO_SUBJECT),
+        "rule_editor.defect.missing_scorer" => Some(rule_editor::defect::MISSING_SCORER),
+        "rule_editor.defect.malformed_scorer" => Some(rule_editor::defect::MALFORMED_SCORER),
+        "rule_editor.defect.list_not_admitted" => Some(rule_editor::defect::LIST_NOT_ADMITTED),
+        "rule_editor.defect.scorer_too_large" => Some(rule_editor::defect::SCORER_TOO_LARGE),
+        "rule_editor.defect.no_keyword" => Some(rule_editor::defect::NO_KEYWORD),
+        "rule_editor.defect.keyword_too_long" => Some(rule_editor::defect::KEYWORD_TOO_LONG),
+        "rule_editor.defect.no_prompt" => Some(rule_editor::defect::NO_PROMPT),
+        "rule_editor.defect.no_labeler" => Some(rule_editor::defect::NO_LABELER),
+        "rule_editor.defect.unused_scorer" => Some(rule_editor::defect::UNUSED_SCORER),
         "connected_apps.title" => Some(connected_apps::TITLE),
         "connected_apps.description" => Some(connected_apps::DESCRIPTION),
         "connected_apps.verbatim" => Some(connected_apps::VERBATIM),
@@ -16104,6 +17507,7 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.revoke_confirm" => Some(connected_apps::REVOKE_CONFIRM),
         "connected_apps.revoke_cancel" => Some(connected_apps::REVOKE_CANCEL),
         "connected_apps.revoke_prompt" => Some(connected_apps::REVOKE_PROMPT),
+        "connected_apps.settings_link" => Some(connected_apps::SETTINGS_LINK),
         "connected_apps.publisher" => Some(connected_apps::PUBLISHER),
         "connected_apps.class_remote" => Some(connected_apps::CLASS_REMOTE),
         "connected_apps.class_device" => Some(connected_apps::CLASS_DEVICE),
@@ -16132,8 +17536,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.error_code_expired" => Some(connected_apps::ERROR_CODE_EXPIRED),
         "connected_apps.error_handoff_expired" => Some(connected_apps::ERROR_HANDOFF_EXPIRED),
         "connected_apps.error_block" => Some(connected_apps::ERROR_BLOCK),
+        "connected_apps.error_bind" => Some(connected_apps::ERROR_BIND),
         "connected_apps.error_secret" => Some(connected_apps::ERROR_SECRET),
         "connected_apps.error_record" => Some(connected_apps::ERROR_RECORD),
+        "connected_apps.error_external_apps" => Some(connected_apps::ERROR_EXTERNAL_APPS),
         "connected_apps.oracle_ops" => Some(connected_apps::ORACLE_OPS),
         "connected_apps.oracle_ops_one" => Some(connected_apps::ORACLE_OPS_ONE),
         "connected_apps.oracle_requests" => Some(connected_apps::ORACLE_REQUESTS),
@@ -16144,6 +17550,21 @@ pub fn lookup(key: &str) -> Option<&'static str> {
         "connected_apps.blocked_hint" => Some(connected_apps::BLOCKED_HINT),
         "connected_apps.blocked_since" => Some(connected_apps::BLOCKED_SINCE),
         "connected_apps.unblock" => Some(connected_apps::UNBLOCK),
+        "connected_apps.install_heading" => Some(connected_apps::INSTALL_HEADING),
+        "connected_apps.install_framing" => Some(connected_apps::INSTALL_FRAMING),
+        "connected_apps.install_heading_bind" => Some(connected_apps::INSTALL_HEADING_BIND),
+        "connected_apps.install_form" => Some(connected_apps::INSTALL_FORM),
+        "connected_apps.install_publisher" => Some(connected_apps::INSTALL_PUBLISHER),
+        "connected_apps.install_publisher_development" => Some(connected_apps::INSTALL_PUBLISHER_DEVELOPMENT),
+        "connected_apps.install_digest" => Some(connected_apps::INSTALL_DIGEST),
+        "connected_apps.install_kinds_heading" => Some(connected_apps::INSTALL_KINDS_HEADING),
+        "connected_apps.install_kinds_none" => Some(connected_apps::INSTALL_KINDS_NONE),
+        "connected_apps.install_hosts_heading" => Some(connected_apps::INSTALL_HOSTS_HEADING),
+        "connected_apps.install_hosts_none" => Some(connected_apps::INSTALL_HOSTS_NONE),
+        "connected_apps.install_ingress_heading" => Some(connected_apps::INSTALL_INGRESS_HEADING),
+        "connected_apps.install_settings_heading" => Some(connected_apps::INSTALL_SETTINGS_HEADING),
+        "connected_apps.install_settings_none" => Some(connected_apps::INSTALL_SETTINGS_NONE),
+        "connected_apps.install_setting" => Some(connected_apps::INSTALL_SETTING),
         "share_link.button" => Some(share_link::BUTTON),
         "share_link.create_title" => Some(share_link::CREATE_TITLE),
         "share_link.create_body" => Some(share_link::CREATE_BODY),

@@ -16,12 +16,12 @@
 // Each section keeps its own mount-scoped work (its timers, push handler,
 // first `refresh()`); only the machine and its one-time wiring live here.
 
-import { identity } from '$lib/store';
-import { nodeUrl } from '$lib/api';
-import { sharedRpcPort } from '$lib/rpc';
-import { sharedAccountPort } from '$lib/account-runtime';
-import { createDevicesMachine, setFollowedFoldersSource } from '$lib/wasm-folders';
-import { conversationsManagerIfReady } from '$lib/conversations';
+import { identity } from '#lib/store';
+import { nodeUrl } from '#lib/api';
+import { sharedRpcPort } from '#lib/rpc';
+import { sharedAccountPort } from '#lib/account-runtime';
+import { createDevicesMachine, setFollowedFoldersSource } from '#lib/wasm-folders';
+import { conversationsManagerIfReady } from '#lib/conversations';
 import type { DevicesMachine } from '../../static/fauna_wasm_folders.js';
 
 interface Session {
@@ -66,6 +66,10 @@ async function build(secretHex: string, s: Session): Promise<DevicesMachine> {
   machine.setMlsQuery({
     isJoinedSharedSet: (groupIdHex: string) =>
       conversationsManagerIfReady()?.foldersIsJoined(groupIdHex) ?? false,
+    // The member-row declassification anchor: the channel's MLS-recorded
+    // owner. Unready → none, and the member row seals.
+    folderChannelOwner: (channelId: Uint8Array) =>
+      conversationsManagerIfReady()?.foldersChannelOwner(channelId),
   });
   // Foreign-set (cross-nest) list source (folders.md § Implementation status
   // today). Unwired, a set shared from ANOTHER nest has no row.

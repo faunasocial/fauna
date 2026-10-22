@@ -55,7 +55,7 @@ _CREATED: list[dict] = []
 #: reply at the one WS-RPC wire core (`clients/_ws_rpc_core.py`), so whichever
 #: helper, fixture or test body sent the kind, the reap knows the account.
 #: Before this, each creating call site owed its own `note` and most did not:
-#: one interrupted `dev.example.com` sweep (2026-10-04) leaked 53 accounts.
+#: one interrupted dev-nest sweep (2026-10-04) leaked 53 accounts.
 ACCOUNT_CREATING_KINDS: dict[str, bool] = {
     "fauna.admin.users.create": False,
     "fauna.account.register": False,
@@ -150,7 +150,7 @@ def _successors(entries: list[dict], call) -> list[dict]:
     observes; the retired id keeps a handle-less `users` row, which the nest
     suspends without complaint — so a reap of the noted ids alone reports
     success and leaves the account active (measured 2026-10-04 on
-    `dev.example.com`: both successors of `test_account_instance_lock_tui.py`).
+    the dev nest: both successors of `test_account_instance_lock_tui.py`).
     Handles are unique per box and this run minted the noted ones, so whoever
     holds one now is this run's. Raises when the listing fails; `reap` turns
     that into a warning.

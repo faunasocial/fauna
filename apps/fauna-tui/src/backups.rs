@@ -276,8 +276,9 @@ impl RestoreKinds {
 pub enum ReseedView {
     #[default]
     Closed,
-    /// `backup-destination-reseed-confirm-modal` is open.
-    Confirming,
+    /// `backup-destination-reseed-confirm-modal` is open over the source
+    /// pressed: `None` for the orphaned store, `Some(id)` for a destination row.
+    Confirming(Option<String>),
     Running,
     Done(fauna_client_backup::reseed::ReseedOutcome),
 }
@@ -466,6 +467,13 @@ pub struct BackupsState {
     pub selected_source: usize,
     /// `restore-confirm-input` buffer — the re-typed snapshot id.
     pub restore_confirm: String,
+    /// `snapshot-restore-destination-input` buffer — the directory the open
+    /// snapshot's files restore into (`ui/backups.md` § Whole-snapshot restore).
+    /// Kept across snapshots: restoring two snapshots into one place is the
+    /// commonest second gesture.
+    pub snapshot_restore_dest: String,
+    /// The whole-snapshot restore's running job and its last outcome line.
+    pub snapshot_restore: SnapshotRestoreView,
     /// The `restore-kind-checkbox` set.
     pub restore_kinds: RestoreKinds,
     /// `restore-history-item` rows, newest first.
@@ -700,6 +708,26 @@ pub fn audit_op(
     })
 }
 
+/// The whole-snapshot restore's state (`ui/backups.md` § Whole-snapshot
+/// restore): idle, running into a destination, or done with its outcome line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SnapshotRestoreView {
+    #[default]
+    Idle,
+    /// `snapshot-restore-progress` paints while this stands; the button is
+    /// disabled so a second click cannot start a second walk into one place.
+    Running { snapshot_id: i64, path: String },
+    /// `snapshot-restore-result`: the rendered outcome line — success, a
+    /// partial result naming the files not written, or the failure.
+    Done(String),
+}
+
+impl SnapshotRestoreView {
+    fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
+}
+
 // ── Field access ─────────────────────────────────────────────────────────────
 
 /// A Backups-page editable field. Both are local dialog buffers committed by
@@ -723,6 +751,9 @@ pub enum BackupsField {
     /// `immediate-delete-acknowledge-input` — the exact ack phrase, same
     /// per-keystroke reason.
     ImmediateAck,
+    /// `snapshot-restore-destination-input` — read every keystroke, because
+    /// `snapshot-restore-button`'s enabled state is repainted from it.
+    SnapshotRestoreDest,
 }
 
 pub fn field(state: &BackupsState, field: &BackupsField) -> String {
@@ -733,6 +764,7 @@ pub fn field(state: &BackupsState, field: &BackupsField) -> String {
         BackupsField::RestoreConfirm => state.restore_confirm.clone(),
         BackupsField::ImmediateConfirm => state.immediate_confirm.clone(),
         BackupsField::ImmediateAck => state.immediate_ack.clone(),
+        BackupsField::SnapshotRestoreDest => state.snapshot_restore_dest.clone(),
     }
 }
 
@@ -744,6 +776,7 @@ pub fn set_field(state: &mut BackupsState, field: BackupsField, value: String) {
         BackupsField::RestoreConfirm => state.restore_confirm = value,
         BackupsField::ImmediateConfirm => state.immediate_confirm = value,
         BackupsField::ImmediateAck => state.immediate_ack = value,
+        BackupsField::SnapshotRestoreDest => state.snapshot_restore_dest = value,
     }
 }
 
@@ -819,10 +852,10 @@ pub enum Action {
     /// `backup-reclaim-confirm-button` — free this device's whole sealed store.
     ConfirmReclaim,
 
-    /// `backup-destination-reseed-button[i]` — arm the re-seed confirm. Every
-    /// placement runs the same leg (this device's own store), so the press
-    /// carries no row.
-    OpenReseedConfirm,
+    /// `backup-destination-reseed-button[i]` — arm the re-seed confirm over
+    /// the row pressed (`None`: the orphaned store's), whose leg the confirm
+    /// runs: this device's own store, or a surviving nest's pull-back.
+    OpenReseedConfirm { source: Option<String> },
     /// `backup-destination-reseed-cancel-button` — close it without side effect.
     CancelReseed,
     /// `backup-destination-reseed-confirm-button` — run the re-seed ceremony.
@@ -881,6 +914,9 @@ pub enum Action {
     /// `snapshot-file-download-button[i]` — save one file's bytes out of the open
     /// snapshot (single-file restore).
     DownloadFile { index: usize },
+    /// `snapshot-restore-button` — restore every file of the open snapshot into
+    /// the directory in `snapshot-restore-destination-input`.
+    RestoreSnapshot,
     /// `restore-kind-checkbox[i]` — tick or untick one kind
     /// (`backups.md:61`: "user may uncheck one").
     ToggleRestoreKind { index: usize },
@@ -964,6 +1000,10 @@ impl Action {
             // call — it produces a verdict, it changes nothing.
             Action::CheckIntegrity => Some("fauna.filesync.snapshot.check"),
             Action::OpenSnapshot { .. } => Some("fauna.filesync.snapshot.get"),
+            // The whole-snapshot restore's one wire kind is the same read: it
+            // re-reads the listing for the restore, then its bytes ride the
+            // bulk-binary carve-out exactly as `DownloadFile`'s do.
+            Action::RestoreSnapshot => Some("fauna.filesync.snapshot.get"),
 
             // ── No kind to name (see the method doc) ────────────────────────
             Action::SelectFolder(_) | Action::DownloadFile { .. } => None,
@@ -993,7 +1033,7 @@ impl Action {
             Action::ToggleRemoveReclaim
             | Action::OpenReclaimConfirm
             | Action::CancelReclaim
-            | Action::OpenReseedConfirm
+            | Action::OpenReseedConfirm { .. }
             | Action::CancelReseed
             | Action::OpenRecoverConfirm { .. }
             | Action::CancelRecover
@@ -1238,16 +1278,16 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 destinations,
             })
         }
-        Action::OpenReseedConfirm => {
-            // Armed only while a row carrying the button is painted — the same
+        Action::OpenReseedConfirm { source } => {
+            // Armed only over a row carrying the button right now — the same
             // keyboard-actuation backstop as the reclaim's — and never while a
             // run is in flight.
             if st.reseed == ReseedView::Running
-                || reseed_rows(st, custodian_handle.device_id()).is_empty()
+                || !reseed_rows(st, custodian_handle.device_id()).contains(&source)
             {
                 return None;
             }
-            st.reseed = ReseedView::Confirming;
+            st.reseed = ReseedView::Confirming(source);
             st.form = None;
             st.removing = None;
             st.reclaiming = false;
@@ -1255,20 +1295,35 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         Action::CancelReseed => {
-            if st.reseed == ReseedView::Confirming {
+            if matches!(st.reseed, ReseedView::Confirming(_)) {
                 st.reseed = ReseedView::Closed;
             }
             app.errors.remove(&Page::Backups);
             None
         }
         Action::ConfirmReseed => {
-            if st.reseed != ReseedView::Confirming {
+            let ReseedView::Confirming(source) = &st.reseed else {
                 return None;
-            }
+            };
+            let leg = reseed_leg(st, custodian_handle.device_id(), source)?;
+            let destination = source
+                .as_ref()
+                .and_then(|id| st.destinations.iter().find(|d| &d.destination_id == id))
+                .cloned();
             let (nest, secret, store) = st.dest_session()?;
             let folder_keys = st.folder_keys.clone()?;
             st.reseed = ReseedView::Running;
             app.errors.remove(&Page::Backups);
+            if leg == fauna_client_backup::reseed::ReseedLeg::NestHeldPullBack {
+                return Some(Op::PullBack {
+                    nest,
+                    secret,
+                    store,
+                    folder_keys,
+                    destination: Box::new(destination?),
+                    custodian: custodian_handle,
+                });
+            }
             Some(Op::Reseed {
                 nest,
                 secret,
@@ -1398,16 +1453,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // logic"). The one thing that IS local is which modal is open.
         Action::SelectFolder(name) => Some(Op::Snapshots {
             machine: st.machine()?,
+            restore_nest: st.nest.clone(),
             gesture: SnapshotGesture::Select(name),
         }),
         Action::CreateSnapshot => Some(Op::Snapshots {
             machine: st.machine()?,
+            restore_nest: st.nest.clone(),
             gesture: SnapshotGesture::Create,
         }),
         Action::DeleteSnapshot { index } => {
             let id = st.snapshot_row_id(index)?;
             Some(Op::Snapshots {
                 machine: st.machine()?,
+                restore_nest: st.nest.clone(),
                 gesture: SnapshotGesture::Delete(id),
             })
         }
@@ -1415,6 +1473,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let id = st.snapshot_row_id(index)?;
             Some(Op::Snapshots {
                 machine: st.machine()?,
+                restore_nest: st.nest.clone(),
                 gesture: SnapshotGesture::Undelete(id),
             })
         }
@@ -1456,6 +1515,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // every rejection behind an already-dismissed modal).
             Some(Op::Snapshots {
                 machine,
+                restore_nest: st.nest.clone(),
                 gesture: SnapshotGesture::ImmediateDelete {
                     id,
                     confirm,
@@ -1465,10 +1525,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::PrunePreview => Some(Op::Snapshots {
             machine: st.machine()?,
+            restore_nest: st.nest.clone(),
             gesture: SnapshotGesture::PrunePreview,
         }),
         Action::PruneExecute => Some(Op::Snapshots {
             machine: st.machine()?,
+            restore_nest: st.nest.clone(),
             gesture: SnapshotGesture::PruneExecute,
         }),
         Action::PruneCancel => {
@@ -1480,12 +1542,19 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         }
         Action::CheckIntegrity => Some(Op::Snapshots {
             machine: st.machine()?,
+            restore_nest: st.nest.clone(),
             gesture: SnapshotGesture::Check,
         }),
         Action::OpenSnapshot { index } => {
             let id = st.snapshot_row_id(index)?;
+            // A finished restore's line describes the snapshot it ran on; a
+            // running one keeps painting until it lands.
+            if !st.snapshot_restore.is_running() {
+                st.snapshot_restore = SnapshotRestoreView::Idle;
+            }
             Some(Op::Snapshots {
                 machine: st.machine()?,
+                restore_nest: st.nest.clone(),
                 gesture: SnapshotGesture::OpenDetail(id),
             })
         }
@@ -1520,6 +1589,36 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
                 path,
             })
         }
+        Action::RestoreSnapshot => {
+            // The button's disabled state, re-checked at actuation.
+            if st.snapshot_restore.is_running() || st.snapshot_restore_dest.trim().is_empty() {
+                return None;
+            }
+            let (nest, secret) = st.session()?;
+            let folder_keys = st.folder_keys.clone()?;
+            let snapshot_id = st.snap.as_ref()?.detail.as_ref()?.snapshot_id;
+            let typed = st.snapshot_restore_dest.trim().to_string();
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+            let Some(destination) =
+                fauna_sync_engine::engine_lifecycle::resolve_restore_destination(&typed, home)
+            else {
+                st.snapshot_restore =
+                    SnapshotRestoreView::Done(t::snapshot_restore_destination_not_absolute(&typed));
+                return None;
+            };
+            st.snapshot_restore = SnapshotRestoreView::Running {
+                snapshot_id,
+                path: destination.display().to_string(),
+            };
+            app.errors.remove(&Page::Backups);
+            Some(Op::RestoreSnapshot {
+                nest,
+                secret,
+                folder_keys,
+                snapshot_id,
+                destination,
+            })
+        }
     }
 }
 
@@ -1540,6 +1639,21 @@ pub enum SnapshotGesture {
     PruneExecute,
     Check,
     OpenDetail(i64),
+}
+
+impl SnapshotGesture {
+    /// Whether the gesture changes which snapshots exist — the ones after
+    /// which the restore picker re-reads.
+    fn mutates(&self) -> bool {
+        matches!(
+            self,
+            Self::Create
+                | Self::Delete(_)
+                | Self::Undelete(_)
+                | Self::ImmediateDelete { .. }
+                | Self::PruneExecute
+        )
+    }
 }
 
 // ── Ops ──────────────────────────────────────────────────────────────────────
@@ -1575,6 +1689,11 @@ pub enum Op {
     Snapshots {
         machine: Arc<BackupsMachine>,
         gesture: SnapshotGesture,
+        /// The nest the restore picker re-reads from once a mutating gesture
+        /// lands — a kind entry's snapshot is restored from the Restore
+        /// section below, so that picker must list it without a page re-entry
+        /// (§ Snapshot-list shape → *Kind entries*). `None` pre-auth.
+        restore_nest: Option<Arc<NestClient>>,
     },
     /// Save one file's bytes out of the open snapshot — the only snapshot-half
     /// gesture that is NOT a machine call, because the machine's job ends at the
@@ -1592,6 +1711,19 @@ pub enum Op {
         set: fauna_client_snapshots::SnapshotSet,
         manifest_hash: String,
         path: String,
+    },
+    /// Restore every file of the open snapshot into `destination` — the
+    /// `snapshot-restore-button` action, over the ONE shared entry point
+    /// `fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir`
+    /// (`backups.md` § Where logic lives → *Whole-snapshot restore*).
+    RestoreSnapshot {
+        nest: Arc<NestClient>,
+        secret: [u8; 32],
+        /// The seat's custody: what renders the sealed listing and licenses
+        /// every entry the walk writes.
+        folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+        snapshot_id: i64,
+        destination: std::path::PathBuf,
     },
     /// Restore the selected local snapshot — the `restore-confirm-button`
     /// action. `confirm_id` is the user's typed text passed through verbatim,
@@ -1716,6 +1848,21 @@ pub enum Op {
         /// The account's folder-key custody — the target pre-create mints into
         /// it before the agent's job starts.
         folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+        custodian: crate::sync_agent::CustodianStoreHandle,
+    },
+    /// Seed the signed-in nest from a surviving nest destination's copy — the
+    /// confirmed `backup-destination-reseed-button` action on a nest-kind row:
+    /// the shared `fauna_sync_engine::reseed_pull::pull_back_from_destination`,
+    /// **in the app** (no custodian store is involved), which also re-enrolls
+    /// the destination once the whole corpus is live.
+    PullBack {
+        nest: Arc<NestClient>,
+        secret: [u8; 32],
+        store: Arc<dyn BackupStateStore>,
+        folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+        /// Boxed: the row is wide, and every variant pays for the largest.
+        destination: Box<BackupDestination>,
+        /// For this device's sync id and the page read afterwards.
         custodian: crate::sync_agent::CustodianStoreHandle,
     },
     /// Recover what the owner's nest lost from `destination`'s copy — the
@@ -1865,13 +2012,21 @@ pub enum Outcome {
     /// failure is distinguishable from a silent no-op (convention 11: a command
     /// is honoured or fails loudly, never dropped).
     Downloaded,
+    /// The whole-snapshot restore finished — its rendered
+    /// `snapshot-restore-result` line, success, partial or failure alike: a
+    /// partial result is a result, never `error-message`.
+    SnapshotRestored(String),
     /// A snapshot-half gesture completed — the machine's fresh render, with the
     /// destination half untouched.
     ///
     /// There is no failure variant: the machine puts its own failures on
     /// `snapshot().error`, which is the page `error-message` this page renders.
     /// Folding them onto [`Self::Failed`] too would paint the banner twice.
-    SnapshotsLoaded(Box<BackupsSnapshot>),
+    ///
+    /// The second field is the restore picker's re-read list after a mutating
+    /// gesture — `None` (no mutation, or the read failed) keeps what the picker
+    /// already paints; the next whole-page read reports a real fault.
+    SnapshotsLoaded(Box<BackupsSnapshot>, Option<Vec<SnapshotSummaryRow>>),
     /// One audit pass's merged picture, with the rest of the page untouched.
     /// `None` carries the same "no pass completed, keep what is rendered"
     /// meaning as [`Self::Loaded`]'s field.
@@ -2022,6 +2177,14 @@ impl Op {
                 folder_keys,
                 custodian,
             } => reseed(nest, secret, store, folder_keys, custodian).await,
+            Op::PullBack {
+                nest,
+                secret,
+                store,
+                folder_keys,
+                destination,
+                custodian,
+            } => pull_back(nest, secret, store, folder_keys, destination, custodian).await,
             Op::Recover {
                 nest,
                 secret,
@@ -2058,7 +2221,12 @@ impl Op {
                     Err(e) => Outcome::Failed(e.to_string()),
                 }
             }
-            Op::Snapshots { machine, gesture } => {
+            Op::Snapshots {
+                machine,
+                gesture,
+                restore_nest,
+            } => {
+                let mutates = gesture.mutates();
                 match gesture {
                     SnapshotGesture::Select(name) => machine.select_folder(name).await,
                     SnapshotGesture::Create => machine.create_snapshot().await,
@@ -2078,7 +2246,15 @@ impl Op {
                     SnapshotGesture::Check => machine.check().await,
                     SnapshotGesture::OpenDetail(id) => machine.open_snapshot(id).await,
                 }
-                Outcome::SnapshotsLoaded(Box::new(machine.snapshot()))
+                let restore_snapshots = match restore_nest.filter(|_| mutates) {
+                    Some(nest) => SnapshotsClient::new(nest)
+                        .list(None, None, 0)
+                        .await
+                        .ok()
+                        .map(|reply| reply.rows),
+                    None => None,
+                };
+                Outcome::SnapshotsLoaded(Box::new(machine.snapshot()), restore_snapshots)
             }
             Op::DownloadFile {
                 nest,
@@ -2090,6 +2266,13 @@ impl Op {
             } => {
                 download_snapshot_file(nest, secret, folder_keys, set, &manifest_hash, &path).await
             }
+            Op::RestoreSnapshot {
+                nest,
+                secret,
+                folder_keys,
+                snapshot_id,
+                destination,
+            } => restore_snapshot(nest, secret, folder_keys, snapshot_id, destination).await,
             Op::Audit {
                 nest,
                 secret,
@@ -2221,6 +2404,82 @@ async fn download_snapshot_file(
         Ok(Ok(())) => Outcome::Downloaded,
         Ok(Err(e)) => Outcome::Failed(e),
         Err(e) => Outcome::Failed(format!("snapshot-download worker: {e}")),
+    }
+}
+
+/// Restore every file of one snapshot into `destination`.
+///
+/// Everything but the outcome line is the shared entry point's —
+/// `fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir` reads the
+/// listing custody-wired, refuses a message-kind snapshot, and runs the one
+/// restore walk (`backup-restore.md` § 4) — so this adds the two per-platform
+/// things [`download_snapshot_file`] adds: the seat's device id and custody
+/// resolver, and the text. The engine is `!Sync`, so the walk rides a
+/// current-thread runtime on its own thread, as the per-file download does.
+async fn restore_snapshot(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    snapshot_id: i64,
+    destination: std::path::PathBuf,
+) -> Outcome {
+    let path = destination.display().to_string();
+    let failed = |message: &str| Outcome::SnapshotRestored(t::snapshot_restore_failed(message));
+    let Some(device_hex) = crate::media::device_id_hex_for_secret(secret) else {
+        return failed("this device has no sync device id yet");
+    };
+    let Some(device_id) = fauna_core::hex32::decode(&device_hex).ok() else {
+        return failed("this device's sync device id is unreadable");
+    };
+
+    let auth = nest.auth().clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build snapshot-restore runtime: {e}"))?;
+        rt.block_on(async move {
+            let resolver: Arc<dyn fauna_core::folder_keys::FolderKeyResolver> = Arc::new(
+                fauna_client_folders::NestFolderKeyResolver::new(Arc::clone(&nest), folder_keys),
+            );
+            fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir(
+                auth,
+                nest,
+                device_id,
+                &secret,
+                Some(resolver),
+                snapshot_id,
+                &destination,
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))
+        })
+    })
+    .await;
+
+    match joined {
+        Ok(Ok(summary)) => Outcome::SnapshotRestored(restore_result_line(&summary, &path)),
+        Ok(Err(e)) => failed(&e),
+        Err(e) => failed(&format!("snapshot-restore worker: {e}")),
+    }
+}
+
+/// The `snapshot-restore-result` line for a finished walk: how many files were
+/// written and where, and — when any failed to fetch, open or verify — which,
+/// by their redacted paths, with everything else said to be written.
+fn restore_result_line(summary: &fauna_sync_engine::engine::RestoreSummary, path: &str) -> String {
+    let files = summary.files_restored.to_string();
+    if summary.unverified.is_empty() {
+        let size =
+            crate::format::byte_size(i64::try_from(summary.bytes_written).unwrap_or(i64::MAX));
+        t::snapshot_restore_done(&files, &size, path)
+    } else {
+        t::snapshot_restore_partial(
+            &files,
+            path,
+            &summary.unverified.len().to_string(),
+            &summary.unverified.join(", "),
+        )
     }
 }
 
@@ -2659,21 +2918,91 @@ async fn orphaned_store_bytes(
     .then_some(store.bytes)
 }
 
+/// The delivery legs tui hosts: the custodian ceremony through the sync agent,
+/// and the nest-held pull-back in the app.
+const HOSTED_LEGS: fauna_client_backup::reseed::HostedLegs =
+    fauna_client_backup::reseed::HostedLegs::WITH_PULL_BACK;
+
 /// Where `backup-destination-reseed-button` paints: `None` for the orphaned
-/// store's row, `Some(id)` for a destination row. The shared
-/// `reseed_sources` decides which rows are sources at all; this keeps the ones
-/// whose delivery leg this build can run, so a nest-kind row joins by its leg
-/// becoming built, never by a change here.
+/// store's row, `Some(id)` for a destination row — the shared `reseed_rows`
+/// every app paints by, over the legs tui hosts.
 fn reseed_rows(st: &BackupsState, this_device_id: Option<&str>) -> Vec<Option<String>> {
+    fauna_client_backup::reseed::reseed_rows(
+        &st.destinations,
+        this_device_id.unwrap_or_default(),
+        st.orphaned_store.is_some(),
+        HOSTED_LEGS,
+    )
+}
+
+/// The leg the button on `source`'s row runs, read off the shared source list
+/// at press time — `None` when that row offers no restore this app hosts.
+fn reseed_leg(
+    st: &BackupsState,
+    this_device_id: Option<&str>,
+    source: &Option<String>,
+) -> Option<fauna_client_backup::reseed::ReseedLeg> {
     fauna_client_backup::reseed::reseed_sources(
         &st.destinations,
         this_device_id.unwrap_or_default(),
         st.orphaned_store.is_some(),
     )
     .into_iter()
-    .filter(|s| s.leg.is_built())
-    .map(|s| s.destination_id)
-    .collect()
+    .find(|s| &s.destination_id == source && s.leg.is_hosted(HOSTED_LEGS))
+    .map(|s| s.leg)
+}
+
+/// The pull-back: the shared host composition over this app's own connections
+/// (`fauna_sync_engine::reseed_pull::pull_back_from_destination` — the order,
+/// the post-ceremony re-enrollment and the result are all its), then a
+/// whole-page read.
+async fn pull_back(
+    nest: Arc<NestClient>,
+    secret: [u8; 32],
+    store: Arc<dyn BackupStateStore>,
+    folder_keys: Arc<dyn fauna_client_folders::FolderKeyStore>,
+    destination: Box<BackupDestination>,
+    custodian: crate::sync_agent::CustodianStoreHandle,
+) -> Outcome {
+    let device = custodian
+        .device_id()
+        .map(str::to_string)
+        .or_else(|| crate::media::device_id_hex_for_secret(secret));
+    let Some(device_id) = device.and_then(|hex| fauna_core::hex32::decode(&hex).ok()) else {
+        return Outcome::Failed(t::backup_reseed_failed(
+            "this device has no sync identity to record the restore under",
+        ));
+    };
+    let ran = fauna_sync_engine::reseed_pull::pull_back_from_destination(
+        fauna_sync_engine::reseed_pull::NativePullBack {
+            target: Arc::clone(&nest),
+            owner_secret: secret,
+            device_id,
+            destination: &destination,
+            store: store.as_ref(),
+            folder_keys,
+        },
+    )
+    .await;
+    let ran = match ran {
+        Ok(ran) => ran,
+        Err(e) => return Outcome::Failed(t::backup_reseed_failed(&e)),
+    };
+    if let Some(e) = ran.reenroll_error {
+        // The data IS back; say so, and say what did not happen.
+        return Outcome::Reseeded {
+            result: ran.outcome,
+            page: Box::new(Outcome::Failed(t::backup_reseed_pull_back_reenroll_failed(
+                &destination_label(&destination),
+                &e,
+            ))),
+        };
+    }
+    let page = refresh(nest, secret, store, None, None, Some(custodian)).await;
+    Outcome::Reseeded {
+        result: ran.outcome,
+        page: Box::new(page),
+    }
 }
 
 /// The re-seed: the target pre-create and the agent's job, waited on to its end
@@ -3263,9 +3592,21 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
             app.backups.reclaiming = false;
             app.errors.remove(&Page::Backups);
         }
-        Outcome::SnapshotsLoaded(page) => fold_snapshots_page(app, *page),
+        Outcome::SnapshotsLoaded(page, restore_snapshots) => {
+            if let Some(rows) = restore_snapshots {
+                app.backups.snapshots = rows;
+                clamp_index(
+                    &mut app.backups.selected_snapshot,
+                    app.backups.snapshots.len(),
+                );
+            }
+            fold_snapshots_page(app, *page)
+        }
         // Nothing to fold: the bytes are on disk and the page is unchanged.
         Outcome::Downloaded => {}
+        Outcome::SnapshotRestored(line) => {
+            app.backups.snapshot_restore = SnapshotRestoreView::Done(line);
+        }
     }
 }
 
@@ -3468,6 +3809,18 @@ pub fn elements(app: &App) -> Vec<Element> {
 /// each row's state and integrity are the machine's, and the busy gate is its
 /// single `in_progress_op` rather than the six ad-hoc partial flags the shipped
 /// apps grew.
+/// A selector row's label: a folder's own name, or a kind entry's label key
+/// resolved through the shared string table.
+fn folder_row_label(row: &fauna_backups_machine::BackupFolderRow) -> String {
+    if row.message_kind.is_some() {
+        fauna_i18n::strings::lookup(&row.name)
+            .map(str::to_string)
+            .unwrap_or_else(|| row.name.clone())
+    } else {
+        row.name.clone()
+    }
+}
+
 fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
     let page = st.snap();
     // Single-flight: while an op runs, EVERY mutating control is disabled
@@ -3478,8 +3831,19 @@ fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
 
     // The selector — a raw-value picker over the set NAME, which is what
     // `select("backup-folder-selector", name)` takes on every native app.
+    // A kind entry's name is its i18n label key (§ Snapshot-list shape →
+    // *Kind entries*): the key stays the value `select` takes, and the label
+    // the user reads is that key resolved — paint-only, like every raw-value
+    // picker's.
     let names: Vec<String> = page.folders.iter().map(|fs| fs.name.clone()).collect();
+    let labels: Vec<String> = page.folders.iter().map(folder_row_label).collect();
     let selected = page.selected_folder.clone().unwrap_or_default();
+    let selected_label = page
+        .folders
+        .iter()
+        .find(|fs| fs.name == selected)
+        .map(folder_row_label)
+        .unwrap_or_else(|| selected.clone());
     let no_sets = names.is_empty();
     out.push(Element {
         enabled: !no_sets && !busy,
@@ -3490,6 +3854,8 @@ fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
             names,
         )
         .labelled(t::FOLDER_LABEL)
+        .display_value(selected_label)
+        .option_labels(labels)
     });
     // A disabled control the user can see states why (Copy comprehensibility
     // rule 5) — the same shape the restore pickers use.
@@ -3551,7 +3917,7 @@ fn snapshot_elements(st: &BackupsState, out: &mut Vec<Element>) {
     if let Some(id) = st.immediate_delete {
         immediate_delete_elements(st, id, out);
     }
-    detail_elements(&page, out);
+    detail_elements(st, &page, out);
 }
 
 /// The `in_progress_op` line's text — the shared
@@ -3810,7 +4176,7 @@ fn immediate_delete_elements(st: &BackupsState, id: i64, out: &mut Vec<Element>)
 /// Painted only while a snapshot is open — `snapshot-detail-files` is a
 /// "present only while open" scope, and the machine drops the detail whenever
 /// its snapshot stops being listed, so this cannot outlive its rows.
-fn detail_elements(page: &BackupsSnapshot, out: &mut Vec<Element>) {
+fn detail_elements(st: &BackupsState, page: &BackupsSnapshot, out: &mut Vec<Element>) {
     let Some(detail) = &page.detail else {
         return;
     };
@@ -3818,6 +4184,21 @@ fn detail_elements(page: &BackupsSnapshot, out: &mut Vec<Element>) {
         ids::SNAPSHOT_DETAIL_FILES,
         t::snapshot(&detail.snapshot_id.to_string()),
     ));
+    // A kind entry's snapshot holds messages, not files: one line says where
+    // it restores from, never an empty list without a reason — and the
+    // whole-snapshot restore into a folder does not apply to it.
+    if detail.message_kind.is_some() {
+        out.push(
+            Element::chrome(t::KIND_SNAPSHOT_RESTORES_BELOW).within(ids::SNAPSHOT_DETAIL_FILES, 0),
+        );
+        out.push(Element::gesture_button(
+            String::new(),
+            t::RESTORE_DIVERGENCE_CLOSE,
+            true,
+            Gesture::Backups(Action::CloseSnapshotDetail),
+        ));
+        return;
+    }
     if detail.files.is_empty() {
         out.push(Element::chrome(t::NO_FILES_IN_SNAPSHOT).within(ids::SNAPSHOT_DETAIL_FILES, 0));
     }
@@ -3844,6 +4225,7 @@ fn detail_elements(page: &BackupsSnapshot, out: &mut Vec<Element>) {
             );
         }
     }
+    snapshot_restore_elements(st, out);
     // ui.yaml scopes no id to the close control, so it paints untagged — the
     // same call the divergence modal's close makes.
     out.push(Element::gesture_button(
@@ -3852,6 +4234,37 @@ fn detail_elements(page: &BackupsSnapshot, out: &mut Vec<Element>) {
         true,
         Gesture::Backups(Action::CloseSnapshotDetail),
     ));
+}
+
+/// The whole-snapshot restore, beside `snapshot-detail-files` (`ui/backups.md`
+/// § Whole-snapshot restore): the typed destination, the button — disabled
+/// with no destination and while a restore runs — then the progress line while
+/// it runs, or the outcome line after.
+fn snapshot_restore_elements(st: &BackupsState, out: &mut Vec<Element>) {
+    out.push(
+        Element::input(
+            ids::SNAPSHOT_RESTORE_DESTINATION_INPUT,
+            st.snapshot_restore_dest.clone(),
+            Field::Backups(BackupsField::SnapshotRestoreDest),
+        )
+        .labelled(t::SNAPSHOT_RESTORE_DESTINATION_PLACEHOLDER),
+    );
+    out.push(Element::gesture_button(
+        ids::SNAPSHOT_RESTORE_BUTTON,
+        t::SNAPSHOT_RESTORE_BUTTON,
+        !st.snapshot_restore.is_running() && !st.snapshot_restore_dest.trim().is_empty(),
+        Gesture::Backups(Action::RestoreSnapshot),
+    ));
+    match &st.snapshot_restore {
+        SnapshotRestoreView::Idle => {}
+        SnapshotRestoreView::Running { snapshot_id, path } => out.push(Element::label(
+            ids::SNAPSHOT_RESTORE_PROGRESS,
+            t::snapshot_restore_progress(&snapshot_id.to_string(), path),
+        )),
+        SnapshotRestoreView::Done(line) => {
+            out.push(Element::label(ids::SNAPSHOT_RESTORE_RESULT, line.clone()));
+        }
+    }
 }
 
 /// The add/edit dialog — painted only while open, which is what ui.yaml's
@@ -4036,7 +4449,7 @@ fn orphaned_store_elements(st: &BackupsState, reseed_here: bool, out: &mut Vec<E
     // owner's only copy is offered back, and the destructive gesture beside it
     // must not be the first one met.
     if reseed_here {
-        out.push(reseed_button(st).within(ids::BACKUP_ORPHANED_STORE_ROW, 0));
+        out.push(reseed_button(st, None).within(ids::BACKUP_ORPHANED_STORE_ROW, 0));
     }
     out.push(
         Element::gesture_button(
@@ -4049,13 +4462,14 @@ fn orphaned_store_elements(st: &BackupsState, reseed_here: bool, out: &mut Vec<E
     );
 }
 
-/// `backup-destination-reseed-button`, disarmed while a run is in flight.
-fn reseed_button(st: &BackupsState) -> Element {
+/// `backup-destination-reseed-button` on `source`'s row, disarmed while a run
+/// is in flight.
+fn reseed_button(st: &BackupsState, source: Option<String>) -> Element {
     Element::gesture_button(
         ids::BACKUP_DESTINATION_RESEED_BUTTON,
         t::BACKUP_DESTINATION_RESEED_BUTTON,
         st.reseed != ReseedView::Running,
-        Gesture::Backups(Action::OpenReseedConfirm),
+        Gesture::Backups(Action::OpenReseedConfirm { source }),
     )
 }
 
@@ -4066,14 +4480,38 @@ fn reseed_button(st: &BackupsState) -> Element {
 fn reseed_elements(st: &BackupsState, out: &mut Vec<Element>) {
     match &st.reseed {
         ReseedView::Closed => {}
-        ReseedView::Confirming => {
+        ReseedView::Confirming(source) => {
+            // A surviving nest's row names the copy it pulls back; every other
+            // source is this device's own store.
+            let nest_source = source
+                .as_ref()
+                .and_then(|id| st.destinations.iter().find(|d| &d.destination_id == id))
+                .filter(|d| {
+                    matches!(
+                        d.kind_view(),
+                        fauna_core::data::DestinationKind::Nest { .. }
+                    )
+                });
+            let (title, body) = match nest_source {
+                Some(dest) => {
+                    let name = destination_label(dest);
+                    (
+                        t::backup_reseed_pull_back_confirm_title(&name),
+                        t::backup_reseed_pull_back_confirm_body(&name),
+                    )
+                }
+                None => (
+                    t::BACKUP_RESEED_CONFIRM_TITLE.to_string(),
+                    t::BACKUP_RESEED_CONFIRM_BODY.to_string(),
+                ),
+            };
             out.push(Element::label(
                 ids::BACKUP_DESTINATION_RESEED_CONFIRM_MODAL,
-                t::BACKUP_RESEED_CONFIRM_TITLE,
+                title,
             ));
             // The consequence, stated where the decision is made (the reclaim
             // modal's idiom); ui.yaml scopes no id to it.
-            out.push(Element::chrome(t::BACKUP_RESEED_CONFIRM_BODY));
+            out.push(Element::chrome(body));
             out.push(
                 Element::gesture_button(
                     ids::BACKUP_DESTINATION_RESEED_CONFIRM_BUTTON,
@@ -4391,10 +4829,14 @@ fn status_row(
         )
         .within(ids::BACKUP_DESTINATION_STATUS_ROW, i),
     );
-    // "Restore my data to this nest" — only on the row naming a copy THIS
-    // device holds (`ui/backups.md` § Restore after losing the nest).
+    // "Restore my data to this nest" — on the row naming a copy this device
+    // holds, or a surviving nest's (`ui/backups.md` § Restore after losing the
+    // nest).
     if reseed_here {
-        out.push(reseed_button(st).within(ids::BACKUP_DESTINATION_STATUS_ROW, i));
+        out.push(
+            reseed_button(st, Some(dest.destination_id.clone()))
+                .within(ids::BACKUP_DESTINATION_STATUS_ROW, i),
+        );
     }
     // The post-succession review mark and its Keep half — present only while
     // this row is actually raised (`succession-aftermath.md` § Adjudicating what
@@ -4944,7 +5386,7 @@ mod tests {
     #[test]
     fn the_reseed_confirm_arms_only_over_a_source_and_cancels_cleanly() {
         let mut app = backups_app();
-        assert!(apply_local(&mut app, Action::OpenReseedConfirm).is_none());
+        assert!(apply_local(&mut app, Action::OpenReseedConfirm { source: None }).is_none());
         assert_eq!(app.backups.reseed, ReseedView::Closed);
         assert!(
             apply_local(&mut app, Action::ConfirmReseed).is_none(),
@@ -4952,8 +5394,8 @@ mod tests {
         );
 
         app.backups.orphaned_store = Some(4096);
-        assert!(apply_local(&mut app, Action::OpenReseedConfirm).is_none());
-        assert_eq!(app.backups.reseed, ReseedView::Confirming);
+        assert!(apply_local(&mut app, Action::OpenReseedConfirm { source: None }).is_none());
+        assert_eq!(app.backups.reseed, ReseedView::Confirming(None));
         for id in [
             "backup-destination-reseed-confirm-button",
             "backup-destination-reseed-cancel-button",
@@ -4975,7 +5417,7 @@ mod tests {
     fn a_confirmed_reseed_runs_once_and_says_so() {
         let mut app = backups_app();
         app.backups.orphaned_store = Some(4096);
-        apply_local(&mut app, Action::OpenReseedConfirm);
+        apply_local(&mut app, Action::OpenReseedConfirm { source: None });
         assert!(matches!(
             apply_local(&mut app, Action::ConfirmReseed),
             Some(Op::Reseed { .. })
@@ -4990,7 +5432,7 @@ mod tests {
             .find(|e| e.id == "backup-destination-reseed-button")
             .expect("the button stays painted");
         assert!(!button.enabled, "a running re-seed disarms its button");
-        assert!(apply_local(&mut app, Action::OpenReseedConfirm).is_none());
+        assert!(apply_local(&mut app, Action::OpenReseedConfirm { source: None }).is_none());
         assert_eq!(app.backups.reseed, ReseedView::Running);
 
         // A failed run hands the button back.
@@ -5008,7 +5450,7 @@ mod tests {
         let mut app = backups_app();
         app.backups.reseed = ReseedView::Running;
         let mail = DeliveredSet {
-            set_name: "__mail".into(),
+            set_name: "__landing/mail".into(),
             axis: SetAxis::Segment,
             folder_display_name: None,
             folder_label: None,
@@ -5037,6 +5479,70 @@ mod tests {
         let text = text_of(&app, "backup-destination-reseed-result");
         assert!(text.starts_with(t::RESEED_RESULT_WHOLE), "{text:?}");
         assert!(text.contains('2'), "{text:?}");
+    }
+
+    /// A surviving nest destination is a restore source tui hosts (the
+    /// nest-held pull-back, owner-approved on a nest-kind row 2026-10-16): its
+    /// row carries the button, and its confirm names the copy it pulls back.
+    #[test]
+    fn a_nest_destinations_row_offers_the_pull_back_and_names_it() {
+        let mut app = backups_app();
+        app.backups.destinations = vec![destination("off", "http://b.test", Some("Off-site"))];
+        assert_eq!(count_scoped(&app, "backup-destination-reseed-button", 0), 1);
+
+        assert!(
+            apply_local(
+                &mut app,
+                Action::OpenReseedConfirm {
+                    source: Some("elsewhere".into())
+                }
+            )
+            .is_none()
+        );
+        assert_eq!(
+            app.backups.reseed,
+            ReseedView::Closed,
+            "a row that carries no button arms nothing"
+        );
+        apply_local(
+            &mut app,
+            Action::OpenReseedConfirm {
+                source: Some("off".into()),
+            },
+        );
+        assert_eq!(
+            app.backups.reseed,
+            ReseedView::Confirming(Some("off".into()))
+        );
+        let body: Vec<String> = elements(&app).into_iter().map(|e| e.text).collect();
+        assert!(
+            body.contains(&t::backup_reseed_pull_back_confirm_title("Off-site")),
+            "{body:?}"
+        );
+        assert!(
+            body.contains(&t::backup_reseed_pull_back_confirm_body("Off-site")),
+            "{body:?}"
+        );
+
+        match apply_local(&mut app, Action::ConfirmReseed) {
+            Some(Op::PullBack { destination, .. }) => {
+                assert_eq!(destination.destination_id, "off");
+            }
+            _ => panic!("a nest row's confirm runs the pull-back"),
+        }
+        assert_eq!(app.backups.reseed, ReseedView::Running);
+    }
+
+    /// This device's own custodian row keeps the custodian ceremony.
+    #[test]
+    fn this_devices_custodian_row_keeps_the_custodian_ceremony() {
+        let mut app = backups_app();
+        app.backups.orphaned_store = Some(4096);
+        apply_local(&mut app, Action::OpenReseedConfirm { source: None });
+        assert!(matches!(
+            apply_local(&mut app, Action::ConfirmReseed),
+            Some(Op::Reseed { .. })
+        ));
     }
 
     /// ⚠ The reclaim op carries **no nest session**, and that is the property,
@@ -5541,6 +6047,7 @@ mod tests {
                 last_attempt_at: Some(1_700_000_000),
                 verified_ledger_generations: Default::default(),
                 accepted_regressions: Default::default(),
+                retained_head_sightings: Default::default(),
                 seat_settled_under: None,
             },
             verdict,
@@ -6858,7 +7365,140 @@ mod tests {
             name: name.to_string(),
             snapshot_count: 1,
             last_snapshot_at: Some(1_700_000_000),
+            message_kind: None,
         }
+    }
+
+    /// The page the machine serves with one folder and every kind entry after
+    /// it (§ Snapshot-list shape → *Kind entries*), `selected` picked.
+    fn page_with_kind_entries(selected: &str) -> BackupsSnapshot {
+        let mut folders = vec![fs_row("alpha")];
+        folders.extend(
+            fauna_backups_machine::KIND_ENTRIES
+                .iter()
+                .map(|(kind, key)| fauna_backups_machine::BackupFolderRow {
+                    name: key.to_string(),
+                    message_kind: Some(kind.to_string()),
+                    ..Default::default()
+                }),
+        );
+        BackupsSnapshot {
+            folders,
+            selected_folder: Some(selected.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn selector(app: &App) -> Element {
+        elements(app)
+            .into_iter()
+            .find(|e| e.id == "backup-folder-selector")
+            .expect("the selector is painted")
+    }
+
+    #[test]
+    fn the_kind_entries_paint_their_existing_labels_after_the_folders() {
+        let app = app_with_page(page_with_kind_entries("alpha"));
+        let el = selector(&app);
+        let crate::element::Role::Select { options, .. } = &el.role else {
+            panic!("the selector is a picker");
+        };
+        // The value `select` takes stays the locale-stable key…
+        assert_eq!(options[0], "alpha");
+        assert_eq!(options[1], "backups.reseed_set_mail");
+        // …and the label the user reads is that key resolved: no raw key and
+        // no new string anywhere in the picker.
+        let labels: Vec<String> = el
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "options")
+            .map(|(_, v)| serde_json::from_str(v).expect("a JSON list"))
+            .expect("the picker carries its option labels");
+        assert_eq!(
+            labels,
+            vec![
+                "alpha",
+                "Mail",
+                "Calendar",
+                "Contacts",
+                "Posts",
+                "Conversations"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_selected_kind_entry_displays_its_label_and_keeps_its_key_as_the_value() {
+        let app = app_with_page(page_with_kind_entries("common.posts"));
+        let el = selector(&app);
+        assert_eq!(
+            el.text, "common.posts",
+            "get_text/select round-trip the key"
+        );
+        let crate::element::Role::Select { display, .. } = &el.role else {
+            panic!("the selector is a picker");
+        };
+        assert_eq!(display.as_deref(), Some("Posts"));
+    }
+
+    #[test]
+    fn a_mutating_gestures_re_read_replaces_the_restore_pickers_rows() {
+        // The kind row's detail says "restore it from the Restore section
+        // below" — so the snapshot a create just took is in that picker
+        // without leaving the page.
+        let mut app = app_with_page(page_with_kind_entries("backups.reseed_set_mail"));
+        assert!(app.backups.snapshots.is_empty());
+        apply_outcome(
+            &mut app,
+            Outcome::SnapshotsLoaded(
+                Box::new(page_with_kind_entries("backups.reseed_set_mail")),
+                Some(vec![snapshot(41, "mail")]),
+            ),
+        );
+        assert_eq!(
+            app.backups
+                .snapshots
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![41]
+        );
+        // A gesture that changed nothing carries no list and keeps the picker.
+        apply_outcome(
+            &mut app,
+            Outcome::SnapshotsLoaded(Box::new(page_with_kind_entries("alpha")), None),
+        );
+        assert_eq!(app.backups.snapshots.len(), 1);
+        assert!(SnapshotGesture::Create.mutates());
+        assert!(!SnapshotGesture::Check.mutates());
+    }
+
+    #[test]
+    fn a_kind_rows_detail_points_at_the_restore_section_instead_of_an_empty_list() {
+        let mut page = page_with_kind_entries("backups.reseed_set_mail");
+        page.snapshots = vec![snap_row(7)];
+        page.detail = Some(fauna_backups_machine::SnapshotDetail {
+            snapshot_id: 7,
+            message_kind: Some("mail".to_string()),
+            ..Default::default()
+        });
+        let app = app_with_page(page);
+        assert_eq!(count_id(&app, "snapshot-detail-files"), 1);
+        let texts: Vec<String> = elements(&app).into_iter().map(|e| e.text).collect();
+        assert!(
+            texts.iter().any(|t| t == t::KIND_SNAPSHOT_RESTORES_BELOW),
+            "{texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == t::NO_FILES_IN_SNAPSHOT),
+            "never the empty-list line on a kind row"
+        );
+        assert_eq!(count_id(&app, "snapshot-file-download-button"), 0);
+        assert_eq!(
+            count_id(&app, "snapshot-restore-button"),
+            0,
+            "a kind row restores from the Restore section, not into a folder"
+        );
     }
 
     fn snap_row(id: i64) -> fauna_backups_machine::SnapshotRow {
@@ -7302,6 +7942,7 @@ mod tests {
             snapshot_id: 7,
             folder: "docs".to_string(),
             folder_hash: None,
+            message_kind: None,
             files: vec![
                 fauna_backups_machine::SnapshotFileRow {
                     path: "docs/a.txt".to_string(),
@@ -7332,6 +7973,154 @@ mod tests {
         );
     }
 
+    fn one_file_detail() -> BackupsSnapshot {
+        let mut page = loaded_page(vec![snap_row(7)]);
+        page.detail = Some(fauna_backups_machine::SnapshotDetail {
+            snapshot_id: 7,
+            folder: "docs".to_string(),
+            folder_hash: None,
+            message_kind: None,
+            files: vec![fauna_backups_machine::SnapshotFileRow {
+                path: "docs/a.txt".to_string(),
+                size_bytes: 12,
+                file_type: "regular".to_string(),
+                manifest_hash: "ab".repeat(32),
+            }],
+        });
+        page
+    }
+
+    #[test]
+    fn the_whole_snapshot_restore_paints_only_with_an_open_detail() {
+        // `ui/backups.md` § Whole-snapshot restore: the surface sits beside
+        // `snapshot-detail-files`, so with no snapshot open there is nothing
+        // to restore and no control to offer.
+        let app = app_with_page(loaded_page(vec![snap_row(7)]));
+        assert_eq!(count_id(&app, "snapshot-restore-destination-input"), 0);
+        assert_eq!(count_id(&app, "snapshot-restore-button"), 0);
+
+        let app = app_with_page(one_file_detail());
+        assert_eq!(count_id(&app, "snapshot-restore-destination-input"), 1);
+        assert_eq!(count_id(&app, "snapshot-restore-button"), 1);
+        assert_eq!(
+            count_id(&app, "snapshot-restore-progress"),
+            0,
+            "idle: no progress line"
+        );
+        assert_eq!(
+            count_id(&app, "snapshot-restore-result"),
+            0,
+            "no run yet: no outcome line"
+        );
+    }
+
+    #[test]
+    fn the_restore_button_arms_only_with_a_destination() {
+        let mut app = app_with_page(one_file_detail());
+        assert!(
+            !enabled_of(&app, "snapshot-restore-button"),
+            "no destination yet"
+        );
+        assert!(
+            apply_local(&mut app, Action::RestoreSnapshot).is_none(),
+            "the actuation backstop refuses what the paint disabled"
+        );
+        set_field(
+            &mut app.backups,
+            BackupsField::SnapshotRestoreDest,
+            "   ".into(),
+        );
+        assert!(
+            !enabled_of(&app, "snapshot-restore-button"),
+            "whitespace is no destination"
+        );
+        set_field(
+            &mut app.backups,
+            BackupsField::SnapshotRestoreDest,
+            "/srv/restored".into(),
+        );
+        assert!(enabled_of(&app, "snapshot-restore-button"));
+        assert_eq!(
+            text_of(&app, "snapshot-restore-destination-input"),
+            "/srv/restored"
+        );
+    }
+
+    #[test]
+    fn a_running_restore_paints_progress_and_disarms_the_button() {
+        let mut app = app_with_page(one_file_detail());
+        set_field(
+            &mut app.backups,
+            BackupsField::SnapshotRestoreDest,
+            "/srv/restored".into(),
+        );
+        app.backups.snapshot_restore = SnapshotRestoreView::Running {
+            snapshot_id: 7,
+            path: "/srv/restored".into(),
+        };
+        assert!(
+            !enabled_of(&app, "snapshot-restore-button"),
+            "one walk at a time"
+        );
+        assert!(text_of(&app, "snapshot-restore-progress").contains("/srv/restored"));
+        assert!(apply_local(&mut app, Action::RestoreSnapshot).is_none());
+
+        apply_outcome(
+            &mut app,
+            Outcome::SnapshotRestored("Restored 1 files".into()),
+        );
+        assert_eq!(count_id(&app, "snapshot-restore-progress"), 0);
+        assert_eq!(text_of(&app, "snapshot-restore-result"), "Restored 1 files");
+        assert!(
+            enabled_of(&app, "snapshot-restore-button"),
+            "a finished run re-arms"
+        );
+        assert!(
+            app.errors.get(&Page::Backups).is_none(),
+            "an outcome line is a result, never error-message"
+        );
+    }
+
+    #[test]
+    fn a_relative_destination_is_refused_on_the_outcome_line_before_any_call() {
+        let mut app = app_with_page(one_file_detail());
+        set_field(
+            &mut app.backups,
+            BackupsField::SnapshotRestoreDest,
+            "restored".into(),
+        );
+        assert!(apply_local(&mut app, Action::RestoreSnapshot).is_none());
+        assert!(
+            text_of(&app, "snapshot-restore-result").contains("restored"),
+            "the refusal names what was typed: {:?}",
+            text_of(&app, "snapshot-restore-result")
+        );
+    }
+
+    #[test]
+    fn the_outcome_line_names_every_file_not_written() {
+        let whole = fauna_sync_engine::engine::RestoreSummary {
+            files_restored: 3,
+            bytes_written: 2048,
+            skipped: 0,
+            unverified: vec![],
+        };
+        let line = restore_result_line(&whole, "/srv/r");
+        assert!(line.contains('3') && line.contains("/srv/r"), "{line}");
+
+        let partial = fauna_sync_engine::engine::RestoreSummary {
+            files_restored: 1,
+            bytes_written: 5,
+            skipped: 0,
+            unverified: vec!["a/b.txt".into(), "c.bin".into()],
+        };
+        let line = restore_result_line(&partial, "/srv/r");
+        assert!(
+            line.contains("a/b.txt") && line.contains("c.bin") && line.contains('2'),
+            "a partial result lists what was not written: {line}"
+        );
+    }
+
     #[test]
     fn no_detail_paints_no_detail_container() {
         let app = app_with_page(loaded_page(vec![snap_row(7)]));
@@ -7345,6 +8134,7 @@ mod tests {
             snapshot_id: 7,
             folder: "docs".to_string(),
             folder_hash: None,
+            message_kind: None,
             files: vec![fauna_backups_machine::SnapshotFileRow {
                 path: "docs".to_string(),
                 size_bytes: 0,

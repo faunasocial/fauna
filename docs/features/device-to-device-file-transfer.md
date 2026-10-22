@@ -4,6 +4,8 @@ title: Files move straight between your own devices
 section: your data and devices
 goal: docs/goal/behavior/p2p.md § Goal
 guide: docs/guides/cloud-sync.md § What syncing feels like
+absences:
+  web: "docs/goal/behavior/p2p.md § Wormability walk"
 ---
 
 ## What a user gets
@@ -31,7 +33,7 @@ Stamped 2026-10-01 at dfa27a899f.
 6. [app] A file arriving straight from another of your devices is checked exactly as one from your nest, and a damaged or tampered piece is refused rather than written — `docs/goal/behavior/p2p.md` § Wormability posture (ratified 2026-08-10)
    - (none)
 7. [app] Two of your devices on the same network keep passing files to each other while your nest, or your internet connection, is down — `docs/goal/behavior/p2p.md` § Same-account nest-down folder transfer
-   - (none)
+   - `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_two_devices_keep_passing_a_file_while_the_nest_is_down`
 8. [app] Your devices never broadcast, scan your network or announce themselves on it to find each other — `docs/goal/behavior/p2p.md` § LAN detection
    - (none)
 9. [app] Each of your devices has its own switch for taking part in direct transfers, on unless you turn it off, on that device's card on the Devices page — `docs/goal/behavior/p2p.md` § Per-device participation
@@ -62,7 +64,7 @@ Stamped 2026-10-01 at dfa27a899f.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web |  no run recorded | |
+| web | — absent | |
 | linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | |
 | macos |  no run recorded | |
@@ -78,9 +80,9 @@ Stamped 2026-10-01 at dfa27a899f.
 | 4 | app | (none) | — |
 | 5 | app | `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_a_file_still_arrives_through_the_nest_when_the_direct_path_is_gone` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 6 | app | (none) | — |
-| 7 | app | (none) | — |
+| 7 | app | `tests/e2e-unified/tests/test_device_to_device_file_transfer.py::test_two_devices_keep_passing_a_file_while_the_nest_is_down` | linux (linux): passed, tui (linux): passed |
 | 8 | app | (none) | — |
-| 9 | app | `tests/e2e-unified/tests/test_p2p_participation.py::test_this_devices_peer_transfer_switch_flips_and_rests` | linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_p2p_participation.py::test_this_devices_peer_transfer_switch_flips_and_rests` | web (linux): skipped, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_device_direct_transfer_switch.py::test_a_sibling_can_only_ask_a_device_to_stop_and_syncing_is_untouched` | tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_device_direct_transfer_switch.py::test_a_sibling_can_only_ask_a_device_to_stop_and_syncing_is_untouched` | tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_device_direct_transfer_switch.py::test_a_sibling_can_only_ask_a_device_to_stop_and_syncing_is_untouched` | tui (linux): passed |

@@ -62,11 +62,12 @@ pub use admission::{
 };
 pub use client::{
     AdmissionOutcome, AdmissionViews, CustodyRevocationView, DeviceRemovedView, FileChunkPull,
-    PeerRequester, PullReport, admit_over, admit_over_as, pull_file_chunks, pull_missing_blocks,
+    PeerRequester, PullReport, admit_over, admit_over_as, fetch_folder_manifest, pull_file_chunks,
+    pull_folder_changes, pull_missing_blocks,
 };
 pub use discovery::{
-    CustodianNestTarget, PeerDialTarget, bind_carried_endpoints, custodian_dial_targets,
-    custodian_nest_targets, dial_target_from, peer_sync_enabled, sibling_dial_targets,
+    PeerDialTarget, bind_carried_endpoints, custodian_dial_targets, dial_target_from,
+    peer_sync_enabled, sibling_dial_targets,
 };
 pub use quota::{MeteredPlane, QuotaConfig, QuotaLedger, metered_handler_factory};
 pub use server::{

@@ -19,7 +19,7 @@
 // mutation lock wasm-side): the install secret is minted there, so two tabs
 // opened together end on one secret.
 
-import { wasmCoreModule } from '$lib/wasm';
+import { wasmCoreModule } from '#lib/wasm';
 
 /** The device id `actorId` presents from this browser. Stable per account.
  *  Throws when no stable id exists (the store dropped the install secret's

@@ -27,7 +27,8 @@ fn json_str(val: &serde_json::Value, key: &str) -> Result<String, String> {
 ///
 /// `provider_json` must contain a `"provider"` field set to one of:
 /// - hetzner / digitalocean / vultr / linode: `token`
-/// - ovh: `app_key`, `app_secret`, `consumer_key`, `project_id`
+/// - ovh: `app_key`, `app_secret`, `consumer_key` (the locations are
+///   `<project>/<region>`, so no project is chosen up front)
 pub async fn verify_vps_from_json(
     provider_json: &str,
     client: &reqwest::Client,
@@ -61,10 +62,10 @@ pub async fn verify_vps_from_json(
             let app_key = json_str(&val, "app_key")?;
             let app_secret = json_str(&val, "app_secret")?;
             let consumer_key = json_str(&val, "consumer_key")?;
-            let project_id = json_str(&val, "project_id")?;
-            let mut ovh = crate::vps::ovh::Ovh::new(app_key, app_secret, consumer_key);
-            ovh.project_id = project_id;
-            ovh.verify(client).await.map_err(|e| e.to_string())
+            crate::vps::ovh::Ovh::new(app_key, app_secret, consumer_key)
+                .verify(client)
+                .await
+                .map_err(|e| e.to_string())
         }
         "linode" => {
             let token = json_str(&val, "token")?;
@@ -188,19 +189,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ovh_vps_missing_project_id_is_rejected() {
+    async fn ovh_vps_missing_consumer_key_is_rejected() {
         let client = reqwest::Client::new();
         let err = verify_vps_from_json(
-            r#"{"provider":"ovh","app_key":"a","app_secret":"b","consumer_key":"c"}"#,
+            r#"{"provider":"ovh","app_key":"a","app_secret":"b"}"#,
             &client,
         )
         .await
         .unwrap_err();
-        assert_eq!(err, "missing field: project_id");
+        assert_eq!(err, "missing field: consumer_key");
     }
 
     #[tokio::test]
-    async fn ovh_vps_missing_earlier_field_is_rejected_before_project_id() {
+    async fn ovh_vps_missing_earlier_field_is_rejected_first() {
         let client = reqwest::Client::new();
         let err = verify_vps_from_json(r#"{"provider":"ovh"}"#, &client)
             .await

@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import json
 
-from helpers import web_store
 import time
 
 import pytest
 
 from actions import ActionLayer
 from common.auth import create_actor_and_register
+from common.accounts import single_account_seed
 from drivers import create_driver
 
 pytestmark = [pytest.mark.tier_3, pytest.mark.web]
@@ -89,11 +89,12 @@ def test_web_sign_out_refuses_while_another_tab_holds_the_engine(nest_instance, 
     actor_id = actor["actor_id_hex"]
 
     tab_a = create_driver("web")
-    tab_a.launch({"url": spa_url + "/app/"})
+    tab_a.launch({
+        "url": spa_url + "/app/",
+        "seed_credentials": single_account_seed(secret, nest_url=spa_url),
+    })
     tab_b = None
     try:
-        web_store.seed_identity(tab_a, secret, nest_url=spa_url)
-        tab_a.hard_reload()
         _wait_until(
             lambda: (json.loads(_ls(tab_a, "fauna/index") or "{}").get("active") == actor_id),
             what="the boot registry read materializing the seeded account as active",

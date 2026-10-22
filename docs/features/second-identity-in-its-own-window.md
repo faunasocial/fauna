@@ -65,7 +65,7 @@ Stamped 2026-09-19 at acb58fddf3.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+e7095c29 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
 | linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
 | windows | ✅ full | 0.1.3-dev+b00cb884 standalone |
 | macos | ✅ full | |

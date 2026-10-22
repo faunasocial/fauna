@@ -227,12 +227,21 @@ pub fn expand_recurrence(
             let set: RRuleSet = RRuleSet::from_str(&rrule_input)
                 .map_err(|e| ICalError::BadRrule(format!("{e}")))?;
 
+            // A half-open CalDAV time-range arrives with an i64 sentinel end;
+            // clamp into chrono's range so it means "unbounded", not an error.
+            // The final integer `filter` below still uses the caller's window.
+            let clamp = |t: i64| {
+                t.clamp(
+                    chrono::DateTime::<chrono::Utc>::MIN_UTC.timestamp(),
+                    chrono::DateTime::<chrono::Utc>::MAX_UTC.timestamp(),
+                )
+            };
             let window_start_chrono =
-                chrono::DateTime::<chrono::Utc>::from_timestamp(window_start, 0)
+                chrono::DateTime::<chrono::Utc>::from_timestamp(clamp(window_start), 0)
                     .ok_or_else(|| ICalError::BadDateTime("window_start out of range".to_string()))?
                     .with_timezone(&Tz::UTC);
             let window_end_chrono =
-                chrono::DateTime::<chrono::Utc>::from_timestamp(window_end - 1, 0)
+                chrono::DateTime::<chrono::Utc>::from_timestamp(clamp(window_end - 1), 0)
                     .ok_or_else(|| ICalError::BadDateTime("window_end out of range".to_string()))?
                     .with_timezone(&Tz::UTC);
 
@@ -731,7 +740,7 @@ mod tests {
             fauna_status: "going".into(),
         }];
 
-        let ics = generate_ical(event, attendees, "organizer@example.com".into());
+        let ics = generate_ical(event, attendees, "organizer@example.net".into());
 
         assert!(ics.contains("BEGIN:VCALENDAR"), "{ics}");
         assert!(ics.contains("BEGIN:VEVENT"), "{ics}");
@@ -768,9 +777,9 @@ mod tests {
             sequence: 2,
             ..Default::default()
         };
-        let via_wrapper = generate_ical(mirror.clone(), vec![], "o@example.com".into());
+        let via_wrapper = generate_ical(mirror.clone(), vec![], "o@example.net".into());
         let core: fauna_core::ical::EventFields = mirror.into();
-        let via_core = fauna_core::ical::generate_ical(&core, &[], "o@example.com");
+        let via_core = fauna_core::ical::generate_ical(&core, &[], "o@example.net");
         assert_eq!(via_wrapper, via_core);
     }
 
@@ -798,7 +807,7 @@ mod tests {
             WriterITipMethod::Request,
             event,
             attendees,
-            "organizer@example.com".into(),
+            "organizer@example.net".into(),
             "2026-06-04T12:00:00Z".into(),
         );
 
@@ -854,7 +863,7 @@ mod tests {
                 m,
                 mirror.clone(),
                 vec![attendee.clone()],
-                "o@example.com".into(),
+                "o@example.net".into(),
                 dtstamp.into(),
             );
             let core: fauna_core::ical::EventFields = mirror.clone().into();
@@ -863,7 +872,7 @@ mod tests {
                 m.into(),
                 &core,
                 std::slice::from_ref(&core_attendee),
-                "o@example.com",
+                "o@example.net",
                 dtstamp,
             );
             assert_eq!(
@@ -889,9 +898,9 @@ DTSTAMP:20260515T120000Z\r\n\
 DTSTART:20260601T100000Z\r\n\
 DTEND:20260601T110000Z\r\n\
 SUMMARY:Design review\r\n\
-ORGANIZER:mailto:organizer@example.com\r\n\
+ORGANIZER:mailto:organizer@example.net\r\n\
 ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n\
-ATTENDEE;PARTSTAT=ACCEPTED:mailto:organizer@example.com\r\n\
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:organizer@example.net\r\n\
 END:VEVENT\r\n\
 END:VCALENDAR\r\n";
 
@@ -902,7 +911,7 @@ END:VCALENDAR\r\n";
         )
         .expect("organizer + a reachable attendee → Some");
 
-        assert_eq!(msg.from, "organizer@example.com");
+        assert_eq!(msg.from, "organizer@example.net");
         // The organizer is excluded; bob is the only reachable recipient.
         assert_eq!(msg.recipients, vec!["bob@example.com".to_string()]);
         let text = String::from_utf8(msg.raw_rfc5322).unwrap();
@@ -911,7 +920,7 @@ END:VCALENDAR\r\n";
             "{text}"
         );
         assert!(text.contains("METHOD:REQUEST"), "{text}");
-        assert!(text.contains("From: organizer@example.com"), "{text}");
+        assert!(text.contains("From: organizer@example.net"), "{text}");
         assert!(text.contains("To: bob@example.com"), "{text}");
     }
 
@@ -930,7 +939,7 @@ DTSTART:20260601T100000Z\r\n\
 DTEND:20260601T110000Z\r\n\
 SUMMARY:Design review\r\n\
 ORGANIZER:mailto:organizer@example.com\r\n\
-ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.com\r\n\
+ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:bob@example.net\r\n\
 END:VEVENT\r\n\
 END:VCALENDAR\r\n";
         build_event_imip_from_ics(method, raw.to_string(), "2026-06-05T12:00:00Z".into())
@@ -956,7 +965,7 @@ END:VCALENDAR\r\n";
             "UID:evt-mailed-invite",
             "SUMMARY:Design review",
             "ORGANIZER:mailto:organizer@example.com",
-            "mailto:bob@example.com",
+            "mailto:bob@example.net",
         ] {
             assert!(invite.ics.contains(want), "missing {want}: {}", invite.ics);
         }
@@ -1000,7 +1009,7 @@ ATTENDEE:mailto:bob@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let only_org = "\
 BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n\
 BEGIN:VEVENT\r\nUID:e\r\nDTSTAMP:20260515T120000Z\r\nDTSTART:20260601T100000Z\r\n\
-ORGANIZER:mailto:organizer@example.com\r\nATTENDEE:mailto:organizer@example.com\r\n\
+ORGANIZER:mailto:organizer@example.net\r\nATTENDEE:mailto:organizer@example.net\r\n\
 END:VEVENT\r\nEND:VCALENDAR\r\n";
         assert!(
             build_event_imip_from_ics(
@@ -1175,6 +1184,51 @@ END:VCALENDAR\r\n";
         let v = &doc.components[0];
         let occ = expand_recurrence(v, epoch(2026, 6, 1, 0), epoch(2026, 6, 30, 0)).unwrap();
         assert_eq!(occ.len(), 5, "Jun 1 through Jun 5 inclusive");
+    }
+
+    /// A CalDAV time-range with only `start` or only `end` reaches here with
+    /// the caller's ±2^62 sentinel; the recurring branch must clamp it to
+    /// chrono's range rather than reject it (else recurring events vanish).
+    #[test]
+    fn expand_rrule_half_open_window_sentinels() {
+        let body: &[u8] = b"\
+BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//test//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:half-open-rrule\r\n\
+DTSTAMP:20260515T120000Z\r\n\
+DTSTART:20260601T100000Z\r\n\
+RRULE:FREQ=DAILY;COUNT=3\r\n\
+SUMMARY:HalfOpen\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let doc = parse_icalendar(body).unwrap();
+        let v = &doc.components[0];
+        let sentinel: i64 = 1 << 62;
+        let w0 = epoch(2026, 6, 1, 0);
+        let w1 = epoch(2026, 6, 30, 0);
+        let open_end = expand_recurrence(v, w0, sentinel - 1).unwrap();
+        assert_eq!(open_end.len(), 3, "start-only window");
+        let open_start = expand_recurrence(v, -sentinel, w1).unwrap();
+        assert_eq!(open_start.len(), 3, "end-only window");
+        let both = expand_recurrence(v, -sentinel, sentinel - 1).unwrap();
+        assert_eq!(both.len(), 3, "fully open window");
+        // An unbounded rule over a fully open window must stay capped, not panic.
+        let unbounded = b"\
+BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+PRODID:-//test//EN\r\n\
+BEGIN:VEVENT\r\n\
+UID:half-open-unbounded\r\n\
+DTSTAMP:20260515T120000Z\r\n\
+DTSTART:20260601T100000Z\r\n\
+RRULE:FREQ=DAILY\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let doc = parse_icalendar(unbounded).unwrap();
+        let occ = expand_recurrence(&doc.components[0], -sentinel, sentinel - 1).unwrap();
+        assert!(!occ.is_empty() && occ.len() <= u16::MAX as usize);
     }
 
     #[test]

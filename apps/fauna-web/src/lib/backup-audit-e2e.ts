@@ -3,7 +3,7 @@
 // (`apps/fauna-linux/src/backup_audit.rs`).
 //
 // This module exists ONLY in builds made for testing (testing.md § convention 15).
-// Two importers, both gated: `$lib/e2e-automation` (itself behind
+// Two importers, both gated: `#lib/e2e-automation` (itself behind
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)`) registers the command, and the
 // Backups page installs its rerun hook inside its own
 // `if (__FAUNA_E2E_AUTOMATION__)` branch — so a production `vite build` folds both
@@ -21,8 +21,8 @@
 // reply, the sampled bytes, and this client's own observation high-water all stay
 // real — nothing about the audit's *finding* is injectable.
 
-import { backupAuditSetClockOffsetForTest } from '$lib/wasm';
-import { registerE2eCommands } from '$lib/e2e-commands';
+import { backupAuditSetClockOffsetForTest } from '#lib/wasm';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 /** The Backups page's own audit-refresh callback, installed while the page is
  *  mounted. `null` when the page has never been opened this session. */
@@ -36,7 +36,7 @@ export function setBackupAuditRerunHook(hook: (() => Promise<void>) | null): voi
 
 const BACKUP_AUDIT_COMMANDS = ['backup_audit_run_now'] as const;
 
-/** Register `backup_audit_run_now`. Called once from `$lib/e2e-automation`. */
+/** Register `backup_audit_run_now`. Called once from `#lib/e2e-automation`. */
 export function registerBackupAuditCommands(): void {
   registerE2eCommands(BACKUP_AUDIT_COMMANDS, async (_action, p) => {
     // Set the offset FIRST: the pass stamps `last_attempt_at`/`last_passed_at`

@@ -34,7 +34,8 @@ than inline in the hooks:
 * **A test that brought its OWN nest artifact is recorded against THAT artifact,
   never against the run's.** Provenance is per record: an ordinary record carries
   the run's `commit` / `image_digest` / `nest_mode`, and a `tests/platform/docker/`
-  test — which boots `fauna-nest-test:local`, whatever that tag holds on the box —
+  test — which boots its tree's keyed test image (`helpers/nest_test_image.py`), or
+  the image the run names in `FAUNA_NEST_TEST_IMAGE` —
   carries the booted container's instead: `nest_mode` is `docker` unconditionally
   (a fact about the test), `image_digest` is the booted image's own registry
   digest (`null` for a hand-built one), and `version` / `commit` are what its
@@ -186,8 +187,9 @@ def note_own_artifact(reason: str) -> None:
     """This test stands up its OWN nest artifact, so its record must name THAT.
 
     A test that boots its own image (every `tests/platform/docker/` module, through
-    `docker_build` → `fauna-nest-test:local`) is not a witness of the run's nest in
-    any mode: the image was built at some other commit, has no relation to the
+    `docker_build` → the tree's keyed `fauna-nest-test:src-<key>`) is not a witness
+    of the run's nest in any mode: the image was built at a commit whose tree had
+    the same image inputs — not necessarily this one — has no relation to the
     run's `--nest docker:<ref>` digest, and is a docker artifact however the run's
     mode reads. § The ledger licenses a record *because* it is first-party "on the
     commit it names, against the artifact it names", so such a test's record is
@@ -835,7 +837,8 @@ def resolved_image_ref(mode) -> str | None:
     the mode's own PROVIDER rather than reading `mode.argument` alone.
 
     `mode.argument` when `--nest docker:<ref>` named one, else the provider's
-    own default (`_DockerProvider.DEFAULT_IMAGE`, `fauna-nest-test:local`) —
+    own default (`_DockerProvider.default_image`, the tree's keyed
+    `fauna-nest-test:src-<key>`) —
     the same three-way resolution `_DockerProvider._resolve_image` boots
     against, factored out as `_DockerProvider.image_ref` so this collection-time
     caller gets the ref without the boot-time presence check (which shells out

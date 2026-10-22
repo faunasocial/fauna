@@ -9,6 +9,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::backup::message_kind::{
+    MESSAGE_KINDS, MessageKindStores, create_message_kind_snapshot, placement_changed,
+};
 use crate::backup::service::BackupService;
 
 /// Minimum seconds between full-DB hot-copy backups. The scheduler ticks every
@@ -18,6 +21,13 @@ use crate::backup::service::BackupService;
 /// Hourly + keep-last-N retention (`KEEP_SQLITE_BACKUPS`) keeps the self-backup
 /// store bounded. See `docs/goal/behavior/backup-restore.md` § Self-backup retention.
 const DB_BACKUP_INTERVAL_SECS: i64 = 3600;
+
+/// At most one automatic message-kind capture per `(scope, kind)` per this
+/// many seconds, and only when the scope changed since its newest active
+/// snapshot — the DB hot-copy's own rule beside it, applied to every message
+/// kind (`backup-restore.md` § 5 → *Creators*: a mailbox never goes quiet for
+/// long, so the folder quiet gate would starve exactly the busiest scopes).
+pub const MESSAGE_KIND_SNAPSHOT_INTERVAL_SECS: i64 = 3600;
 
 /// How often the scheduler wakes to look for folders owing an automatic
 /// snapshot. Named here rather than spelled at the one call site so the
@@ -41,6 +51,10 @@ pub struct SnapshotScheduler {
     last_db_backup: AtomicI64,
     /// Unix timestamp of last logical dump; -1 means never run.
     last_logical_dump: AtomicI64,
+    /// The segment stores the message-kind arm captures from; `None` runs the
+    /// folder arm alone (a scheduler built without them, as most folder-arm
+    /// unit tests do).
+    message_kinds: Option<MessageKindStores>,
 }
 
 impl SnapshotScheduler {
@@ -56,7 +70,15 @@ impl SnapshotScheduler {
             running: AtomicBool::new(false),
             last_db_backup: AtomicI64::new(-1),
             last_logical_dump: AtomicI64::new(-1),
+            message_kinds: None,
         }
+    }
+
+    /// Arm the message-kind captures over these stores — `main.rs` and the
+    /// run-now test hook both do, so the hook runs the production pass.
+    pub fn with_message_kinds(mut self, stores: MessageKindStores) -> Self {
+        self.message_kinds = Some(stores);
+        self
     }
 
     /// Spawn the background scheduler task. Returns a JoinHandle.
@@ -72,6 +94,9 @@ impl SnapshotScheduler {
                 }
                 if let Err(e) = self.check_all_folders().await {
                     tracing::error!(error = %e, "snapshot scheduler error");
+                }
+                if let Err(e) = self.check_all_message_kinds().await {
+                    tracing::error!(error = %e, "message-kind snapshot scheduler error");
                 }
 
                 let now = fauna_core::data::Timestamp::now_secs();
@@ -194,6 +219,82 @@ impl SnapshotScheduler {
         };
         crate::backup::prune::schedule_auto_prune(db, &fs).await?;
         Ok(())
+    }
+
+    /// One pass of the message-kind arm (`backup-restore.md` § 5 →
+    /// *Creators*): for every `(scope, kind)` the segment mirror holds a record
+    /// for, capture when the scope's newest active snapshot is at least
+    /// [`MESSAGE_KIND_SNAPSHOT_INTERVAL_SECS`] old (or it has none) AND the
+    /// scope changed since — its content cursor moved past the row's
+    /// `max_change_seq`, or its placement state moved. Then auto-prune the
+    /// kind row through the same armed path as a folder. Returns how many
+    /// captures the pass cut; 0 when the scheduler was built without stores.
+    ///
+    /// Scopes come from the stores, never from `folders` (conv: one scope per
+    /// channel, captured as the nest — no bearer). A pure-backup destination's
+    /// scope holds no plaintext-framed segments to pin and is skipped, the
+    /// handler's gate. One scope's failure costs that scope's capture, never
+    /// the pass.
+    pub async fn check_all_message_kinds(&self) -> Result<usize> {
+        let Some(stores) = &self.message_kinds else {
+            return Ok(0);
+        };
+        let db = self.backup_service.db();
+        let now = crate::db::now_epoch_secs();
+        let mut created = 0usize;
+        for (scope, kind) in db.list_message_kind_scopes(MESSAGE_KINDS).await? {
+            match self
+                .capture_message_kind_if_due(stores, &scope, &kind, now)
+                .await
+            {
+                Ok(true) => created += 1,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    kind = %kind,
+                    scope = %hex::encode(scope),
+                    error = %e,
+                    "automatic message-kind snapshot failed"
+                ),
+            }
+        }
+        Ok(created)
+    }
+
+    async fn capture_message_kind_if_due(
+        &self,
+        stores: &MessageKindStores,
+        scope: &[u8; 32],
+        kind: &str,
+        now: i64,
+    ) -> Result<bool> {
+        let db = self.backup_service.db();
+        if db.is_pure_backup_destination(kind, scope).await? {
+            return Ok(false);
+        }
+        if let Some(newest) = db.newest_active_message_kind_snapshot(scope, kind).await? {
+            if now - newest.created_at < MESSAGE_KIND_SNAPSHOT_INTERVAL_SECS {
+                return Ok(false);
+            }
+            let cursor = db.message_kind_change_cursor(scope, kind).await?;
+            let content_moved = newest.max_change_seq.is_none_or(|covered| cursor > covered);
+            if !content_moved
+                && !placement_changed(stores, scope, kind, newest.placement_manifest.as_deref())
+                    .await?
+            {
+                return Ok(false);
+            }
+        }
+        let capture = create_message_kind_snapshot(db, stores, scope, kind).await?;
+        tracing::info!(
+            kind = %kind,
+            scope = %hex::encode(scope),
+            snapshot_id = capture.snapshot_id,
+            "automatic message-kind snapshot created"
+        );
+        if let Err(e) = self.auto_prune_folder(capture.folder_id).await {
+            tracing::warn!(kind = %kind, error = %e, "message-kind auto-prune failed");
+        }
+        Ok(true)
     }
 }
 
@@ -830,5 +931,203 @@ mod tests {
             1,
             "alice's folder must still be snapshotted in the same pass"
         );
+    }
+}
+
+/// The message-kind arm (`backup-restore.md` § 5 → *Creators*): hourly, and
+/// only for a scope that changed since its newest active snapshot.
+#[cfg(test)]
+mod message_kind_tests {
+    use super::*;
+    use crate::db::CacheDb;
+    use crate::routes::AppState;
+
+    struct Fixture {
+        db: Arc<CacheDb>,
+        _state: AppState,
+        stores: MessageKindStores,
+        scheduler: SnapshotScheduler,
+        _tmp: tempfile::TempDir,
+    }
+
+    fn fixture() -> Fixture {
+        let db = Arc::new(CacheDb::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::for_test(db.clone());
+        let stores = MessageKindStores::of(&state);
+        let svc = Arc::new(
+            BackupService::new(db.clone(), None, false, tmp.path().to_path_buf(), None).unwrap(),
+        );
+        let scheduler = SnapshotScheduler::new(svc, Duration::from_secs(60), DEFAULT_QUIET_SECS)
+            .with_message_kinds(stores.clone());
+        Fixture {
+            db,
+            _state: state,
+            stores,
+            scheduler,
+            _tmp: tmp,
+        }
+    }
+
+    async fn append_conv(f: &Fixture, channel: &[u8; 32], body: &[u8]) -> i64 {
+        crate::segments::conv::append(&f.stores.conv, &f.db, channel, body, 1_715_000_000_000)
+            .await
+            .expect("append conv")
+            .seq
+    }
+
+    async fn kind_rows(f: &Fixture, scope: &[u8; 32], kind: &str) -> usize {
+        match f
+            .db
+            .find_reserved_kind_folder_id(scope, kind)
+            .await
+            .unwrap()
+        {
+            Some(id) => f.db.list_set_snapshots(id).await.unwrap().len(),
+            None => 0,
+        }
+    }
+
+    /// Age every snapshot past the interval, as an hour of wall clock would.
+    async fn an_hour_passes(f: &Fixture) {
+        let conn = f.db.conn().await;
+        conn.execute(
+            "UPDATE snapshots SET created_at = created_at - ?1",
+            [MESSAGE_KIND_SNAPSHOT_INTERVAL_SECS + 1],
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scope_with_records_is_captured_on_the_first_pass_and_not_again_inside_the_hour() {
+        let f = fixture();
+        let channel = [0x31u8; 32];
+        append_conv(&f, &channel, b"first").await;
+
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 1);
+        assert_eq!(kind_rows(&f, &channel, "conv").await, 1);
+
+        // A change inside the hour waits for the interval.
+        append_conv(&f, &channel, b"second").await;
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 0);
+        assert_eq!(kind_rows(&f, &channel, "conv").await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_scope_owes_no_capture_after_the_hour_and_an_append_does() {
+        let f = fixture();
+        let channel = [0x32u8; 32];
+        append_conv(&f, &channel, b"first").await;
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 1);
+
+        an_hour_passes(&f).await;
+        assert_eq!(
+            f.scheduler.check_all_message_kinds().await.unwrap(),
+            0,
+            "nothing changed since the newest capture"
+        );
+
+        append_conv(&f, &channel, b"second").await;
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 1);
+        assert_eq!(kind_rows(&f, &channel, "conv").await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_counts_as_a_change() {
+        let f = fixture();
+        let channel = [0x33u8; 32];
+        let seq = append_conv(&f, &channel, b"doomed").await;
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 1);
+        an_hour_passes(&f).await;
+
+        {
+            let conn = f.db.conn().await;
+            crate::segments::records_db::tombstone_conv_up_to_seq(&conn, &[channel], seq).unwrap();
+        }
+        assert_eq!(
+            f.scheduler.check_all_message_kinds().await.unwrap(),
+            1,
+            "a delete re-assigns changed_seq, so it is a restore point"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_placement_only_change_counts_as_a_change() {
+        let f = fixture();
+        let actor = [0x34u8; 32];
+        {
+            // One mail record, so the scope is enumerated; the content stays
+            // untouched from here on.
+            let conn = f.db.conn().await;
+            let cid = fauna_mls::segments::derive_record_cid(b"mail-body").unwrap();
+            crate::segments::records_db::insert_mail(
+                &conn,
+                &actor,
+                1,
+                &cid,
+                "b",
+                0,
+                "example.org",
+                "ham",
+                false,
+                1,
+                None,
+                0,
+                0,
+            )
+            .unwrap();
+        }
+        let create = |name: &str| fauna_mail::segments::placement::MailPlacementRecord::Create {
+            mailbox: name.into(),
+            uid_validity: 1,
+            attrs: vec![],
+        };
+        f.stores
+            .mail_placement
+            .append_event(&actor, &create("INBOX"))
+            .await
+            .unwrap();
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 1);
+
+        an_hour_passes(&f).await;
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 0);
+
+        f.stores
+            .mail_placement
+            .append_event(&actor, &create("Archive"))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.scheduler.check_all_message_kinds().await.unwrap(),
+            1,
+            "a mailbox created with no content change is a placement change"
+        );
+        assert_eq!(kind_rows(&f, &actor, "mail").await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_store_with_no_record_owes_no_capture() {
+        let f = fixture();
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn conv_is_captured_per_channel_and_the_capture_records_its_cursor() {
+        let f = fixture();
+        let (a, b) = ([0x35u8; 32], [0x36u8; 32]);
+        append_conv(&f, &a, b"in a").await;
+        append_conv(&f, &b, b"in b").await;
+        append_conv(&f, &b, b"in b again").await;
+
+        assert_eq!(f.scheduler.check_all_message_kinds().await.unwrap(), 2);
+        for (channel, cursor) in [(a, 1), (b, 2)] {
+            assert_eq!(kind_rows(&f, &channel, "conv").await, 1);
+            let newest =
+                f.db.newest_active_message_kind_snapshot(&channel, "conv")
+                    .await
+                    .unwrap()
+                    .expect("a row per channel");
+            assert_eq!(newest.max_change_seq, Some(cursor));
+        }
     }
 }

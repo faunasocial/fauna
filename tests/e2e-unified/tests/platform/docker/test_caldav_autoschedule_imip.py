@@ -306,12 +306,12 @@ def autosched_nest(docker_image, stub_mx, run_seal_helper):
     Storage mode committed plaintext (the deploy default; CalDAV + cert
     provisioning need a committed mode). Yields the nest dict + organizer +
     ``out_dir`` + ``router_port``."""
-    http_port, router_port, *mail = find_free_ports(6)
+    http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
     name = f"fauna-caldav-autosched-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, 443: router_port, **mail_ports},
+        {443: http_port, **mail_ports},
         env={
             "FAUNA_CLAIM_CODE": CLAIM_CODE,
             "FAUNA_PORT": "3000",
@@ -326,7 +326,7 @@ def autosched_nest(docker_image, stub_mx, run_seal_helper):
         nest = {
             "name": name,
             "port": http_port,
-            "router_port": router_port,
+            "router_port": http_port,
             "url": f"https://127.0.0.1:{http_port}",
             "admin": admin,
             "mail_ports": mail_ports,
@@ -563,6 +563,20 @@ def test_caldav_organizer_autoschedule_in_domain_attendee_delivered_to_inbox(aut
         f"dave's INBOX message must be the iMIP REQUEST; body head={text[:400]!r}")
     assert EVENT_UID_IN_DOMAIN in text, diag("the REQUEST must carry the event UID")
     assert org in text.lower(), diag("the REQUEST must carry the organizer (From)")
+
+    # The MDA door's authenticated-sender stamp, in the shipped image
+    # (`inbound-scheduling-authority.md` § The mail rail): the gateway's
+    # caller-scoped enqueue stamps the organizer `enforce_mda_sender_scope`
+    # bound to the CalDAV login into the attendee's sealed copy. An attendee's
+    # mailed REPLY back through this same door is merged on the organizer's
+    # app only under that stamp, so an image whose gateway stopped stamping
+    # would refuse every legitimate auto-scheduled REPLY `sender_unauthenticated`.
+    head = text.split("\r\n\r\n", 1)[0]
+    stamps = re.findall(
+        r"^x-fauna-authenticated-sender:[ \t]*(\S+)", head, re.IGNORECASE | re.MULTILINE)
+    assert stamps[:1] == [org.lower()], diag(
+        f"dave's copy must carry the MDA door's X-Fauna-Authenticated-Sender stamp "
+        f"naming the organizer {org!r} as its first occurrence; found {stamps!r}")
 
     # No relay was attempted for the in-domain attendee (the whole point: it is
     # delivered locally, never self-SMTP-looped to the box's own MX).

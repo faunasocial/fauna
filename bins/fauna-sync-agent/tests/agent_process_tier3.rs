@@ -491,7 +491,7 @@ const UNRESOLVABLE_HOME_FALLBACK_BASE: &str = "/tmp/Library/Application Support/
 /// pass only vacuously, because the running instance's lock rejects the
 /// second bind. A relative `HOME` hits the identical "home did not resolve to
 /// an absolute path" branch in both `SyncPaths`'s macOS base
-/// (`fauna_account_store::root::macos_user_domain_base`)
+/// (`fauna_core::platform_ids::macos_sync_state_base`)
 /// and `unix_transport::macos_socket_path` (the latter's matching gap closed
 /// in this same commit — it lacked the absolute-guarantee fallback the base
 /// dir got), landing in an isolated `/tmp` location instead: verified red

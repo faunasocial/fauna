@@ -9,7 +9,7 @@ user can enter the app at EITHER `/app` or `/app/`.
 
 Before the one-owner fix, TWO `onMount` redirects competed on the index:
   - the root `+page.svelte` unconditionally `goto('/app/conversations')`, and
-  - the `+layout.svelte` guard `goto('/app/onboarding')` when unauthenticated.
+  - the `RootShell.svelte` guard `goto('/app/onboarding')` when unauthenticated.
 The layout guard only matched `pathname.startsWith('/app/')`, so at the bare
 `/app` (no trailing slash) it MISSED entirely — the index page's redirect won
 and an UNAUTHENTICATED user landed on the feed shell with no identity, stranded,

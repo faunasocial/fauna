@@ -80,6 +80,20 @@ impl<W: Write + Seek> Writer<W> {
         Ok(())
     }
 
+    /// The underlying writer — for a caller that must make each block durable
+    /// as it lands (`File::sync_data`), which an unfinalized file's crash
+    /// recovery relies on (`crate::scan`).
+    pub fn get_ref(&self) -> &W {
+        &self.w
+    }
+
+    /// Give up the underlying writer WITHOUT finalizing — the bytes a crash
+    /// would leave. Test support for the crash-recovery walk.
+    #[cfg(test)]
+    pub(crate) fn into_inner(self) -> W {
+        self.w
+    }
+
     /// Finalize the file: write the index, then backfill the v2 header.
     /// Consumes `self` (the file is now sealed).
     pub fn finalize(mut self) -> Result<W, Error> {

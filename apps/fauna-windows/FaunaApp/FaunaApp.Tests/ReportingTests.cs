@@ -297,7 +297,7 @@ public class ReportingTests : IDisposable
     private static FfiReportQueueRow QueueRow(
         string id, FfiReportSubject subject, bool canOpenTakedown, string? note = null, string? excerpt = null) =>
         new(id, subject, null, Text("moderation.report.reason.harassment"), note, excerpt,
-            Text("admin.nest_page.reports_origin_local"), 1_700_000_000_000_000L, canOpenTakedown);
+            Text("admin.nest_page.reports_origin_local"), 1_700_000_000_000_000L, canOpenTakedown, canBlock: canOpenTakedown);
 
     [Fact]
     public async Task Queue_LoadsInTheLoadWithItsOwnLoadedBit()

@@ -95,7 +95,7 @@ pub(crate) fn alerts_registry() -> Arc<CriticalAlerts> {
 }
 
 /// Repaint hook: fires on every post/clear against this chunk's registry.
-/// `$lib/critical-alerts.ts` calls this once the chunk loads.
+/// `#lib/critical-alerts.ts` calls this once the chunk loads.
 #[wasm_bindgen(js_name = subscribeCriticalAlerts)]
 pub fn subscribe_critical_alerts(observer: JsCriticalAlertsObserver) {
     fauna_client_alerts::wasm_glue::subscribe(&ALERTS_REGISTRY, observer);
@@ -130,7 +130,7 @@ pub fn clear_all_critical_alerts() {
 /// whose counters would read `[0, 0]` forever — reading them instead would make
 /// every wait on this barrier time out, and every negative assert behind it
 /// unreachable. Unlike the `active()` triple, these counters are therefore
-/// deliberately NOT aggregated across chunks by `$lib/critical-alerts.ts`.
+/// deliberately NOT aggregated across chunks by `#lib/critical-alerts.ts`.
 ///
 /// A pair rather than one number because both halves are load-bearing; the
 /// contract doc explains why a bare completion count cannot support the

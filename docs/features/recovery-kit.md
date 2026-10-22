@@ -56,18 +56,18 @@ Stamped 2026-09-19 at acb58fddf3.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+e48628f5 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_creating_a_recovery_kit_flips_the_status_and_shows_the_secret_once` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_recovery_kit_settings.py::test_replacing_the_kit_with_the_one_you_hold_mints_a_different_secret` | web (linux): failed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_the_phrase_alone_restores_the_account_after_losing_every_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_phrase_that_names_no_account_asks_for_one_instead_of_failing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 4 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_an_identity_secret_is_never_taken_for_a_recovery_phrase` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
@@ -82,6 +82,6 @@ Stamped 2026-09-19 at acb58fddf3.
 | 11 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_restore_of_an_identity_that_moved_on_routes_to_the_import` | web (linux): passed, linux (linux): passed, windows (windows): skipped, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_the_phrase_alone_restores_the_account_after_losing_every_device` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_copied_kit_restores_the_account_with_nothing_typed_but_the_kit` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus` | linux (linux): failed, windows (windows): passed, tui (linux): passed |
-| 15 | app | `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone` | linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_recovery_kit_restore.py::test_a_kit_replaced_after_a_succession_still_restores_the_predecessor_corpus` | web (linux): passed, linux (linux): failed, windows (windows): passed, tui (linux): passed |
+| 15 | app | `tests/e2e-unified/tests/test_custody_recovery_copy_journey.py::test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone` | web (linux): skipped, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

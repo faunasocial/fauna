@@ -41,7 +41,7 @@ use fauna_core::data::ContentHash;
 use fauna_ipc::sync::{Event, EventKind, FileStatus, SyncProgressInfo};
 use fauna_sync_engine::FileHydrator;
 use fauna_sync_engine::always_resident::{
-    EngineCommand, LocalWrite, LocalWriteHost, LocalWrites, apply_local_write,
+    EngineCommand, FreeSpaceTally, LocalWrite, LocalWriteHost, LocalWrites, apply_local_write,
 };
 use fauna_sync_engine::db::SyncState;
 use fauna_sync_engine::engine::SyncEngine;
@@ -671,6 +671,12 @@ pub trait HydrationHost: FileHydrator + PlaceholderLister + LocalWriteHost {
     async fn pinned_placeholders(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
+
+    /// Every file whose bytes are on this device, with its recorded size — what a
+    /// *Free up space* sweep walks ([`FreeSpaceSweep`]).
+    async fn on_device_files(&self) -> Result<Vec<(String, u64)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A file's pin and presence as its row records them ([`HydrationHost::row_pin`]).
@@ -742,6 +748,10 @@ impl HydrationHost for SyncEngine {
 
     async fn pinned_placeholders(&self) -> Result<Vec<String>> {
         self.db().pinned_placeholder_paths()
+    }
+
+    async fn on_device_files(&self) -> Result<Vec<(String, u64)>> {
+        self.db().on_device_files()
     }
 
     async fn subtree_fully_synced(&self, dir_rel: &str) -> bool {
@@ -1185,9 +1195,11 @@ impl PlaceholderInvalidator for CfapiInvalidator {
         // the sweep's cadence (the rescan tick) bounds how many can pile up.
         let path = abs_path.to_path_buf();
         std::thread::spawn(move || match fauna_cfapi::hydrate_placeholder(&path) {
-            Ok(()) => tracing::info!(path = %path.display(), "pinned placeholder hydrated"),
+            Ok(()) => {
+                tracing::info!(path = %fauna_core::log_redact::log_path(&path.to_string_lossy()), "pinned placeholder hydrated")
+            }
             Err(e) => tracing::warn!(
-                path = %path.display(),
+                path = %fauna_core::log_redact::log_path(&path.to_string_lossy()),
                 error = %e,
                 "hydrating a pinned placeholder failed (retried on the next sweep)"
             ),
@@ -1413,12 +1425,12 @@ pub(crate) async fn flip_recorded_in_sync<H: HydrationHost, I: PlaceholderInvali
         match assert_recorded_in_sync(hydrator, invalidator, &abs, rel).await {
             Ok(true) => {}
             Ok(false) => tracing::debug!(
-                rel,
+                path = %fauna_core::log_redact::log_path(rel),
                 "not flipping in-sync: the disk moved past the recorded content (a newer \
                  save); its own upload flips it"
             ),
             Err(e) => tracing::warn!(
-                rel,
+                path = %fauna_core::log_redact::log_path(rel),
                 error = %e,
                 "in-sync flip failed after a recorded upload; the file keeps its \
                  sync-pending state until the next upload retries"
@@ -1514,16 +1526,18 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
 ) -> Result<()> {
     if invalidator.placeholders_off_disk() {
         if !hydrator.dehydrate_off_disk(rel).await? {
-            return Err(anyhow::anyhow!(
+            return Err(KeptOnlyCopy(
                 "not freeing: this device may hold the only copy of the file's content — it \
-                 has not finished syncing, or its folder keeps no content on the server"
-            ));
+                 has not finished syncing, or its folder keeps no content on the server",
+            )
+            .into());
         }
     } else if hydrator.keeps_own_record(rel).await {
-        return Err(anyhow::anyhow!(
+        return Err(KeptOnlyCopy(
             "not freeing: this device may hold the only copy of the file's content — its \
-             folder keeps no content on the server"
-        ));
+             folder keeps no content on the server",
+        )
+        .into());
     }
     match superseded_by {
         Some(head) => {
@@ -1547,6 +1561,20 @@ pub(crate) async fn free_local_bytes<H: HydrationHost, I: PlaceholderInvalidator
         },
     }
 }
+
+/// [`free_local_bytes`]' refusal — this device may hold the only copy of the file's
+/// content — typed so a *Free up space* sweep counts it as kept (`kept_unsynced`), apart
+/// from a free that failed for any other reason.
+#[derive(Debug)]
+pub(crate) struct KeptOnlyCopy(&'static str);
+
+impl std::fmt::Display for KeptOnlyCopy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for KeptOnlyCopy {}
 
 /// Does the cloud file at `abs` describe another version than `row`, its `Placeholder`
 /// row — another size, or another last-write time? Stat-only; `false` when nothing is at
@@ -1807,11 +1835,11 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
                         {
                             Ok(true) => {}
                             Ok(false) => tracing::debug!(
-                                path = %abs,
+                                path = %fauna_core::log_redact::log_path(&row.relative_path),
                                 "the fetched head is not vouched in sync: the disk moved past it"
                             ),
                             Err(e) => tracing::warn!(
-                                path = %abs,
+                                path = %fauna_core::log_redact::log_path(&row.relative_path),
                                 error = %e,
                                 "re-anchoring the fetched head failed; it keeps its sync-pending \
                                  state until its next upload or pull"
@@ -1832,7 +1860,7 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
                 Ok(false) => {}
                 Err(fetch) => {
                     tracing::info!(
-                        path = %abs,
+                        path = %fauna_core::log_redact::log_path(&row.relative_path),
                         error = %fetch,
                         "keeping this device's own version: the newer one could not be fetched from a device holding it — retried on the next pull"
                     );
@@ -1851,7 +1879,7 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
                         invalidated += 1;
                     }
                     Err(replace) => tracing::warn!(
-                        path = %abs,
+                        path = %fauna_core::log_redact::log_path(&row.relative_path),
                         error = %replace,
                         "skipping stale-hydrated invalidation: the file is kept on this device \
                          (pinned), and replacing it with the new version failed — retried on \
@@ -1861,7 +1889,7 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
                 continue;
             }
             tracing::warn!(
-                path = %abs,
+                path = %fauna_core::log_redact::log_path(&row.relative_path),
                 error = %e,
                 cause = stale_copy_skip_cause(hydrator, invalidator, abs_path, &row.relative_path)
                     .await,
@@ -1872,7 +1900,7 @@ pub(crate) async fn apply_stale_hydrated<H: HydrationHost>(
         // Bytes are gone: now the row may safely say "hydrate from the new head".
         if let Err(e) = hydrator.repoint_placeholder(row).await {
             tracing::warn!(
-                path = %abs,
+                path = %fauna_core::log_redact::log_path(&row.relative_path),
                 error = %e,
                 "re-pointing an invalidated hydrated row failed; next open re-materializes the old bytes until the next pull retries"
             );
@@ -1956,11 +1984,11 @@ async fn replace_pinned_copy<H: HydrationHost>(
     match assert_recorded_in_sync(hydrator, invalidator, abs, &row.relative_path).await {
         Ok(true) => {}
         Ok(false) => tracing::debug!(
-            path = %abs.display(),
+            path = %fauna_core::log_redact::log_path(&row.relative_path),
             "the replaced file is not vouched in sync: the disk moved past it"
         ),
         Err(e) => tracing::warn!(
-            path = %abs.display(),
+            path = %fauna_core::log_redact::log_path(&row.relative_path),
             error = %e,
             "vouching the replaced file in sync failed; it keeps its sync-pending state until \
              its next upload or pull"
@@ -2060,7 +2088,7 @@ pub(crate) fn materialize_created<I: PlaceholderInvalidator + ?Sized>(
                 }
                 Ok(()) => {}
                 Err(e) => tracing::warn!(
-                    rel,
+                    path = %fauna_core::log_redact::log_path(&rel),
                     error = %e,
                     "materializing a remote create failed; it appears with its directory's next listing"
                 ),
@@ -2176,7 +2204,7 @@ async fn apply_folded_deletes<H: HydrationHost>(
             Ok(FoldedDeleteOutcome::Kept | FoldedDeleteOutcome::Moot) => {}
             Err(e) => tracing::warn!(
                 phase,
-                rel = delete.relative_path,
+                path = %fauna_core::log_redact::log_path(&delete.relative_path),
                 error = %e,
                 "applying a remote delete failed; the next re-pull retries it"
             ),
@@ -2237,7 +2265,7 @@ async fn redescribe_repointed<H: HydrationHost, I: PlaceholderInvalidator + ?Siz
             }
             Err(e) => {
                 tracing::warn!(
-                    rel = row.rel,
+                    path = %fauna_core::log_redact::log_path(&row.rel),
                     error = %e,
                     "re-describing a re-pointed placeholder was refused (a program holds it \
                      open, or a local edit since?); retrying"
@@ -2323,7 +2351,7 @@ async fn record_dehydrated<H: HydrationHost>(
     event_tx: Option<&broadcast::Sender<Event>>,
 ) {
     if let Err(e) = hydrator.mark_placeholder(rel).await {
-        tracing::warn!(rel, error = %e, "recording dehydrated file Placeholder failed");
+        tracing::warn!(path = %fauna_core::log_redact::log_path(rel), error = %e, "recording dehydrated file Placeholder failed");
     }
     if let Some(tx) = event_tx {
         let path = crate::path_map::overlay_abs_path(&sync_root.to_string_lossy(), rel);
@@ -2377,17 +2405,17 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
     match invalidator.pin_action(&abs) {
         None => {}
         Some(PinAction::Hydrate) => {
-            tracing::info!(rel, "pinned placeholder: requesting hydration");
+            tracing::info!(path = %fauna_core::log_redact::log_path(rel), "pinned placeholder: requesting hydration");
             invalidator.kick_hydrate(&abs);
         }
         Some(PinAction::Dehydrate) if hydrator.keeps_own_record(rel).await => {
             tracing::info!(
-                rel,
+                path = %fauna_core::log_redact::log_path(rel),
                 "not freeing: this device may hold the only copy of the file's content — its \
                  folder keeps no content on the server; kept on this device"
             );
             if let Err(e) = assert_recorded_in_sync(hydrator, invalidator, &abs, rel).await {
-                tracing::warn!(rel, error = %e, "re-pinning a kept file failed (retried by the sweep)");
+                tracing::warn!(path = %fauna_core::log_redact::log_path(rel), error = %e, "re-pinning a kept file failed (retried by the sweep)");
             }
         }
         Some(PinAction::Dehydrate) => {
@@ -2406,7 +2434,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
                                 Ok(()) => true,
                                 Err(e) => {
                                     tracing::warn!(
-                                        rel,
+                                        path = %fauna_core::log_redact::log_path(rel),
                                         error = %e,
                                         "unpinned file: dehydrate failed after repair"
                                     );
@@ -2416,7 +2444,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
                         }
                         Ok(false) => {
                             tracing::debug!(
-                                rel,
+                                path = %fauna_core::log_redact::log_path(rel),
                                 refusal = %refusal,
                                 "unpinned file carries unsynced local content; converge \
                                  uploads it first, the next sweep frees it"
@@ -2425,7 +2453,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
                         }
                         Err(e) => {
                             tracing::warn!(
-                                rel,
+                                path = %fauna_core::log_redact::log_path(rel),
                                 error = %e,
                                 "unpinned file: the in-sync repair failed"
                             );
@@ -2435,7 +2463,7 @@ async fn react_to_pin<H: HydrationHost, I: PlaceholderInvalidator>(
                 }
             };
             if done {
-                tracing::info!(rel, "unpinned file dehydrated (Free up space)");
+                tracing::info!(path = %fauna_core::log_redact::log_path(rel), "unpinned file dehydrated (Free up space)");
                 record_dehydrated(hydrator, sync_root, rel, event_tx).await;
             }
         }
@@ -2472,12 +2500,12 @@ async fn pin_kept_own_records<H: HydrationHost, I: PlaceholderInvalidator>(
         }
         match invalidator.pin(&abs).await {
             Ok(()) => tracing::info!(
-                rel,
+                path = %fauna_core::log_redact::log_path(&rel),
                 "kept on this device: its folder keeps no content on the server, and this \
                  device may hold the only copy"
             ),
             Err(e) => {
-                tracing::warn!(rel, error = %e, "pinning a kept file failed; retried next tick")
+                tracing::warn!(path = %fauna_core::log_redact::log_path(&rel), error = %e, "pinning a kept file failed; retried next tick")
             }
         }
     }
@@ -2503,7 +2531,7 @@ async fn react_to_pin_sweep<H: HydrationHost, I: PlaceholderInvalidator>(
         match hydrator.pinned_placeholders().await {
             Ok(rels) => {
                 for rel in rels {
-                    tracing::info!(rel, "pinned placeholder: requesting hydration");
+                    tracing::info!(path = %fauna_core::log_redact::log_path(&rel), "pinned placeholder: requesting hydration");
                     invalidator.kick_hydrate(&sync_root.join(&rel));
                 }
             }
@@ -2543,9 +2571,116 @@ async fn free_space<H: HydrationHost, I: PlaceholderInvalidator>(
         ));
     }
     free_local_bytes(hydrator, invalidator, &sync_root.join(rel), rel, None).await?;
-    tracing::info!(rel, "file dehydrated (Free up space)");
+    tracing::info!(path = %fauna_core::log_redact::log_path(rel), "file dehydrated (Free up space)");
     push_status(event_tx, sync_root, rel, FileStatus::CloudOnly);
     Ok(())
+}
+
+/// A *Free up space* sweep in flight on an off-disk root
+/// ([`EngineCommand::FreeLocationSpace`]): the files still to visit and the tally the
+/// host reads back. The serve loop takes ONE file per turn, in its lowest-priority arm,
+/// so a hydrate-on-open waits for at most one file's proof (`on-demand-files.md` § The
+/// free-up-space gesture where the OS offers none). Dropping it — the sweep done, or the
+/// root torn down mid-sweep — marks the tally no longer running.
+struct FreeSpaceSweep {
+    files: std::collections::VecDeque<(String, u64)>,
+    tally: Arc<std::sync::Mutex<FreeSpaceTally>>,
+}
+
+impl FreeSpaceSweep {
+    /// Start a sweep over `files`, zeroing `tally` and marking it running.
+    fn start(files: Vec<(String, u64)>, tally: Arc<std::sync::Mutex<FreeSpaceTally>>) -> Self {
+        if let Ok(mut t) = tally.lock() {
+            *t = FreeSpaceTally {
+                running: true,
+                ..FreeSpaceTally::default()
+            };
+        }
+        Self {
+            files: files.into(),
+            tally,
+        }
+    }
+
+    fn record(&self, outcome: SweepOutcome, size: u64) {
+        let Ok(mut t) = self.tally.lock() else {
+            return;
+        };
+        match outcome {
+            SweepOutcome::Freed => {
+                t.freed_files += 1;
+                t.freed_bytes += size;
+            }
+            SweepOutcome::KeptUnsynced => t.kept_unsynced += 1,
+            SweepOutcome::KeptPinned => t.kept_pinned += 1,
+            SweepOutcome::Uncounted => {}
+        }
+    }
+}
+
+impl Drop for FreeSpaceSweep {
+    fn drop(&mut self) {
+        if let Ok(mut t) = self.tally.lock() {
+            t.running = false;
+        }
+    }
+}
+
+/// Where one file of a sweep landed ([`sweep_one`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepOutcome {
+    Freed,
+    /// The dehydration gate refused ([`KeptOnlyCopy`]).
+    KeptUnsynced,
+    KeptPinned,
+    /// Nothing to free any more (gone, or already cloud-only since the sweep listed
+    /// it), or the free failed for another reason — logged, counted nowhere.
+    Uncounted,
+}
+
+/// One file of a [`FreeSpaceSweep`], down the ONE road [`free_space`] takes — the pin
+/// refusal, then [`free_local_bytes`] and its gate — never a second gate.
+async fn sweep_one<H: HydrationHost, I: PlaceholderInvalidator>(
+    hydrator: &H,
+    invalidator: &I,
+    sync_root: &Path,
+    rel: &str,
+    event_tx: Option<&broadcast::Sender<Event>>,
+) -> SweepOutcome {
+    match hydrator.row_pin(rel).await {
+        Ok(Some(pin)) if pin.cloud_only => return SweepOutcome::Uncounted,
+        Ok(Some(pin)) if pin.pinned => return SweepOutcome::KeptPinned,
+        Ok(Some(_)) => {}
+        Ok(None) => return SweepOutcome::Uncounted,
+        Err(e) => {
+            tracing::warn!(path = %fauna_core::log_redact::log_path(rel), error = %e, "free-up-space sweep: reading the row failed");
+            return SweepOutcome::Uncounted;
+        }
+    }
+    match free_local_bytes(hydrator, invalidator, &sync_root.join(rel), rel, None).await {
+        Ok(()) => {
+            tracing::info!(path = %fauna_core::log_redact::log_path(rel), "file dehydrated (Free up space, location sweep)");
+            push_status(event_tx, sync_root, rel, FileStatus::CloudOnly);
+            SweepOutcome::Freed
+        }
+        Err(e) if e.is::<KeptOnlyCopy>() => {
+            tracing::info!(path = %fauna_core::log_redact::log_path(rel), reason = %e, "free-up-space sweep kept a file");
+            SweepOutcome::KeptUnsynced
+        }
+        Err(e) => {
+            tracing::warn!(path = %fauna_core::log_redact::log_path(rel), error = %e, "free-up-space sweep: freeing a file failed");
+            SweepOutcome::Uncounted
+        }
+    }
+}
+
+/// The sweep's next file, when one is in flight — ready at once, so the loop's biased
+/// `select!` takes it only when nothing else is ready.
+async fn next_sweep_file(sweep: &mut Option<FreeSpaceSweep>) -> (String, u64) {
+    match sweep.as_mut().and_then(|s| s.files.pop_front()) {
+        Some(file) => file,
+        None => std::future::pending().await,
+    }
 }
 
 /// [`EngineCommand::SetPinned`] on an off-disk root: the pin lands in the row,
@@ -2571,16 +2706,18 @@ async fn set_pin<H: HydrationHost, I: PlaceholderInvalidator>(
     let abs = sync_root.join(rel);
     if pinned {
         if pin.cloud_only {
-            tracing::info!(rel, "pinned placeholder: requesting hydration");
+            tracing::info!(path = %fauna_core::log_redact::log_path(rel), "pinned placeholder: requesting hydration");
             invalidator.kick_hydrate(&abs);
         }
     } else if !pin.cloud_only {
         match free_local_bytes(hydrator, invalidator, &abs, rel, None).await {
             Ok(()) => {
-                tracing::info!(rel, "unpinned file dehydrated");
+                tracing::info!(path = %fauna_core::log_redact::log_path(rel), "unpinned file dehydrated");
                 push_status(event_tx, sync_root, rel, FileStatus::CloudOnly);
             }
-            Err(e) => tracing::info!(rel, reason = %e, "unpinned file keeps its bytes for now"),
+            Err(e) => {
+                tracing::info!(path = %fauna_core::log_redact::log_path(rel), reason = %e, "unpinned file keeps its bytes for now")
+            }
         }
     }
     Ok(())
@@ -2770,7 +2907,7 @@ async fn drive_hydration_root<H, I, C, G>(
         && let Err(e) = hydrator.set_placeholders_off_disk().await
     {
         tracing::error!(
-            folder,
+            folder = %fauna_core::log_redact::log_folder_name(&folder),
             error = %e,
             "the host cannot take the off-disk placeholder posture; not serving this root"
         );
@@ -2804,7 +2941,7 @@ async fn drive_hydration_root<H, I, C, G>(
         && let Err(e) = hydrator.clear_seen_all().await
     {
         tracing::error!(
-            folder,
+            folder = %fauna_core::log_redact::log_folder_name(&folder),
             error = %e,
             "clearing the seen marks of a fresh registration failed; not serving this root \
              (a sweep over stale marks would read the OS's own removal of its placeholders \
@@ -2877,7 +3014,7 @@ async fn drive_hydration_root<H, I, C, G>(
         Ok(w) => Some(w),
         Err(e) => {
             tracing::error!(
-                folder,
+                folder = %fauna_core::log_redact::log_folder_name(&folder),
                 error = %e,
                 "watcher start failed on the on-demand root: local edits will only be picked up \
                  by the rescan tick, not live. A tracked file's change MUST still be uploaded."
@@ -2926,10 +3063,7 @@ async fn drive_hydration_root<H, I, C, G>(
     // shared default rather than leaving the host without a tick (the re-pull is
     // also how a host that came up against a down nest recovers).
     let rescan_interval = hydrator.rescan_interval().await;
-    fauna_sync_engine::always_resident::log_rescan_armed(
-        &fauna_core::log_redact::log_folder_name(&folder),
-        rescan_interval,
-    );
+    fauna_sync_engine::always_resident::log_rescan_armed(&folder, rescan_interval);
     let mut rescan_tick = tokio::time::interval(rescan_interval);
     rescan_tick.tick().await; // consume the immediate first tick — `prepare` just folded
     let mut reconnected = hydrator.reconnects();
@@ -2939,8 +3073,14 @@ async fn drive_hydration_root<H, I, C, G>(
     // `NestClient` that holds the sender, and the engine is owned by this loop) —
     // this just makes that impossible to regress into.
     let mut watch_reconnects = true;
+    // The *Free up space* sweep in flight, if any — walked one file per turn below.
+    let mut sweep: Option<FreeSpaceSweep> = None;
 
     loop {
+        // A sweep with nothing left to visit is done: dropping it marks its tally idle.
+        if sweep.as_ref().is_some_and(|s| s.files.is_empty()) {
+            sweep = None;
+        }
         // What the platform asked while a call of the loop's own was out and was left for
         // after it — a notice, a FUSE request — in the order it came; and the re-describes
         // the requests answered meanwhile owed.
@@ -2979,7 +3119,7 @@ async fn drive_hydration_root<H, I, C, G>(
                 let applied = apply_local_write(hydrator, &folder, write).await;
                 if !applied.continue_watching {
                     tracing::error!(
-                        folder,
+                        folder = %fauna_core::log_redact::log_folder_name(&folder),
                         "the on-demand root's file watcher closed; local edits now reach the \
                          nest only via the rescan tick's converge, not live"
                     );
@@ -3058,6 +3198,23 @@ async fn drive_hydration_root<H, I, C, G>(
                         free_space(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await,
                     );
                 }
+                // A press while a sweep runs joins it: the files are already queued.
+                EngineCommand::FreeLocationSpace { tally, reply } => {
+                    if sweep.is_some() {
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        match hydrator.on_device_files().await {
+                            Ok(files) => {
+                                tracing::info!(folder = %fauna_core::log_redact::log_folder_name(&folder), files = files.len(), "free-up-space sweep accepted");
+                                sweep = Some(FreeSpaceSweep::start(files, tally));
+                                let _ = reply.send(Ok(()));
+                            }
+                            Err(e) => {
+                                let _ = reply.send(Err(e.context("listing the files on this device")));
+                            }
+                        }
+                    }
+                }
                 EngineCommand::SetPinned { rel, pinned, reply } => {
                     let _ = reply.send(
                         set_pin(hydrator, &invalidator, &sync_root, &rel, pinned, event_tx.as_ref())
@@ -3110,6 +3267,15 @@ async fn drive_hydration_root<H, I, C, G>(
             // platform meanwhile. Last: nothing waits on them.
             () = redescribe_retry_due(pending.due) => {
                 try_pending_redescribes(hydrator, &invalidator, &sync_root, event_tx.as_ref(), &mut pending).await;
+            }
+
+            // One file of the *Free up space* sweep. Lowest of all: a sweep never
+            // outranks an open — every request above is served before the next file.
+            (rel, size) = next_sweep_file(&mut sweep) => {
+                let outcome = sweep_one(hydrator, &invalidator, &sync_root, &rel, event_tx.as_ref()).await;
+                if let Some(s) = &sweep {
+                    s.record(outcome, size);
+                }
             }
         }
     }
@@ -3341,7 +3507,7 @@ async fn serve_command<H: HydrationHost>(
                     // freshly-downloaded file as a local edit and echoing it
                     // straight back up (`SyncEngine::mark_hydrated`).
                     if let Err(e) = hydrator.mark_hydrated(&rel, content_hash).await {
-                        tracing::warn!(rel, error = %e, "marking hydrated file Synced failed");
+                        tracing::warn!(path = %fauna_core::log_redact::log_path(&rel), error = %e, "marking hydrated file Synced failed");
                     }
                     push_status(event_tx, sync_root, &rel, FileStatus::Synced);
                     None
@@ -3352,12 +3518,12 @@ async fn serve_command<H: HydrationHost>(
                 // here: the platform retries the refused read at once, and the update
                 // would wait on that fetch, which only this loop serves.
                 Err(e) if e.downcast_ref::<DescribesAnotherVersion>().is_some() => {
-                    tracing::warn!(rel, error = %e, "hydration fetch refused");
+                    tracing::warn!(path = %fauna_core::log_redact::log_path(&rel), error = %e, "hydration fetch refused");
                     Some(rel)
                 }
                 // serve_fetch already reported failure to the sink.
                 Err(e) => {
-                    tracing::warn!(rel, error = %e, "hydration fetch failed");
+                    tracing::warn!(path = %fauna_core::log_redact::log_path(&rel), error = %e, "hydration fetch failed");
                     None
                 }
             }
@@ -3367,7 +3533,7 @@ async fn serve_command<H: HydrationHost>(
                 // serve_populate already completed the op with an empty set.
                 // `?e` (not `%e`): anyhow's Display drops the source chain, which is
                 // exactly where the underlying windows::core::Error HRESULT lives.
-                tracing::warn!(parent_rel, error = ?e, "directory population failed");
+                tracing::warn!(path = %fauna_core::log_redact::log_path(&parent_rel), error = ?e, "directory population failed");
             }
             None
         }
@@ -3601,7 +3767,7 @@ async fn serve_materialize_batch<H: HydrationHost>(
                 }
                 Some(HydrationCommand::Populate { parent_rel, sink }) => {
                     if let Err(e) = serve_populate(hydrator, &*sink, &parent_rel).await {
-                        tracing::warn!(parent_rel, error = ?e, "directory population failed");
+                        tracing::warn!(path = %fauna_core::log_redact::log_path(&parent_rel), error = ?e, "directory population failed");
                     }
                 }
                 Some(other) => requests.leave_for_later(other),
@@ -4177,7 +4343,9 @@ mod tests {
                     self.engine_commands.lock().unwrap().push("ShareIngest");
                     let _ = reply.send(Ok((Default::default(), FAKE_SHARE_CURSOR)));
                 }
-                EngineCommand::FreeSpace { reply, .. } | EngineCommand::SetPinned { reply, .. } => {
+                EngineCommand::FreeSpace { reply, .. }
+                | EngineCommand::FreeLocationSpace { reply, .. }
+                | EngineCommand::SetPinned { reply, .. } => {
                     self.engine_commands.lock().unwrap().push("PinOrFree");
                     let _ = reply.send(Err(anyhow::anyhow!("the fake host keeps no pins")));
                 }

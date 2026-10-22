@@ -236,7 +236,11 @@ private fun LinkedAccountSection(bridge: FfiBridgeStatus, onUnlink: () -> Unit) 
 
             bridge.mode?.let { mode ->
                 Text(stringResource(R.string.nostr_account_signing_mode), style = MaterialTheme.typography.labelMedium)
-                Text(localized(nostrKeySourceLabel(mode)) ?: mode, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    localized(nostrKeySourceLabel(mode)) ?: mode,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.testTag(Ids.NOSTR_SIGNING_MODE),
+                )
                 Spacer(Modifier.height(8.dp))
             }
 

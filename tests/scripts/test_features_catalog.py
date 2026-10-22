@@ -1130,3 +1130,65 @@ def test_the_status_table_and_the_json_say_where_an_outcome_is_absent(tmp_path):
     entry = data["sections"][0]["features"][0]
     assert entry["outcome_absences"] == {"web": {"1": "docs/goal/ui/feed.md § Platform notes"}}
     assert entry["absences"] == {"android": "docs/goal/ui/feed.md § Platform notes"}
+
+
+# ── the last-green reader (delayed-testing.md § The last-green directory) ───
+def _git(repo, *args):
+    import os
+    import subprocess
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True, env=env).stdout.strip()
+
+
+def _commit(repo, rel, message):
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(message + "\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _fixture_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet", "--initial-branch=main")
+    return repo
+
+
+def test_load_last_green_reads_one_platforms_snapshot(tmp_path):
+    features = tmp_path / "features"
+    (features / "last-green").mkdir(parents=True)
+    record = {"collected": "2026-10-20", "last_green": {"base": "a" * 40}}
+    (features / "last-green" / "linux.json").write_text(
+        '{"platform": "linux", "schema": 1, "tests": {\n'
+        f'"t.py::test_x[tui]": {json.dumps(record)}\n' + "}}\n", encoding="utf-8")
+    assert fc.load_last_green("linux", features) == {"t.py::test_x[tui]": record}
+    assert fc.load_last_green("windows", features) == {}, "a platform that never published"
+
+
+def test_behind_commits_counts_only_the_tests_trees(tmp_path):
+    """A quiet weekend ages nothing and a `libs/` sweep ages everything: the count is
+    `base..ref` restricted to the shared trees plus the test's own app's."""
+    repo = _fixture_repo(tmp_path)
+    base = _commit(repo, "README", "start")
+    _commit(repo, "libs/fauna-core/x.rs", "shared code")        # counts for every app
+    _commit(repo, "apps/fauna-tui/y.rs", "the tui's tree")      # counts for tui only
+    _commit(repo, "apps/fauna-apple/z.swift", "the apple tree")  # counts for macos and ios
+    _commit(repo, "docs/goal/q.md", "a doc")                    # counts for nobody
+    record = {"last_green": {"base": base}}
+    assert fc.behind_commits(record, "tui", repo, ref="main") == 2
+    assert fc.behind_commits(record, "macos", repo, ref="main") == 2
+    assert fc.behind_commits(record, "ios", repo, ref="main") == 2
+    assert fc.behind_commits(record, "linux", repo, ref="main") == 1
+    assert fc.behind_commits(record, "nest", repo, ref="main") == 1
+
+
+def test_behind_commits_is_unknown_without_a_green_or_a_resolvable_base(tmp_path):
+    repo = _fixture_repo(tmp_path)
+    _commit(repo, "README", "start")
+    assert fc.behind_commits({"last_green": None}, "tui", repo, ref="main") is None
+    assert fc.behind_commits({"last_green": {"base": None}}, "tui", repo, ref="main") is None
+    assert fc.behind_commits({"last_green": {"base": "f" * 40}}, "tui", repo, ref="main") is None

@@ -6,7 +6,7 @@ Authoritative behavior: ``docs/goal/architecture/apps/tui.md`` § Credential
 storage (design ratified 2026-07-14): when no usable OS secret store is
 reachable, the identity rests in a passphrase-encrypted sealed file
 (``libs/fauna-credential-store::sealed`` — Argon2id + ChaCha20-Poly1305 over
-the whole namespace map) and the ``tui-unlock`` page gates launch routing.
+the whole namespace map) and the ``unlock`` page gates launch routing.
 
 The driver's ``headless_store`` launch mode empties
 ``FAUNA_E2E_CREDENTIAL_DIR`` (so the e2e file backend is OFF — this journey
@@ -54,7 +54,7 @@ from helpers.tui_headless_store import (
 pytestmark = [
     pytest.mark.tier_3,
     pytest.mark.tui,
-    pytest.mark.feature("identity-protected-on-this-device"),
+    pytest.mark.feature("identity-protected-on-this-device", "identity-sealed-under-a-passphrase"),
 ]
 
 PASSPHRASE = "correct-horse-battery"

@@ -15,8 +15,11 @@
 //!   the nest at `nest_url` when one is given, never either-or.
 //!
 //! The bound id every write keys on is the identity the connection is bound
-//! to ([`fauna_client_pair::resolve_this_nest_id`] —
-//! `LinkedNestsMachine::bound_nest_id`), never the box's own `nest.info` claim.
+//! to, never the box's own `nest.info` claim: both drives run through
+//! [`fauna_client_pair::deployment_seed`] — the one composition web shares —
+//! which resolves that id from the identity machine over the connection
+//! (the same native seam [`fauna_client_pair::resolve_this_nest_id`] builds)
+//! and is where the lying-box pins live.
 
 use std::sync::Arc;
 
@@ -25,10 +28,10 @@ use fauna_account_plane::deployment_seed_recovery::{
 };
 use fauna_client::NestClient;
 use fauna_client_config::{
-    DeploymentSeedCustody, DeploymentSeedStore, ResolvingLedgerStore, SupersessionMarks,
-    custody_leg_unattempted_warning, custody_leg_warning, rotate_deployment_seed_on_plane,
-    run_deployment_seed_custody_leg, seed_rotation_verdict,
+    DeploymentSeedCustody, DeploymentSeedStore, ResolvingLedgerStore, SeedRotation,
+    SupersessionMarks, custody_leg_unattempted_warning, custody_leg_warning, seed_rotation_verdict,
 };
+use fauna_client_pair::{LinkedNestsMachine, deployment_seed};
 use fauna_core::data::DeploymentSeedEntry;
 use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::localized::LocalizedText;
@@ -40,10 +43,13 @@ use fauna_core::localized::LocalizedText;
 /// The bound id could not be resolved (no reachable connection, a nest whose
 /// own claim disagrees with what the connection proved) or is not 32 bytes.
 pub async fn bound_nest_id(nest: &Arc<NestClient>) -> Result<ActorId, String> {
-    let bytes = fauna_client_pair::resolve_this_nest_id(nest).await?;
-    <[u8; 32]>::try_from(bytes.as_slice())
-        .map(ActorId)
-        .map_err(|_| "the nest reported an identity that is not 32 bytes".to_string())
+    deployment_seed::bound_actor_id(&identity_of(nest)).await
+}
+
+/// The identity machine over `nest`'s connection — the native seam every
+/// drive here resolves the bound id through.
+fn identity_of(nest: &Arc<NestClient>) -> LinkedNestsMachine {
+    fauna_client_pair::build_linked_nests_machine(Arc::clone(nest))
 }
 
 /// **The custody leg** over the bound nest (`fauna_client_config::
@@ -60,14 +66,14 @@ pub async fn run_custody_leg<S>(nest: &Arc<NestClient>, store: &S) -> Option<Loc
 where
     S: DeploymentSeedStore + ?Sized,
 {
-    let bound = match bound_nest_id(nest).await {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!("deployment-seed custody leg: bound nest id unresolved: {e}");
-            return Some(custody_leg_unattempted_warning());
-        }
-    };
-    let report = run_deployment_seed_custody_leg(&**nest, bound, store).await;
+    let report =
+        match deployment_seed::run_custody_leg_bound(&**nest, &identity_of(nest), store).await {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!("deployment-seed custody leg: bound nest id unresolved: {e}");
+                return Some(custody_leg_unattempted_warning());
+            }
+        };
     match &report.custody {
         DeploymentSeedCustody::Captured => tracing::info!(
             "deployment seed custodied off-box on the account plane (custody leg: captured)"
@@ -117,18 +123,30 @@ where
     F: Fn() -> Option<H> + Send + Sync,
     H: DeploymentSeedStore,
 {
-    let failed = |cause: String| {
-        LocalizedText::key_arg("admin.nest_page.rotate_seed_failed", "cause", cause)
-    };
-    let bound = match bound_nest_id(nest).await {
-        Ok(id) => id,
-        Err(e) => return failed(e),
-    };
-    let store = ResolvingLedgerStore::new(resolve);
-    match rotate_deployment_seed_on_plane(&**nest, bound, &store).await {
+    match rotate_deployment_seed_outcome(nest, resolve).await {
         Ok(outcome) => seed_rotation_verdict(&outcome),
-        Err(e) => failed(e.to_string()),
+        Err(cause) => LocalizedText::key_arg("admin.nest_page.rotate_seed_failed", "cause", cause),
     }
+}
+
+/// [`rotate_deployment_seed`]'s outcome itself, for a host that paints more
+/// than the verdict — fauna-ffi's `FfiSeedRotationResult` also carries whether
+/// the box's identity flipped. `Err` is the cause of a refusal (nothing
+/// rotated), as [`deployment_seed::rotate_deployment_seed_bound`] words it.
+///
+/// # Errors
+///
+/// The bound id did not resolve, or the drive refused before or at dispatch.
+pub async fn rotate_deployment_seed_outcome<F, H>(
+    nest: &Arc<NestClient>,
+    resolve: F,
+) -> Result<SeedRotation, String>
+where
+    F: Fn() -> Option<H> + Send + Sync,
+    H: DeploymentSeedStore,
+{
+    let store = ResolvingLedgerStore::new(resolve);
+    deployment_seed::rotate_deployment_seed_bound(&**nest, &identity_of(nest), &store).await
 }
 
 /// Drive a resolver future to completion on a blocking-pool thread of the

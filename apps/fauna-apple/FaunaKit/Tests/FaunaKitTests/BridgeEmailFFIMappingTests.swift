@@ -48,6 +48,7 @@ import Foundation
                                     settingType: "bool", value: .bool(v: true),
                                     options: nil)],
         supportsFollows: true,
+        supportsFollowRequests: false,
         linkModes: [FfiBridgeLinkMode(mode: "personal", label: "Personal",
                                       clientAction: nil, platform: nil,
                                       fields: [FfiBridgeLinkField(key: "handle",

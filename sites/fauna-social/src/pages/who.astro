@@ -1,0 +1,29 @@
+---
+import Base from '../layouts/Base.astro';
+import Critter from '../components/Critter.astro';
+// Every word on this page is single-sourced from docs/sites/fauna-social/
+// and imported at build time. Edit the copy THERE; this file owns structure
+// and styling only. The body IS the page — including the facts table, whose
+// values are org.ts tokens — and the `*Illustration: …*` line under the `#`
+// heading picks the animal standing beside it.
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/who.md';
+import { fill } from '../data/fill.ts';
+import { takeOpening } from '../data/copy.ts';
+
+const { heading, lead, illustration, rest } = takeOpening(fill(await compiledContent()));
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <div class="page-head">
+        {illustration && <Critter name={illustration} size={90} />}
+        <div>
+          <h1 set:html={heading} />
+          <p class="lead" set:html={lead} />
+        </div>
+      </div>
+
+      <Fragment set:html={rest} />
+    </article>
+  </div>
+</Base>

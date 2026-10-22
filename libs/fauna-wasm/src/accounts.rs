@@ -3,7 +3,7 @@
 //!
 //! The shared account list + active pointer live in
 //! `fauna_client_accounts` (priority #2); this module provides only the thin
-//! [`LocalStorageSecretStore`] glue over `web_sys::Storage` — the browser twin of
+//! [`WebIdentityStore`] glue over `web_sys::Storage` — the browser twin of
 //! native `CredentialStore` / `KeychainStore` — plus a `#[wasm_bindgen]`
 //! [`WasmAccountRegistry`] the Svelte account-settings switcher drives.
 //!
@@ -39,10 +39,10 @@ use wasm_bindgen_futures::future_to_promise;
 // The store lives in the shared crate (`fauna-client-accounts/src/web_store.rs`,
 // feature `web-localstorage`) because `fauna-wasm-launch` is its second
 // consumer — two wasm chunks share code only through a common crate.
-use fauna_client_accounts::{AccountRegistry, LocalStorageSecretStore, with_web_mutation_lock};
+use fauna_client_accounts::{AccountRegistry, WebIdentityStore, with_web_mutation_lock};
 
 /// The account-settings switcher's handle onto the shared [`AccountRegistry`],
-/// backed by [`LocalStorageSecretStore`]. Cheap to construct (both are
+/// backed by [`WebIdentityStore`]. Cheap to construct (both are
 /// stateless), so the Svelte layer builds one per operation.
 #[wasm_bindgen]
 pub struct WasmAccountRegistry {
@@ -59,7 +59,7 @@ fn mutate(
 ) -> js_sys::Promise {
     future_to_promise(async move {
         with_web_mutation_lock(move || {
-            let registry = AccountRegistry::new(Arc::new(LocalStorageSecretStore));
+            let registry = AccountRegistry::new(Arc::new(WebIdentityStore));
             mutate(&registry)
         })
         .await
@@ -79,7 +79,7 @@ fn mutate_add(
 ) -> js_sys::Promise {
     future_to_promise(async move {
         with_web_mutation_lock(move || {
-            let registry = AccountRegistry::new(Arc::new(LocalStorageSecretStore));
+            let registry = AccountRegistry::new(Arc::new(WebIdentityStore));
             add(&registry).map(JsValue::from).map_err(|err| {
                 match fauna_client_accounts::add_refused_copy(&err) {
                     Some(line) => crate::rpc::to_js(&line).unwrap_or_else(|e| e),
@@ -101,7 +101,7 @@ fn mutate_add(
 fn activate(actor_id: String, confirmed: bool) -> js_sys::Promise {
     future_to_promise(async move {
         with_web_mutation_lock(move || {
-            let registry = AccountRegistry::new(Arc::new(LocalStorageSecretStore));
+            let registry = AccountRegistry::new(Arc::new(WebIdentityStore));
             let result = if confirmed {
                 registry.set_active_confirmed(&actor_id)
             } else {
@@ -138,7 +138,7 @@ fn activate(actor_id: String, confirmed: bool) -> js_sys::Promise {
 impl WasmAccountRegistry {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        let registry = AccountRegistry::new(Arc::new(LocalStorageSecretStore));
+        let registry = AccountRegistry::new(Arc::new(WebIdentityStore));
         Self { registry }
     }
 
@@ -289,13 +289,13 @@ impl WasmAccountRegistry {
     /// device secret in the same `localStorage` (web's sign-out is `clearAll`
     /// alone, which never names the secret). One id per account, never one for
     /// every account on the browser (`sync-agent-credentials.md` § Credential
-    /// model, the 2026-09-20 ruling, property (2)). `$lib/device-id`'s
+    /// model, the 2026-09-20 ruling, property (2)). `#lib/device-id`'s
     /// `getDeviceId` is the one caller.
     #[wasm_bindgen(js_name = deviceIdForActor)]
     pub fn device_id_for_actor(&self, actor_id: &str) -> Result<String, JsError> {
         Ok(self
             .registry
-            .device_id_for_actor(&LocalStorageSecretStore, actor_id)?)
+            .device_id_for_actor(&WebIdentityStore, actor_id)?)
     }
 
     /// Boot step (`accountsBoot`): mint the install device secret if this
@@ -306,7 +306,7 @@ impl WasmAccountRegistry {
     #[wasm_bindgen(js_name = ensureInstallDeviceSecret, unchecked_return_type = "Promise<void>")]
     pub fn ensure_install_device_secret(&self) -> js_sys::Promise {
         mutate(|r| {
-            r.ensure_install_device_secret(&LocalStorageSecretStore)?;
+            r.ensure_install_device_secret(&WebIdentityStore)?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -330,14 +330,11 @@ impl WasmAccountRegistry {
     pub fn remove(&self, actor_id: &str) -> js_sys::Promise {
         let actor_id = actor_id.to_string();
         future_to_promise(async move {
-            fauna_client_accounts::SignOutRecord::record_removal(
-                &LocalStorageSecretStore,
-                &actor_id,
-            );
+            fauna_client_accounts::SignOutRecord::record_removal(&WebIdentityStore, &actor_id);
             let removed = with_web_mutation_lock({
                 let actor_id = actor_id.clone();
                 move || {
-                    AccountRegistry::new(Arc::new(LocalStorageSecretStore))
+                    AccountRegistry::new(Arc::new(WebIdentityStore))
                         .remove_with_snapshot(&actor_id)
                         .map_err(JsError::from)
                 }

@@ -59,11 +59,11 @@ Stamped 2026-09-19 at 8ac16765e4.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+e3bf6a64 standalone |
 

@@ -110,7 +110,7 @@ consumer appears, not queued work in any NEXT file.
 
 ⁷ **web shows no connection status at all on this page today** — corrects an
 overstated ✅ here (found sweep). Web's global `connection-status`
-indicator lives in the root shell sidebar (`routes/+layout.svelte`), but that
+indicator lives in the root shell sidebar (`lib/components/RootShell.svelte`), but that
 whole sidebar — connection-status included — is bypassed while
 `$page.url.pathname.startsWith('/app/settings')` (the same bare-canvas
 sidebar-swap the Settings shell uses for onboarding/admin), and

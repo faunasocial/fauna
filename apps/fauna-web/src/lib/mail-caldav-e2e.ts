@@ -4,7 +4,7 @@
 // every wired app through one spelling (convention 11's cross-app command table).
 //
 // This module exists ONLY in builds made for testing (convention 15): its sole
-// importer is `$lib/e2e-automation`, itself reached only through
+// importer is `#lib/e2e-automation`, itself reached only through
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)` branch, which a production
 // `vite build` constant-folds away.
 //
@@ -27,16 +27,16 @@
 
 import { get } from 'svelte/store';
 
-import { registerE2eCommands } from '$lib/e2e-commands';
-import { mailSettingsMachine } from '$lib/rpc';
-import { identity } from '$lib/store';
-import { accountsTabSessionMaterial } from '$lib/accounts';
+import { registerE2eCommands } from '#lib/e2e-commands';
+import { mailSettingsMachine } from '#lib/rpc';
+import { identity } from '#lib/store';
+import { accountsTabSessionMaterial } from '#lib/accounts';
 
 type CaldavMailboxReply = { ok: true } | { ok: false; error: string };
 
 /** The agent reads this slot (`tests/e2e-unified/web-bridge/agent.js`). */
 function setReply(reply: CaldavMailboxReply | undefined): void {
-  // This module is automation-only (its sole importer is `$lib/e2e-automation`),
+  // This module is automation-only (its sole importer is `#lib/e2e-automation`),
   // so the guard is belt-and-braces at runtime — but convention 15's web pin
   // holds every `__fauna_*` write to a block-precise standard, not a
   // file-level one, and a module-private setter has no exported installer for
@@ -49,7 +49,7 @@ function setReply(reply: CaldavMailboxReply | undefined): void {
 
 const MAIL_CALDAV_COMMANDS = ['enable_caldav_mailbox'] as const;
 
-/** Register `enable_caldav_mailbox`. Called once from `$lib/e2e-automation`.
+/** Register `enable_caldav_mailbox`. Called once from `#lib/e2e-automation`.
  *  Payload: `{password?: string}` — a password mints a `default` credential the
  *  test knows (so a stock CalDAV client can AUTH as this actor); absent, one is
  *  generated. */

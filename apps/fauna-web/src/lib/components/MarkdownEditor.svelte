@@ -17,7 +17,7 @@
   // Controlled-component: `value` is the source of truth (the wasm
   // ConversationsManager's `body_draft`); the editor mirrors it and emits `oninput`
   // on user edits. CM uses **UTF-16 code-unit** positions, the same unit as JS
-  // strings — so `$lib/markdown-decorations` converts the shared map's UTF-8 byte
+  // strings — so `#lib/markdown-decorations` converts the shared map's UTF-8 byte
   // ranges to UTF-16 and the toolbar splice math needs no offset translation.
 
   import { onMount, onDestroy } from 'svelte';
@@ -32,10 +32,10 @@
     type ViewUpdate,
   } from '@codemirror/view';
   import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
-  import { decorationMap, composeShowMarkersDimRanges, wrapMarkdownSelection } from '$lib/wasm';
-  import { decorationRanges, byteToUtf16Index } from '$lib/markdown-decorations';
-  import { utf16ToByte } from '$lib/notes-editor';
-  import { notesEditorExtensions, composeHideExtension } from '$lib/notes-editor-cm';
+  import { decorationMap, composeShowMarkersDimRanges, wrapMarkdownSelection } from '#lib/wasm';
+  import { decorationRanges, byteToUtf16Index } from '#lib/markdown-decorations';
+  import { utf16ToByte } from '#lib/notes-editor';
+  import { notesEditorExtensions, composeHideExtension } from '#lib/notes-editor-cm';
 
   interface Props {
     /** The markdown source (controlled — the manager's `body_draft`). */
@@ -54,7 +54,7 @@
      *  with Enter/Tab/Backspace routed through the shared gesture engine. Off (the
      *  default) keeps the conversations compose behaviour EXACTLY — markers dimmed,
      *  whole-line reveal, no gestures (priority #4: one editor, two modes). See
-     *  `$lib/notes-editor-cm` + the Notes editor design spec. */
+     *  `#lib/notes-editor-cm` + the Notes editor design spec. */
     notes?: boolean;
     /** Compose marker visibility (the per-editor toggle; conversations + feed compose). When
      *  `false` (the default), inline

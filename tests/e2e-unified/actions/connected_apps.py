@@ -141,6 +141,28 @@ class ConnectedAppsActions:
             "connected-apps-request-decline", scope=f"connected-apps-request-card[{index}]"
         )
 
+    # The install section — only on an admin's hosted-plugin install card
+    # (third-party.md § The install-approval leg). `leaf` is the id's suffix
+    # after `connected-apps-request-install`: "" (the heading), "form",
+    # "publisher", "digest", "kinds", "hosts" or "settings".
+    def request_install_text(self, index: int, leaf: str = "") -> str:
+        element = "connected-apps-request-install" + (f"-{leaf}" if leaf else "")
+        scope = f"connected-apps-request-card[{index}]"
+        if self.driver.count(element, scope=scope) == 0:
+            return ""
+        return self.driver.get_text(element, scope=scope) or ""
+
+    def request_install_form(self, index: int) -> str:
+        """The execution form VALUE — the badge's `form` attr."""
+        return (
+            self.driver.get_attr(
+                "connected-apps-request-install-form",
+                "form",
+                scope=f"connected-apps-request-card[{index}]",
+            )
+            or ""
+        )
+
     def block_request(self, index: int) -> None:
         """*Never show requests from this app*."""
         self.driver.click(
@@ -261,6 +283,23 @@ class ConnectedAppsActions:
             renavigate=True,
         )
         return bool(gone)
+
+    def has_settings_link(self, index: int) -> bool:
+        """Whether the row links to its settings card — a hosted plugin's row
+        only (`connected-apps-item-settings-link`, connected-apps.md § Layout &
+        flow, region 3). Built on tui; the other apps ride the trickle-down."""
+        return (
+            self.driver.count(
+                "connected-apps-item-settings-link", scope=f"connected-apps-item[{index}]"
+            )
+            == 1
+        )
+
+    def open_settings_link(self, index: int) -> None:
+        """Follow a plugin row's link to its settings card on the Bridges page."""
+        self.driver.click(
+            "connected-apps-item-settings-link", scope=f"connected-apps-item[{index}]"
+        )
 
     def revoke_item(self, index: int) -> None:
         """Revoke → the inline confirm → confirm."""
@@ -401,3 +440,27 @@ class ConnectedAppsActions:
         if not self.driver.is_visible("error-message"):
             return ""
         return (self.driver.get_text("error-message") or "").strip()
+
+    # ── The account's external-apps switch (`atproto-external-apps-enable`) ──
+    # On this page at every integration level (ui.yaml `connected-apps`;
+    # docs/goal/ui/connected-apps.md § Layout & flow). Its on/off rides the
+    # `state` attr, the same idiom as `mail-settings-enabled-toggle`.
+    EXTERNAL_APPS_TOGGLE_ID = "atproto-external-apps-enable"
+
+    def external_apps_state(self) -> str:
+        return self.driver.get_attr(self.EXTERNAL_APPS_TOGGLE_ID, "state") or ""
+
+    def wait_for_external_apps_state(self, expected: str, timeout: float = 10.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.external_apps_state() == expected:
+                return True
+            time.sleep(0.3)
+        return self.external_apps_state() == expected
+
+    def set_external_apps_enabled(self, enabled: bool) -> None:
+        """Drive the switch to `enabled`, idempotently."""
+        self.driver.wait_for(self.EXTERNAL_APPS_TOGGLE_ID, timeout=10.0)
+        want = "on" if enabled else "off"
+        if self.external_apps_state() != want:
+            self.driver.click(self.EXTERNAL_APPS_TOGGLE_ID)

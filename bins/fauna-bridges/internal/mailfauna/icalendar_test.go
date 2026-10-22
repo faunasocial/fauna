@@ -150,7 +150,7 @@ func TestGenerateICal_RoundTripsThroughParser(t *testing.T) {
 		FaunaStatus: "going",
 	}}
 
-	ics := GenerateICal(ev, att, "organizer@example.com")
+	ics := GenerateICal(ev, att, "organizer@example.net")
 
 	for _, want := range []string{
 		"BEGIN:VCALENDAR", "BEGIN:VEVENT", "SUMMARY:Go writer smoke",
@@ -193,7 +193,7 @@ func TestGenerateItip_RoundTripsThroughParser(t *testing.T) {
 		Partstat: "NEEDS-ACTION",
 	}}
 
-	ics := GenerateItip(ITipRequest, ev, att, "organizer@example.com", "2026-06-04T12:00:00Z")
+	ics := GenerateItip(ITipRequest, ev, att, "organizer@example.net", "2026-06-04T12:00:00Z")
 
 	for _, want := range []string{
 		"BEGIN:VCALENDAR", "METHOD:REQUEST", "BEGIN:VEVENT", "DTSTAMP:",

@@ -477,16 +477,27 @@ pub fn delegable_kinds_scope_wraps(
         .then_some(scopes)
 }
 
+/// Every kind a plane's consent twin carries a `content.read` tuple over
+/// (`encryption-at-rest.md` § Capability tiering → *Third-party holders*) —
+/// the one table the consent planner plans by and the owner's log reads
+/// (`view_model::is_principal_scope`, `third-party.md` § The principal model
+/// rule 4), so a plane's twin lands in both with one row. Today: the served
+/// folder's read twin and the two personalization kinds. Each later plane
+/// appends its kinds here and nowhere else, and its planner reads them back
+/// from this table, as [`PERSONALIZATION_GRANT_KINDS`] does.
+pub const CONSENT_TWIN_KINDS: [&str; 3] = [
+    ScopeTuple::KIND_FOLDER,
+    fauna_protocol::merge_policy::KIND_PERSONALIZATION,
+    fauna_protocol::personalization::MODEL_SEAL_KIND,
+];
+
 /// The two kinds the `fauna:personalization:rw` grant twin covers
 /// (`authorization-server.md` § Scope grammar → *The fifth arm*): the
 /// trained-factor registry `fauna.state.personalization`, and
 /// `fauna.personalization.model`, the reserved kind whose delegable pair
 /// seals the model blobs (`topic-factors.md` § At rest → *Re-keyed for the
-/// third-party plane*).
-pub const PERSONALIZATION_GRANT_KINDS: [&str; 2] = [
-    fauna_protocol::merge_policy::KIND_PERSONALIZATION,
-    fauna_protocol::personalization::MODEL_SEAL_KIND,
-];
+/// third-party plane*). Read from [`CONSENT_TWIN_KINDS`].
+pub const PERSONALIZATION_GRANT_KINDS: [&str; 2] = [CONSENT_TWIN_KINDS[1], CONSENT_TWIN_KINDS[2]];
 
 /// The `fauna:personalization:rw` twin's tuples and wraps: one
 /// `content.read` tuple per [`PERSONALIZATION_GRANT_KINDS`] kind, each

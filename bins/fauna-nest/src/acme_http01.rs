@@ -22,10 +22,104 @@ use crate::acme::CERT_FILENAME;
 
 pub use fauna_acme_http01::{
     ACME_FAILED_VALIDATION_BUDGET_PER_HOUR, ACME_RATE_WINDOW_SECS, ChallengeState, Http01Config,
-    IssuanceError, IssuanceOrder, RETRY_STATE_FILENAME, RetryState, cert_covers_sans,
-    cert_dns_sans, cert_seconds_remaining, http01_router, next_attempt_delay, now_unix,
-    obtain_certificate, start_http01_listener,
+    IssuanceError, IssuanceOrder, RETRY_STATE_FILENAME, RedirectHosts, RetryState,
+    cert_covers_sans, cert_dns_sans, cert_seconds_remaining, http01_router, next_attempt_delay,
+    now_unix, obtain_certificate,
 };
+
+/// The port-80 listener's per-source request rate (requests per second, also
+/// the burst). The listener answers two things — an ACME validator fetching a
+/// token (a handful of fetches per order, spread over the CA's vantage points)
+/// and a browser's one plain-HTTP hit before its redirect — so a tenth of the
+/// nest's own 100/s governor is still far above any honest source. A resource
+/// bound nobody chooses: a constant, not a knob (`principles.md` § One
+/// configuration surface).
+pub const HTTP01_REQUESTS_PER_SECOND_PER_IP: u32 = 10;
+
+/// The port-80 app: the shared [`http01_router`] (challenge, redirect only to a
+/// host this nest serves, no request bodies) behind the per-source request
+/// governor. `served` is the nest's cert resolver — the redirect allow-list
+/// ([`crate::acme::MultiDomainCertResolver::serves_host`]); without one only
+/// `domain` is redirected to.
+pub fn http01_app(
+    state: Arc<ChallengeState>,
+    domain: String,
+    served: Option<Arc<crate::acme::MultiDomainCertResolver>>,
+    limiter: Arc<crate::rate_limit::IpRateLimiter>,
+) -> axum::Router {
+    let redirect_hosts: RedirectHosts = match served {
+        Some(resolver) => Arc::new(move |host: &str| resolver.serves_host(host)),
+        None => Arc::new(|_: &str| false),
+    };
+    http01_router(state, domain, redirect_hosts)
+        .layer(crate::rate_limit::RateLimitLayer::new(limiter))
+}
+
+/// Bind the ACME HTTP-01 listener on `0.0.0.0:port` (8080, mapped to host port
+/// 80) and serve [`http01_app`] through the nest's one admitted accept loop
+/// ([`crate::serve_plain`]): the global connection cap, the per-source
+/// connection cap, TCP keepalive, the 20 s header-read timeout and the shed
+/// lines every other listener has (`transport-connection.md` § Abuse posture).
+/// Until 2026-10-17 this was a bare `axum::serve`, so a slow-loris on :80 could
+/// spend the nest process's file descriptors and take :443 down with it
+/// (`deployment-threat-model.md` § Concern 1a, finding M2).
+///
+/// The listener outlives every serving generation, so its per-source cap is its
+/// own limiter at the constant default, not the admin's generation-scoped one.
+pub async fn start_http01_listener(
+    state: Arc<ChallengeState>,
+    domain: String,
+    port: u16,
+    served: Option<Arc<crate::acme::MultiDomainCertResolver>>,
+) -> Result<tokio::task::JoinHandle<()>> {
+    use anyhow::Context as _;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .context(format!("bind HTTP-01 listener on port {port}"))?;
+    tracing::info!("HTTP-01 challenge listener started on port {port}");
+    // spawn-ok(process-lifetime): started once by `main.rs` *before* the
+    // serve-and-restart loop, and deliberately outlives every generation — it
+    // holds only `ChallengeState` and the cert resolver (both process-lifetime),
+    // no `AppState` and no deployment key, and re-binding :8080 per generation
+    // would fail. The caller drops the handle knowingly.
+    let handle = tokio::spawn(serve_http01(
+        listener,
+        state,
+        domain,
+        served,
+        fauna_conn_limit::PerIpConnLimit::new(fauna_conn_limit::DEFAULT_MAX_CONNS_PER_IP),
+    ));
+    Ok(handle)
+}
+
+/// Serve [`http01_app`] on a bound `listener` through [`crate::serve_plain`]
+/// with the given per-source connection limiter — the body of
+/// [`start_http01_listener`], `pub` so `tests/http01_listener_admission.rs` can
+/// drive the production path with a small loopback ceiling.
+pub async fn serve_http01(
+    listener: tokio::net::TcpListener,
+    state: Arc<ChallengeState>,
+    domain: String,
+    served: Option<Arc<crate::acme::MultiDomainCertResolver>>,
+    per_ip_limit: Arc<fauna_conn_limit::PerIpConnLimit>,
+) {
+    let limiter = crate::rate_limit::new_ip_limiter(HTTP01_REQUESTS_PER_SECOND_PER_IP);
+    // The keyed governor never sheds its own entries; sweep it like the main
+    // listener's, for as long as this listener serves (the guard aborts it
+    // when this future ends or is dropped with its aborted task).
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _sweeper = AbortOnDrop(crate::rate_limit::spawn_retain_sweeper(
+        Arc::clone(&limiter),
+        std::time::Duration::from_secs(300),
+    ));
+    let app = http01_app(state, domain, served, limiter).into_make_service();
+    crate::serve_plain(listener, app, per_ip_limit).await;
+}
 
 /// Build the desired ACME SAN list for a mail deployment.
 ///

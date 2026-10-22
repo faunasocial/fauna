@@ -18,6 +18,24 @@ import com.fauna.ffi.FfiNestClient
  * caller in this flavor can reach a surface that would need them.
  */
 abstract class KidsExcisedApi {
+    /**
+     * A Profile-header picture — this nest's blob route only: the shared
+     * post-blob plane that reaches a relayed profile's home rides the feed,
+     * which this flavor compiles out, so a relayed profile's pictures stay
+     * empty here (the ruled degrade of a failed fetch). `null` on any failure.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun fetchProfilePicture(relayedFrom: String?, homeNestActorId: String?, hashHex: String): ByteArray? {
+        if (relayedFrom != null) return null
+        return try {
+            (this as ApiClient).fetchBlobBytes(hashHex)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Excised — no sweep (the registry's only feeder is compiled out). */
     fun startCriticalAlertSweep() = Unit
 
@@ -81,8 +99,18 @@ abstract class KidsExcisedApi {
         throw excised("subscriptions")
 
     @Suppress("UNUSED_PARAMETER")
-    suspend fun subscriptionSubscribe(authorIdHex: String, tier: String): com.fauna.ffi.FfiSubscribeReply =
-        throw excised("subscriptions")
+    suspend fun subscriptionSubscribe(
+        authorIdHex: String,
+        tier: String,
+        homeNestUrl: String? = null,
+    ): com.fauna.ffi.FfiSubscribeReply = throw excised("subscriptions")
+
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun subscriptionUnsubscribe(
+        authorId: ByteArray,
+        tier: String,
+        homeNestUrl: String?,
+    ): com.fauna.ffi.FfiUnsubscribeReply = throw excised("subscriptions")
 
     // Sealed tier-1 spam training rides the mail-settings machine, a bridge:
     // there is no sealed model here, so the callers take their non-mail path.

@@ -211,6 +211,69 @@ impl CacheDb {
         Ok(())
     }
 
+    /// The projection of a post envelope a **federated follow delivered** from
+    /// its author's home (`federated-follow.md` § Decision 3): the `content`
+    /// row (empty payload — the body is in the author's `__post` segment) and
+    /// the list-card preview `write_post_index` writes for any post, marked
+    /// `origin_nest_url = home_url`, `origin_nest_id = home_nest_id` (the
+    /// delivery's verified origin — the home identity the feed item carries)
+    /// and `follow_delivered = 1` — and **no
+    /// `content_fts` row**: the Search corpus is nest-wide and a delivered post
+    /// is the readers' who follow its author (`db::feeds::FeedLocality`).
+    ///
+    /// A row this nest already lists nest-wide (a discovery stub of the same
+    /// post) keeps that standing: the delivery adds the body, never narrows
+    /// who sees a row. Orchestrated by `segments::post::store_delivered_post`.
+    pub async fn put_delivered_post_index_only(
+        &self,
+        post_id: &[u8; 32],
+        data: &[u8],
+        home_url: &str,
+        home_nest_id: &[u8; 32],
+    ) -> Result<()> {
+        let Some(post) = decode_stored_post(data) else {
+            anyhow::bail!("a delivered post must decode");
+        };
+        let schema = post_body_schema(&post);
+        let meta = extract_post_metadata(&post);
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin delivered post")?;
+        let nest_wide: bool = tx
+            .query_row(
+                "SELECT follow_delivered = 0 FROM content WHERE id = ?1",
+                [post_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("read the prior row's standing")?
+            .unwrap_or(false);
+        content::insert_content(
+            &tx,
+            post_id,
+            schema,
+            &meta.author,
+            meta.created_at,
+            &[], // empty payload — body in the __post segment store
+            None,
+            &meta.source,
+            None,
+        )
+        .context("put delivered post")?;
+        tx.execute(
+            "UPDATE content SET origin_nest_url = ?2, origin_nest_id = ?3, follow_delivered = ?4
+             WHERE id = ?1",
+            rusqlite::params![
+                post_id.as_slice(),
+                home_url,
+                home_nest_id.as_slice(),
+                !nest_wide
+            ],
+        )
+        .context("mark the delivered post")?;
+        write_post_index(&tx, post_id, &meta)?;
+        tx.commit().context("commit delivered post")
+    }
+
     /// Whether a `content` row exists for this post id. The newly-stored gate
     /// the forwarded-post receive reads before running the create-side bridge
     /// fan-out — `segments::post::store_post` is idempotent (a re-delivery

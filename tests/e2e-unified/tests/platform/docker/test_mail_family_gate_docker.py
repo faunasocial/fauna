@@ -412,7 +412,7 @@ def family_nest(docker_image):
         scanners = start_fake_scanner_sidecars(
             network, fakes_dir, clamd_name=clamd_name, rspamd_name=rspamd_name)
         start_container_with_ports(
-            name, {3000: http_port, **mail_ports},
+            name, {443: http_port, **mail_ports},
             env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000",
                  "FAUNA_CLAMD_ADDR": scanners["clamd_addr"],
                  "FAUNA_RSPAMD_URL": scanners["rspamd_url"]},

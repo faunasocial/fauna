@@ -184,6 +184,8 @@ tokio = { version = "1", default-features = false, features = ["sync", "macros"]
 # deadline tests; under selected-feature resolution nothing else unifies it in.
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time", "test-util"] }
 tracing-subscriber = { workspace = true }
+# Test-only: property tests over `decode_frame` (`tests/proptest_frame.rs`).
+proptest = { workspace = true }
 
 # Forbidden by spec § 1.9 (L3 transport-agnosticism mandate).
 # scripts/check-protocol-deps.sh asserts that none of these appear in this

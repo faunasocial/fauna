@@ -411,6 +411,7 @@ public sealed partial class SettingsAccountPage : Page
         Paint(AftermathBackupRegrantText, FfiAftermathLeg.BackupRegrant);
         Paint(AftermathMlsResealText, FfiAftermathLeg.MlsReseal);
         Paint(AftermathGrantRemintText, FfiAftermathLeg.GrantRemint);
+        Paint(AftermathPeriodRotationText, FfiAftermathLeg.PeriodRotation);
         Paint(AftermathDraftsResealText, FfiAftermathLeg.DraftsReseal);
         Paint(AftermathMailBurnText, FfiAftermathLeg.MailBurn);
 

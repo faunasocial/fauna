@@ -8,7 +8,7 @@ import { linkBridgeChallenge } from './bridges';
 // The nest is the user's NIP-46 signer (`docs/goal/ui/nostr.md` § The nest as
 // the user's NIP-46 signer): third-party Nostr apps sign via the user's box.
 // The *Connected apps* roster rides `fauna.nostr.bunker.*` via the typed
-// wrappers in `$lib/rpc.ts`, re-exported here so the Nostr page keeps a single
+// wrappers in `#lib/rpc.ts`, re-exported here so the Nostr page keeps a single
 // import surface.
 
 export type { BunkerInvite, BunkerApp } from './rpc';
@@ -21,7 +21,7 @@ export {
 
 // --- Zap signers (the NIP-57 trust root) ---
 // `docs/goal/behavior/monetization.md` § Zap receipts — the trust model.
-// Rides `fauna.nostr.zap_signers.*` via the typed wrappers in `$lib/rpc.ts`,
+// Rides `fauna.nostr.zap_signers.*` via the typed wrappers in `#lib/rpc.ts`,
 // re-exported here so the Nostr page keeps a single import surface.
 
 export type { ZapSignerEntry } from './rpc';

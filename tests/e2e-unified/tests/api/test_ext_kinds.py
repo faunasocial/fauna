@@ -26,7 +26,11 @@ A second test holds TP4 (``encryption-at-rest.md`` § Capability tiering →
 *Third-party holders* (1)): a *remote*-form principal — a confidential client,
 authenticated by its ``private_key_jwt`` assertion — that asks for a read of
 the account's mail is refused before any card renders. No arm can name a
-pre-existing sealed scope at all; the grammar is the bound.
+pre-existing sealed scope at all; the grammar is the bound. A third holds the
+form rule's other two doors: PAR refuses the personalization arm to a
+confidential client, and the nest's ``fauna.capabilities.mint`` refuses the
+arm's twin to a remote principal's attested key while minting it to a device
+principal's — the gate reads the row's form, never the arm.
 
 The plane-row write and the ledger ``Mint`` of the owner's entry point are
 pinned in Rust (``fauna_client_capabilities::ext_consent``); this journey is
@@ -43,6 +47,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, x25519
 
 import fauna_ffi
+from clients.ws_rpc_admin_client import RpcCallError
 from helpers.atproto_consent import (  # noqa: F401 — consent_nest/consent_bridge are pytest fixtures adopted by import
     HANDLE_DOMAIN,
     consent_bridge,
@@ -89,6 +94,7 @@ def metadata_server(tmp_path_factory):
     payload["service_auth"] = SERVICE_AUTH
     manifest = sign_manifest(publisher_key, payload)
     server.publisher_key = _raw(publisher_key.public_key())
+    server.manifest_jws = manifest
     server.documents[DOCUMENT_PATH] = client_document(
         server.client_id(), REDIRECT_URI, RECORDS, manifest_jws=manifest
     )
@@ -330,3 +336,68 @@ def test_a_remote_principal_cannot_ask_for_the_accounts_personalization(
     assert "user's own device" in body.get("error_description", ""), (
         f"refused by the form rule, after the client authenticated: {body!r}"
     )
+
+    # ── The nest's door (`encryption-at-rest.md` § Capability tiering →
+    # *Third-party holders*, the form gate): an app that planned wrongly
+    # cannot hand the twin to a remote key either. A records-only consent
+    # gives a confidential client its `remote` row and attested holder; the
+    # owner's mint of the personalization twin to that key is refused, and
+    # the same mint to a device principal's key — one that consented
+    # `records` only, never the arm — is stored: the gate reads the row's
+    # form, never the arm. ──
+    alice = nest["user"]
+    remote_path = "/remote-records-client.json"
+    remote_holder = _raw(x25519.X25519PrivateKey.generate().public_key())
+    remote_writer = _raw(ed25519.Ed25519PrivateKey.generate().public_key())
+    remote = OAuthClient(
+        base=nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=REDIRECT_URI,
+        scope=RECORDS,
+        holder_x25519=remote_holder,
+        writer_ed25519=remote_writer,
+        client_id_url=metadata_server.client_id(remote_path),
+        assertion_key=ec.generate_private_key(ec.SECP256R1()),
+        assertion_kid="k1",
+        issuer=_issuer(nest),
+    )
+    metadata_server.documents[remote_path] = client_document(
+        remote.client_id, REDIRECT_URI, RECORDS,
+        manifest_jws=metadata_server.manifest_jws, jwk=remote.assertion_jwk(),
+    )
+    _approve_with_grant(nest, remote, remote_holder, remote_writer, secrets.token_bytes(16))
+
+    device_holder = _raw(x25519.X25519PrivateKey.generate().public_key())
+    device_writer = _raw(ed25519.Ed25519PrivateKey.generate().public_key())
+    device = OAuthClient(
+        base=nest["url"],
+        htu_origin=f"https://{HANDLE_DOMAIN}",
+        redirect_uri=REDIRECT_URI,
+        scope=RECORDS,
+        holder_x25519=device_holder,
+        writer_ed25519=device_writer,
+        client_id_url=metadata_server.client_id(),
+    )
+    _approve_with_grant(nest, device, device_holder, device_writer, secrets.token_bytes(16))
+
+    with alice_client(nest) as ws:
+        principals = ws.call("fauna.principals.list", {})["principals"]
+    forms = {p["client_id"]: p["execution_form"] for p in principals}
+    assert forms.get(remote.client_id) == "remote", forms
+    assert forms.get(device.client_id) == "device", forms
+
+    def twin(holder: bytes) -> bytes:
+        now = int(time.time())
+        return fauna_ffi.build_personalization_grant(
+            bytes(alice["signing_key"]), secrets.token_bytes(16), holder, now, now + 3600
+        )
+
+    with alice_client(nest) as ws:
+        with pytest.raises(RpcCallError) as refused:
+            ws.call("fauna.capabilities.mint", {"grant_blob": twin(remote_holder)})
+    assert refused.value.code.endswith("permission_denied"), (
+        f"the nest refuses the twin to a remote principal's key: {refused.value!r}"
+    )
+    with alice_client(nest) as ws:
+        minted = ws.call("fauna.capabilities.mint", {"grant_blob": twin(device_holder)})
+    assert minted.get("ok") is True, f"a device principal's key holds the twin: {minted!r}"

@@ -36,9 +36,10 @@ import SwiftUI
 /// same path every other step transition in this wizard takes — does the
 /// rest.
 ///
-/// ⚠ No renewal copy — the shared summary string promises nothing about
-/// auto-renewal (`ui/nests.md` § Expiry / renewal is unbuilt); this view
-/// must not add its own wording.
+/// ⚠ The summary copy is the shared string alone — it states the renewal
+/// the tap's blessing brings and no fixed limit (`onboarding.md` § 3b-ter,
+/// honest bound (1)), pinned in shared Rust; this view must not add its own
+/// wording.
 ///
 /// Shared by macOS and iOS (priority #2), mirroring `AwaitingManualDnsView`.
 /// Reference impls: tui `wizard/trust_prompt.rs` (the lead app), linux

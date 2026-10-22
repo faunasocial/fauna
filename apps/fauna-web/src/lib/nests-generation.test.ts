@@ -8,6 +8,8 @@ import {
   generationPathText,
   generationShowsRestore,
   generationNoticeText,
+  holdersStatusText,
+  showsTrustEmpty,
   type TrustGenerationRow,
 } from './nests-generation.ts';
 
@@ -92,5 +94,29 @@ Deno.test('a past-recovery-window outcome renders its own notice text, never "fa
   }
   if (/fail/i.test(text)) {
     throw new Error(`PastRecoveryWindow is a product state, not a failure — must never say "failed", got: ${text}`);
+  }
+});
+
+// `nest-trust-holders-status` (nests.md:125) — tui's twins are
+// `an_unreadable_holder_roster_replaces_the_empty_state` and
+// `a_readable_holder_roster_keeps_the_empty_state`.
+Deno.test('an unreadable holder roster replaces the empty state', () => {
+  if (!holdersStatusText(true)) {
+    throw new Error('an unreachable roster must render the unreachable copy');
+  }
+  if (showsTrustEmpty(0, 0, true)) {
+    throw new Error('an unreachable roster must not render nest-trust-empty');
+  }
+});
+
+Deno.test('a readable holder roster keeps the empty state', () => {
+  if (holdersStatusText(false) !== '' || holdersStatusText(undefined) !== '') {
+    throw new Error('a readable roster must render an empty status');
+  }
+  if (!showsTrustEmpty(0, 0, false)) {
+    throw new Error('a readable, empty roster keeps nest-trust-empty');
+  }
+  if (showsTrustEmpty(1, 0, false)) {
+    throw new Error('a grant suppresses nest-trust-empty');
   }
 });

@@ -142,7 +142,7 @@ def ip_bridge_stack(docker_image):
 
         start_container_with_ports(
             nest_name,
-            {3000: api_port},
+            {443: api_port},
             env={
                 "FAUNA_PORT": "3000",
                 "FAUNA_ACME_DIRECTORY_URL": f"https://{pebble_name}:14000/dir",

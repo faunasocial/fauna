@@ -102,17 +102,16 @@ class AdminCustodyHostingContentTest {
         render(rows = listOf(row(host = "aa".repeat(32)), row(host = "cc".repeat(32))))
         composeTestRule.onAllNodesWithTag("admin-custody-hosting-count").assertCountEquals(1)
         assertEquals(0, composeTestRule.onAllNodesWithTag("admin-custody-hosting-empty").fetchSemanticsNodes().size)
-        assertEquals(2, composeTestRule.onAllNodesWithTag("admin-custody-hosting-row-0").fetchSemanticsNodes().size
-            + composeTestRule.onAllNodesWithTag("admin-custody-hosting-row-1").fetchSemanticsNodes().size)
-        composeTestRule.onNodeWithTag("admin-custody-hosting-host-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-owner-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-url-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-budget-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-held-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-stopped-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-receipt-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0").assertExists()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-host-1").assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-row").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-host")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-owner")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-url")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-budget")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-held")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-stopped")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-receipt")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-host")[1].assertExists()
     }
 
     @Test
@@ -120,15 +119,15 @@ class AdminCustodyHostingContentTest {
         // 0 means the row carries no cap and the pump substitutes the
         // hard-coded default — the leg must render Default, never "0 B".
         render(rows = listOf(row(retainedBytesCap = 0)))
-        val budget = composeTestRule.onNodeWithTag("admin-custody-hosting-budget-0")
+        val budget = composeTestRule.onAllNodesWithTag("admin-custody-hosting-budget")[0]
         budget.assertTextEquals("Default")
     }
 
     @Test
     fun stoppedAndActiveRenderDistinctWords() {
         render(rows = listOf(row(stopped = true), row(stopped = false)))
-        composeTestRule.onNodeWithTag("admin-custody-hosting-stopped-0").assertTextEquals("Paused")
-        composeTestRule.onNodeWithTag("admin-custody-hosting-stopped-1").assertTextEquals("Active")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-stopped")[0].assertTextEquals("Paused")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-stopped")[1].assertTextEquals("Active")
     }
 
     @Test
@@ -141,7 +140,7 @@ class AdminCustodyHostingContentTest {
             ),
         )
         val words = (0..2).map {
-            composeTestRule.onNodeWithTag("admin-custody-hosting-receipt-$it").fetchSemanticsNode()
+            composeTestRule.onAllNodesWithTag("admin-custody-hosting-receipt")[it].fetchSemanticsNode()
                 .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString { t -> t.text }
         }
         assertEquals(3, words.toSet().size)
@@ -158,10 +157,10 @@ class AdminCustodyHostingContentTest {
                 row(host = "bb".repeat(32), grant = byteArrayOf(2)),
             ),
         )
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-1").performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[1].performScrollTo().performClick()
 
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0").assertExists()
-        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button-1").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0].assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button").assertCountEquals(1)
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-confirm-button").assertExists()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-cancel-button").assertExists()
     }
@@ -170,10 +169,10 @@ class AdminCustodyHostingContentTest {
     fun cancelDisarmsWithoutRemoving() {
         var removed: Pair<String, ByteArray>? = null
         render(rows = listOf(row(host = "aa".repeat(32))), onRemove = { h, g -> removed = h to g })
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0").performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0].performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-cancel-button").performScrollTo().performClick()
         assertNull(removed)
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0").assertExists()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0].assertExists()
     }
 
     @Test
@@ -182,7 +181,7 @@ class AdminCustodyHostingContentTest {
         val host = "cc".repeat(32)
         val grant = byteArrayOf(9, 9)
         render(rows = listOf(row(host = host, grant = grant)), onRemove = { h, g -> removed = h to g })
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0").performScrollTo().performClick()
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0].performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-confirm-button").performScrollTo().performClick()
         assertEquals(host, removed?.first)
         assertEquals(grant.toList(), removed?.second?.toList())

@@ -202,8 +202,7 @@ pub fn regressed_sets(record: &DestinationAuditRecord) -> Vec<String> {
 pub fn sets_of_ledger_keys<'a>(keys: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut sets: Vec<String> = keys
         .into_iter()
-        .filter_map(|key| key.split('/').next())
-        .filter(|set| !set.is_empty())
+        .filter_map(crate::audit::ledger_key_set)
         .map(str::to_string)
         .collect();
     sets.sort();
@@ -895,13 +894,44 @@ mod tests {
     /// kind's content ledger and its journal's name one set.
     #[test]
     fn ledger_keys_read_as_their_sets_once_each() {
+        let channel_a = "ab".repeat(32);
+        let channel_b = "cd".repeat(32);
         assert_eq!(
             sets_of_ledger_keys([
                 "__mail/aa/manifest.mail",
-                "__mail/aa/manifest.mail.placement",
+                "__mail/aa/placement/manifest.mail",
                 "__post/aa/manifest.post",
+                &format!("__conv/{channel_a}/aa/manifest.conv"),
+                &format!("__conv/{channel_b}/aa/manifest.conv"),
+                &format!("__conv/{channel_b}/bb/manifest.conv"),
             ]),
-            ["__mail", "__post"]
+            [
+                "__conv/".to_string() + &channel_a,
+                "__conv/".to_string() + &channel_b,
+                "__mail".to_string(),
+                "__post".to_string(),
+            ]
+        );
+    }
+
+    /// A key that is no ledger's names no set: it is skipped, never read as
+    /// the text before its first `/`.
+    #[test]
+    fn a_key_whose_set_does_not_parse_is_skipped() {
+        let channel = "ab".repeat(32);
+        assert!(
+            sets_of_ledger_keys([
+                // a conv set without its channel, a short channel, a non-mirror path,
+                // a kind that is not the set's, and bare text.
+                "__conv/aa/manifest.conv",
+                &format!("__conv/{}/aa/manifest.conv", &channel[..62]),
+                &format!("__conv/{channel}/aa/seg-00000001.dat"),
+                "__mail/aa/manifest.post",
+                "__mail/aa/manifest.mail.placement",
+                "live-only",
+                "",
+            ])
+            .is_empty()
         );
     }
 }

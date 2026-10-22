@@ -29,8 +29,8 @@ use crate::test_support::MockNest;
 use crate::transfer::TransferPool;
 
 // Same trimmed harness as `keep_local_resolution_test.rs` (whose helpers are
-// private to it).
-fn test_sync_engine(
+// private to it). Holds the owner key `[0x61; 32]`.
+pub(crate) fn test_sync_engine(
     server_uri: &str,
     watch_dir: std::path::PathBuf,
     device_id: [u8; 32],
@@ -71,7 +71,11 @@ fn test_sync_engine(
     )
 }
 
-fn create_change_with_manifest(seq: i64, path: &str, manifest_hash: ContentHash) -> SyncChange {
+pub(crate) fn create_change_with_manifest(
+    seq: i64,
+    path: &str,
+    manifest_hash: ContentHash,
+) -> SyncChange {
     SyncChange {
         seq,
         path_hash: hex::encode(fauna_core::sync::path_hash(path)),

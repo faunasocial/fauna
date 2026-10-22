@@ -22,6 +22,7 @@ import com.fauna.app.ui.components.AccountSwitcherSection
 import com.fauna.app.ui.components.CopyableRow
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.components.IdentityExportSection
+import com.fauna.app.ui.components.PushNotificationsSection
 import com.fauna.app.ui.components.RecoveryKitSection
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
@@ -217,6 +218,7 @@ fun AccountSettingsScreen(
                 onSucceeded = { successor -> vm.switchAccount(successor, confirmed = false, onAccountSwitched) },
             )
         },
+        pushNotificationsSection = { PushNotificationsSection() },
     )
 }
 
@@ -287,6 +289,9 @@ fun AccountSettingsContent(
     // The stateful Recovery kit section ([RecoveryKitSection], VM-backed) —
     // supplied by [AccountSettingsScreen]; empty under the Content harness.
     recoveryKitSection: @Composable () -> Unit = {},
+    // The stateful Push notifications section ([PushNotificationsSection],
+    // VM-backed) — same slot shape as [recoveryKitSection].
+    pushNotificationsSection: @Composable () -> Unit = {},
 ) {
     val context = LocalContext.current
     val appMessages = LocalAppMessages.current
@@ -367,6 +372,11 @@ fun AccountSettingsContent(
                 onNewHandleChange = onNewHandleChange,
                 onChangeHandle = onChangeHandle,
             )
+
+            // Push notifications — directly before Data export (settings.md
+            // § Layout & flow item 10), on the Account page as on tui,
+            // windows and linux.
+            pushNotificationsSection()
 
             // Data Export Section
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -657,7 +667,10 @@ fun DeleteAccountConfirmDialog(
             )
         },
         text = {
-            Text(stringResource(R.string.settings_account_page_delete_confirm_text))
+            Text(
+                stringResource(R.string.settings_account_page_delete_confirm_text),
+                modifier = Modifier.testTag(Ids.SETTINGS_DELETE_CONFIRM_TEXT),
+            )
         },
         confirmButton = {
             Column {

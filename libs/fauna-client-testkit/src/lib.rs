@@ -395,6 +395,7 @@ impl RpcErrorClass for ClassifiedError {
 pub struct RejectingRequester {
     responses: std::collections::HashMap<&'static str, Result<Value, RpcError>>,
     kinds: Mutex<Vec<&'static str>>,
+    payloads: Mutex<Vec<(&'static str, serde_json::Value)>>,
 }
 
 impl RejectingRequester {
@@ -404,6 +405,7 @@ impl RejectingRequester {
         Self {
             responses: std::collections::HashMap::new(),
             kinds: Mutex::new(Vec::new()),
+            payloads: Mutex::new(Vec::new()),
         }
     }
 
@@ -427,6 +429,12 @@ impl RejectingRequester {
     pub fn kinds(&self) -> Vec<&'static str> {
         self.kinds.lock().unwrap().clone()
     }
+
+    /// Every request so far as `(kind, payload)`, the payload as JSON, in
+    /// call order — for a caller whose contract is what it sends.
+    pub fn payloads(&self) -> Vec<(&'static str, serde_json::Value)> {
+        self.payloads.lock().unwrap().clone()
+    }
 }
 
 impl Default for RejectingRequester {
@@ -441,13 +449,15 @@ impl RpcRequester for RejectingRequester {
     async fn request<Req, Reply>(
         &self,
         kind: &'static str,
-        _payload: Req,
+        payload: Req,
     ) -> Result<Reply, Self::Error>
     where
         Req: serde::Serialize,
         Reply: serde::de::DeserializeOwned,
     {
         self.kinds.lock().unwrap().push(kind);
+        let payload = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+        self.payloads.lock().unwrap().push((kind, payload));
         match self.responses.get(kind) {
             Some(Ok(v)) => {
                 let bytes = fauna_protocol::encode_canonical(v).expect("encode canned value");

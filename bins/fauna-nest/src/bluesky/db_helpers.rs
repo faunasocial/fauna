@@ -513,9 +513,12 @@ pub async fn resolve_reply_refs(
 /// someone else's record this nest has no business deleting. The post-delete
 /// re-drive (`post_delete_redrive`) scans these for a cross-post whose post
 /// is gone: a mapping outliving its post is exactly the retained-on-failure
-/// row `write_through_delete_inner` left for a retry.
+/// row `write_through_delete_inner` left for a retry. Sorted, so the re-drive
+/// can resume its walk where the last pass stopped.
 pub fn list_crosspost_post_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT fauna_post_id FROM bluesky_posts WHERE interacted = 1")?;
+    let mut stmt = conn.prepare(
+        "SELECT fauna_post_id FROM bluesky_posts WHERE interacted = 1 ORDER BY fauna_post_id",
+    )?;
     let ids = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -597,6 +600,45 @@ mod tests {
         upsert_linked_account(&conn, &canonical, "did:plc:ext", "ext.bsky.social")
             .expect("the canonical spelling is written");
         assert!(get_linked_account(&conn, &canonical).unwrap().is_some());
+    }
+
+    /// The post-delete re-drive's rotation splits this list with
+    /// `partition_point`, which is correct only on a sorted list. `bluesky_posts`
+    /// is a rowid table, so an unsorted scan returns rows in insertion order —
+    /// which a fixture inserting in id order cannot tell from a sort. Insert out
+    /// of order and the `ORDER BY` is the only thing that can sort them.
+    #[tokio::test]
+    async fn crosspost_post_ids_come_back_sorted_whatever_the_insertion_order() {
+        let db = CacheDb::open_in_memory().unwrap();
+        let conn = db.conn().await;
+        crate::bluesky::apply_schema(&conn).expect("apply bluesky schema");
+
+        for id in ["cc", "aa", "ee", "bb", "dd"] {
+            store_crosspost_mapping(
+                &conn,
+                id,
+                &format!("at://did:plc:x/app.bsky.feed.post/{id}"),
+                "did:plc:x",
+                "bafy",
+            )
+            .unwrap();
+        }
+        // An ingested (interacted = 0) row sorting in the middle is never listed.
+        assert!(
+            insert_ingested_post_mapping(
+                &conn,
+                "ab",
+                "at://did:plc:y/app.bsky.feed.post/ab",
+                "bafy",
+                "did:plc:y"
+            )
+            .unwrap()
+        );
+
+        assert_eq!(
+            list_crosspost_post_ids(&conn).unwrap(),
+            ["aa", "bb", "cc", "dd", "ee"]
+        );
     }
 
     /// The reply derivation's root rule (`bridges.md` § Cross-posting → *A

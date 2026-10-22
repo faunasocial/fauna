@@ -72,6 +72,19 @@ pub enum FakeCall {
         folder: String,
         verify_content: bool,
     },
+    ListKindSnapshots {
+        kind: String,
+    },
+    CreateKindSnapshot {
+        kind: String,
+    },
+    PruneKindPolicy {
+        kind: String,
+        dry_run: bool,
+    },
+    CheckKind {
+        kind: String,
+    },
 }
 
 /// Scripted responses + a call log.
@@ -85,6 +98,8 @@ struct Inner {
     folders: Vec<WireFolderSummary>,
     /// Snapshots per folder name.
     snapshots: std::collections::BTreeMap<String, Vec<SnapshotSummaryRow>>,
+    /// Snapshots per message kind — a kind entry's rows.
+    kind_snapshots: std::collections::BTreeMap<String, Vec<SnapshotSummaryRow>>,
     check_reply: SnapshotCheckReply,
     prune_reply: SnapshotPruneSetPolicyReply,
     /// Per-snapshot-id `get` replies. A snapshot with no entry answers the
@@ -126,6 +141,14 @@ impl FakeBackupsNestApi {
             .unwrap()
             .snapshots
             .insert(folder.to_string(), rows);
+    }
+
+    pub fn set_kind_snapshots(&self, kind: &str, rows: Vec<SnapshotSummaryRow>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .kind_snapshots
+            .insert(kind.to_string(), rows);
     }
 
     pub fn set_check_reply(&self, reply: SnapshotCheckReply) {
@@ -357,5 +380,75 @@ impl BackupsNestApi for FakeBackupsNestApi {
             .get(&snapshot_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    // The kind twins share their folder twin's pause and failure flags: a
+    // test scripts "the next create fails" without caring which form it takes.
+
+    async fn list_kind_snapshots(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<SnapshotSummaryRow>, BackupsApiError> {
+        let pause_here = std::mem::take(&mut self.inner.lock().unwrap().pause_next_list_snapshots);
+        if self.take_pause() || pause_here {
+            YieldOnce(false).await;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(FakeCall::ListKindSnapshots {
+            kind: kind.to_string(),
+        });
+        if let Some(err) = inner.fail_list_snapshots.take() {
+            return Err(err);
+        }
+        Ok(inner.kind_snapshots.get(kind).cloned().unwrap_or_default())
+    }
+
+    async fn create_kind_snapshot(&self, kind: &str) -> Result<(), BackupsApiError> {
+        if self.take_pause() {
+            YieldOnce(false).await;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(FakeCall::CreateKindSnapshot {
+            kind: kind.to_string(),
+        });
+        if let Some(err) = inner.fail_create.take() {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn prune_kind_policy(
+        &self,
+        kind: &str,
+        dry_run: bool,
+    ) -> Result<SnapshotPruneSetPolicyReply, BackupsApiError> {
+        if self.take_pause() {
+            YieldOnce(false).await;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(FakeCall::PruneKindPolicy {
+            kind: kind.to_string(),
+            dry_run,
+        });
+        if let Some(err) = inner.fail_prune.take() {
+            return Err(err);
+        }
+        let mut reply = inner.prune_reply.clone();
+        reply.dry_run = dry_run;
+        Ok(reply)
+    }
+
+    async fn check_kind(&self, kind: &str) -> Result<SnapshotCheckReply, BackupsApiError> {
+        if self.take_pause() {
+            YieldOnce(false).await;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(FakeCall::CheckKind {
+            kind: kind.to_string(),
+        });
+        if let Some(err) = inner.fail_check.take() {
+            return Err(err);
+        }
+        Ok(inner.check_reply.clone())
     }
 }

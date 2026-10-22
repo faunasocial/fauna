@@ -97,6 +97,7 @@ struct CalendarListView: View {
                                 if let error = vm.errorMessage {
                                     ErrorBanner(message: error)
                                 }
+                                RefusedChangeList(vm: vm)
                                 // Calendars
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(L.events.calendars)
@@ -319,6 +320,9 @@ struct CalendarListView: View {
             //
             // `reloadToken` stays on its own `.onChange` below (it pops a pushed
             // event detail) — it is a nav signal, not an identity one.
+            // A refusal that lands while the page is open paints with no
+            // re-entry (events.md § Refused scheduling changes).
+            .onStoreChange { await vm.loadRefusedChanges() }
             .task(id: SessionKey(client)) {
                 guard let client else {
                     vm.reset()

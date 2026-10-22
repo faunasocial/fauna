@@ -1,6 +1,5 @@
 package com.fauna.app.core.feed
 
-import com.fauna.app.core.ApiClient
 import com.fauna.app.testing.FaunaRobolectricTestRunner
 import com.fauna.ffi.FfiFeedManager
 import com.fauna.ffi.FfiRangedNestReaderInterface
@@ -87,7 +86,7 @@ class InlineVideoPlaybackTest {
         val reader = FakeReader(10, 10)
         var opened: Pair<String, String>? = null
         val media = InlineVideoPlayback.resolve(
-            manager, mock(ApiClient::class.java), block, "https://127.0.0.1:3000", File("/tmp"),
+            manager, null, null, block, "https://127.0.0.1:3000", File("/tmp"),
         ) { nestUrl, path ->
             opened = nestUrl to path
             reader
@@ -103,11 +102,11 @@ class InlineVideoPlaybackTest {
         val manager = mock(FfiFeedManager::class.java)
         val block = RenderBlock.Video(hash = "bb", alt = "")
         whenever(manager.playbackSource(block)).thenReturn(PlaybackSource.Unplayable(reason = "no"))
-        assertNull(InlineVideoPlayback.resolve(manager, mock(ApiClient::class.java), block, "https://n", File("/tmp")))
+        assertNull(InlineVideoPlayback.resolve(manager, null, null, block, "https://n", File("/tmp")))
 
         whenever(manager.playbackSource(block)).thenReturn(PlaybackSource.Url(url = "/api/v1/blob/bb"))
         assertNull(
-            InlineVideoPlayback.resolve(manager, mock(ApiClient::class.java), block, "https://n", File("/tmp")) { _, _ ->
+            InlineVideoPlayback.resolve(manager, null, null, block, "https://n", File("/tmp")) { _, _ ->
                 throw IllegalStateException("unpinned cert")
             },
         )

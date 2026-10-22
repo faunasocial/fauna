@@ -110,6 +110,16 @@ const (
 	// anti-abuse tuning, not a human-chosen knob; smtp-server.md
 	// § Connection-time limits.
 	maxInboundMsgsPerIPPerHour = 50
+	// maxUnknownRcptsPerSession caps the recipients one port-25 session may
+	// have the nest's resolver refuse. Every RCPT costs a resolve_recipient
+	// round-trip to the nest, and a directory-harvest sender walks local parts
+	// a hundred to a transaction (MaxRecipients), tarpitted but uncapped. Once
+	// the cap is reached the session is closed with 421 4.7.0 before any
+	// further resolver call: a legitimate MTA retrying a message with a few
+	// stale addresses never comes near it. Counted across RSET, like the
+	// tarpit's errCount. Hard-coded: internal anti-abuse tuning, not a
+	// human-chosen knob; smtp-server.md § Connection-time limits.
+	maxUnknownRcptsPerSession = 10
 	// maxSubmissionConns caps simultaneously-served submission (465/587)
 	// connections. Authenticated clients, so the cap is a generous OS-FD /
 	// goroutine backstop rather than a flood brake — matched to the Rust
@@ -267,6 +277,20 @@ func capSubmission(ln net.Listener, port string) net.Listener {
 	)
 }
 
+// preAuthSubmission wraps a capped submission listener (465/587) in the
+// pre-auth connection deadline (connlimit.NewPreAuthListener), counting a
+// connection closed on it as SMTPConnectionsTotal{port,"preauth_deadline"}.
+// The session's auth-success point lifts it (submissionSession.authenticate).
+// Wrap it outermost below tls.NewListener, above capSubmission, so a Close
+// still releases the slot (mda.preAuthMDA is the IMAP twin).
+func preAuthSubmission(ln net.Listener, logger *slog.Logger, port string) net.Listener {
+	return connlimit.NewPreAuthListener(ln, func() {
+		metrics.SMTPConnectionsTotal.WithLabelValues(port, "preauth_deadline").Inc()
+		// Debug, not info: a stranger's scan must not flood the log.
+		logger.Debug("mta: pre-auth connection deadline reached", "port", port)
+	})
+}
+
 // perIPSubmission wraps a raw submission listener (465/587) in the shared
 // per-IP concurrent-connection limiter (connlimit.PerIPLimiter, fed from
 // AuthPolicy.max_conn_per_ip), labelling shed connections on
@@ -355,6 +379,12 @@ type inboundBackend struct {
 	// backends that don't construct it ⇒ applyScanGate runs ungated.
 	scanGate *scanGate
 
+	// dataBudget is the process-wide in-flight DATA byte budget
+	// (maxInFlightDataBytes), shared by pointer into every session like
+	// scanGate. nil in unit-test backends that don't construct it ⇒ Data reads
+	// unbudgeted.
+	dataBudget *dataBudget
+
 	// requireStartTLS enforces InboundTLSMode=required (smtp-server.md
 	// § TLS posture per port): when true, inboundSession.Mail rejects
 	// MAIL FROM on a not-yet-STARTTLS'd connection with 530 5.7.10. Set
@@ -402,6 +432,7 @@ func (b *inboundBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 		caller:                   b.caller,
 		bytePlane:                b.bytePlane,
 		localDomains:             lc.localDomains,
+		primaryDomain:            lc.primaryDomain,
 		outboundTrigger:          b.outboundTrigger,
 		maxMessageBytes:          lc.maxMessageBytes,
 		authPolicy:               lc.authPolicy,
@@ -409,6 +440,7 @@ func (b *inboundBackend) NewSession(c *gosmtp.Conn) (gosmtp.Session, error) {
 		unlistedRecipientPenalty: lc.unlistedRecipientPenalty,
 		scanConfig:               b.scanConfig,
 		scanGate:                 b.scanGate,
+		dataBudget:               b.dataBudget,
 		requireStartTLS:          b.requireStartTLS,
 		drain:                    b.drain,
 		msgRate:                  b.msgRate,
@@ -559,7 +591,12 @@ type inboundSession struct {
 	policy         *Policy
 	fcrdns         FCrDNSResult
 	fcrdnsResolved bool
-	mailChecked    bool
+	// mailChecked: the peer-IP rules (no-rDNS, FCrDNS enforce) have run — once
+	// per connection. heloChecked/checkedHELO: the greeting name the greeting
+	// rules last passed, so a changed name is checked again at its MAIL FROM.
+	mailChecked bool
+	heloChecked bool
+	checkedHELO string
 	// msgRate is the backend's shared per-IP message-rate limiter
 	// (inboundBackend.msgRate); nil ⇒ no message-rate gate.
 	msgRate *RateLimiter
@@ -571,6 +608,11 @@ type inboundSession struct {
 	// time.Sleep (the production path).
 	errCount int
 	sleep    func(time.Duration)
+
+	// unknownRcpts counts the recipients the nest's resolver refused on this
+	// session (across RSET); at maxUnknownRcptsPerSession the session is done
+	// and every later MAIL, RCPT and DATA answers 421 (unknownRcptCapErr).
+	unknownRcpts int
 
 	// requireStartTLS mirrors the backend flag: when true, Mail rejects
 	// the envelope on a pre-STARTTLS connection (InboundTLSMode=required).
@@ -584,6 +626,9 @@ type inboundSession struct {
 
 	caller       wsrpc.Caller
 	localDomains []string
+	// primaryDomain is the nest's primary mail domain, the domain a forward's
+	// SRS envelope is on; the spoof floor reads it (forwardDoor).
+	primaryDomain string
 	// bytePlane stages an oversized sealed body on the bulk-byte plane. Copied
 	// from the backend at NewSession, like every other session-scoped dep.
 	bytePlane *byteplane.Client
@@ -641,6 +686,10 @@ type inboundSession struct {
 	// breaker state + in-flight budget are global. nil ⇒ ungated.
 	scanGate *scanGate
 
+	// dataBudget is the process-wide in-flight DATA byte budget, shared by
+	// pointer from the backend; nil ⇒ unbudgeted.
+	dataBudget *dataBudget
+
 	// indexHint holds the C.8 tokenize result on the message body +
 	// subject; populated by Session.Data once the C.7 spam gate has
 	// accepted the message. Phase C.9 encrypts
@@ -693,6 +742,21 @@ func (s *inboundSession) reject(err *gosmtp.SMTPError) *gosmtp.SMTPError {
 	}
 	sleep(tarpitDelay(s.errCount))
 	return err
+}
+
+// unknownRcptCapErr returns the 421 that closes a session whose resolver
+// refusals reached maxUnknownRcptsPerSession, or nil while it is under the cap.
+// Not tarpitted: the refusals that got it here each paid the tarpit already,
+// and a 421 ends the session.
+func (s *inboundSession) unknownRcptCapErr() *gosmtp.SMTPError {
+	if s.unknownRcpts < maxUnknownRcptsPerSession {
+		return nil
+	}
+	return &gosmtp.SMTPError{
+		Code:         421,
+		EnhancedCode: gosmtp.EnhancedCode{4, 7, 0},
+		Message:      "Too many unknown recipients; closing connection",
+	}
 }
 
 // checkHeaderSection is the parser-bomb defense (smtp-server.md
@@ -797,6 +861,11 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 			Message:      "Service shutting down",
 		}
 	}
+	// A session whose resolver refusals reached the unknown-recipient cap is
+	// done: no new transaction, so an RSET buys no fresh round of lookups.
+	if capErr := s.unknownRcptCapErr(); capErr != nil {
+		return capErr
+	}
 	// InboundTLSMode=required (smtp-server.md § TLS posture per port):
 	// reject the envelope until the connection has upgraded via STARTTLS.
 	// Fires before any policy gate — and regardless of whether a spam
@@ -824,12 +893,18 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	if s.policy == nil {
 		return nil
 	}
-	if !s.mailChecked {
-		s.mailChecked = true
-		// HELO/EHLO syntactic check — fires once per session at the
-		// first MAIL FROM (go-smtp doesn't expose a HELO callback;
-		// reading c.Hostname() here is the equivalent hook).
-		helo := strings.TrimSpace(s.conn.Hostname())
+	// The greeting rules (syntax, self-claim, identity) fire at the first MAIL
+	// FROM and again at any later MAIL FROM whose greeting name differs from
+	// the one already checked — a re-EHLO after RSET — never twice for the same
+	// name (go-smtp doesn't expose a HELO callback; reading c.Hostname() here
+	// is the equivalent hook). The name is recorded only once it passes, so a
+	// refused greeting is refused again on a retry.
+	helo := ""
+	if s.conn != nil {
+		helo = strings.TrimSpace(s.conn.Hostname())
+	}
+	if !s.heloChecked || helo != s.checkedHELO {
+		// HELO/EHLO syntactic check.
 		if err := validateHELOSyntax(helo, s.clientIP); err != nil {
 			s.logger.Info("smtp: invalid HELO", "client_ip", s.clientIP, "helo", helo, "err", err)
 			return s.reject(&gosmtp.SMTPError{
@@ -876,6 +951,13 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 				})
 			}
 		}
+		s.heloChecked = true
+		s.checkedHELO = helo
+	}
+	// The peer-IP rules depend on the address, not the greeting: once per
+	// connection, at the first MAIL FROM whose greeting passed.
+	if !s.mailChecked {
+		s.mailChecked = true
 		// No rDNS alone-reject — the admin opted in, and the peer has
 		// definitely no PTR (a resolver error fails open).
 		if s.policy.RejectNoRDNS && s.fcrdnsResolved && s.fcrdns.NoPTR {
@@ -905,7 +987,7 @@ func (s *inboundSession) Mail(from string, _ *gosmtp.MailOptions) error {
 	}
 	// Sender-domain MX/A check (smtp-server.md § Sender-domain). Runs on
 	// every MAIL FROM — the envelope sender can differ across an RSET, so
-	// this is NOT once-per-session like the HELO gates above. Two bypasses:
+	// unlike the HELO gates above, it is not keyed on the greeting. Two bypasses:
 	// the null sender `<>` (from == "", RFC 5321 §4.5.5 bounce traffic),
 	// and loopback peers — local relays / cron legitimately send from
 	// non-resolving sender domains, mirroring postfix's permit_mynetworks-
@@ -963,6 +1045,9 @@ func senderEnvelopeDomain(from string) string {
 }
 
 func (s *inboundSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
+	if capErr := s.unknownRcptCapErr(); capErr != nil {
+		return capErr
+	}
 	// Domain filter — RCPT TO for any domain not in the deployment's
 	// active mail_domains list is relay (550 5.7.1). The list arrives
 	// via fauna.bridges.fetch_config's `local_domains` projection
@@ -1091,6 +1176,11 @@ func (s *inboundSession) Rcpt(to string, _ *gosmtp.RcptOptions) error {
 			s.logger.Info("smtp: resolve_recipient reject",
 				"client_ip", s.clientIP, "local_part", localPart, "domain", rcptDomain,
 				"smtp_code", res.SMTPCode, "reason", res.Reason)
+			s.unknownRcpts++
+			if s.unknownRcpts >= maxUnknownRcptsPerSession {
+				s.logger.Info("smtp: unknown-recipient cap reached; closing session",
+					"client_ip", s.clientIP, "unknown_rcpts", s.unknownRcpts)
+			}
 			return s.reject(rejectFromResolver(res.SMTPCode, res.Reason))
 		case wsrpc.ResolveDiscard:
 			// RFC 8058 mailto one-click unsubscribe (mail-mass-mailing.md
@@ -1426,19 +1516,48 @@ func (s *inboundSession) Data(r io.Reader) error {
 	// forensic row's synthetic message_id from it, which is what makes that
 	// insert idempotent.
 	acceptedAtUnix := time.Now().Unix()
-	// Phase C.4 pre-parser size guard: bound io.ReadAll with a
-	// LimitReader so a 1 GiB header bomb can't tie up the goroutine
-	// before our explicit cap check. When maxMessageBytes is 0 (tests
-	// that don't exercise the cap) we read without a cap; production
-	// always carries a non-zero value from the snapshot.
-	var raw []byte
-	var err error
-	if s.maxMessageBytes > 0 {
-		raw, err = io.ReadAll(io.LimitReader(r, int64(s.maxMessageBytes)+1))
-	} else {
-		raw, err = io.ReadAll(r)
+	// The unknown-recipient cap closes the session for DATA too: recipients
+	// accepted before it was reached ride no further.
+	if capErr := s.unknownRcptCapErr(); capErr != nil {
+		return capErr
 	}
-	if err != nil {
+	// Phase C.4 pre-parser size guard: bound the read with a LimitReader so
+	// a 1 GiB header bomb can't tie up the goroutine before our explicit cap
+	// check. When maxMessageBytes is 0 (tests that don't exercise the cap) we
+	// read without a cap; production always carries a non-zero value from the
+	// snapshot. Every growth of the buffer is charged against the process-wide
+	// in-flight DATA byte budget first, and against this source's share of it
+	// (smtp-server.md § Connection-time limits), held until Data returns; past
+	// either the message is told to retry later — infra-class, so not
+	// tarpitted: we are full. A transfer that falls behind the whole-DATA
+	// deadline is dropped, its charge returned.
+	charge := s.dataBudget.open(dataShareKey(s.clientIP))
+	defer charge.close()
+	raw, err := readDataWithinBudget(r, int64(s.maxMessageBytes), charge)
+	switch {
+	case errors.Is(err, errDataBudgetFull), errors.Is(err, errDataSourceShareFull):
+		s.logger.Warn("smtp: in-flight DATA byte budget full; message deferred",
+			"client_ip", s.clientIP, "from", s.from, "reason", err.Error(),
+			"budget_bytes", maxInFlightDataBytes)
+		return &gosmtp.SMTPError{
+			Code:         451,
+			EnhancedCode: gosmtp.EnhancedCode{4, 3, 1},
+			Message:      "Insufficient system resources; try again later",
+		}
+	case errors.Is(err, errDataTooSlow):
+		s.logger.Info("smtp: DATA transfer too slow; connection dropped",
+			"client_ip", s.clientIP, "from", s.from, "bytes", charge.held)
+		// Close the connection: left open, the rest of the trickle would be
+		// read and discarded for as long as the sender liked.
+		if s.conn != nil {
+			_ = s.conn.Conn().Close()
+		}
+		return &gosmtp.SMTPError{
+			Code:         421,
+			EnhancedCode: gosmtp.EnhancedCode{4, 4, 2},
+			Message:      "Transfer too slow; closing connection",
+		}
+	case err != nil:
 		return err
 	}
 	if s.maxMessageBytes > 0 && uint32(len(raw)) > s.maxMessageBytes {
@@ -2266,7 +2385,56 @@ func (s *inboundSession) maybeForwardForRecipient(actorID, raw, localMessageID [
 		return // forward-all disabled for this recipient
 	}
 	dispatchForward(ctx, s.caller, s.logger, s.outboundTrigger, s.clientIP, s.from,
-		s.parsed.Headers, raw, actorID, target, s.forwardOrigMsgID(localMessageID), "forward-all", copyMode)
+		s.parsed.Headers, raw, actorID, target, s.forwardOrigMsgID(localMessageID), "forward-all", copyMode,
+		s.forwardDoor())
+}
+
+// forwardDoor is the door a forward arrived through, carrying what the spoof
+// floor (mail-forwarding.md § Spoof floor — a local From: must have
+// authenticated) reads. dispatchForward computes the floor itself from it, so no
+// caller can forget or forge the floor: the submission exemption is the one
+// named value submissionForwardDoor, never a literal at a call site.
+//
+// The MX door's floor suppresses every forward of a message whose From: names a
+// served domain, or a name under the primary mail domain's organizational
+// domain, and whose DMARC verdict here was not pass. A forward leaves unsigned
+// with its envelope SRS-rewritten onto the primary mail domain, so forwarding
+// such a message would SPF-align the spoofed From: and pass DMARC downstream —
+// for any fail the perimeter admits (log-only, DMARC enforcement off, the
+// domain's own p=quarantine or p=none) and for a domain publishing no DMARC
+// record at all.
+type forwardDoor struct {
+	// mx is true for the inbound MX door; the zero value is the submission door.
+	mx           bool
+	localDomains []string
+	// primaryDomain is the domain the SRS envelope is on — the nest's primary
+	// mail domain, the same lookup the outbound worker rewrites onto.
+	primaryDomain string
+	verdicts      *mailfauna.AuthVerdicts
+}
+
+// submissionForwardDoor is the submission door: its From: was held to the
+// authenticated submitter before the message got to a forward
+// (mail-multidomain.md § From: header ownership), so the floor does not apply.
+var submissionForwardDoor = forwardDoor{}
+
+// unauthenticatedLocalFrom reports whether the spoof floor suppresses every
+// forward of raw at this door.
+func (d forwardDoor) unauthenticatedLocalFrom(raw []byte) bool {
+	if !d.mx {
+		return false
+	}
+	return mailfauna.ForwardUnauthenticatedLocalFrom(raw, d.localDomains, d.primaryDomain, d.verdicts)
+}
+
+// forwardDoor is this MX session's door for dispatchForward.
+func (s *inboundSession) forwardDoor() forwardDoor {
+	return forwardDoor{
+		mx:            true,
+		localDomains:  s.localDomains,
+		primaryDomain: s.primaryDomain,
+		verdicts:      s.verdicts,
+	}
 }
 
 // forwardOrigMsgID is the `original_msgid` a forward of this message carries:
@@ -2334,7 +2502,8 @@ func (s *inboundSession) dispatchFilterForwards(actorID, raw, localMessageID []b
 	enqueued := 0
 	for _, p := range plans {
 		if dispatchForward(ctx, s.caller, s.logger, s.outboundTrigger, s.clientIP, s.from,
-			s.parsed.Headers, raw, actorID, p.destination, origMsgID, p.ruleID, copyMode) == forwardEnqueued {
+			s.parsed.Headers, raw, actorID, p.destination, origMsgID, p.ruleID, copyMode,
+			s.forwardDoor()) == forwardEnqueued {
 			enqueued++
 		}
 	}
@@ -2368,7 +2537,7 @@ func (s *inboundSession) dispatchForwarderRedirect(rcpt resolvedInboundRcpt, raw
 	}
 	if dispatchForward(ctx, s.caller, s.logger, s.outboundTrigger, s.clientIP, s.from,
 		s.parsed.Headers, raw, rcpt.forwarderActorID, rcpt.forwardTarget, origMsgID,
-		"forwarder", wsrpc.ForwardCopyModeRedirect) == forwardFailed {
+		"forwarder", wsrpc.ForwardCopyModeRedirect, s.forwardDoor()) == forwardFailed {
 		// Infra-class tempfail: never routed through reject's tarpit.
 		return forwarderTempfailError()
 	}
@@ -2415,9 +2584,12 @@ const (
 // for an external forwarder. `headers` are the inbound/submitted message's headers
 // as they arrived (the loop floors inspect them, predating our own prepends).
 //
-// It applies the two per-forward loop floors (Received: chain > 10 hops, or our
-// own X-Fauna-Forwarded-By already present — :134,:146; each suppresses only the
-// forward), stamps a fresh X-Fauna-Forwarded-By onto a private copy (the caller's
+// It applies the spoof floor itself, from `door` (the MX door from the
+// message's From: and DMARC verdict, the submission door never —
+// mail-forwarding.md § Spoof floor — a local From: must have
+// authenticated) and the two per-forward loop floors
+// (Received: chain > 10 hops, or our own X-Fauna-Forwarded-By already present —
+// :134,:146; each suppresses only the forward), stamps a fresh X-Fauna-Forwarded-By onto a private copy (the caller's
 // `raw` is untouched), and enqueues one outbound_mail_queue forward row via
 // fauna.bridges.forward_message. The SRS envelope rewrite is applied nest-side at
 // queue-out (N3). A suppressed/failed forward is logged and never fails the
@@ -2441,6 +2613,7 @@ func dispatchForward(
 	raw, forwarderActor []byte,
 	target, origMsgID, ruleID string,
 	copyMode wsrpc.ForwardCopyMode,
+	door forwardDoor,
 ) forwardOutcome {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -2451,6 +2624,12 @@ func dispatchForward(
 		return forwardSuppressed
 	}
 	ourActor := hex.EncodeToString(forwarderActor)
+	if door.unauthenticatedLocalFrom(raw) {
+		logger.Info("smtp: forward suppressed",
+			"client_ip", clientIP, "actor", ourActor, "rule", ruleID,
+			"verdict", "forward_suppressed_unauthenticated_local_from")
+		return forwardSuppressed
+	}
 
 	// Stamp X-Fauna-Forwarded-By on the copy to forward — prependHeaders returns
 	// a fresh buffer, so the caller's `raw` is untouched. Built BEFORE the size

@@ -1,0 +1,43 @@
+[package]
+# The package is the DEVICE SHELL; its binary is `fauna-cli`. The catalog crate
+# (`libs/fauna-cli`) holds the package name `fauna-cli` (`apps/cli.md` § One
+# catalog, many front-ends), and a workspace cannot hold two packages of one name.
+name = "fauna-cli-device"
+description = "The cli app's device shell: Fauna operated by an LLM host over MCP, as a principal of the user"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Ships as per-OS release archives like tui, never through a language registry
+# (the `apps/fauna-tui` reasoning).
+publish = false
+
+[[bin]]
+name = "fauna-cli"
+path = "src/main.rs"
+
+[features]
+default = []
+# The e2e seams (`e2e-conventions.md` convention 15): the dial-base override
+# that stands in for handle resolution against a loopback nest, and the
+# credential-store redirect in a --release e2e build. Never default-on.
+e2e-agent = ["fauna-credential-store/e2e-agent"]
+
+[dependencies]
+fauna-cli = { path = "../../libs/fauna-cli", features = ["device"] }
+# The principal session's native client (`PrincipalNestClient`).
+fauna-anon-client = { path = "../../libs/fauna-anon-client" }
+# `fauna.setup.status`, the public read `admin_registration_mode_get` makes.
+fauna-protocol = { workspace = true }
+# Handle → nest domain, the way every app resolves a handle (`network`).
+fauna-core = { path = "../../libs/fauna-core" }
+# The headless credential store, under this app's own namespace
+# (`apps/tui.md` § Credential storage).
+fauna-credential-store = { workspace = true }
+fauna-client-accounts = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+fauna-credential-store = { workspace = true, features = ["no-live-keyring"] }

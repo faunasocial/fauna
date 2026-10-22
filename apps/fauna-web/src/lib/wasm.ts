@@ -1,7 +1,8 @@
-import { base } from '$app/paths';
+import { asset } from '$app/paths';
+import { registerIdentityStoreChunk } from './identity-store';
 import type { WsRpcClient, WasmUploadPayload } from '../../static/fauna_wasm.js';
-import type { LocalizedText } from '$lib/i18n/localized';
-import type { ImportTotals } from '$lib/mail-import-confirm';
+import type { LocalizedText } from '#lib/i18n/localized';
+import type { ImportTotals } from '#lib/mail-import-confirm';
 // Type-only (erased at build, so no runtime cycle with rpc.ts, which imports this
 // module): `ObligationAction` is the `fauna.moderation.actions` wire row and stays
 // owned by its rpc module — the merge below takes it as the queue's server half.
@@ -12,19 +13,20 @@ import type {
   EmailFilter,
   BackupDestination,
   MutedKeyword,
+  MutedKeywordLevel,
   NodeLeg,
-} from '$lib/rpc';
+} from '#lib/rpc';
 import type {
   IssuerForcedArm,
   IssuerForcedConfirmView,
   IssuerKeyRow,
   IssuerKeyView,
-} from '$lib/admin-oauth-keys';
-import type { MdDecoration, MdRevealRange, ComposeMarkerPlan } from '$lib/markdown-decorations';
-import type { Affordance } from '$lib/offline-gate';
-import type { OverlayFace } from '$lib/contact-overlay';
-import type { AskRules, FeedRequestState } from '$lib/ward-asks';
-import type { DeadGenerations, LetGoOutcome } from '$lib/recovery-let-go';
+} from '#lib/admin-oauth-keys';
+import type { MdDecoration, MdRevealRange, ComposeMarkerPlan } from '#lib/markdown-decorations';
+import type { Affordance } from '#lib/offline-gate';
+import type { OverlayFace } from '#lib/contact-overlay';
+import type { AskRules, FeedRequestState } from '#lib/ward-asks';
+import type { DeadGenerations, LetGoOutcome } from '#lib/recovery-let-go';
 import type {
   Block,
   BlockCaret,
@@ -34,16 +36,17 @@ import type {
   NoteDocument,
   StructuralGesture,
   WasmNoteLine,
-} from '$lib/notes';
-import type { RenderBlock, RenderDocument, QuotedPostEmbed, ResolvedLinkPreview } from '$lib/document';
+} from '#lib/notes';
+import type { RenderBlock, RenderDocument, QuotedPostEmbed, ResolvedLinkPreview } from '#lib/document';
 // Type-only (erased at build, so no runtime cycle with task-delegation.ts,
-// which imports this module) — see the `$lib/rpc` note above.
-import type { RunnerStatus, PinOption } from '$lib/task-delegation';
+// which imports this module) — see the `#lib/rpc` note above.
+import type { RunnerStatus, PinOption } from '#lib/task-delegation';
 import { classifyChallengeError } from './auth-errors';
 import { wireCriticalAlertsSource, type CriticalAlertRow } from './critical-alerts';
+import { localTimestamp } from './value-format';
 
 // Re-export the typed silent-challenge errors + classifier so existing call
-// sites keep importing them from `$lib/wasm`.
+// sites keep importing them from `#lib/wasm`.
 export { classifyChallengeError, NestOutdatedError, TransientAuthError, NestIdentityChangedError } from './auth-errors';
 
 let wasmModule: typeof import('../../static/fauna_wasm.js') | null = null;
@@ -61,7 +64,10 @@ export function ensureWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm.js');
-      await mod.default(`${base}/fauna_wasm_bg.wasm`);
+      await mod.default(asset('fauna_wasm_bg.wasm'));
+      // The identity store's key, if this page holds it, goes in before
+      // anything reads the registry through this chunk (identity-store.ts).
+      registerIdentityStoreChunk(mod);
       wasmModule = mod;
       // This chunk hosts the session-start critical-alert sweep's registry
       // (`src/critical_alerts.rs` — `runCriticalAlertSweep` in `src/rpc.rs`
@@ -89,7 +95,7 @@ function wasm() {
 /** The post-claim serving-enablement step's progress — the web read of
  *  `fauna_e2e_agent::SERVING_ENABLEMENT_KEY`, parsed from the shared Rust
  *  derivation (`serving_enablement_json`), never re-built here. The step runs
- *  inside this core chunk (`applyServingEnablement` in `$lib/rpc`), so before
+ *  inside this core chunk (`applyServingEnablement` in `#lib/rpc`), so before
  *  the chunk loads it cannot have run: the empty run list is the honest answer. */
 export type ServingEnablement = {
   started: number;
@@ -107,7 +113,7 @@ export function servingEnablement(): ServingEnablement {
 
 /** This tab's account runtime — the faces over `fauna-wasm`'s
  *  `account_runtime` module, the one runtime this tab hosts
- *  (`$lib/account-runtime` owns its lifecycle). Every read answers "none"
+ *  (`#lib/account-runtime` owns its lifecycle). Every read answers "none"
  *  while the core chunk is not loaded: no runtime can run before it. */
 export async function accountRuntimeShutdown(): Promise<void> {
   if (!wasmModule) return;
@@ -126,7 +132,7 @@ export function accountRuntimeStopBudgetMs(): number {
   return wasmModule?.accountRuntimeStopBudgetMs() ?? 0;
 }
 /** The sign-out record's faces over `fauna-wasm`'s `account_scope`
- *  (`$lib/accounts` owns their use). Record the sign-out for every account the
+ *  (`#lib/accounts` owns their use). Record the sign-out for every account the
  *  registry names plus `signedInActor` — synchronous, so the gesture writes it
  *  before its first await; `false` when the core chunk is not loaded yet. */
 export function signOutRecordBegin(signedInActor: string | undefined): boolean {
@@ -161,8 +167,8 @@ export async function signOutFinishRecorded(eraseRefused: boolean): Promise<Sign
 }
 /** The conversations-engine role's faces over `fauna-wasm` — the Web Lock
  *  `conversationsManager` takes before any engine exists, whose model and two
- *  postures `fauna_mls::engine_role` owns (`$lib/conversations` and
- *  `$lib/accounts` are their callers). The accounts among `actorIds` whose
+ *  postures `fauna_mls::engine_role` owns (`#lib/conversations` and
+ *  `#lib/accounts` are their callers). The accounts among `actorIds` whose
  *  role ANOTHER tab of this browser holds right now: the erase's question,
  *  this tab's own hold consulted, never probed; degrades open. */
 export async function actorsServedByAnotherTab(actorIds: readonly string[]): Promise<string[]> {
@@ -200,7 +206,7 @@ export async function accountEnrollmentNotice(): Promise<string | null> {
   if (!wasmModule) return null;
   return (await wasmModule.accountEnrollmentNotice()) ?? null;
 }
-/** The store-change notice (`$lib/store-change` is its one caller): resolves
+/** The store-change notice (`#lib/store-change` is its one caller): resolves
  *  with the notice count once it differs from `seen`, `undefined` when this
  *  tab hosts no runtime or the runtime stopped while waiting. Never rejects. */
 export async function accountStoreChangedAfter(seen: number): Promise<number | undefined> {
@@ -277,8 +283,15 @@ export async function accountPumpNow(): Promise<void> {
   if (!wasmModule) return;
   await wasmModule.accountPumpNow();
 }
+/** The Nests page's restore gesture — `accountRestoreFromCustodian`, the
+ *  shared `RestoreFromCustodian` command run by this tab's runtime; the raw
+ *  JSON answer `#lib/nests-custody-restore` reads. */
+export async function accountRestoreFromCustodian(url: string): Promise<string> {
+  await ensureWasm();
+  return wasm().accountRestoreFromCustodian(url);
+}
 /** One door of a consumer seam for `actorIdHex`'s account — the core chunk's
- *  half of the account port (`accountPortCall`; `$lib/account-runtime`'s
+ *  half of the account port (`accountPortCall`; `#lib/account-runtime`'s
  *  `sharedAccountPort` is the one caller). Rejects while the core chunk is not
  *  loaded, which the calling chunk reads as a port fault: no runtime can run
  *  before it. */
@@ -292,7 +305,7 @@ export async function accountPortCall(
 }
 
 /** The initialized core wasm module, for a feature-gated glue module that must
- *  live OUTSIDE this file. The one caller today is `$lib/payments`: this module
+ *  live OUTSIDE this file. The one caller today is `#lib/payments`: this module
  *  is unconditionally in the bundle, so a face wrapper defined here ships the
  *  wasm export's NAME into the store-safe artifact even with every caller folded
  *  away, and those names are the web column's criterion-2 axis
@@ -354,6 +367,16 @@ export interface StaleSurfaces {
    *  `MailExportSection.svelte` while it is mounted, which re-runs the
    *  machine's hydrate. */
   mail_export: boolean;
+  /** The Import page's session view — set by the three import events when
+   *  another device starts, finishes, fails or dismisses an import.
+   *  Page-gated: read by `MailImportSection.svelte` while it is mounted, which
+   *  re-runs the machine's hydrate. */
+  mail_import: boolean;
+  /** The nest's self-description (`fauna.nest.info`) — set by
+   *  `fauna.nest.info_changed` on an accepted rules write
+   *  (`nest-rules.md` § Acceptance at joining, and a change of rules). Read by
+   *  the root shell, which re-reads the self-description past any memo. */
+  nest_info: boolean;
 }
 
 /** Which client surfaces a push `kind` has made stale
@@ -491,7 +514,7 @@ export function connectionReportsForTest(): unknown {
 }
 
 /** Record one painted frame's candidate error surfaces (`ids[i]` showed
- *  `texts[i]`) in the shared tally — see `$lib/e2e-painted-errors`. A no-op
+ *  `texts[i]`) in the shared tally — see `#lib/e2e-painted-errors`. A no-op
  *  where the bundle has no leg (the observable then reads `null`). */
 export function paintedErrorsObserveForTest(ids: string[], texts: string[]): void {
   const fn = coreTestExport('paintedErrorsObserveForTest');
@@ -591,7 +614,7 @@ export function logClear(): void {
 // `LogsView` renders both Logs surfaces through these instead of
 // re-implementing the severity filter / line+row form in TypeScript (it was the
 // web "twin of `logs_view.rs`"). `tzOffsetSecs` is the browser's current local
-// UTC offset in seconds (via the one `$lib/utcOffset` door), so the shared formatter
+// UTC offset in seconds (via the one `#lib/utcOffset` door), so the shared formatter
 // renders local `HH:MM:SS` with no timezone lib. Entries go in oldest-first (as
 // the ring / admin RPC return them); `logRows` / `logRenderedText` emit
 // newest-first.
@@ -709,8 +732,43 @@ export function forwardPerHourHint(ceiling: number): LocalizedText {
   return wasm().forwardPerHourHint(ceiling) as LocalizedText;
 }
 
+/** The automatic-reply message check (`email-filters.md` § The auto-respond
+ *  setting) — wasm twin of `fauna_client_mail_settings::
+ *  autorespond_message_draft_outcome`. A blank draft is `refused`. */
+export type AutorespondMessageDraftOutcome =
+  | { kind: 'set'; text: string }
+  | { kind: 'refused'; message: LocalizedText };
+
+export function autorespondMessageDraftOutcome(draft: string): AutorespondMessageDraftOutcome {
+  return wasm().autorespondMessageDraftOutcome(draft) as AutorespondMessageDraftOutcome;
+}
+
+/** The mailbox-quota readout (`imap-server.md` § Composition with submission
+ *  quota): the label's `{used}`/`{limit}` filled from the other two once
+ *  resolved. Never the sending allowance. */
+export interface MailQuotaDisplay {
+  label: LocalizedText;
+  used: LocalizedText;
+  limit: LocalizedText;
+}
+
+export function mailQuotaDisplay(quotas: unknown): MailQuotaDisplay {
+  return wasm().mailQuotaDisplay(quotas) as MailQuotaDisplay;
+}
+
+/** The daily sending-allowance readout ("{used} of {limit} recipients today");
+ *  `{used}`/`{limit}` are plain args, no nested text. */
+export function mailSubmissionQuotaDisplay(quotas: unknown): LocalizedText {
+  return wasm().mailSubmissionQuotaDisplay(quotas) as LocalizedText;
+}
+
+/** The notice naming the limit that ran out, or `null` while none has. */
+export function mailOverQuotaNotice(quotas: unknown): LocalizedText | null {
+  return (wasm().mailOverQuotaNotice(quotas) as LocalizedText | null) ?? null;
+}
+
 // The §4 provider form's two faces (`paymentsKnownKinds`, `paymentsWebhookUrl`)
-// MOVED to `$lib/payments` with the rest of the payments glue — see
+// MOVED to `#lib/payments` with the rest of the payments glue — see
 // `wasmCoreModule` above for why a face whose name must excise cannot be
 // wrapped in this file.
 
@@ -742,14 +800,15 @@ export interface ProfileDisplay {
   display_name: string | null;
   bio: string | null;
   links: ProfileLinkInput[];
-  /** Hex blob hash of the stored avatar, or null when the profile has none.
-   *  Fetch the bytes over the ordinary blob download path. */
+  /** Hex blob hash of the stored avatar, or null when the profile has none —
+   *  the header's `profile-avatar`, fetched from the nest that served the
+   *  profile. */
   avatar_hash_hex: string | null;
   /** Hex blob hash of the stored banner, or null. */
   banner_hash_hex: string | null;
 }
 
-/** Decode a stored profile body (from `profileGet`) to its editable display
+/** Decode a stored profile body (from `profileHeaderRead`) to its editable display
  *  fields — the read half of the read-modify-write (shared
  *  `fauna_client_profile::decode_profile_display`). */
 export function decodeProfileDisplay(body: Uint8Array): ProfileDisplay {
@@ -758,7 +817,7 @@ export function decodeProfileDisplay(body: Uint8Array): ProfileDisplay {
 
 /** Where a knock sent from `actorIdHex`'s profile page goes — `inboxSend`'s
  *  `recipient_nest_url`, `null` = this nest. `profileBody` is the stored
- *  profile the page's open already fetched (`profileGet`); `ownNestUrl` is
+ *  profile the page's open already fetched (`profileHeaderRead`); `ownNestUrl` is
  *  this box's nest base URL. The rule is the shared
  *  `fauna_client_profile::knock_recipient_nest_url` (`profile.md` § Where
  *  logic lives → *Request contact routing*) — never re-derived here. */
@@ -771,13 +830,14 @@ export function knockRecipientNestUrl(
 }
 
 /** The shared ward-ask matching rules (`fauna_client_family::ward_asks`) over
- *  their wasm faces — what `$lib/ward-asks`' render helpers take as their
+ *  their wasm faces — what `#lib/ward-asks`' render helpers take as their
  *  `AskRules`, so the SPA never restates the id compare or the triple key. */
 export const wardAskRules: AskRules = {
   contactAskPending: (asks, peerHex) => wasm().wardContactAskPending(asks, peerHex),
   feedRequestState: (asks, bridgeId, operation, target) =>
     (wasm().wardFeedRequestState(asks, bridgeId, operation, target) as FeedRequestState | undefined) ??
       null,
+  knocksAwaitGuardian: (policy) => wasm().wardKnocksAwaitGuardian(policy),
 };
 
 /** The feed-source operations' wire names, from the shared
@@ -802,6 +862,9 @@ export function buildEditedProfile(
   return wasm().build_edited_profile(
     secretHex,
     baseBody ?? undefined,
+    // The owner's last identity-signed row (`last_direct_body`): not threaded
+    // on web yet, so a save over an external app's edit degrades as before.
+    undefined,
     displayName ?? undefined,
     bio ?? undefined,
     JSON.stringify(links),
@@ -832,6 +895,8 @@ export function buildEditedProfileWithImages(
   return wasm().build_edited_profile_with_images(
     secretHex,
     baseBody ?? undefined,
+    // `last_direct_body`: not threaded on web yet (see `buildEditedProfile`).
+    undefined,
     displayName ?? undefined,
     bio ?? undefined,
     JSON.stringify(links),
@@ -839,6 +904,7 @@ export function buildEditedProfileWithImages(
     avatarHashHex ?? undefined,
     bannerClear,
     bannerHashHex ?? undefined,
+    undefined,
   );
 }
 
@@ -906,7 +972,7 @@ export async function forgetNestIdentityPin(origin: string): Promise<void> {
 /** Pre-identity public node metadata over the anonymous WS-RPC `fauna.nest.info`
  *  kind — the replacement for the deleted HTTP `GET /api/v1/node-info`
  *  (`api-layers.md` § Public). Returns the parsed `{ domain, version,
- *  registration }`; the caller (`$lib/api.ts`) casts to `NestInfoResponse`. */
+ *  registration }`; the caller (`#lib/api.ts`) casts to `NestInfoResponse`. */
 export async function nestInfo(origin: string): Promise<unknown> {
   await ensureWasm();
   return JSON.parse((await wasm().nestInfo(origin)) as string);
@@ -961,12 +1027,12 @@ export async function adoptHeldSuccessor(
   verifiedSuccessor: string,
 ): Promise<boolean> {
   await ensureWasm();
-  return wasm().adoptHeldSuccessor(predecessorActorIdHex, verifiedSuccessor) as boolean;
+  return await (wasm().adoptHeldSuccessor(predecessorActorIdHex, verifiedSuccessor) as Promise<boolean>);
 }
 
 /** Whether this identity is owed a relaunch adoption's group sweep — a PEEK,
  *  so the Settings page brings conversations up only on the launch that owes
- *  one. The discharge itself is `$lib/rpc`'s `dischargeOwedSuccessionSweep`: it
+ *  one. The discharge itself is `#lib/rpc`'s `dischargeOwedSuccessionSweep`: it
  *  sweeps over the live session and the live engine. */
 export async function successionSweepOwed(actorIdHex: string): Promise<boolean> {
   await ensureWasm();
@@ -999,25 +1065,6 @@ export async function resolveVerifiedSuccessor(
 export async function nestResolve(domain: string, origin: string): Promise<string> {
   await ensureWasm();
   return (await wasm().nestResolve(domain, origin)) as string;
-}
-
-/** Resolve a handle to its actor ID over the anonymous WS-RPC
- *  `fauna.actor.by_handle` kind — the replacement for the deleted HTTP
- *  `GET /api/v1/actor/by-handle/{handle}`. The anonymous WS is CORS-exempt, so a
- *  cross-origin (remote-nest) resolve works where the HTTP fetch was blocked.
- *
- *  `domain` is the optional multi-domain qualifier: for a recipient typed as
- *  `bob@domain2` (a secondary active local domain), passing `domain2` makes the
- *  nest echo it back so we can display `bob@domain2`; omitted → the nest reports
- *  the canonical identity domain (single-domain behavior). Additive —
- *  `mail-multidomain.md` § Multi-domain handles § Resolution. */
-export async function actorByHandle(
-  handle: string,
-  origin: string,
-  domain?: string,
-): Promise<{ actor_id: string; handle: string; domain: string }> {
-  await ensureWasm();
-  return JSON.parse((await wasm().actorByHandle(handle, origin, domain)) as string);
 }
 
 /** The Contacts Find User lookup with cross-nest peer discovery — shared
@@ -1154,9 +1201,13 @@ export async function buildPostWithMedia(
   return wasm().build_post_with_media(secretHex, body, JSON.stringify(tags), JSON.stringify(mediaItems), replyToHex);
 }
 
-export async function decodePost(data: Uint8Array): Promise<any> {
+// Decode a post body fetched BY ID (`fauna.posts.get(requestedPostId)`): the
+// shared `decode_post_shaped_fetched_as`, so `valid` is signature ∧ the bytes'
+// wire id == `requestedPostId`. There is deliberately no unbound decode face —
+// paint the result only through `paintableDecodedPost` (`#lib/feed-utils`).
+export async function decodePostFetchedAs(requestedPostId: string, data: Uint8Array): Promise<any> {
   await ensureWasm();
-  return JSON.parse(wasm().decode_post(data));
+  return JSON.parse(wasm().decodePostFetchedAs(requestedPostId, data));
 }
 
 // The resolved-post plain-text extraction the tier-1 spam-model client-write path
@@ -1267,7 +1318,7 @@ export async function gatedPostSidecar(): Promise<Uint8Array> {
 // IndexedDB persistence + the `fauna_mls_active_tab` single-tab lease +
 // `beforeunload` localStorage backup) was RETIRED with slice 6 of
 // devices.md § Cross-device MLS group-state sync: the conversations manager's
-// engine (`$lib/conversations` / `libs/fauna-wasm/src/conversations.rs`) is the
+// engine (`#lib/conversations` / `libs/fauna-wasm/src/conversations.rs`) is the
 // ONE web MLS engine — multi-tab-safe via the nest replica + CAS, and the only
 // minter of key packages (a second engine's private init keys would be
 // invisible to the engine that processes Welcomes).
@@ -1310,7 +1361,7 @@ export function classifyText(text: string): ClassifyLabel[] {
 // ── Value formatting (shared `fauna_core::format`) ────────────
 //
 // Thin sync wrappers over the wasm boundary; the display helpers live in
-// `$lib/value-format`. See `docs/goal/behavior/value-formatting.md`.
+// `#lib/value-format`. See `docs/goal/behavior/value-formatting.md`.
 
 /** `{ localized?: {key,args}, absolute_epoch_ms?: number }` — `localized` is
  *  set for recent buckets; `absolute_epoch_ms` for `≥7d` (render a native date). */
@@ -1347,6 +1398,18 @@ export function statusTextRaw(
   buildStamp: string | null,
 ): StatusText {
   return wasm().statusText(node, keyPackages ?? undefined, channels, buildStamp ?? undefined) as StatusText;
+}
+
+/** The product version this app is (`fauna-wasm`'s `buildVersion` — the
+ *  workspace version, `product-version.md` § The model). */
+export function buildVersion(): string {
+  return wasm().buildVersion() as string;
+}
+
+/** The organisation's terms URL (`fauna-wasm`'s `termsUrl` — `fauna_core::TERMS_URL`,
+ *  `terms-and-content-guidelines.md` § The decisions, item 4 (d)). */
+export function termsUrl(): string {
+  return wasm().termsUrl() as string;
 }
 
 export function byteSizeRaw(bytes: number): LocalizedText {
@@ -1642,20 +1705,74 @@ export interface ReportQueueRow {
   subject: AbuseReportSubject;
   subject_actor: string | null;
   reason: LocalizedText;
+  /** The wire reason token — what `reportBlockConfirmSummary` takes. */
+  reason_token: string;
   note: string | null;
   excerpt: string | null;
   origin: LocalizedText;
   created_at: number;
   can_open_takedown: boolean;
+  /** The shared `block::block_form_view` verdict: only an item subject arms Block. */
+  can_block: boolean;
+}
+
+/** `block::BlockFormView` — the Block / Unblock control's render decisions. */
+export interface BlockFormView {
+  can_submit: boolean;
+  blocked_reason: LocalizedText | null;
+  arm_label: LocalizedText;
+  confirm_label: LocalizedText;
+}
+
+/** One blocked-list row (`admin-nest-blocked-item`), worded by the shared
+ *  `blocked_row_view` beside the wire `subject` and `reason_token`. */
+export interface BlockedRow {
+  report_id: string;
+  subject: AbuseReportSubject;
+  subject_kind: string;
+  subject_id: string;
+  reason_token: string;
+  reason: LocalizedText;
+  blocked_at: number;
+  unblock: BlockFormView;
+}
+
+/** `block::block_form_view` — the Block (queue row, `restore` false) / Unblock
+ *  (blocked list) control. */
+export function reportBlockFormView(subject: AbuseReportSubject, restore: boolean): BlockFormView {
+  return wasm().reportBlockFormView(subject, restore) as BlockFormView;
+}
+
+/** `block::block_confirm_summary` — the armed confirm naming verb, item and
+ *  reason. `{item}` and `{reason}` are keys: resolve with
+ *  `resolveLocalizedNested`. */
+export function reportBlockConfirmSummary(
+  subject: AbuseReportSubject,
+  reasonToken: string,
+  restore: boolean,
+): LocalizedText {
+  return wasm().reportBlockConfirmSummary(subject, reasonToken, restore) as LocalizedText;
+}
+
+/** `block::block_verdict` — `null` error is success. */
+export function reportBlockVerdict(restore: boolean, error: string | null): LocalizedText {
+  return wasm().reportBlockVerdict(restore, error ?? undefined) as LocalizedText;
+}
+
+/** `fauna_core::obligation::admin_block_notice` — the shared notice an
+ *  admin-blocked post or message paints in its body position. `{reason}` is a
+ *  key: resolve with `resolveLocalizedNested`. */
+export function adminBlockNotice(reasonToken: string): LocalizedText {
+  return wasm().adminBlockNotice(reasonToken) as LocalizedText;
 }
 
 // ── Outside-app sign-in keys (`admin-nest-oauth-*`) — the pure word folds of
 // `fauna_client_admin` (authorization-server.md § The issuer → Two rotation
 // arms), the wasm twins of the UniFFI faces the natives render. The section
-// decides no sentence of its own; the calls that dispatch are `$lib/rpc`'s.
+// decides no sentence of its own; the calls that dispatch are `#lib/rpc`'s.
 
 /** `fauna_client_admin::issuer_key_row_label` → one
- *  `admin-nest-oauth-key-item-{n}` line: the signer's kid, or how many more
+ *  `admin-nest-oauth-key-item` line: the signer's kid, or how many more
  *  whole minutes a retired key is accepted. `nowSecs` is the clock at paint
  *  (epoch seconds) — the countdown is the point of a retired key's line. */
 export function issuerKeyRowLabel(row: IssuerKeyRow, nowSecs: number): LocalizedText {
@@ -1706,23 +1823,80 @@ export function encodeEmailFilterRule(kind: string, value: string): Record<strin
 
 // Every input the shared filter form collects for its action — the wasm
 // `FilterActionInputs` (snake_case, `fauna_protocol::email`). The form holds
-// the whole object as state, so an edit writes back the Reject reason and the
-// Forward copy mode unchanged.
+// the whole object as state, so an edit writes back every action's inputs
+// unchanged.
 export interface FilterActionInputs {
   kind: string;
   reject_reason: string;
   forward_address: string;
   keep_local_copy: boolean;
+  file_into_mailbox: string;
+  label: string;
+  auto_reply_subject: string;
+  auto_reply_body: string;
+  auto_reply_interval_hours: string;
 }
 
-// The action tags the form's dropdown offers and the edit gate admits
+// The action tags the form's dropdown offers
 // (`fauna_protocol::email::SUPPORTED_ACTION_KINDS`).
-export const FILTER_ACTION_KINDS = ['Allow', 'Discard', 'Reject', 'Forward'];
+export const FILTER_ACTION_KINDS = ['Allow', 'Discard', 'Reject', 'Forward', 'FileInto', 'AddLabel', 'AutoReply'];
 
 // A fresh form's action inputs: the first dropdown entry, every input at its
 // default (`FilterActionInputs::default()` — keep-a-local-copy checked).
 export function defaultFilterActionInputs(): FilterActionInputs {
-  return { kind: FILTER_ACTION_KINDS[0], reject_reason: '', forward_address: '', keep_local_copy: true };
+  return {
+    kind: FILTER_ACTION_KINDS[0],
+    reject_reason: '',
+    forward_address: '',
+    keep_local_copy: true,
+    file_into_mailbox: '',
+    label: '',
+    auto_reply_subject: '',
+    auto_reply_body: '',
+    auto_reply_interval_hours: '',
+  };
+}
+
+// Every input the shared filter form collects for its condition — the wasm
+// `FilterRuleInputs`: the rule-type tag, the value field, a header-contains
+// condition's header value and a spam-score condition's score in points.
+export interface FilterRuleInputs {
+  kind: string;
+  value: string;
+  header_value: string;
+  spam_score: string;
+}
+
+// The condition tags the form's dropdown offers
+// (`fauna_protocol::email::SUPPORTED_RULE_KINDS`).
+export const FILTER_RULE_KINDS = [
+  'SenderIs', 'SenderDomain', 'SubjectContains', 'BodyContains', 'HeaderExists', 'HeaderContains', 'SpamScoreAtLeast',
+];
+
+// A fresh form's condition inputs (`FilterRuleInputs::default()`).
+export function defaultFilterRuleInputs(): FilterRuleInputs {
+  return { kind: FILTER_RULE_KINDS[0], value: '', header_value: '', spam_score: '' };
+}
+
+export function encodeEmailFilterRuleInputs(inputs: FilterRuleInputs): Record<string, unknown> {
+  return wasm().encodeEmailFilterRuleInputs(inputs) as Record<string, unknown>;
+}
+
+// The reverse of `encodeEmailFilterRuleInputs`; `null` only for a condition a
+// newer build added.
+export function describeEmailFilterRuleInputs(rule: Record<string, unknown> | string): FilterRuleInputs | null {
+  return wasm().describeEmailFilterRuleInputs(rule) as FilterRuleInputs | null;
+}
+
+// The `filter-priority-input` buffer → the rule's order (blank is 0); throws
+// on anything but a whole number.
+export function parseFilterPriority(text: string): number {
+  return wasm().parseFilterPriority(text) as number;
+}
+
+// The full form's edit gate (`fauna_protocol::email::filter_is_editable`).
+export function filterIsEditable(filter: EmailFilter): boolean {
+  return wasm().filterIsEditable(filter) as boolean;
 }
 
 export function encodeEmailFilterActionInputs(
@@ -1774,8 +1948,8 @@ export function graceCountdownRaw(deadlineMs: number, nowMs: number): LocalizedT
   return wasm().graceCountdown(deadlineMs, nowMs) as LocalizedText | undefined;
 }
 
-// The three tip formatters MOVED to `$lib/payments` (resolved there rather than
-// exposed raw, since `$lib/value-format`'s wrappers moved with them) — see
+// The three tip formatters MOVED to `#lib/payments` (resolved there rather than
+// exposed raw, since `#lib/value-format`'s wrappers moved with them) — see
 // `wasmCoreModule` above.
 
 // Shared spam-threshold label band. `fauna_protocol::spam::spam_threshold_band`
@@ -2078,7 +2252,7 @@ export function backupAuditSetClockOffsetForTest(offsetSecs: number): void {
 
 /** Test-only: move the Nests trust facet's RENDER clock (grant liveness and the
  *  auto-renew due decision; never the mint clock) — the wasm half of the
- *  `trust_facet_advance_clock` e2e command (`$lib/trust-clock-e2e`), so a lapse
+ *  `trust_facet_advance_clock` e2e command (`#lib/trust-clock-e2e`), so a lapse
  *  journey reaches `expiring soon` / `paused` without waiting out the real
  *  ~90-day window (testing.md § convention 14).
  *
@@ -2097,6 +2271,30 @@ export function trustSetClockOffsetForTest(offsetSecs: number): void {
     );
   }
   (fn as (o: number) => void)(offsetSecs);
+}
+
+/** Test-only: move the submission-token refresh's clock (the 7-day re-mint
+ *  cadence and each re-minted token's `issued_at`; never the bearer clock) — the
+ *  wasm half of the `mail_token_refresh_advance_clock` e2e command
+ *  (`#lib/mail-token-refresh-e2e`, testing.md § convention 14).
+ *
+ *  ⚠ Module-wide, and nothing auto-resets it: pass `0` once the assertions are
+ *  done. Same two-flavor discipline as `trustSetClockOffsetForTest` above. */
+export function mailTokenRefreshSetClockOffsetForTest(offsetSecs: number): void {
+  const fn = (wasm() as unknown as Record<string, unknown>).mailTokenRefreshSetClockOffsetForTest;
+  if (typeof fn !== 'function') {
+    throw new Error(
+      'mailTokenRefreshSetClockOffsetForTest is absent: this SPA is running the PRODUCTION ' +
+        'wasm flavor, which compiles the e2e seams out. Build with `just web-test`.',
+    );
+  }
+  (fn as (o: number) => void)(offsetSecs);
+}
+
+/** The submission-token refresh's between-connects tick, in seconds — the shared
+ *  `token_refresh::TOKEN_REFRESH_TICK_SECS`, never re-spelled here. */
+export function tokenRefreshTickSecs(): number {
+  return wasm().tokenRefreshTickSecs();
 }
 
 /** Which input widget a `feed-rule-type-select` row's `(value, required)` fields need —
@@ -2163,7 +2361,7 @@ export function hexShort(bytes: Uint8Array): string {
 /** Full display hex for a byte id (every byte → lowercase hex) — the
  *  actor/member-id fallback label shown when no handle is available. Twin of
  *  native's `hex_full`; pass a `Uint8Array` (web's wire actor id is `number[]`
- *  → normalize with `toBytes(...)` from `$lib/hex`). */
+ *  → normalize with `toBytes(...)` from `#lib/hex`). */
 export function hexFull(bytes: Uint8Array): string {
   return wasm().hexFull(bytes) as string;
 }
@@ -2320,6 +2518,12 @@ export interface QueueRow {
   action: number | null;
   timestamp: number;
   source: 'Server' | 'Local';
+  /** The issuing nest's domain on a row another nest delivered; `null` on this
+   *  nest's own decision and on a local detection. */
+  issuer_nest: string | null;
+  /** The row text's suffix naming that nest (`moderation.queue.issued_by`);
+   *  `null` exactly when `issuer_nest` is. */
+  issued_by: LocalizedText | null;
 }
 
 /** The moderation queue = the server's `fauna.moderation.actions` obligation rows
@@ -2343,6 +2547,14 @@ export function moderationQueue(server: ObligationAction[], local: LocalDetectio
  *  on the `fauna.posts.get` withheld-body reply). */
 export function legalTakedownTombstone(reference: string): LocalizedText {
   return wasm().legalTakedownTombstone(reference) as LocalizedText;
+}
+
+/** `fauna_core::scoring::MutedKeywordLevel::of` — the level the muted-words
+ *  level picker shows for a row's stored `weight`: `hide` iff the weight
+ *  collapses (the full penalty), else `show-less`. The SPA never compares a
+ *  weight itself (`content-moderation-and-ranking.md` § Composition). */
+export function mutedKeywordLevel(weight: number): MutedKeywordLevel {
+  return wasm().mutedKeywordLevel(weight) as MutedKeywordLevel;
 }
 
 /** `fauna_core::scoring::muted_keywords_collapse` — does a decrypted
@@ -2489,11 +2701,11 @@ export function bunkerLastUsedLabel(formattedTime: string | undefined): Localize
 }
 
 // The §4 provider-status and §5 claim-status label decisions MOVED to
-// `$lib/payments` — see `wasmCoreModule` above.
+// `#lib/payments` — see `wasmCoreModule` above.
 
 // Shared task-delegation runner/option label decision
 // (`fauna_core::delegation::{runner_label,option_label}` over wasm), resolved
-// through `$lib/task-delegation`'s `runnerText`/`pinOptionLabel` (participants.md
+// through `#lib/task-delegation`'s `runnerText`/`pinOptionLabel` (participants.md
 // § Task delegation). `labels` crosses as a plain object — `from_js`'s HashMap
 // deserialize walks object entries, not a JS `Map`.
 export function taskDelegationRunnerLabelRaw(
@@ -2646,6 +2858,26 @@ export function dmarcPolicyOptions(): DmarcPolicyOption[] {
   return wasm().dmarcPolicyOptions() as DmarcPolicyOption[];
 }
 
+// The remove-confirm dialog's title
+// (`fauna_client_mail_settings::local_domains::remove_confirm_title` over wasm),
+// a `LocalizedText` the page resolves with `resolveLocalized`.
+export function removeConfirmTitle(domain: string): LocalizedText {
+  return wasm().removeConfirmTitle(domain) as LocalizedText;
+}
+
+// The remove-confirm dialog's ratified body, beside [removeConfirmTitle]
+// (`fauna_client_mail_settings::local_domains::remove_confirm_body` over wasm).
+export function removeConfirmBody(domain: string): LocalizedText {
+  return wasm().removeConfirmBody(domain) as LocalizedText;
+}
+
+// The shared DMARC-report window picker (`fauna_client_mail_settings::
+// dmarc_report_window_options` over wasm) — the day counts in paint order
+// (7 default / 30 / 90). `dmarc-reporting.md` § Admin pane summary surface.
+export function dmarcReportWindowOptions(): number[] {
+  return wasm().dmarcReportWindowOptions() as number[];
+}
+
 // How often an open `admin-dns` page runs the shared machine's
 // `backgroundRecheck` (`fauna_client_dns::record_recheck_secs` over wasm) —
 // the shared cadence; the page owns only the timer.
@@ -2668,6 +2900,32 @@ export function fcrdnsModeOptions(): ReachPolicyOption[] {
 // raw-value picker. See [fcrdnsModeOptions].
 export function imapDeleteNonemptyOptions(): ReachPolicyOption[] {
   return wasm().imapDeleteNonemptyOptions() as ReachPolicyOption[];
+}
+
+// The shared DMARC `fo=` picker catalog (`dmarcForensicModeOptions` over wasm):
+// the four RFC 7489 tags in render order, the value `DmarcPolicyView.fo_mode`
+// holds. See [fcrdnsModeOptions].
+export function dmarcForensicModeOptions(): ReachPolicyOption[] {
+  return wasm().dmarcForensicModeOptions() as ReachPolicyOption[];
+}
+
+// The two receiver-side sender dashboards (`senderDashboardLinks` over wasm):
+// `gmail` / `outlook` index key, hard-coded URL and label i18n key, in display
+// order — the shared `SENDER_DASHBOARD_LINKS`, so no URL is spelled here.
+export interface SenderDashboardLink {
+  key: string;
+  url: string;
+  label_key: string;
+}
+export function senderDashboardLinks(): SenderDashboardLink[] {
+  return wasm().senderDashboardLinks() as SenderDashboardLink[];
+}
+
+// Whether a forensic-report retention of `days` earns the page's PII warning
+// (`dmarcForensicRetentionWarns` over wasm) — the threshold lives in shared
+// Rust, never restated here.
+export function dmarcForensicRetentionWarns(days: number): boolean {
+  return wasm().dmarcForensicRetentionWarns(days) as boolean;
 }
 
 // The localized label for a stored `unknown_sender_mail` wire value, failing
@@ -2699,6 +2957,21 @@ export function unknownPeerDmLabelRaw(value: string): LocalizedText {
 export interface PolicySummaryLine {
   label: LocalizedText;
   value: LocalizedText;
+  /** The guardian rule's reason as `{ lang → text }` (the `default` entry is
+   *  always present), set only on the line a rule of the guardian's document
+   *  makes — shown verbatim beside the line (`nest-rules.md` § The shared rule
+   *  editor → *The reason is the member's to read*). Absent on every other line. */
+  reason?: Record<string, string> | null;
+}
+
+/** A summary line's reason in `lang`, falling back to the required `default`
+ *  entry — `PolicySummaryLine::reason_text`'s pick over the wire record. `null`
+ *  when the line carries none, or an empty one. */
+export function policySummaryReasonText(line: PolicySummaryLine, lang: string): string | null {
+  const reason = line.reason;
+  if (!reason) return null;
+  const text = reason[lang] ?? reason['default'];
+  return text ? text : null;
 }
 
 // The four-line read-only reach-policy summary the supervised side sees, in
@@ -2753,6 +3026,10 @@ export interface ContentPolicyValue {
   spam: string;
   phishing: string;
   commercial: string;
+  /** The guardian's rule document (`ContentPolicy.document`, an object on the
+   *  wasm face; `nest-rules.md` § The shared rule editor (b)); absent on a
+   *  floors-only policy. Opaque here: the editor and the engine read it. */
+  document?: unknown;
 }
 
 /** What a render path should do with an item after composing the viewer's own
@@ -2790,11 +3067,37 @@ export interface RegionPlaceholder {
   reason: string;
 }
 
-/** One item's render decision with the region composed in: the verdict, and
- *  the placeholder when the region drove it (`null` otherwise). */
+/** The placeholder a NEST verdict paints in place of the item
+ *  (`nest-rules.md` § The nest source in the engine): the verb, the nest's
+ *  domain and the admin's reason, verbatim — the region placeholder's twin. */
+export interface NestPlaceholder {
+  verb: 'block' | 'collapse';
+  domain: string;
+  reason: string;
+}
+
+/** Either source's placeholder; a nest's carries `domain`, a region's `region`. */
+export type ItemPlaceholder = RegionPlaceholder | NestPlaceholder;
+
+/** What the guardian's policy paints beside the family-policy frame
+ *  (`nest-rules.md` § The shared rule editor → *The reason is the member's to
+ *  read*): the verb, and the guardian rule's reason verbatim in the app's
+ *  language — `null` when a floor drove the verdict. The frame stays the app's. */
+export interface GuardianPlaceholder {
+  verb: 'block' | 'collapse';
+  reason: string | null;
+}
+
+/** One item's render decision with the region and the nest composed in: the
+ *  verdict, and the placeholder when the region or the nest drove it (`null`
+ *  otherwise). */
 export interface ContentRender {
   verdict: ContentRenderVerdict;
-  placeholder: RegionPlaceholder | null;
+  placeholder: ItemPlaceholder | null;
+  /** Set when the guardian's policy drove a `block`/`collapse`; `reason` is the
+   *  guardian rule's, verbatim, or `null` for a floor. Absent before the region
+   *  plane opens (no document composes then). */
+  guardianPlaceholder?: GuardianPlaceholder | null;
   /** `block` because the viewer reported the item or its author
    *  (`moderation.md` § Corollary — block also hides): the surface paints
    *  "You reported this" in place of the body. */
@@ -2876,6 +3179,22 @@ export interface RegionPlaneHandle {
     hasMedia: boolean,
     lang: string,
   ): ContentRender;
+  /** `render` with the nest source composed in — the one call for an item read
+   *  through the nest `nestId` names (`WasmRegionPlane.renderWithNest`). */
+  renderWithNest(
+    book: NestRulesBookHandle,
+    nestId: string,
+    labels: ContentLabelEntry[],
+    contentPolicy: ContentPolicyValue | null,
+    ownSpamPermille: number | undefined,
+    ownPhishingPermille: number | undefined,
+    contentIdHex: string | null | undefined,
+    authorHex: string | null | undefined,
+    text: string,
+    hashtags: string[],
+    hasMedia: boolean,
+    lang: string,
+  ): ContentRender & { nestPlaceholder: NestPlaceholder | null };
   view(): RegionView;
 }
 
@@ -2885,6 +3204,129 @@ export interface RegionPlaneHandle {
  *  region's policy). */
 export function openRegionPlane(languageTag: string | null, record: Uint8Array | null): RegionPlaneHandle {
   return new (wasm().WasmRegionPlane)(languageTag, record) as unknown as RegionPlaneHandle;
+}
+
+// ── The shared rule editor (`rule-editor-*`) and the nest-rules book ──────
+//
+// `WasmRuleEditor` (`libs/fauna-wasm/src/rule_editor.rs`) is the web twin of
+// the UniFFI `FfiRuleEditor`: the working document, the kinds, the level scale,
+// every label and defect sentence are shared Rust (`fauna_client_policy`); the
+// SPA paints `view()` and forwards the edits (`nest-rules.md` § The shared
+// rule editor). The interfaces mirror `fauna_client_policy::view`'s serde shapes.
+
+export type RuleKind = 'category' | 'keywords' | 'labeler' | 'prompt' | 'list';
+export type RuleVerdict = 'block' | 'collapse';
+
+export interface RuleRow {
+  number: number;
+  kind: RuleKind;
+  kind_label: LocalizedText;
+  read_only: boolean;
+  category: string | null;
+  keywords: string | null;
+  labeler: string | null;
+  prompt: string | null;
+  verdict: RuleVerdict;
+  level_index: number | null;
+  reasons: { lang: string; text: string }[];
+  reason_code: string;
+  inert: LocalizedText | null;
+}
+
+export interface RuleEditorView {
+  rows: RuleRow[];
+  kinds: { kind: RuleKind; label: LocalizedText }[];
+  categories: { category: string; label: LocalizedText }[];
+  labelers: { name: string }[];
+  verdicts: { verdict: RuleVerdict; label: LocalizedText }[];
+  levels: { label: LocalizedText; permille: number }[];
+  defects: LocalizedText[];
+  editable: boolean;
+  can_save: boolean;
+  reason_default_key: string;
+}
+
+/** One option of the labeler picker (`RuleEditor::labeler_choices`). */
+export interface LabelerChoice {
+  name: string;
+  /** `null` for a labeler the document bundles; the hex id of a subscribed one. */
+  labeler_id: string | null;
+}
+
+export interface RuleEditorHandle {
+  view(): RuleEditorView;
+  addRule(kind: RuleKind): number | undefined;
+  removeRule(index: number): boolean;
+  setKind(index: number, kind: RuleKind): boolean;
+  setCategory(index: number, category: string): boolean;
+  setKeywords(index: number, text: string): boolean;
+  setKeywordsInline(index: number, text: string): boolean;
+  setLabeler(index: number, name: string, module: Uint8Array): boolean;
+  labelerChoices(subscribed: string[]): LabelerChoice[];
+  chooseBundledLabeler(index: number, name: string): boolean;
+  setPrompt(index: number, text: string): boolean;
+  setVerdict(index: number, verdict: RuleVerdict): boolean;
+  setLevel(index: number, level: number): boolean;
+  setReason(index: number, lang: string, text: string): boolean;
+  validate(): LocalizedText[];
+  documentBytes(): Uint8Array;
+  free(): void;
+}
+
+/** The admin's editor over this nest's document bytes (`null` on a fresh install). */
+export function openRuleEditorForNest(domain: string, document: Uint8Array | null): RuleEditorHandle {
+  return wasm().WasmRuleEditor.forNest(domain, document ?? undefined) as unknown as RuleEditorHandle;
+}
+
+/** A row's `keywords` (one term per line) as the single-line input shows them. */
+export function ruleKeywordsInline(terms: string): string {
+  return wasm().WasmRuleEditor.keywordsInline(terms);
+}
+
+/** The guardian's editor over a ward's content policy (the `familyStatus`
+ *  ward entry's `policy.content_policy`, or `null`). */
+export function openRuleEditorForGuardian(contentPolicy: ContentPolicyValue | null): RuleEditorHandle {
+  return wasm().WasmRuleEditor.forGuardian(contentPolicy ?? null) as unknown as RuleEditorHandle;
+}
+
+/** What one self-description read did (`NestRulesRead`). */
+export type NestRulesReadResult =
+  | { kind: 'no_rules' }
+  | { kind: 'first'; sequence: number }
+  | { kind: 'unchanged' }
+  | { kind: 'changed'; domain: string; sequence: number }
+  | { kind: 'refused'; reason: string };
+
+/** The rules in force for a nest, as the settings surface paints them
+ *  (`NestRulesSummary`). */
+export interface NestRulesSummaryValue {
+  domain: string;
+  sequence: number;
+  issued_at: number;
+  rules: {
+    verdict: LocalizedText;
+    level: LocalizedText | null;
+    reason: string;
+    inert: LocalizedText | null;
+  }[];
+  not_applied: string | null;
+}
+
+/** The member's nest-rules book — `WasmNestRulesBook`
+ *  (`libs/fauna-wasm/src/nest_rules.rs`). */
+export interface NestRulesBookHandle {
+  refresh(client: WsRpcClient): Promise<{ nestId: string; domain: string; read: NestRulesReadResult }>;
+  summary(nestId: string, lang: string): NestRulesSummaryValue | null;
+  forget(nestId: string): void;
+  stored(): unknown;
+  free(): void;
+}
+
+/** A fresh book, or one rebuilt from the records a previous page persisted
+ *  (each is verified again). */
+export function openNestRulesBook(records: unknown | null): NestRulesBookHandle {
+  const w = wasm();
+  return (records ? w.WasmNestRulesBook.restore(records) : new w.WasmNestRulesBook()) as unknown as NestRulesBookHandle;
 }
 
 // ── The shared feature-policy editor (`feature-policy-editor-*`) ──────────
@@ -2987,6 +3429,35 @@ export function openFeaturePolicyEditorForWard(
   feature: string,
 ): Promise<PolicyEditorHandle> {
   return wasm().WasmPolicyEditor.openForWard(client, ward, feature) as unknown as Promise<PolicyEditorHandle>;
+}
+
+/** One `admin-audit-entry` row of the folded audit section. */
+export interface AuditLogRow {
+  id: number;
+  /** Epoch milliseconds; painted ahead of `text` by `localTimestamp`. */
+  ts_ms: number;
+  text: LocalizedText;
+}
+
+/** The folded `admin-audit-section` (`fauna_client_admin::AuditLogView`):
+ *  rows newest first, the chain-check line, and the more cursor (`null` once
+ *  the whole record is shown). */
+export interface AuditLogView {
+  rows: AuditLogRow[];
+  integrity_text: LocalizedText;
+  more_before_id: number | null;
+}
+
+/** The section's state held in wasm — `WasmAuditLog`. */
+export interface AuditLogHandle {
+  load(): Promise<AuditLogView>;
+  more(): Promise<AuditLogView>;
+  free(): void;
+}
+
+/** A fresh, empty audit-log section over `client`'s nest; call `load()`. */
+export function openAuditLog(client: WsRpcClient): AuditLogHandle {
+  return new (wasm().WasmAuditLog)(client) as unknown as AuditLogHandle;
 }
 
 // The guardian-floor categories a piece of content triggers, for Guardian Notify
@@ -3102,7 +3573,7 @@ export function newUsageHeartbeat(): UsageHeartbeatHandle {
 
 // ── Engagement-cue capture: the shared tracker (engagement-cues.md § Cue
 // vocabulary & derivation) — the wasm `WasmCueTracker`. The web shell that
-// drives it is `$lib/feed-cues`; all bookkeeping is shared Rust.
+// drives it is `#lib/feed-cues`; all bookkeeping is shared Rust.
 
 /** One probe row — `fauna_feed::CueRow`. `height <= 0` means "not yet
  *  arranged": held, never read as 0-visibility. */
@@ -3237,15 +3708,20 @@ export function approvalTimestampRaw(
 
 // Shared admin-nest host-OS-maintenance status label.
 // `fauna_core::format::os_maintenance_status_label` (over wasm) owns the state→key
-// decision (reboot-pending / updates-pending / up-to-date, from the `os_*` fields
-// on `fauna.setup.status`) the native apps consume via UniFFI — so web shares it
+// decision (no-host-data / reboot-pending / updates-pending / up-to-date, from the
+// `os_*` fields on `fauna.setup.status`) the native apps consume via UniFFI — so web shares it
 // instead of its own ternary. Returns a `LocalizedText` the SPA resolves via
 // `resolveLocalized`. See `installers/vps.md` § Host OS Maintenance § 4.
 export function osMaintenanceStatusLabel(
+  hostStatusPresent: boolean,
   securityUpdatesPending: number,
   rebootPending: boolean,
 ): LocalizedText {
-  return wasm().osMaintenanceStatusLabel(securityUpdatesPending, rebootPending) as LocalizedText;
+  return wasm().osMaintenanceStatusLabel(
+    hostStatusPresent,
+    securityUpdatesPending,
+    rebootPending,
+  ) as LocalizedText;
 }
 
 // Mail health readout labels (`mail-deliverability.md` § The mail health readout).
@@ -3261,6 +3737,13 @@ export function mailHealthCheckStateLabel(state: string): LocalizedText {
   return wasm().mailHealthCheckStateLabel(state) as LocalizedText;
 }
 
+// The `admin-mail` line for the last secret rotation (`MailPolicySnapshot
+// .secret_rotation`): `fauna_client_mail_settings::admin_policy::secret_rotation_text`
+// over wasm, a `LocalizedText` the page resolves through `resolveLocalized`.
+export function secretRotationText(view: unknown): LocalizedText {
+  return wasm().secretRotationText(view) as LocalizedText;
+}
+
 export function mailHealthHeartbeatLabelRaw(
   atSecs: number | null,
   nowMs: number,
@@ -3271,7 +3754,7 @@ export function mailHealthHeartbeatLabelRaw(
 // The private contact overlay's face for a tab that hosts no account runtime —
 // an empty projection (every name its public label) whose Save is refused. The
 // tab that hosts one reads `WasmConversationsManager.contactOverlays()`
-// instead; `$lib/conversations`'s `contactOverlays()` picks between them.
+// instead; `#lib/conversations`'s `contactOverlays()` picks between them.
 // See `docs/goal/ui/contacts.md` § The private overlay.
 export function contactOverlaysWithoutRuntime(): OverlayFace {
   return new (wasm().WasmContactOverlays)() as unknown as OverlayFace;
@@ -3509,7 +3992,7 @@ export function mediaSortDirectionLabel(descending: boolean): LocalizedText {
 // `undefined` exactly when `available` is true.
 //
 // Consumers do not call this directly — they bind it into the `use:offlineGate`
-// action (`$lib/offline-gate`), which owns how a reactive tree obeys the verdict.
+// action (`#lib/offline-gate`), which owns how a reactive tree obeys the verdict.
 export function offlineAffordance(kind: string, connectionState: string): Affordance {
   return wasm().offlineAffordance(kind, connectionState) as Affordance;
 }
@@ -3527,7 +4010,7 @@ export function offlineAffordance(kind: string, connectionState: string): Afford
 // its verdict.
 //
 // The consumer is the e2e automation surface's `connection` observable
-// (`$lib/e2e-automation`), which publishes the boolean beside the word so the
+// (`#lib/e2e-automation`), which publishes the boolean beside the word so the
 // harness never re-derives the list either.
 export function connectionIsOnline(connectionState: string): boolean {
   return wasm().connectionIsOnline(connectionState) as boolean;
@@ -3551,6 +4034,21 @@ export function certStatusView(
   notAfterUnix: number,
 ): CertStatusView {
   return wasm().certStatusView(state, isFloor, notAfterUnix) as CertStatusView;
+}
+
+// One `admin-dns-cert-issuance-error` line. `fauna_client_dns::cert_issuance_error_line`
+// (over wasm) owns the wording — the order switch and the sanitized CA text — so web has
+// none of its own; the caller passes the failure's date rendered like the cert badge's
+// expiry. Paint the result as plain text (the CA's detail is third-party data), never
+// `{@html}`. See `docs/goal/architecture/nest/tls-certificates.md` § Keeping the cert
+// alive, *The admin sees why issuance is failing*.
+export interface CertIssuanceErrorRow {
+  order: 'Domain' | 'IpBridge' | null;
+  detail: string;
+  failed_at_unix: number;
+}
+export function certIssuanceErrorLine(row: CertIssuanceErrorRow, date: string): string {
+  return wasm().certIssuanceErrorLine(row, date) as string;
 }
 
 // Shared `subscription-offer-status` badge label. `fauna_core::format::offer_status` +
@@ -3579,6 +4077,14 @@ export function offerStatusLabel(
 // `resolveLocalized`. See `docs/goal/architecture/apps/bridges.md` § Active bridges.
 export function bridgeDisplayName(role: string): LocalizedText {
   return wasm().bridgeDisplayName(role) as LocalizedText;
+}
+
+// Shared follow display name. `fauna_client_bridges::follow_display` (over wasm)
+// owns the rule — the petname if set and non-blank, else the raw external id —
+// that linux, tui and android already consume, so the bridge card's follow row
+// reads the same on every app. See `docs/goal/behavior/bridges.md` § Follows.
+export function followDisplay(id: string, petname?: string | null): string {
+  return wasm().followDisplay(id, petname ?? undefined) as string;
 }
 
 // Shared Nostr signing-mode label. `fauna_client_bridges::nostr_key_source_label`
@@ -3643,6 +4149,15 @@ export function bridgeModeApplies(modePlatform: string | undefined, platform: st
   return wasm().bridgeModeApplies(modePlatform, platform) as boolean;
 }
 
+// Which control a bridge setting's `setting_type` paints — the shared
+// classifier (`fauna_client_bridges::setting_control`), so web does not
+// hand-list the spellings providers use (`bool`/`boolean`/`toggle`,
+// `text`/`string`). `unknown` is the read-only fallback.
+export type BridgeSettingControl = 'toggle' | 'select' | 'number' | 'text' | 'unknown';
+export function bridgeSettingControl(settingType: string): BridgeSettingControl {
+  return wasm().bridgeSettingControl(settingType) as BridgeSettingControl;
+}
+
 // Shared mail-list member status label. `fauna_client_mail_settings::member_status_label`
 // (over wasm) owns the canonical Subscribed/Unsubscribed label map that the native
 // apps consume — so web stops hand-rolling its own `memberStatusBadge`. `status`
@@ -3667,6 +4182,24 @@ export function memberStatusLabel(status: string): LocalizedText {
  *  native's `alias_hits_label`. */
 export function aliasHitsLabel(hitCount: number, lastHitDate: string | null): LocalizedText {
   return wasm().aliasHitsLabel(hitCount, lastHitDate ?? undefined) as LocalizedText;
+}
+
+/** `mail-aliases-list-item-expires-at` text, or `null` for an alias with no
+ *  expiry; the expiry date is passed in pre-formatted (the `aliasHitsLabel`
+ *  split). Twin of native's `alias_expiry_label`. */
+export function aliasExpiryLabel(expiresAtMs: number | null, nowMs: number, expiryDate: string): LocalizedText | null {
+  return (wasm().aliasExpiryLabel(expiresAtMs ?? undefined, nowMs, expiryDate) as LocalizedText | null) ?? null;
+}
+
+/** Whether the row shows `mail-aliases-list-item-extend-button`. Twin of
+ *  native's `alias_is_extendable`. */
+export function aliasIsExtendable(
+  kind: string,
+  expiresAtMs: number | null,
+  usesRemaining: number | null,
+  nowMs: number,
+): boolean {
+  return wasm().aliasIsExtendable(kind, expiresAtMs ?? undefined, usesRemaining ?? undefined, nowMs) as boolean;
 }
 
 /** Whether saving this archive link must first ask once (it is off the user's own
@@ -3940,6 +4473,14 @@ export function renderDocumentProxiedImages(doc: RenderDocument): { path: string
   return (wasm().renderDocumentProxiedImages(doc) as { path: string; alt: string }[] | undefined) ?? [];
 }
 
+// The `{path, alt}` a post's `post-image` slot paints when it is a bridged picture — the first
+// `ProxiedImage` of a post with no blob image, else null
+// (`fauna_core::render::RenderDocument::proxied_post_image_ref` over wasm; render-model.md § D6c).
+// The browser twin of the native UniFFI `render_document_proxied_post_image` face.
+export function renderDocumentProxiedPostImage(doc: RenderDocument): { path: string; alt: string } | null {
+  return (wasm().renderDocumentProxiedPostImage(doc) as { path: string; alt: string } | null | undefined) ?? null;
+}
+
 // Every trusted media block (`Image` / `Video` / `ProxiedImage` / `ProxiedVideo`) in body order
 // (`fauna_core::render::RenderDocument::media_blocks` over wasm) — what web paints its media
 // row from, since web renders EVERY attachment (the richest existing pattern, priority #4).
@@ -4004,7 +4545,7 @@ export function wrapMarkdownSelection(
 // Compose-field inline-styling decoration map — the styled-content + marker byte
 // ranges over the RAW compose source, from the shared `fauna_core::markdown::decoration_map`
 // (over wasm). The same inline scanner feeds `markdownToHtml`, so the compose preview and
-// the sent message never disagree on what is styled. `$lib/markdown-decorations` converts
+// the sent message never disagree on what is styled. `#lib/markdown-decorations` converts
 // these byte ranges to UTF-16 CodeMirror positions for the `MarkdownEditor` applier (the
 // web twin of linux's `gtk::TextTag` applier / the native FFI `FfiMdDecoration`).
 // See `docs/goal/ui/conversations.md` § Compose-field inline markdown styling.
@@ -4017,7 +4558,7 @@ export function decorationMap(src: string): MdDecoration[] {
 // (over wasm). A markers-never-shown (Notes) editor conceals every marker `decorationMap`
 // returns and reveals only these (the run the caret is in) so its raw markdown can be edited;
 // structural block markers are never returned. One shared policy so web + native can't drift
-// on which markers reveal. `$lib/markdown-decorations` maps the byte ranges to UTF-16 positions.
+// on which markers reveal. `#lib/markdown-decorations` maps the byte ranges to UTF-16 positions.
 export function inlineRevealRanges(src: string, caret: number): MdRevealRange[] {
   return wasm().inlineRevealRanges(src, caret) as MdRevealRange[];
 }
@@ -4026,7 +4567,7 @@ export function inlineRevealRanges(src: string, caret: number): MdRevealRange[] 
 // — which inline markers to conceal vs which to dim, for a caret at byte offset `caret`. The
 // inline/structural split + the caret-edge reveal decision are shared Rust (one policy for web +
 // native — priority #2; design tracked internally); the web only
-// converts the byte ranges to UTF-16 + styles content from `decorationMap` (see `$lib/notes-editor`
+// converts the byte ranges to UTF-16 + styles content from `decorationMap` (see `#lib/notes-editor`
 // `composeMarkPlan`).
 export function composeDecorationPlan(src: string, caret: number): ComposeMarkerPlan {
   return wasm().composeDecorationPlan(src, caret) as ComposeMarkerPlan;
@@ -4036,7 +4577,7 @@ export function composeDecorationPlan(src: string, caret: number): ComposeMarker
 // `fauna_core::markdown::compose_show_markers_dim_ranges`) — the marker byte ranges to DIM for
 // a caret at byte offset `caret`: every inline-emphasis/structural marker whose source line
 // differs from the caret's line (markers on the caret's line are revealed, i.e. absent here).
-// Replaces `$lib/markdown-decorations`' hand-rolled `caretLine`/`lineOfUtf16` marker filter —
+// Replaces `#lib/markdown-decorations`' hand-rolled `caretLine`/`lineOfUtf16` marker filter —
 // one shared caret-line rule for web + native (windows/android/linux already consume it). See
 // `docs/goal/ui/conversations.md` § the compose "show markers" (dim) mode.
 export function composeShowMarkersDimRanges(src: string, caret: number): MdRevealRange[] {
@@ -4176,10 +4717,16 @@ export function roomProspectiveClass(
 }
 
 // `thread-room-notice`: which standing notice (if any) the room states, from
-// the two facts the projected room carries (`awaiting_key` wins) — the shared
+// the three facts the projected room carries — the shared
 // `RoomNotice::for_facts`, so no app re-decides precedence.
-export function roomNoticeFor(awaitingKey: boolean, moderationUnverified: boolean): string | null {
-  return wasm().roomNoticeFor(awaitingKey, moderationUnverified) as string | null;
+export function roomNoticeFor(
+  awaitingKey: boolean,
+  moderationUnverified: boolean,
+  bridgeDisconnected: boolean,
+): string | null {
+  return wasm().roomNoticeFor(awaitingKey, moderationUnverified, bridgeDisconnected) as
+    | string
+    | null;
 }
 
 // …its text, and its driver-facing `state` attribute
@@ -4213,13 +4760,13 @@ export function roomMayNameLabelerKind(kind: string): boolean {
 // (blocks → markdown buffer) are the Fork-1 lowering's ends; `applyStructuralGesture` is the
 // pure bullets-first gesture engine (Enter/Tab/Shift-Tab/Backspace/checkbox); `applyEdits` is
 // the Fork-1 reference lowering of the edits it returns. One shared policy for all 7 apps
-// (priorities #1/#2). See `$lib/notes` for the model types + the design spec.
+// (priorities #1/#2). See `#lib/notes` for the model types + the design spec.
 export function parseNote(md: string): NoteDocument {
   return wasm().parseNote(md) as NoteDocument;
 }
 
 /** `fauna_core::notes::note_line_map` — the per-buffer-line structural projection (byte offsets;
- *  `mapNoteLines` in `$lib/notes-editor` remaps to CodeMirror UTF-16). `blocks` is the array
+ *  `mapNoteLines` in `#lib/notes-editor` remaps to CodeMirror UTF-16). `blocks` is the array
  *  `parseNote` returns. The shared structural derivation (code folding, checkbox indexing,
  *  ordered-list numbering, prefix range) every app's Notes view turns into chrome + per-line
  *  styling — computed once, never per client (priority #2). */
@@ -4285,6 +4832,23 @@ export function typedAddressDisplay(addr: unknown): string {
   return wasm().typedAddressDisplay(addr) as string;
 }
 
+// The `dm-message-warmup-deferred` line for a sent mail the fresh-IP warm-up
+// holds (`MessageSnapshot.warmup_hold`; mail-deliverability.md § Enforcement at
+// submission time): the shared wording and queue count over wasm
+// (`fauna_conversations::message::warmup_deferred_text_at`), with only the
+// release time formatted here in the browser's local clock — wasm has no
+// timezone database (the native apps call the `local-clock` twin). `null` once
+// the release has come.
+export function warmupDeferredText(hold: { release_at_secs: number }): string | null {
+  return (
+    (wasm().warmupDeferredTextAt(
+      hold,
+      Math.floor(Date.now() / 1000),
+      localTimestamp(hold.release_at_secs * 1000),
+    ) as string | undefined) ?? null
+  );
+}
+
 // Identity-import field parsing (a bare 64-hex secret, the `fauna://identity?secret=&handle=`
 // query form, or the iOS colon form) via the shared `fauna_core::identity_qr` parser (over
 // wasm), shared with iOS/android instead of hand-rolled per client. Returns `null` on a
@@ -4348,7 +4912,7 @@ export function qrQuietZoneModules(): number {
 // in TS and shares one contract with the nostr bridge writer (priority #2/#4).
 // Returns `null` for any non-structured body (plain / media / video posts and
 // the `nostr/kind-N` unknown-kind fallback). Sync: `decoded` only exists after
-// `decodePost`, which has already awaited `ensureWasm()`. See
+// `decodePostFetchedAs`, which has already awaited `ensureWasm()`. See
 // `docs/goal/ui/feed.md` § Post content types + § Where logic lives.
 export type StructuredView =
   | { kind: 'article'; title: string; summary: string; image: string; content: string }
@@ -4367,11 +4931,11 @@ export function structuredView(decoded: unknown): StructuredView | null {
 // classification contract shared with linux/native (`source_label`) and the
 // per-app `protocolIcon`/`protocolLabel`/`ProtocolBadge`/`build_protocol_badge`
 // switches it replaced (priority #2/#4). Web keeps only its `SourceGlyph → emoji`
-// map (`$lib/source-glyph` `sourceGlyphEmoji`) keyed off the precomputed `glyph`
+// map (`#lib/source-glyph` `sourceGlyphEmoji`) keyed off the precomputed `glyph`
 // concept — the SAME map the conversations rail uses, so the badge and the rail
 // can't drift (render-model.md § Deltas → D5); the `label` is the canonical shared
 // `SourceKind::label`. Sync: every caller renders a post that only exists after
-// `decodePost`, which has already awaited `ensureWasm()`. See `docs/goal/ui/feed.md`
+// `decodePostFetchedAs`, which has already awaited `ensureWasm()`. See `docs/goal/ui/feed.md`
 // § Where logic lives.
 export interface SourceBadge {
   /** Stable icon-map key: `fauna | bluesky | nostr | activitypub | email | other`. */
@@ -4380,7 +4944,7 @@ export interface SourceBadge {
   label: string;
   /** Shared source-icon concept (`SourceKind::glyph()`), serialized to its
    *  lowercase id (`fox | envelope | butterfly | bolt | globe | unknown | archive | bridge`); the
-   *  key for `$lib/source-glyph` `sourceGlyphEmoji`. */
+   *  key for `#lib/source-glyph` `sourceGlyphEmoji`. */
   glyph: string;
   /** `SourceKind::badge_paints_label`: true for a third-party bridge's badge,
    *  whose glyph does not name it. Web paints every badge's label already. */
@@ -4431,6 +4995,17 @@ export function postCardGate(post: {
   return gate ?? null;
 }
 
+/** The home a post's own bytes are fetched from — the shared
+ *  `fauna_feed::PostSummary::blob_home`, so the SPA never decides what a blank
+ *  home means. `null` = this nest; otherwise handed back UNCHANGED to the
+ *  post-blob plane (`#lib/rpc`'s `postBlobGet`). Sync, like `postCardGate`. */
+export function postBlobHome(post: {
+  home_nest_url?: string | null;
+  home_nest_actor_id?: string | null;
+}): unknown | null {
+  return wasm().postBlobHome(post.home_nest_url ?? undefined, post.home_nest_actor_id ?? undefined) ?? null;
+}
+
 /** One entry of the feed snapshot's `thread.posts` (`fauna_feed::ThreadPostView`). */
 export interface ThreadPostView {
   at_uri: string;
@@ -4460,7 +5035,7 @@ export function feedRefusalI18nKey(err: string): string | undefined {
 // ── Calendar / date math (shared `fauna_core::caltime`) ──────────────────────
 //
 // Raw thunks over the wasm boundary; the JS-`Date`-friendly adapters (0↔1-indexed
-// month conversion, `Date` construction) live in `$lib/caltime`. Months are
+// month conversion, `Date` construction) live in `#lib/caltime`. Months are
 // **1-indexed** (1 = January) and weekday is **0 = Mon … 6 = Sun** here, matching
 // `fauna_core::caltime` — the canonical Gregorian date math the native apps
 // consume (linux re-exports the same module), so the web Events month-grid +
@@ -4730,6 +5305,24 @@ export function backupDestinationKindOptions(): BackupDestinationKindOption[] {
   return wasm().backupDestinationKindOptions() as BackupDestinationKindOption[];
 }
 
+// Which destination rows carry `backup-destination-reseed-button` (ui/backups.md
+// § Restore after losing the nest): the shared `reseed_rows` over the legs web
+// hosts, asked as a browser that holds no custodian store — so a surviving
+// nest-kind row and no other. Pass the rows as `backupDestinationList` gave them.
+export function backupReseedRows(destinations: BackupDestination[]): string[] {
+  return wasm().backupReseedRows(destinations) as string[];
+}
+
+// Whether the confirm armed on `destinationId`'s row runs the nest-held pull-back
+// — the shared `reseed_runs_pull_back`, read at press time so the page never
+// re-derives it from the row's kind.
+export function backupReseedRunsPullBack(
+  destinations: BackupDestination[],
+  destinationId: string,
+): boolean {
+  return wasm().backupReseedRunsPullBack(destinations, destinationId) as boolean;
+}
+
 // ── Trained-factor publish kind (topic-factors.md § Publishing a trained
 // factor, v2) — the `personalization-trained-factor-publish-kind-select`
 // catalog and the shared Model-review faces both halves (publisher review +
@@ -4873,6 +5466,14 @@ export function notificationText(row: unknown): NotificationText {
   return wasm().notificationText(row) as NotificationText;
 }
 
+// Whether a notification row's dismiss is greyed — a `security.notice` inside
+// its retention window (`fauna_client_notifications::notification_retained`
+// over wasm; `behavior/notifications.md` § Retention rule 2). Pass the row AS IT
+// ARRIVES from `notificationsList`; `nowMicros` is epoch microseconds.
+export function notificationRetained(row: unknown, nowMicros: number): boolean {
+  return wasm().notificationRetained(row, nowMicros) as boolean;
+}
+
 /** Where a notification row goes when opened — see `notificationDestination`. */
 export type NotificationDestination =
   | { Post: { post_id: string } }
@@ -4888,6 +5489,17 @@ export type NotificationDestination =
 // `source` then `notif_type`.
 export function notificationDestination(row: unknown): NotificationDestination | null {
   return (wasm().notificationDestination(row) ?? null) as NotificationDestination | null;
+}
+
+/** Does a muted word collapse this notification row behind `notification-muted`
+ *  and its reveal (`notifications.md` § Muted words)? Twin of native's
+ *  `notification_muted_for` over the one shared
+ *  `fauna_client_notifications::notification_muted`. `row` is one element of a
+ *  `notificationsList` reply as it arrived; `mutedKeywords` is the list the
+ *  conversation collapse reads. Which text is matched and which rows are exempt
+ *  (a security notice never collapses) is the shared decision's, never the SPA's. */
+export function notificationMuted(row: unknown, mutedKeywords: MutedKeyword[]): boolean {
+  return wasm().notificationMuted(row, mutedKeywords) as boolean;
 }
 
 // The conversations rail / feed badge source icon: glyph id → display emoji.

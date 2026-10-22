@@ -16,7 +16,8 @@
 //! `actor_id` replaces the HTTP `{actor_id}` path param + bearer-match
 //! (exactly the posts/feed treatment). The HTTP twins (`notif_routes.rs`) +
 //! the `paths::notifications` constants were deleted in T4 — these kinds are
-//! the sole surface now.
+//! the sole surface now. `list`, `count` and `mark_read` have principal
+//! twins over the same cores ([`principal_handlers`]).
 
 use std::time::Duration;
 
@@ -32,6 +33,8 @@ use fauna_protocol::{
 };
 
 use crate::db::notifications::DismissOutcome;
+use crate::principal_handlers::PrincipalHandler;
+use crate::routes::AppState;
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -64,43 +67,53 @@ fn notifications_list_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.notifications.list").await?;
-            let req: NotifListRequest = decode(&payload).map_err(malformed)?;
-
-            // Match the HTTP twin's default + clamp (default 25, 1..=100).
-            let limit = req.limit.unwrap_or(25).clamp(1, 100);
-
-            let rows = state
-                .db
-                .list_notifications(&actor_id, req.cursor, limit)
-                .await
-                .map_err(internal)?;
-
-            // The next-page cursor is the id of the last (oldest) row in
-            // this page — exactly the HTTP twin's `next_cursor`.
-            let cursor = rows.last().map(|r| r.id);
-            let notifications: Vec<NotifItem> = rows
-                .into_iter()
-                .map(|r| NotifItem {
-                    id: r.id,
-                    notif_type: r.notif_type,
-                    source: r.source,
-                    sender_id: r.sender_id.as_deref().map(hex::encode),
-                    content_id: r.content_id.as_deref().map(hex::encode),
-                    subject_uri: r.subject_uri,
-                    summary: r.summary,
-                    body: r.body,
-                    is_read: r.is_read,
-                    created_at: r.created_at,
-                    extra: std::collections::BTreeMap::new(),
-                })
-                .collect();
-
-            encode_reply(&NotifListReply {
-                notifications,
-                cursor,
-                extra: std::collections::BTreeMap::new(),
-            })
+            list_core(&state, &actor_id, &payload).await
         })
+    })
+}
+
+/// `fauna.notifications.list` over `account`'s inbox — the one read the
+/// account's own apps and a `fauna:notifications:read` principal share.
+async fn list_core(
+    state: &AppState,
+    account: &[u8; 32],
+    payload: &[u8],
+) -> Result<Bytes, RpcError> {
+    let req: NotifListRequest = decode(payload).map_err(malformed)?;
+
+    // Match the HTTP twin's default + clamp (default 25, 1..=100).
+    let limit = req.limit.unwrap_or(25).clamp(1, 100);
+
+    let rows = state
+        .db
+        .list_notifications(account, req.cursor, limit)
+        .await
+        .map_err(internal)?;
+
+    // The next-page cursor is the id of the last (oldest) row in this page —
+    // exactly the HTTP twin's `next_cursor`.
+    let cursor = rows.last().map(|r| r.id);
+    let notifications: Vec<NotifItem> = rows
+        .into_iter()
+        .map(|r| NotifItem {
+            id: r.id,
+            notif_type: r.notif_type,
+            source: r.source,
+            sender_id: r.sender_id.as_deref().map(hex::encode),
+            content_id: r.content_id.as_deref().map(hex::encode),
+            subject_uri: r.subject_uri,
+            summary: r.summary,
+            body: r.body,
+            is_read: r.is_read,
+            created_at: r.created_at,
+            extra: std::collections::BTreeMap::new(),
+        })
+        .collect();
+
+    encode_reply(&NotifListReply {
+        notifications,
+        cursor,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -110,25 +123,36 @@ fn notifications_mark_read_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.notifications.mark_read").await?;
-            let req: NotifMarkReadRequest = decode(&payload).map_err(malformed)?;
-
-            // Default to "now" when `up_to` is omitted — the HTTP twin's
-            // behavior (mark everything up to the current time).
-            let up_to = req
-                .up_to
-                .unwrap_or_else(|| fauna_core::data::Timestamp::now_or_zero().as_i64());
-
-            let count = state
-                .db
-                .mark_notifications_read(&actor_id, up_to)
-                .await
-                .map_err(internal)?;
-
-            encode_reply(&NotifMarkReadReply {
-                marked_read: count as i64,
-                extra: std::collections::BTreeMap::new(),
-            })
+            mark_read_core(&state, &actor_id, &payload).await
         })
+    })
+}
+
+/// `fauna.notifications.mark_read` over `account`'s inbox — shared with a
+/// `fauna:notifications:write` principal, whose mark clears the badge on every
+/// device of the user's exactly as the user's own would.
+async fn mark_read_core(
+    state: &AppState,
+    account: &[u8; 32],
+    payload: &[u8],
+) -> Result<Bytes, RpcError> {
+    let req: NotifMarkReadRequest = decode(payload).map_err(malformed)?;
+
+    // Default to "now" when `up_to` is omitted — the HTTP twin's behavior
+    // (mark everything up to the current time).
+    let up_to = req
+        .up_to
+        .unwrap_or_else(|| fauna_core::data::Timestamp::now_or_zero().as_i64());
+
+    let count = state
+        .db
+        .mark_notifications_read(account, up_to)
+        .await
+        .map_err(internal)?;
+
+    encode_reply(&NotifMarkReadReply {
+        marked_read: count as i64,
+        extra: std::collections::BTreeMap::new(),
     })
 }
 
@@ -138,22 +162,65 @@ fn notifications_count_handler() -> RpcHandler {
     Box::new(|state, actor_id, payload| {
         Box::pin(async move {
             require_permission(&state, &actor_id, "fauna.notifications.count").await?;
-            // Decode for the `extra` forward-compat envelope (the count
-            // request carries no params besides the connection actor).
-            let _req: NotifCountRequest = decode(&payload).map_err(malformed)?;
-
-            let count = state
-                .db
-                .count_unread_notifications(&actor_id)
-                .await
-                .map_err(internal)?;
-
-            encode_reply(&NotifCountReply {
-                count,
-                extra: std::collections::BTreeMap::new(),
-            })
+            count_core(&state, &actor_id, &payload).await
         })
     })
+}
+
+/// `fauna.notifications.count` over `account`'s inbox — shared with a
+/// `fauna:notifications:read` principal.
+async fn count_core(
+    state: &AppState,
+    account: &[u8; 32],
+    payload: &[u8],
+) -> Result<Bytes, RpcError> {
+    // Decode for the `extra` forward-compat envelope (the count request
+    // carries no params besides the connection actor).
+    let _req: NotifCountRequest = decode(payload).map_err(malformed)?;
+
+    let count = state
+        .db
+        .count_unread_notifications(account)
+        .await
+        .map_err(internal)?;
+
+    encode_reply(&NotifCountReply {
+        count,
+        extra: std::collections::BTreeMap::new(),
+    })
+}
+
+// ── The principal twins ────────────────────────────────────────
+//
+// The notifications arms (`authorization-server.md` § Scope grammar → *The
+// notifications arms*): `list` and `count` under `fauna:notifications:read`,
+// `mark_read` under `fauna:notifications:write`, each over the principal's
+// account through the account's own core — the ceiling and the scope check
+// are `principal_handlers`' gate. `dismiss` and `clear` have no twin: they
+// stay the owner's.
+
+/// The notifications arms' three kinds.
+pub(crate) fn principal_handlers() -> Vec<(&'static str, PrincipalHandler)> {
+    vec![
+        (
+            "fauna.notifications.list",
+            Box::new(|state, caller, payload| {
+                Box::pin(async move { list_core(&state, &caller.account, &payload).await })
+            }),
+        ),
+        (
+            "fauna.notifications.count",
+            Box::new(|state, caller, payload| {
+                Box::pin(async move { count_core(&state, &caller.account, &payload).await })
+            }),
+        ),
+        (
+            "fauna.notifications.mark_read",
+            Box::new(|state, caller, payload| {
+                Box::pin(async move { mark_read_core(&state, &caller.account, &payload).await })
+            }),
+        ),
+    ]
 }
 
 // ── fauna.notifications.dismiss ────────────────────────────────

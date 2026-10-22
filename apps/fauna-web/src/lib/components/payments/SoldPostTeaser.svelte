@@ -8,8 +8,8 @@
   // its bundle carries none of the three ids. The buy (`fauna.subscriptions.
   // subscribe`) and the link's `isSafeNavUrl` guard stay with the feed page:
   // glue, not payments faces.
-  import { t } from '$lib/i18n/strings';
-  import { PAYMENTS_IDS } from '$lib/components/payments/generatedIds';
+  import { t } from '#lib/i18n/strings';
+  import { PAYMENTS_IDS } from '#lib/components/payments/generatedIds';
 
   interface Props {
     /** The post's resolved `unlock_offer` (monetization.md § Per-post

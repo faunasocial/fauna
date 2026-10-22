@@ -130,6 +130,29 @@ pub fn process_and_seal_upload(
     })
 }
 
+/// The client-computed media hash check for a shell that POSTs its own public
+/// upload: compares the hash the nest's upload reply `echoed` with the content
+/// address of the `bytes` the shell just sent (`blake3`, the same
+/// `fauna_media::pipeline::bytes_content_hash_hex` the nest computes on
+/// ingest). Returns the lowercase local hash on a case-insensitive match, so
+/// the caller signs over the hash it computed, never the echo; errors
+/// `blob upload hash mismatch` otherwise — a nest naming a different blob must
+/// not get the user's signature over it (`security.md` § Signed-envelope
+/// shape). The twin of web's `assertEchoedBlobHash` and of the check inside
+/// `fauna_client::media_upload::upload_prepared_blob`, for the shells whose
+/// HTTP stack is platform code (priority #2).
+#[uniffi::export]
+pub fn verify_blob_upload_echo(echoed: String, bytes: Vec<u8>) -> Result<String, FfiError> {
+    let local = fauna_media::pipeline::bytes_content_hash_hex(&bytes);
+    if echoed.eq_ignore_ascii_case(&local) {
+        Ok(local)
+    } else {
+        Err(FfiError::General {
+            msg: format!("blob upload hash mismatch: nest echoed {echoed}, local {local}"),
+        })
+    }
+}
+
 /// Lossless privacy-metadata strip (EXIF/IPTC removal, C2PA preserved) with
 /// **no** seal, no thumbnail, no C2PA probe — the on-device face for a
 /// photo-library backup ingress, where re-encoding (what `process_and_seal_upload`'s
@@ -286,6 +309,35 @@ mod tests {
             Err(other) => panic!("local seal can only fail in the general bucket, got {other:?}"),
             Ok(_) => panic!("expected wrong-length backup_key to be rejected"),
         }
+    }
+
+    #[test]
+    fn upload_echo_match_returns_the_local_blake3_case_insensitively() {
+        let bytes = b"a public attachment".to_vec();
+        let local = blake3::hash(&bytes).to_hex().to_string();
+        assert_eq!(
+            verify_blob_upload_echo(local.to_uppercase(), bytes.clone()).unwrap(),
+            local
+        );
+        assert_eq!(
+            verify_blob_upload_echo(local.clone(), bytes).unwrap(),
+            local
+        );
+    }
+
+    #[test]
+    fn upload_echo_naming_another_blob_is_refused() {
+        let other = blake3::hash(b"a blob the nest holds").to_hex().to_string();
+        match verify_blob_upload_echo(other, b"what the user uploaded".to_vec()) {
+            Err(FfiError::General { msg }) => {
+                assert!(msg.contains("blob upload hash mismatch"), "got: {msg}")
+            }
+            Err(other) => {
+                panic!("a local check can only fail in the general bucket, got {other:?}")
+            }
+            Ok(h) => panic!("a mismatched echo must be refused, got {h}"),
+        }
+        assert!(verify_blob_upload_echo(String::new(), b"x".to_vec()).is_err());
     }
 
     #[test]

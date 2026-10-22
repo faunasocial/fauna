@@ -26,6 +26,7 @@ pub enum FakeCall {
     RevokeGrant([u8; 16]),
     LookupCode(String),
     OpenHandoff(String),
+    BindPlugin(Vec<u8>),
     BlockClient(String, bool),
     ListBlockedClients,
     ListSessions,
@@ -37,6 +38,7 @@ pub enum FakeCall {
     RevokeMailCredential(String),
     RevealMailSecret(String),
     ExternalAppsEnabled,
+    SetExternalAppsEnabled(bool),
 }
 
 #[derive(Debug, Default)]
@@ -49,6 +51,9 @@ struct Inner {
     consents: Vec<NestConsentRow>,
     codes: Vec<(String, NestConsentRow)>,
     handoffs: Vec<(String, NestConsentRow)>,
+    /// Each installed plugin's bind card, by install row id.
+    plugins: Vec<(Vec<u8>, NestConsentRow)>,
+    fail_bind: bool,
     drop_opened_from_list: bool,
     blocked: Vec<BlockedClient>,
     sessions: Vec<AtprotoSessionInfo>,
@@ -62,6 +67,7 @@ struct Inner {
     external_apps_off: bool,
     external_apps_unavailable: bool,
     fail_external_apps: bool,
+    fail_set_external_apps: bool,
 }
 
 /// A scripted nest: set rows, drive the machine, read [`Self::calls`].
@@ -120,6 +126,18 @@ impl FakeConnectedAppsNestApi {
             .handoffs
             .push((request_uri.into(), row));
     }
+    /// An installed plugin whose bind opens `row` onto the pending list.
+    pub fn add_plugin(&self, principal_id: &[u8], row: NestConsentRow) {
+        self.inner
+            .lock()
+            .unwrap()
+            .plugins
+            .push((principal_id.to_vec(), row));
+    }
+    /// Every bind is refused from now on.
+    pub fn fail_bind(&self) {
+        self.inner.lock().unwrap().fail_bind = true;
+    }
     /// An opened handoff's row is answered but missing from the next re-list
     /// (a failed or racing read), so the machine must paint it from the reply.
     pub fn drop_opened_from_list(&self) {
@@ -165,6 +183,10 @@ impl FakeConnectedAppsNestApi {
     /// The switch read fails transiently from now on.
     pub fn fail_external_apps(&self) {
         self.inner.lock().unwrap().fail_external_apps = true;
+    }
+    /// The switch write fails transiently from now on.
+    pub fn fail_set_external_apps(&self) {
+        self.inner.lock().unwrap().fail_set_external_apps = true;
     }
     /// Every revoke fails transiently from now on.
     pub fn fail_revokes(&self) {
@@ -288,6 +310,25 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
             row
         }))
     }
+    async fn bind_plugin(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<NestConsentRow, ConnectedAppsApiError> {
+        let mut g = self.record(FakeCall::BindPlugin(principal_id.clone()));
+        if g.fail_all || g.fail_bind {
+            return Err(transient());
+        }
+        let row = g
+            .plugins
+            .iter()
+            .find(|(id, _)| *id == principal_id)
+            .map(|(_, row)| row.clone())
+            .ok_or_else(|| ConnectedAppsApiError::NotFound {
+                detail: "no such plugin".into(),
+            })?;
+        g.consents.push(row.clone());
+        Ok(row)
+    }
     async fn block_client(
         &self,
         client_id: String,
@@ -402,5 +443,13 @@ impl ConnectedAppsNestApi for FakeConnectedAppsNestApi {
             return Err(unavailable());
         }
         Ok(!g.external_apps_off)
+    }
+    async fn set_external_apps_enabled(&self, enabled: bool) -> Result<(), ConnectedAppsApiError> {
+        let mut g = self.record(FakeCall::SetExternalAppsEnabled(enabled));
+        if g.fail_all || g.fail_set_external_apps {
+            return Err(transient());
+        }
+        g.external_apps_off = !enabled;
+        Ok(())
     }
 }

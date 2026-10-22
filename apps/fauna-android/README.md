@@ -5,7 +5,7 @@ core via UniFFI (`libs/fauna-ffi`, built for all four Android ABIs).
 
 ## Build
 
-Environment setup (JDK 17, Android SDK, NDK toolchain — including the
+Environment setup (JDK 21, Android SDK, NDK toolchain — including the
 extra steps for ARM64 hosts): **[BUILD-SETUP.md](BUILD-SETUP.md)**.
 
 Then, from the repository root:

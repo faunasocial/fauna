@@ -808,7 +808,7 @@ async fn an_admin_add_whose_target_was_succeeded_in_the_window_does_not_grant() 
 }
 
 /// Deleting an account whose LOCAL PREDECESSOR holds an admin row is refused
-/// (`admin.md` § Admin continuity and succession: the last-superadmin floor and
+/// (`admin.md` § Cutting a user off, the `Admin ⊇ User` paragraph: the last-superadmin floor and
 /// `Admin ⊇ User` at both ends of the role's life). The deletion's predecessor
 /// walk purges `admin_actor_ids` for every predecessor (`Policy::Purge`) and
 /// `delete_user` drops their `users` rows — so without this refusal the

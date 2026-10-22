@@ -19,12 +19,21 @@ struct WelcomeView: View {
                     IdentityImportView(vm: vm)
                 case .handleEntry:
                     HandleEntryView(vm: vm)
+                // Nest setup is compiled out of Fauna Kids: a child joins their
+                // guardian's nest by invite, so the build never reaches a hosting or
+                // DNS provider (dynamic-features.md, the kids spine paragraph). The
+                // steps stay on handle entry, as on the android leg.
+                #if FAUNA_KIDS
+                case .dnsConfig, .vpsConfig, .nestProvisioning:
+                    HandleEntryView(vm: vm)
+                #else
                 case .dnsConfig:
                     DnsConfigView(vm: vm)
                 case .vpsConfig:
                     VpsConfigView(vm: vm)
                 case .nestProvisioning:
                     NestProvisioningView(vm: vm)
+                #endif
                 case .dnsPostInstructions:
                     DnsPostInstructionsView(vm: vm)
                 case .inviteRequest:

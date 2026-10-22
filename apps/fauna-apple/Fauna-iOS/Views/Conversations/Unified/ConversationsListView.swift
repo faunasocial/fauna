@@ -96,6 +96,9 @@ struct ConversationsListView: View {
                             .automationField(Ids.conversationSearchBox, text: vm.searchBinding)
                             .padding(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
 
+                        // The standing community-room invitations, atop the list.
+                        RoomInvitationsSection()
+
                         ForEach(Array(vm.rows.enumerated()), id: \.element.id) { index, row in
                             NavigationLink(value: Route.thread(row.id)) {
                                 ConversationListRow(model: row)

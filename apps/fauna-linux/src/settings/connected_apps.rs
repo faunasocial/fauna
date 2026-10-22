@@ -32,7 +32,7 @@
 //! app passwords are rows of this roster) exists.
 
 use fauna_ui_ids as ids;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ use adw::prelude::*;
 use fauna_client_connected_apps::{
     BlockedAppRow, ConnectedAppRow, ConnectedAppsMachine, ConnectedAppsObserver,
     ConnectedAppsSnapshot, ConsentCardRow,
-    compose::{request_card_lines, roster_row_text},
+    compose::{LINE_SEPARATOR, request_card_lines, request_install_text, roster_row_text},
 };
 use fauna_client_mail_settings::resolve_mua_username;
 use fauna_core::localized::LocalizedText;
@@ -51,7 +51,7 @@ use fauna_core::secret::SecretString;
 use crate::async_helper::spawn_with_snapshot;
 use crate::i18n::strings::settings::mail as mail_t;
 use crate::i18n::strings::{atproto_settings as card_t, connected_apps as t};
-use crate::testid::{set_test_attr, set_test_id, set_test_text};
+use crate::testid::{set_test_attr, set_test_attr_text, set_test_id, set_test_text};
 
 /// The rail label + `add_titled` title (settings_shell.rs).
 pub const TITLE: &str = t::TITLE;
@@ -76,6 +76,9 @@ enum Gesture {
     Block(String),
     Unblock(String),
     Revoke(String),
+    /// Set the account's external-apps switch to the carried value
+    /// (`atproto-external-apps-enable`).
+    SetExternalApps(bool),
     /// The same-device handoff's open — a visit's read when a `fauna://consent`
     /// route brought the user here (`crate::routes`).
     OpenHandoff(String),
@@ -93,6 +96,7 @@ impl Gesture {
             Self::Block(consent_id_hex) => machine.block_request(consent_id_hex).await,
             Self::Unblock(client_id) => machine.unblock(client_id).await,
             Self::Revoke(key) => machine.revoke(key).await,
+            Self::SetExternalApps(enabled) => machine.set_external_apps_enabled(enabled).await,
             Self::OpenHandoff(request_uri) => machine.open_handoff(request_uri).await,
         }
     }
@@ -105,6 +109,7 @@ struct Widgets {
     requests_box: gtk::Box,
     code_entry: adw::EntryRow,
     connect_btn: gtk::Button,
+    external_apps_toggle: adw::SwitchRow,
     roster_box: gtk::Box,
     blocked_group: adw::PreferencesGroup,
     blocked_box: gtk::Box,
@@ -128,6 +133,9 @@ struct Ctx {
     /// A consent route's request URI, waiting for the visit it navigated to,
     /// and the caller to release once that visit's open has painted.
     pending_handoff: RefCell<Option<(String, crate::routes::Then)>>,
+    /// Set while `paint` sets the external-apps switch, so the paint's own
+    /// `set_active` is not read as a user gesture.
+    guard: Cell<bool>,
     w: Widgets,
 }
 
@@ -218,10 +226,26 @@ pub fn build_connected_apps_page() -> (adw::PreferencesPage, impl Fn() + 'static
     connect_group.add(&code_entry);
     page.add(&connect_group);
 
-    // --- 3. The roster ---
+    // --- 3. The external-apps switch, then the roster it pauses ---
+    // At every integration level: the flag is the account's, and every app it
+    // pauses is listed just below (`connected-apps.md` § Layout & flow). Absent
+    // snapshot = the flag's own default, ON. The hint is the row's subtitle
+    // (ui.yaml gives it no id of its own).
     let roster_group = adw::PreferencesGroup::builder()
         .title(t::ROSTER_HEADING)
         .build();
+    let external_apps_toggle = adw::SwitchRow::builder()
+        .title(card_t::EXTERNAL_APPS_TOGGLE)
+        .subtitle(card_t::EXTERNAL_APPS_HINT)
+        .active(true)
+        .build();
+    set_test_id(&external_apps_toggle, ids::ATPROTO_EXTERNAL_APPS_ENABLE);
+    set_test_attr(&external_apps_toggle, "state", "on");
+    crate::offline_gate::declare_wire_kind(
+        &external_apps_toggle,
+        "fauna.bridges.atproto.set_external_apps_enabled",
+    );
+    roster_group.add(&external_apps_toggle);
     let roster_box = vertical_box();
     roster_group.add(&roster_box);
     page.add(&roster_group);
@@ -242,6 +266,7 @@ pub fn build_connected_apps_page() -> (adw::PreferencesPage, impl Fn() + 'static
         requests_box,
         code_entry,
         connect_btn,
+        external_apps_toggle,
         roster_box,
         blocked_group,
         blocked_box,
@@ -280,6 +305,7 @@ fn wire(widgets: Widgets) -> Option<impl Fn()> {
         revoke_armed: RefCell::new(None),
         revealed: RefCell::new(HashMap::new()),
         pending_handoff: RefCell::new(None),
+        guard: Cell::new(false),
         w: widgets,
     });
     CURRENT.with(|c| *c.borrow_mut() = Rc::downgrade(&ctx));
@@ -292,6 +318,18 @@ fn wire(widgets: Widgets) -> Option<impl Fn()> {
                 .connect_btn
                 .set_sensitive(!entry.text().trim().is_empty());
         });
+    }
+    {
+        let ctx = Rc::clone(&ctx);
+        ctx.w
+            .external_apps_toggle
+            .clone()
+            .connect_active_notify(move |sw| {
+                if ctx.guard.get() {
+                    return;
+                }
+                run(&ctx, Gesture::SetExternalApps(sw.is_active()));
+            });
     }
     {
         let ctx = Rc::clone(&ctx);
@@ -321,14 +359,13 @@ fn wire(widgets: Widgets) -> Option<impl Fn()> {
     Some(move || visit(&ctx))
 }
 
-/// A fresh visit: drop the last visit's state, paint unread, re-read.
-fn visit(ctx: &Rc<Ctx>) {
+/// The page's machine, built on first use. `None` only when no client is
+/// registered (the unit test).
+fn ensure_machine(ctx: &Rc<Ctx>) -> Option<Arc<ConnectedAppsMachine>> {
     if ctx.machine.borrow().is_none() {
         // The session's mail machine is built by the Mail & Calendar page;
         // its app passwords are rows of this roster.
-        let Some(client) = crate::settings::get_client() else {
-            return;
-        };
+        let client = crate::settings::get_client()?;
         let observer: Arc<dyn ConnectedAppsObserver> = Arc::new(NoopObserver);
         let machine = fauna_client_connected_apps::build_connected_apps_machine(
             client.nest_rpc().clone(),
@@ -345,6 +382,25 @@ fn visit(ctx: &Rc<Ctx>) {
             Err(e) => tracing::error!("[settings/connected-apps] decode secret_hex: {e}"),
         }
         *ctx.machine.borrow_mut() = Some(machine);
+    }
+    ctx.machine.borrow().clone()
+}
+
+/// The signed-in window's connected-apps machine, for a hosted plugin's
+/// settings card on the Bridges page: *Connect* and *Disconnect* are this
+/// machine's `bind_plugin` / `revoke_principal` — the one approve path, whose
+/// cards the Connected apps page shows (`third-party.md` § The principal model
+/// → *Hosted principals*). GTK main thread only; the machine itself is `Send`,
+/// so the caller runs the verb on the runtime.
+pub fn shared_machine() -> Option<Arc<ConnectedAppsMachine>> {
+    let ctx = CURRENT.with(|c| c.borrow().upgrade())?;
+    ensure_machine(&ctx)
+}
+
+/// A fresh visit: drop the last visit's state, paint unread, re-read.
+fn visit(ctx: &Rc<Ctx>) {
+    if ensure_machine(ctx).is_none() {
+        return;
     }
     ctx.w.code_entry.set_text("");
     ctx.revoke_armed.borrow_mut().take();
@@ -412,6 +468,18 @@ fn paint(ctx: &Rc<Ctx>) {
     for request in requests {
         w.requests_box.append(&request_card(ctx, request));
     }
+
+    // The switch paints what the last read said, never a local guess: a refused
+    // write leaves the snapshot where it was and this puts the switch back.
+    let external_apps_on = !snap.is_some_and(|s| s.external_apps_off);
+    ctx.guard.set(true);
+    w.external_apps_toggle.set_active(external_apps_on);
+    ctx.guard.set(false);
+    set_test_attr(
+        &w.external_apps_toggle,
+        "state",
+        if external_apps_on { "on" } else { "off" },
+    );
 
     // The three-state list: nothing until the roster read has returned, then
     // either rows or the empty state (`ui/README.md` § List pages).
@@ -494,7 +562,8 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
     // The lines — head, burned state, publisher, scopes, permission sets, oracle
     // summary, facts — are the shared composition's
     // (`fauna_client_connected_apps::compose`); this file only resolves them.
-    let lines = roster_row_text(row).resolve_lines(crate::i18n::strings::lookup);
+    let composed = roster_row_text(row);
+    let lines = composed.resolve_lines(crate::i18n::strings::lookup);
     let head = lines[0].clone();
     // The item's declared text is the joined description, as tui's single
     // label is: the cross-app observable is "it names the app AND what it may
@@ -531,6 +600,15 @@ fn roster_row(ctx: &Rc<Ctx>, row: &ConnectedAppRow, handle: &str) -> gtk::Box {
         let label = text_label(line);
         label.add_css_class("caption");
         item.append(&label);
+    }
+
+    // A hosted plugin's row links to its settings card on the Bridges page —
+    // the shared composition says which rows (`opens_settings_card`).
+    if composed.opens_settings_card {
+        let link = flat_button(t::SETTINGS_LINK, ids::CONNECTED_APPS_ITEM_SETTINGS_LINK);
+        link.set_halign(gtk::Align::Start);
+        link.connect_clicked(|btn| crate::app::navigate_to_section(btn, "bridges"));
+        item.append(&link);
     }
 
     if let Some(mail) = &row.mail {
@@ -710,6 +788,68 @@ fn consent_card_lines(consent: &ConsentCardRow) -> Vec<String> {
         .collect()
 }
 
+/// The install section of an admin's hosted-plugin install card
+/// (`third-party.md` § The runner contract → *The install-approval leg*): one
+/// leaf per fact, each the shared composition's text
+/// (`compose::request_install_text`) resolved here, between the card's scope
+/// lines and its binding code. The form leaf carries the raw execution form
+/// in a `form` attr. Absent on every other card.
+fn append_install_section(card: &gtk::Box, consent: &ConsentCardRow) {
+    let Some(section) = request_install_text(consent) else {
+        return;
+    };
+    let one = |text: &fauna_client_connected_apps::compose::ComposedText| {
+        text.resolve(crate::i18n::strings::lookup)
+    };
+    let many = |lines: &[fauna_client_connected_apps::compose::ComposedText]| {
+        lines
+            .iter()
+            .map(|l| l.resolve(crate::i18n::strings::lookup))
+            .collect::<Vec<_>>()
+            .join(LINE_SEPARATOR)
+    };
+    let heading = leaf(ids::CONNECTED_APPS_REQUEST_INSTALL, &one(&section.heading));
+    heading.add_css_class("heading");
+    card.append(&heading);
+    let form = leaf(
+        ids::CONNECTED_APPS_REQUEST_INSTALL_FORM,
+        &one(&section.form),
+    );
+    set_test_attr_text(
+        &form,
+        "form",
+        consent
+            .install
+            .as_ref()
+            .map_or("", |install| install.execution_form.as_str()),
+    );
+    card.append(&form);
+    for (id, text) in [
+        (
+            ids::CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER,
+            one(&section.publisher),
+        ),
+        (
+            ids::CONNECTED_APPS_REQUEST_INSTALL_DIGEST,
+            one(&section.digest),
+        ),
+        (
+            ids::CONNECTED_APPS_REQUEST_INSTALL_KINDS,
+            many(&section.kinds),
+        ),
+        (
+            ids::CONNECTED_APPS_REQUEST_INSTALL_HOSTS,
+            many(&section.hosts),
+        ),
+        (
+            ids::CONNECTED_APPS_REQUEST_INSTALL_SETTINGS,
+            many(&section.settings),
+        ),
+    ] {
+        card.append(&leaf(id, &text));
+    }
+}
+
 /// One `connected-apps-request-card`: a third-party app is asking to act for
 /// this account and is waiting for the answer — the built consent card, with
 /// its wording (`atproto_settings.consent_*`) unchanged. Every request the
@@ -740,6 +880,8 @@ fn request_card(ctx: &Rc<Ctx>, consent: &ConsentCardRow) -> gtk::Box {
     for line in &lines[1..] {
         card.append(&text_label(line));
     }
+
+    append_install_section(&card, consent);
 
     // The code carries the raw value in a `code` attr as well as inside its
     // prose: the label is localized and may be reworded; the value is not, and

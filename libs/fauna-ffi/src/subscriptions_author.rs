@@ -49,8 +49,8 @@ use fauna_core::data::Timestamp;
 
 use crate::nest_client::FfiNestClient;
 use crate::{
-    FfiApproveReply, FfiError, FfiPendingRequest, FfiSubscribeReply, bytes_to_actor_id,
-    general_err, keypair_from_bytes,
+    FfiApproveReply, FfiError, FfiPendingRequest, FfiSubscribeReply, FfiUnsubscribeReply,
+    bytes_to_actor_id, general_err, keypair_from_bytes,
 };
 
 /// Rebuild the actor's encrypted-mode author orchestration from the connection's
@@ -76,6 +76,7 @@ fn author(
 /// `From<PendingRequest>`), so it can't silently drift.
 fn pending_from_ffi(p: FfiPendingRequest) -> Result<PendingRequest, FfiError> {
     Ok(PendingRequest {
+        home: p.home,
         request_id: p.request_id,
         subscriber_id: bytes_to_actor_id(&p.subscriber_id)?,
         tier_name: p.tier_name,
@@ -201,6 +202,50 @@ pub async fn subscriptions_subscribe_publishing_ek(
     let author = bytes_to_actor_id(&author_id)?;
     let subs = SubscriptionsClient::new(nest.nest_arc());
     subs.subscribe_publishing_ek(author, tier, &subscriber)
+        .await
+        .map_err(general_err)?
+        .try_into()
+}
+
+/// The follow gesture across nests — the native twin of
+/// [`fauna_client_subscriptions::SubscriptionsClient::subscribe_across_nests`]
+/// (the web SPA's twin is `fauna-wasm`'s `subscriptionsSubscribeAcrossNests`):
+/// [`subscriptions_subscribe_publishing_ek`] when `home_nest_url` is `None` or
+/// blank, and for an author homed on another nest the subscribe carrying the
+/// home and the subscriber's own signed follow intent
+/// (`federated-follow.md` § Decision 2).
+#[fauna_uniffi_async::export]
+pub async fn subscriptions_subscribe_across_nests(
+    nest: Arc<FfiNestClient>,
+    subscriber_secret: Vec<u8>,
+    author_id: Vec<u8>,
+    tier: String,
+    home_nest_url: Option<String>,
+) -> Result<FfiSubscribeReply, FfiError> {
+    let subscriber = keypair_from_bytes(&subscriber_secret)?;
+    let author = bytes_to_actor_id(&author_id)?;
+    let subs = SubscriptionsClient::new(nest.nest_arc());
+    subs.subscribe_across_nests(author, tier, &subscriber, home_nest_url)
+        .await
+        .map_err(general_err)?
+        .try_into()
+}
+
+/// The leave twin of [`subscriptions_subscribe_across_nests`] —
+/// [`fauna_client_subscriptions::SubscriptionsClient::unsubscribe_across_nests`];
+/// `tier` is the tier being left.
+#[fauna_uniffi_async::export]
+pub async fn subscriptions_unsubscribe_across_nests(
+    nest: Arc<FfiNestClient>,
+    subscriber_secret: Vec<u8>,
+    author_id: Vec<u8>,
+    tier: String,
+    home_nest_url: Option<String>,
+) -> Result<FfiUnsubscribeReply, FfiError> {
+    let subscriber = keypair_from_bytes(&subscriber_secret)?;
+    let author = bytes_to_actor_id(&author_id)?;
+    let subs = SubscriptionsClient::new(nest.nest_arc());
+    subs.unsubscribe_across_nests(author, tier, &subscriber, home_nest_url)
         .await
         .map_err(general_err)?
         .try_into()
@@ -371,8 +416,10 @@ mod tests {
             created_at: 1234,
             mlkem_encaps_key: Some(vec![9u8; 1184]),
             payment_entitled: true,
+            home: Some("https://home.example".into()),
         };
         let req = pending_from_ffi(ffi).expect("valid 32-byte actor id");
+        assert_eq!(req.home.as_deref(), Some("https://home.example"));
         assert_eq!(req.request_id, 42);
         assert_eq!(req.subscriber_id.0, [7u8; 32]);
         assert_eq!(req.tier_name, "gold");
@@ -395,6 +442,7 @@ mod tests {
             created_at: 0,
             mlkem_encaps_key: None,
             payment_entitled: false,
+            home: None,
         };
         assert!(pending_from_ffi(ffi).is_err());
     }

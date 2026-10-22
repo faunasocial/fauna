@@ -67,11 +67,14 @@ internal sealed class FakeMailPolicyMachine : MailPolicyMachineFakeBase
             outbound ?? DefaultOutbound(),
             alias ?? DefaultAlias(),
             DefaultDmarc(),
+            new MicrosoftRegistrationView("", "", true),
             MailPolicyStatus.Idle,
             baselinePublishResult,
             baselineState,
             mailHealth,
-            error);
+            error,
+            null,
+            null);
 
     public static DmarcPolicyView DefaultDmarc() => new(
         @policyMode: "reject",

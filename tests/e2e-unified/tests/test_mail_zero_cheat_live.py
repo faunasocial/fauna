@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN): a believable mail RECEIVE round-trip against a
-live nest (example.com), where **the test uses NO nest APIs** — every nest-side
+live nest, where **the test uses NO nest APIs** — every nest-side
 step is driven through the linux app UI. The only non-UI component is a plain
 **IMAP client acting as the external MUA** (the stand-in for macOS Mail /
 Thunderbird), which is exactly the second mail party a real inbound needs.
@@ -7,14 +7,14 @@ Thunderbird), which is exactly the second mail party a real inbound needs.
 Difference from the two siblings:
   - `test_mail_client_full_roundtrip.py` (local nest) fakes DNS discovery, injects
     the admin session via `set_state`, and provisions cert/DKIM/spam over WS-RPC.
-  - `test_mail_enable_live_nest.py` (example.com) is cleaner but still calls THREE
+  - `test_mail_enable_live_nest.py` is cleaner but still calls THREE
     nest APIs: a bootstrap `fauna.admin.factory_reset`, `fauna.setup.status`
     polling, and admin WS-RPC.
 
 This test calls NONE of those. The flow:
 
   1. **Reach the admin shell, deciding like a user would.** Import the admin
-     secret, type `test@example.com`, run the REAL DoH handle check, then branch on
+     secret, type `test@example.net`, run the REAL DoH handle check, then branch on
      the wizard's own outcome:
        - unclaimed → claim with `FAUNA_LIVE_CLAIM_CODE` (UI),
        - already claimed (we're the admin) → sign in (UI).

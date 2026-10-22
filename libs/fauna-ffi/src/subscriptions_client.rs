@@ -155,6 +155,11 @@ pub struct FfiMineSubscription {
     /// verbatim; do **not** re-derive the fallback client-side.
     /// See `docs/goal/behavior/value-formatting.md` § Subscription author label.
     pub author_display: String,
+    /// The creator's home nest when it is not the caller's own — a follow
+    /// relayed across nests (`federated-follow.md` § Decision 2). `None` = a
+    /// creator on this nest. The leave (`subscriptions_unsubscribe_across_nests`)
+    /// passes it back so the unsubscribe reaches the creator's home.
+    pub home_nest_url: Option<String>,
 }
 
 impl From<MineSubscription> for FfiMineSubscription {
@@ -169,6 +174,7 @@ impl From<MineSubscription> for FfiMineSubscription {
             status: s.status,
             handle: s.handle,
             since: s.since.0,
+            home_nest_url: s.home_nest_url,
         }
     }
 }
@@ -195,6 +201,10 @@ pub struct FfiPendingRequest {
     /// pump approves it without creator judgment; the UI renders it as paid
     /// rather than awaiting-decision.
     pub payment_entitled: bool,
+    /// Where the subscriber lives when it is not this nest — the home nest
+    /// that carried the follow (`federated-follow.md` § Decision 2). `None` = a
+    /// subscriber on this nest.
+    pub home: Option<String>,
 }
 
 impl From<PendingRequest> for FfiPendingRequest {
@@ -207,6 +217,7 @@ impl From<PendingRequest> for FfiPendingRequest {
             created_at: p.created_at.0,
             mlkem_encaps_key: p.mlkem_encaps_key.map(|b| b.into_vec()),
             payment_entitled: p.payment_entitled,
+            home: p.home,
         }
     }
 }
@@ -611,6 +622,7 @@ mod tests {
     #[test]
     fn pending_request_maps_actor_and_timestamp() {
         let proto = PendingRequest {
+            home: None,
             request_id: 11,
             subscriber_id: ActorId([9u8; 32]),
             tier_name: "gold".into(),
@@ -631,6 +643,7 @@ mod tests {
     #[test]
     fn mine_subscription_maps_actor_status_and_handle() {
         let proto = MineSubscription {
+            home_nest_url: Some("https://home.example".into()),
             author_id: ActorId([3u8; 32]),
             tier: "gold".into(),
             status: "pending".into(),
@@ -644,6 +657,7 @@ mod tests {
         assert_eq!(ffi.status, "pending");
         assert_eq!(ffi.handle.as_deref(), Some("alice"));
         assert_eq!(ffi.since, 123);
+        assert_eq!(ffi.home_nest_url.as_deref(), Some("https://home.example"));
         // The row label is pre-computed at this mirror, not re-chosen per client.
         assert_eq!(ffi.author_display, "alice");
     }
@@ -655,6 +669,7 @@ mod tests {
     fn mine_subscription_author_display_falls_back_to_full_hex() {
         let mine = |handle: Option<&str>| -> FfiMineSubscription {
             MineSubscription {
+                home_nest_url: None,
                 author_id: ActorId([0xabu8; 32]),
                 tier: "gold".into(),
                 status: "active".into(),

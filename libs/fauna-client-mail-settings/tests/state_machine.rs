@@ -979,6 +979,86 @@ async fn enable_mail_swallows_set_mail_enabled_rejection_for_non_admin() {
     assert!(machine.snapshot().enabled);
 }
 
+// ── a box with no content scanners cannot enable mail ───────────────────────
+//
+// `ui/mail-settings.md` § Layout & flow (the fact: `mail-bridge-lifecycle.md`
+// § Default-off on first claim → *A box with no content scanners cannot enable
+// mail*): hydrate reads the box's report into `mail_unavailable_here`, the
+// machine refuses `EnableMail` while it holds — before anything is minted —
+// and the nest's own typed refusal is the page's error, never the swallowed
+// non-admin `Rejected`.
+
+fn enable_default() -> MailSettingsAction {
+    MailSettingsAction::EnableMail {
+        display_name: "default".into(),
+        kind: CredentialKind::OAuthBearer,
+        secret: SecretBytes::from(vec![0xAB; 32]),
+    }
+}
+
+#[tokio::test]
+async fn hydrate_reads_mail_unavailable_here_and_enable_is_refused_locally() {
+    let (machine, nest, mail) = build_machine();
+    nest.state().mail_unavailable_here = true;
+    machine.hydrate().await.expect("hydrate");
+    assert!(machine.snapshot().mail_unavailable_here);
+
+    let err = machine
+        .dispatch(enable_default())
+        .await
+        .expect_err("the enable is refused on an unavailable box");
+    let sentence = fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE;
+    assert_eq!(err.to_string(), sentence);
+    assert_eq!(machine.snapshot().error.as_deref(), Some(sentence));
+    assert!(mail.current().msek.is_none(), "nothing was minted");
+    assert!(nest.state().set_mail_enabled.is_empty(), "nothing was sent");
+    assert!(!machine.snapshot().enabled);
+}
+
+#[tokio::test]
+async fn a_box_that_can_enable_mail_hydrates_available() {
+    let (machine, _nest, _mail) = build_machine();
+    machine.hydrate().await.expect("hydrate");
+    assert!(!machine.snapshot().mail_unavailable_here);
+}
+
+#[tokio::test]
+async fn an_unhydrated_machine_refuses_the_enable_on_an_unavailable_box() {
+    // The claim-time launch glue enables through a machine that never
+    // hydrated: the enable's own fresh read refuses it before any mint.
+    let (machine, nest, mail) = build_machine();
+    nest.state().mail_unavailable_here = true;
+    let err = machine
+        .enable_mail_with_generated_password("Default".into())
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        err.to_string(),
+        fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE
+    );
+    assert!(mail.current().msek.is_none(), "nothing was minted");
+    assert!(machine.snapshot().mail_unavailable_here);
+}
+
+#[tokio::test]
+async fn the_nests_unavailable_refusal_is_the_page_error_never_swallowed() {
+    // The box's report was unreadable at enable time (or changed under the
+    // page): the nest's typed refusal of the subsystem flip surfaces.
+    let (machine, nest, _mail) = build_machine();
+    machine.hydrate().await.expect("hydrate");
+    // The fake answers its read `false` but refuses the flip — the
+    // read-then-refuse race.
+    nest.state().refuse_set_mail_enabled_unavailable = true;
+    let err = machine
+        .dispatch(enable_default())
+        .await
+        .expect_err("the nest's refusal surfaces");
+    let sentence = fauna_i18n::strings::error::bridges::MAIL_UNAVAILABLE_HERE;
+    assert_eq!(err.to_string(), sentence);
+    assert_eq!(machine.snapshot().error.as_deref(), Some(sentence));
+    assert!(machine.snapshot().mail_unavailable_here);
+}
+
 #[tokio::test]
 async fn enable_mail_surfaces_transient_set_mail_enabled_failure() {
     // A `Transient` (connectivity) failure on the subsystem flip rides the same
@@ -1304,6 +1384,40 @@ async fn hydrate_threads_admin_caldav_port_for_local_target_only() {
         443,
         "registrable domain stays on the router-fronted 443"
     );
+}
+
+#[tokio::test]
+async fn hydrate_shows_a_direct_listener_at_the_boxs_own_address() {
+    // Home box with a domain (`caldav-server.md` § Network exposure —
+    // Any-locator serving): the nest declares its one DAV listener direct, so
+    // the page shows the address the member reaches the nest at, on the admin
+    // port, not the `mail.<domain>:443` route that reaches nothing there.
+    let (home, nest) = build_machine_for("https://home.example.com");
+    nest.state().caldav_port = Some(9443);
+    nest.state().dav_direct_listener = Some(true);
+    home.hydrate().await.expect("hydrate home");
+    let mua = home.snapshot().mua;
+    assert_eq!(mua.caldav_host, "home.example.com");
+    assert_eq!(mua.caldav_port, 9443);
+    assert_eq!(mua.webdav_url, "https://home.example.com:9443/webdav/");
+    // A config-driven re-snapshot keeps the hydrated lines.
+    home.dispatch(MailSettingsAction::SetServingEnabled { enabled: false })
+        .await
+        .expect("serving off");
+    let mua = home.snapshot().mua;
+    assert_eq!(mua.caldav_host, "home.example.com");
+    assert_eq!(mua.caldav_port, 9443);
+    assert_eq!(mua.webdav_url, "https://home.example.com:9443/webdav/");
+
+    // The cloud domain box declares its listener router-fronted: unchanged.
+    let (cloud, nest2) = build_machine_for("https://example.com");
+    nest2.state().caldav_port = Some(9443);
+    nest2.state().dav_direct_listener = Some(false);
+    cloud.hydrate().await.expect("hydrate cloud");
+    let mua = cloud.snapshot().mua;
+    assert_eq!(mua.caldav_host, "mail.example.com");
+    assert_eq!(mua.caldav_port, 443);
+    assert_eq!(mua.webdav_url, "https://mail.example.com/webdav/");
 }
 
 #[tokio::test]

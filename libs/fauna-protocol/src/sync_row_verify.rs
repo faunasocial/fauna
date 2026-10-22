@@ -861,7 +861,7 @@ mod tests {
     }
 
     /// A cross-nest member's set has a roster source (the relayed read,
-    /// `federation.md` § Cross-nest…, *The cross-nest writer roster read*), so
+    /// `federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster read*), so
     /// its non-owner rows take the same-nest shape: held until the first read,
     /// then judged by the roster it returned.
     #[test]

@@ -2,8 +2,8 @@
 
 use super::{AuditRow, InviteCodeRow, InviteRequestRow, Stats, TierRow, UserRow};
 use super::{CacheDb, now_epoch_millis, now_epoch_secs};
-use crate::db::chain_version::{self, ChainVersion};
 use anyhow::{Context, Result};
+use fauna_core::chain_version::{self, ChainVersion};
 use rusqlite::OptionalExtension;
 
 /// The authority-relevant columns of a `users` row, read in one query by the
@@ -80,6 +80,38 @@ pub struct AuditVersionCensus {
     pub unverifiable: i64,
 }
 
+tokio::task_local! {
+    /// The consented principal an admin-plane call is served to, set by
+    /// [`scope_audit_via_principal`] around the actor handler that
+    /// `principal_handlers::admin_twin` runs as the account.
+    static AUDIT_VIA_PRINCIPAL: Vec<u8>;
+}
+
+/// Run `fut` with every audit row it writes attributed to `principal_id`:
+/// [`audit_on_conn`] appends `via_principal=<hex>` to the row's `detail`, so
+/// an admin's log tells a principal's act on the account's authority from the
+/// admin's own (`apps/bridges.md` rule (e)). The attribution rides `detail`,
+/// not a column, so the hash-chain preimage keeps its format. A row the
+/// handler writes from a task it spawns is outside the scope and unattributed.
+pub(crate) async fn scope_audit_via_principal<F: std::future::Future>(
+    principal_id: Vec<u8>,
+    fut: F,
+) -> F::Output {
+    AUDIT_VIA_PRINCIPAL.scope(principal_id, fut).await
+}
+
+/// `detail` as the row stores it: the writer's own, plus the principal the
+/// running call is attributed to, if any.
+fn attributed_detail(detail: Option<&str>) -> Option<std::borrow::Cow<'_, str>> {
+    match AUDIT_VIA_PRINCIPAL.try_with(|p| hex::encode(p)) {
+        Ok(p) => Some(std::borrow::Cow::Owned(match detail {
+            Some(d) if !d.is_empty() => format!("{d}, via_principal={p}"),
+            _ => format!("via_principal={p}"),
+        })),
+        Err(_) => detail.map(std::borrow::Cow::Borrowed),
+    }
+}
+
 /// Insert an audit log entry on an already-held connection (or transaction —
 /// [`rusqlite::Transaction`] derefs to [`rusqlite::Connection`]). The sync core
 /// of [`CacheDb::audit`], split out so multi-write operations (e.g. the
@@ -100,6 +132,8 @@ pub(crate) fn audit_on_conn(
     target: Option<&str>,
     detail: Option<&str>,
 ) -> Result<()> {
+    let detail = attributed_detail(detail);
+    let detail = detail.as_deref();
     let now = now_epoch_millis();
 
     // Get the previous entry's hash (or genesis)
@@ -109,10 +143,7 @@ pub(crate) fn audit_on_conn(
             [],
             |row| row.get(0),
         )
-        .unwrap_or_else(|_| {
-            use sha2::Digest;
-            format!("{:x}", sha2::Sha256::digest(b"fauna-audit-genesis-v1"))
-        });
+        .unwrap_or_else(|_| chain_version::audit_genesis_prev_hash());
 
     // Insert first (with empty entry_hash) to get the autoincrement id.
     // `entry_hash_version` is written in the same statement rather than left to
@@ -452,6 +483,25 @@ impl CacheDb {
         }
     }
 
+    /// Set the actor's durable first-session mark if it is unset, answering
+    /// whether it was — `true` exactly once per account, at its first
+    /// actor-own session mint (`login.md` § Direct Auth → the verify reply,
+    /// `first_sign_in`). One conditional `UPDATE`, rows-changed the answer, so
+    /// two devices racing their first sign-in get exactly one `true`. An
+    /// actor with no `users` row answers `false`.
+    pub async fn mark_first_session(&self, actor_id: &[u8]) -> Result<bool> {
+        let actor_id = actor_id.to_vec();
+        let conn = self.conn.lock().await;
+        let changed = conn
+            .execute(
+                "UPDATE users SET first_session_at = ?1
+                 WHERE actor_id = ?2 AND first_session_at IS NULL",
+                rusqlite::params![now_epoch_secs(), actor_id],
+            )
+            .context("mark_first_session")?;
+        Ok(changed > 0)
+    }
+
     /// Returns true if at least one user row exists in the users table.
     pub async fn has_any_user(&self) -> Result<bool> {
         let conn = self.conn.lock().await;
@@ -570,6 +620,52 @@ impl CacheDb {
             rusqlite::params![tier.name, tier.max_inbox_bytes, tier.max_storage_bytes, tier.max_devices, tier.max_blob_size, tier.max_feeds],
         ).context("create tier")?;
         Ok(())
+    }
+
+    /// Remove a tier nobody is on. The reference checks and the delete run in
+    /// one transaction under the connection lock, so no member, invite code or
+    /// membership link can come to name the tier between the check and the
+    /// delete. The FKs from `users`, `invite_codes` and `membership_tiers` would
+    /// refuse the delete on their own; checking first is what lets the refusal
+    /// say which kind of referrer holds the tier. A membership's frozen lapse
+    /// stamp is deliberately not a referrer — it carries no FK so a stale stamp
+    /// never blocks this (the sweep degrades a vanished lapse tier to `free`).
+    pub async fn delete_tier(&self, name: &str) -> Result<super::TierDeleteOutcome> {
+        use super::TierDeleteOutcome;
+        let name = name.to_string();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction().context("begin delete tier")?;
+        let referrers: [(&'static str, &str); 3] = [
+            (
+                "a member is on it",
+                "SELECT EXISTS(SELECT 1 FROM users WHERE tier = ?1)",
+            ),
+            (
+                "an invite code admits at it",
+                "SELECT EXISTS(SELECT 1 FROM invite_codes WHERE tier = ?1)",
+            ),
+            (
+                "a membership link points at it",
+                "SELECT EXISTS(SELECT 1 FROM membership_tiers WHERE admin_tier = ?1 OR lapse_tier = ?1)",
+            ),
+        ];
+        for (why, sql) in referrers {
+            let named: bool = tx
+                .query_row(sql, rusqlite::params![name], |row| row.get(0))
+                .context("check tier referrers")?;
+            if named {
+                return Ok(TierDeleteOutcome::InUse(why));
+            }
+        }
+        let deleted = tx
+            .execute("DELETE FROM tiers WHERE name = ?1", rusqlite::params![name])
+            .context("delete tier")?;
+        tx.commit().context("commit delete tier")?;
+        Ok(if deleted > 0 {
+            TierDeleteOutcome::Deleted
+        } else {
+            TierDeleteOutcome::NotFound
+        })
     }
 
     /// Look up the max_feeds limit for the tier assigned to the given user.
@@ -1194,11 +1290,17 @@ impl CacheDb {
         }
     }
 
-    /// Set (or clear) a user's handle. Empty string clears it.
+    /// Set (or clear) a user's handle. Empty string clears it. A handle an
+    /// exact alias, forwarder or list holds against this actor is refused with
+    /// [`super::mail_aliases::HandleHeldByAlias`] (one address, one owner).
     pub async fn set_handle(&self, actor_id: &[u8; 32], handle: &str) -> Result<()> {
         let actor_id = *actor_id;
         let handle = handle.to_string();
         let conn = self.conn.lock().await;
+        if !handle.is_empty() && super::mail_aliases::alias_holds_handle(&conn, &handle, &actor_id)?
+        {
+            return Err(super::mail_aliases::HandleHeldByAlias.into());
+        }
         let tx = conn.unchecked_transaction().context("begin set handle")?;
         tx.execute(
             "UPDATE users SET handle = ?1 WHERE actor_id = ?2",
@@ -1430,6 +1532,12 @@ impl CacheDb {
         let guardian = guardian.map(|g| g.to_vec());
         let age = age.map(|(b, p)| (b.to_string(), p.to_string()));
         let conn = self.conn.lock().await;
+        // One address, one owner: a handle an exact alias, forwarder or list
+        // already holds is taken (`mail-aliases.md` § Cross-user uniqueness).
+        if !handle.is_empty() && super::mail_aliases::alias_holds_handle(&conn, &handle, &actor_id)?
+        {
+            return Err(super::mail_aliases::HandleHeldByAlias.into());
+        }
         let now = now_epoch_secs();
         let tx = conn.unchecked_transaction().context("begin tx")?;
         // label defaults to the handle (see doc comment) — a later admin
@@ -2279,6 +2387,39 @@ fn invite_request_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<InviteRe
         age_band: row.get(9)?,
         age_provenance: row.get(10)?,
     })
+}
+
+/// The handles of many accounts in one read — [`CacheDb::get_handle`] batched
+/// for the feed's author decoration (`feed_routes::decorate_authors_best_effort`).
+/// An id with no `users` row, or whose handle is unset (`NULL` or empty), is
+/// simply absent from the map.
+pub fn handles_many(
+    conn: &rusqlite::Connection,
+    actor_ids: &[[u8; 32]],
+) -> rusqlite::Result<std::collections::HashMap<[u8; 32], String>> {
+    let mut out = std::collections::HashMap::new();
+    // Well under SQLite's bound-variable floor; a feed page is ≤ 200 rows.
+    for chunk in actor_ids.chunks(100) {
+        let marks = (1..=chunk.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT actor_id, handle FROM users
+             WHERE actor_id IN ({marks}) AND handle IS NOT NULL AND handle != ''"
+        ))?;
+        let ids = chunk.iter().map(|id| id.as_slice());
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids), |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (actor_id, handle) = row?;
+            if let Ok(actor_id) = <[u8; 32]>::try_from(actor_id.as_slice()) {
+                out.insert(actor_id, handle);
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

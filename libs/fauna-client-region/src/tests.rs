@@ -132,7 +132,7 @@ fn nsfw(permille: u16) -> Vec<ContentLabelEntry> {
 }
 
 fn verdict(plane: &RegionPlane, labels: &[ContentLabelEntry]) -> RenderVerdict {
-    render_verdict_composed(labels, None, None, &plane.rule_sets()).verdict
+    render_verdict_composed(labels, None, None, &plane.rule_sets(), &[]).verdict
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn a_relayed_document_binds_and_names_its_authority_and_reason() {
         reply(Some(envelope("XZ", 42, 1, &nsfw_block()))),
         NOW
     ));
-    let composed = render_verdict_composed(&nsfw(900), None, None, &plane.rule_sets());
+    let composed = render_verdict_composed(&nsfw(900), None, None, &plane.rule_sets(), &[]);
     assert_eq!(composed.verdict, RenderVerdict::Block);
     let attribution = composed.region().expect("attributed to the region");
     assert_eq!(attribution.authority_name, "Synthetic Authority");
@@ -564,7 +564,7 @@ fn the_placeholder_names_the_verb_the_authority_and_the_reason_in_the_app_langua
         .insert("en".to_string(), "In English.".to_string());
     plane.apply_reply(&code("XZ"), reply(Some(envelope("XZ", 42, 1, &doc))), NOW);
 
-    let composed = render_verdict_composed(&nsfw(900), None, None, &plane.rule_sets());
+    let composed = render_verdict_composed(&nsfw(900), None, None, &plane.rule_sets(), &[]);
     let p = placeholder_for(&composed, "en").expect("the region drove a block");
     assert_eq!(p.verb, RegionVerb::Block);
     assert_eq!(p.region.as_str(), "XZ");
@@ -574,7 +574,7 @@ fn the_placeholder_names_the_verb_the_authority_and_the_reason_in_the_app_langua
     assert_eq!(placeholder_for(&composed, "nb").unwrap().reason, REASON);
 
     // A verdict no region drove paints no region placeholder.
-    let unregioned = render_verdict_composed(&nsfw(900), None, None, &[]);
+    let unregioned = render_verdict_composed(&nsfw(900), None, None, &[], &[]);
     assert!(placeholder_for(&unregioned, "en").is_none());
 }
 

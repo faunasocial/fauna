@@ -68,7 +68,12 @@ pub fn default_socket_path() -> io::Result<PathBuf> {
         // the socket is created 0600 inside a 0700 dir either way — so this
         // cannot widen the socket's audience the way guessing a runtime dir
         // could.
-        Ok(macos_socket_path(dirs::home_dir()))
+        macos_socket_path(dirs::home_dir()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                fauna_core::platform_ids::NO_HOME_REFUSAL,
+            )
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -86,23 +91,21 @@ pub fn default_socket_path() -> io::Result<PathBuf> {
     }
 }
 
-/// `~/Library/Application Support/Fauna/sync-agent.sock` under `home`.
+/// `~/Library/Application Support/Fauna/sync-agent.sock` under `home`, or
+/// `None` when `home` is not a POSIX-absolute path.
 ///
-/// **Always ABSOLUTE**, the same guarantee `SyncPaths`'s macOS base (now the
-/// user-domain `…/Fauna/sync` beside this socket, 2026-08-25)
-/// makes for the sync base dir: `dirs::home_dir()` only filters an
-/// EMPTY `$HOME` (falling back to the passwd database, always absolute), not a
-/// present-but-relative one — so without this fallback a relative `$HOME` would
-/// silently produce a relative socket path, which `UnixListener::bind` resolves
-/// against the process cwd. Under launchd that cwd is `/`, read-only — the exact
-/// failure mode the base-dir fix closed, left open here until now.
-#[cfg(target_os = "macos")]
-fn macos_socket_path(home: Option<PathBuf>) -> PathBuf {
-    let home = match home {
-        Some(h) if h.is_absolute() => h,
-        _ => PathBuf::from("/tmp"),
-    };
-    home.join("Library/Application Support/Fauna/sync-agent.sock")
+/// **Always ABSOLUTE or REFUSED**, the same floor `SyncPaths`'s macOS base
+/// uses (`fauna_core::platform_ids::apple_user_domain_home`):
+/// `dirs::home_dir()` only filters an EMPTY `$HOME` (falling back to the passwd
+/// database, always absolute), not a present-but-relative one. A relative home
+/// is refused rather than mapped to `/tmp` — another local account could
+/// pre-create that socket, and every client resolves its agent through this
+/// path without a peer-credential check, then pushes capabilities and bearers
+/// down it. Compiled on every target (only the call site is macOS-gated) so the
+/// refusal is unit-tested on every dev box.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_socket_path(home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(fauna_core::platform_ids::apple_user_domain_home(home)?.join("Fauna/sync-agent.sock"))
 }
 
 /// `$XDG_RUNTIME_DIR/fauna/sync-agent.sock` under `runtime_dir` — or, when
@@ -281,7 +284,7 @@ const SUN_PATH_MAX: usize = 108;
 /// ([`macos_socket_path`]) plus a fixed 50-byte
 /// `Library/Application Support/Fauna/sync-agent.sock` suffix, so any caller
 /// relocating `HOME` (every e2e launch, a sandbox container) can overshoot.
-fn check_socket_path_len(socket_path: &Path) -> io::Result<()> {
+pub(crate) fn check_socket_path_len(socket_path: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let len = socket_path.as_os_str().as_bytes().len();
     if len >= SUN_PATH_MAX {
@@ -300,7 +303,7 @@ fn check_socket_path_len(socket_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn prepare_socket_dir(socket_path: &Path) -> io::Result<()> {
+pub(crate) fn prepare_socket_dir(socket_path: &Path) -> io::Result<()> {
     check_socket_path_len(socket_path)?;
     if let Some(dir) = socket_path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -316,7 +319,7 @@ fn prepare_socket_dir(socket_path: &Path) -> io::Result<()> {
 /// Correct as-is and unfixable at the socket-mode layer; the parent
 /// directory is the actual guard. Reviewed and cleared, no rewrite
 /// needed.
-fn restrict_socket_perms(socket_path: &Path) -> io::Result<()> {
+pub(crate) fn restrict_socket_perms(socket_path: &Path) -> io::Result<()> {
     set_mode(socket_path, 0o600)
 }
 
@@ -334,33 +337,32 @@ mod tests {
 
     /// The per-platform socket path shape, asserted on a fake base — pure path
     /// formatting, no env mutation, no filesystem.
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_socket_path_is_under_application_support() {
         assert_eq!(
             macos_socket_path(Some(PathBuf::from("/Users/tester"))),
-            PathBuf::from("/Users/tester/Library/Application Support/Fauna/sync-agent.sock")
+            Some(PathBuf::from(
+                "/Users/tester/Library/Application Support/Fauna/sync-agent.sock"
+            ))
         );
     }
 
     /// Twin of `SyncPaths::macos_group_container_base_is_always_absolute`
     /// (`bins/fauna-sync-agent/src/config.rs`) for the socket path: a
-    /// missing/empty/relative home must never produce a relative socket path —
-    /// `UnixListener::bind` resolves a relative path against the process cwd,
-    /// which under launchd is `/`, read-only.
-    #[cfg(target_os = "macos")]
+    /// missing/empty/relative home is REFUSED (`None`), never mapped to a
+    /// world-writable `/tmp` another local account could pre-create
+    /// (`account-data-plane.md` § The account store → Placement, *No shared
+    /// fallback*) — and never a relative path, which `UnixListener::bind`
+    /// resolves against the process cwd (`/`, read-only, under launchd).
     #[test]
-    fn macos_socket_path_is_always_absolute() {
+    fn macos_socket_path_is_refused_without_an_absolute_home() {
         for home in [
             None,
             Some(PathBuf::from("")),
             Some(PathBuf::from("relative/home")),
+            Some(PathBuf::from("relative")),
         ] {
-            let path = macos_socket_path(home.clone());
-            assert!(
-                path.is_absolute(),
-                "home {home:?} produced relative {path:?}"
-            );
+            assert_eq!(macos_socket_path(home.clone()), None, "home {home:?}");
         }
     }
 
@@ -442,7 +444,7 @@ mod tests {
     #[test]
     fn the_default_socket_path_shape_clears_the_length_gate() {
         #[cfg(target_os = "macos")]
-        let path = macos_socket_path(Some(PathBuf::from("/Users/tester")));
+        let path = macos_socket_path(Some(PathBuf::from("/Users/tester"))).unwrap();
         #[cfg(not(target_os = "macos"))]
         let path = linux_socket_path(Path::new("/run/user/1000"), None);
         check_socket_path_len(&path).expect("the production socket path must fit sun_path");

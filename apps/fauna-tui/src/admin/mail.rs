@@ -4,10 +4,10 @@
 //! A dumb renderer of the shared `MailPolicyMachine`
 //! (`fauna-client-mail-settings::admin_policy`): the two deployment-wide toggles
 //! (`admin-mail-enabled-toggle` / `-auto-enable-new-users-toggle`) dispatch
-//! immediately, and the six policy groups (spam / auth / submission / imap /
-//! outbound / alias) each **full-PUT** their whole sub-struct on their own Save
-//! button. The shell (`super`) owns the machine, ops and folds; this file is paint
-//! only, plus the [`MailDrafts`] seed/gather impl (the six groups' edit drafts).
+//! immediately, and the seven policy groups (spam / auth / submission / imap /
+//! outbound / alias / dmarc) each **full-PUT** their whole sub-struct on their own
+//! Save button. The shell (`super`) owns the machine, ops and folds; this file is
+//! paint only, plus the [`MailDrafts`] seed/gather impl (the groups' edit drafts).
 //!
 //! Every editable control is a **draft** re-seeded from the persisted snapshot on
 //! every fold (`super::apply_outcome`), so a group shows persisted state until the
@@ -18,8 +18,10 @@
 //! § 6 — unlike the page-scoped aliases error), bridged in the fold.
 
 use fauna_client_mail_settings::admin_policy::{
-    AliasPolicyView, AuthPolicyView, FcrdnsMode, ImapDeleteNonempty, ImapPolicyView,
-    MailHealthView, MailPolicySnapshot, OutboundPolicyView, SpamPolicyView, SubmissionPolicyView,
+    AliasPolicyView, AuthPolicyView, DmarcPolicyView, FcrdnsMode, ImapDeleteNonempty,
+    ImapPolicyView, MailHealthView, MailPolicyConfirm, MailPolicySnapshot, OutboundPolicyView,
+    SENDER_DASHBOARD_LINKS, SpamPolicyView, SubmissionPolicyView, dmarc_forensic_mode_options,
+    dmarc_forensic_retention_warns, secret_rotation_text,
 };
 use fauna_core::format::{parse_count, parse_count_u64};
 use fauna_i18n::strings::admin as t;
@@ -27,8 +29,8 @@ use fauna_i18n::strings::common;
 use fauna_ui_ids as ids;
 
 use super::{
-    Action, AdminField, AdminState, AliasDraft, AuthDraft, ImapDraft, MailDrafts, MailField,
-    MailToggle, OutboundDraft, SpamDraft, SubmissionDraft,
+    Action, AdminField, AdminState, AliasDraft, AuthDraft, DmarcDraft, ImapDraft, MailDrafts,
+    MailField, MailToggle, MicrosoftDraft, OutboundDraft, SpamDraft, SubmissionDraft,
 };
 use crate::element::{Element, Field, Gesture, SelectTarget};
 use crate::pages::Page;
@@ -46,6 +48,7 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
     let d = &state.mail_drafts;
     let snap = state.mail_snapshot.as_ref();
     let mail_enabled = snap.map(|s| s.mail_enabled).unwrap_or(false);
+    let unavailable = !mail_enabled && snap.is_some_and(|s| s.mail_unavailable_here);
     let auto_enable = snap
         .map(|s| s.auto_enable_mail_for_new_users)
         .unwrap_or(false);
@@ -64,21 +67,42 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
         .nav_back(),
         // The two deployment-wide toggles dispatch immediately (non-optimistic:
         // `checked` reads the persisted snapshot, flipping only after the write +
-        // re-read), NOT gathered into a group PUT.
+        // re-read), NOT gathered into a group PUT. On a box that cannot enable
+        // mail (the shared machine's `mail_unavailable_here`, read — never
+        // re-derived) the enable toggle reads `unavailable`, disabled, under
+        // its notice (`admin.md` § 6 Mail); mail already on keeps its toggle so
+        // the admin can still turn it off.
         Element::checkbox_gesture(
             ids::ADMIN_MAIL_ENABLED_TOGGLE,
             t::mail_page::ENABLED_LABEL,
             mail_enabled,
             Gesture::Admin(Action::ToggleMailEnabled),
-        ),
+        )
+        .attr(
+            "state",
+            match (mail_enabled, unavailable) {
+                (true, _) => "on",
+                (false, true) => "unavailable",
+                (false, false) => "off",
+            },
+        )
+        .enabled(!unavailable),
     ];
+    if unavailable {
+        // The same sentence as the user's page (`ui/mail-settings.md` § Layout
+        // & flow owns it).
+        els.push(Element::label(
+            ids::ADMIN_MAIL_UNAVAILABLE_NOTICE,
+            fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE,
+        ));
+    }
     // The mail health readout sits directly under the enable toggle — omitted
     // until the health read answers (a nest that refuses it gets no section,
     // never a guess).
     if let Some(health) = snap.and_then(|s| s.health.as_ref()) {
         els.extend(health_elements(
             health,
-            state.mail_warmup_reset_armed,
+            snap.and_then(|s| s.armed),
             fauna_core::data::Timestamp::now_millis_or_zero() as i64,
         ));
     }
@@ -87,6 +111,37 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
         t::mail_page::AUTO_ENABLE_NEW_USERS_LABEL,
         auto_enable,
         Gesture::Admin(Action::ToggleMailAutoEnable),
+    ));
+
+    // ── The deployment's own Microsoft registration for the Outlook import
+    // (set_microsoft_registration; read back via fauna.setup.status) ──
+    els.push(Element::chrome(t::mail_page::MICROSOFT_GROUP_TITLE));
+    els.push(Element::chrome(t::mail_page::MICROSOFT_GROUP_DESC));
+    els.push(Element::chrome(t::mail_page::MICROSOFT_REQUIREMENTS));
+    els.push(Element::chrome(
+        if snap.is_none_or(|s| s.microsoft_registration.is_default) {
+            t::mail_page::MICROSOFT_USING_DEFAULT
+        } else {
+            t::mail_page::MICROSOFT_USING_OWN
+        },
+    ));
+    els.push(text_input(
+        state,
+        ids::ADMIN_MAIL_MICROSOFT_CLIENT_ID_INPUT,
+        MailField::MicrosoftClientId,
+        t::mail_page::MICROSOFT_CLIENT_ID_LABEL,
+    ));
+    els.push(text_input(
+        state,
+        ids::ADMIN_MAIL_MICROSOFT_TENANT_INPUT,
+        MailField::MicrosoftTenant,
+        t::mail_page::MICROSOFT_TENANT_LABEL,
+    ));
+    els.push(Element::chrome(t::mail_page::MICROSOFT_TENANT_SUBTITLE));
+    els.push(save(
+        ids::ADMIN_MAIL_MICROSOFT_SAVE_BUTTON,
+        t::mail_page::MICROSOFT_SAVE,
+        Action::SaveMailMicrosoft,
     ));
 
     // ── Spam / inbound perimeter (put_spam_policy) ──
@@ -197,10 +252,15 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
     ));
 
     // ── Deployment baseline (admin opt-in aggregate) ──
-    els.push(save(
-        "admin-mail-publish-spam-baseline-button",
+    // The same-button two-press (`mail-spam.md` § Cold start step 1): the first
+    // press relabels it to the sentence saying whose training the baseline
+    // reflects, the second publishes.
+    els.push(confirm_button(
+        ids::ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON,
+        MailPolicyConfirm::PublishSpamBaseline,
+        snap.and_then(|s| s.armed),
         t::mail_page::PUBLISH_SPAM_BASELINE_BUTTON,
-        Action::PublishSpamBaseline,
+        t::mail_page::PUBLISH_SPAM_BASELINE_CONFIRM,
     ));
     // The result is painted UNCONDITIONALLY (empty text until Publish is clicked —
     // it registers on its non-empty id, `ui::register_frame`), so
@@ -452,6 +512,131 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
         Action::SaveMailAlias,
     ));
 
+    // ── DMARC reports (put_dmarc_policy; nest-side, read via get_dmarc_policy) ──
+    els.extend(dmarc_elements(state));
+
+    // ── Secrets (rotate_list_unsubscribe_secret / rotate_srs_secret) ──
+    els.extend(secrets_elements(snap));
+
+    els
+}
+
+/// The Secrets group (`mail-mass-mailing.md` § Secret rotation,
+/// `mail-forwarding.md` § SRS scheme): the two rotate buttons, each the
+/// same-button two-click the shared machine holds — an armed button relabels to
+/// its confirm sentence — then the last rotation's outcome as untagged chrome,
+/// through the shared `secret_rotation_text`.
+fn secrets_elements(snap: Option<&MailPolicySnapshot>) -> Vec<Element> {
+    let armed = snap.and_then(|s| s.armed);
+    let mut els = vec![
+        Element::chrome(t::mail_page::SECRETS_GROUP_TITLE),
+        Element::chrome(t::mail_page::SECRETS_GROUP_DESC),
+        confirm_button(
+            ids::ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON,
+            MailPolicyConfirm::RotateListUnsubscribeSecret,
+            armed,
+            t::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE,
+            t::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE_CONFIRM,
+        ),
+        confirm_button(
+            ids::ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON,
+            MailPolicyConfirm::RotateSrsSecret,
+            armed,
+            t::mail_page::FORWARD_SRS_SECRET_ROTATE,
+            t::mail_page::FORWARD_SRS_SECRET_ROTATE_CONFIRM,
+        ),
+    ];
+    if let Some(view) = snap.and_then(|s| s.secret_rotation.as_ref()) {
+        els.push(Element::chrome(
+            secret_rotation_text(view).resolve(fauna_i18n::strings::lookup),
+        ));
+    }
+    els
+}
+
+/// One confirm button: its resting label, or its confirm sentence while the
+/// machine holds it armed; every press is the shared `Press`.
+fn confirm_button(
+    id: &str,
+    button: MailPolicyConfirm,
+    armed: Option<MailPolicyConfirm>,
+    label: &str,
+    confirm: &str,
+) -> Element {
+    Element::gesture_button(
+        id,
+        if armed == Some(button) {
+            confirm
+        } else {
+            label
+        },
+        true,
+        Gesture::Admin(Action::PressMailConfirm(button)),
+    )
+}
+
+/// The DMARC-reports group (`dmarc-reporting.md` § Forensic-report receive →
+/// *Default off*, § Retention): the forensic opt-in with its PII text beside it
+/// (painted always, the toggle point's whole explanation), the `fo=` picker over
+/// the shared catalog, the two retentions and the group's Save. A forensic
+/// retention past the default adds the UI's warning under its field — untagged
+/// chrome, decided by the shared `dmarc_forensic_retention_warns` over the
+/// draft as typed (an unparsed draft warns on nothing).
+fn dmarc_elements(state: &AdminState) -> Vec<Element> {
+    let d = &state.mail_drafts.dmarc;
+    let resolve =
+        |label: &fauna_core::localized::LocalizedText| label.resolve(fauna_i18n::strings::lookup);
+    let fo_options = dmarc_forensic_mode_options();
+    let fo_display = fo_options
+        .iter()
+        .find(|o| o.value == d.fo_mode)
+        .map(|o| resolve(&o.label))
+        .unwrap_or_else(|| d.fo_mode.clone());
+    let mut els = vec![
+        Element::chrome(t::mail_page::DMARC_GROUP_TITLE),
+        Element::chrome(t::mail_page::DMARC_GROUP_DESC),
+        toggle(
+            ids::ADMIN_MAIL_DMARC_RUF_PUBLISH_TOGGLE,
+            t::mail_page::DMARC_RUF_PUBLISH_LABEL,
+            d.ruf_publish,
+            MailToggle::DmarcRufPublish,
+        ),
+        Element::label(
+            ids::ADMIN_MAIL_DMARC_RUF_WARNING,
+            t::mail_page::DMARC_RUF_WARNING,
+        ),
+        Element::select(
+            ids::ADMIN_MAIL_DMARC_FO_MODE_SELECT,
+            d.fo_mode.clone(),
+            SelectTarget::MailDmarcFoMode,
+            fo_options.iter().map(|o| o.value.clone()).collect(),
+        )
+        .display_value(fo_display)
+        .option_labels(fo_options.iter().map(|o| resolve(&o.label)).collect())
+        .labelled(t::mail_page::DMARC_FO_MODE_LABEL),
+        text_input(
+            state,
+            ids::ADMIN_MAIL_DMARC_AGGREGATE_RETENTION_INPUT,
+            MailField::DmarcAggregateRetention,
+            t::mail_page::DMARC_AGGREGATE_RETENTION_LABEL,
+        ),
+        text_input(
+            state,
+            ids::ADMIN_MAIL_DMARC_FORENSIC_RETENTION_INPUT,
+            MailField::DmarcForensicRetention,
+            t::mail_page::DMARC_FORENSIC_RETENTION_LABEL,
+        ),
+    ];
+    if parse_count(d.forensic_retention.trim()).is_some_and(dmarc_forensic_retention_warns) {
+        els.push(Element::chrome(
+            t::mail_page::DMARC_FORENSIC_RETENTION_WARNING,
+        ));
+    }
+    els.push(save(
+        ids::ADMIN_MAIL_DMARC_SAVE_BUTTON,
+        t::mail_page::DMARC_SAVE,
+        Action::SaveMailDmarc,
+    ));
     els
 }
 
@@ -464,10 +649,14 @@ pub(super) fn mail_elements(state: &AdminState) -> Vec<Element> {
 /// (empty text) before each row's three leaves, so `-label`/`-state`/`-detail`
 /// at index *i* are row *i*'s. The two heartbeat rows (5 and 6) carry an empty
 /// `detail` on purpose — the stamp is painted there. The warm-up reset relabels
-/// to its confirm sentence while armed (the two-click confirm's whole visible
-/// affordance); the delist link shows its URL, since a terminal copies rather
-/// than opens.
-fn health_elements(health: &MailHealthView, warmup_armed: bool, now_ms: i64) -> Vec<Element> {
+/// to its confirm sentence while the machine holds it armed (the two-click
+/// confirm's whole visible affordance); the delist link shows its URL, since a
+/// terminal copies rather than opens.
+fn health_elements(
+    health: &MailHealthView,
+    armed: Option<MailPolicyConfirm>,
+    now_ms: i64,
+) -> Vec<Element> {
     let lookup = fauna_i18n::strings::lookup;
     let mut els = vec![
         Element::label(ids::ADMIN_MAIL_HEALTH_SECTION, t::mail_page::HEALTH_TITLE),
@@ -508,7 +697,7 @@ fn health_elements(health: &MailHealthView, warmup_armed: bool, now_ms: i64) -> 
                 ids::ADMIN_MAIL_HEALTH_DELIST_LINK,
                 format!("{}: {url}", t::mail_page::HEALTH_DELIST),
                 true,
-                Gesture::Admin(Action::CopyMailDelistUrl { url: url.clone() }),
+                Gesture::Admin(Action::CopyMailLinkUrl { url: url.clone() }),
             )
             // The target as the `href` attribute every app publishes on the link.
             .attr("href", url.clone()),
@@ -520,16 +709,37 @@ fn health_elements(health: &MailHealthView, warmup_armed: bool, now_ms: i64) -> 
         true,
         Gesture::Admin(Action::RecheckMailHealth),
     ));
-    els.push(Element::gesture_button(
+    els.push(confirm_button(
         ids::ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON,
-        if warmup_armed {
-            t::mail_page::HEALTH_WARMUP_RESET_CONFIRM
-        } else {
-            t::mail_page::HEALTH_WARMUP_RESET
-        },
-        true,
-        Gesture::Admin(Action::ResetMailWarmup),
+        MailPolicyConfirm::ResetWarmup,
+        armed,
+        t::mail_page::HEALTH_WARMUP_RESET,
+        t::mail_page::HEALTH_WARMUP_RESET_CONFIRM,
     ));
+    // The sender-dashboard note (static help) and its two links, one per
+    // receiver in the shared order; like the delist link they show their URL
+    // and copy it.
+    els.push(Element::label(
+        ids::ADMIN_MAIL_HEALTH_SENDER_DASHBOARDS_NOTE,
+        t::mail_page::HEALTH_SENDER_DASHBOARDS_NOTE,
+    ));
+    for (key, url) in SENDER_DASHBOARD_LINKS {
+        let label = match key {
+            "gmail" => t::mail_page::HEALTH_SENDER_DASHBOARD_GMAIL,
+            _ => t::mail_page::HEALTH_SENDER_DASHBOARD_OUTLOOK,
+        };
+        els.push(
+            Element::gesture_button(
+                ids::ADMIN_MAIL_HEALTH_SENDER_DASHBOARD_LINK,
+                format!("{label}: {url}"),
+                true,
+                Gesture::Admin(Action::CopyMailLinkUrl {
+                    url: url.to_string(),
+                }),
+            )
+            .attr("href", url),
+        );
+    }
     els
 }
 
@@ -678,6 +888,18 @@ impl MailDrafts {
             subaddressing: al.subaddressing_enabled,
             wildcard_prefix: al.wildcard_prefix_enabled,
         };
+        let dm = &snap.dmarc;
+        self.dmarc = DmarcDraft {
+            ruf_publish: dm.ruf_publish,
+            fo_mode: dm.fo_mode.clone(),
+            aggregate_retention: dm.aggregate_retention_days.to_string(),
+            forensic_retention: dm.forensic_retention_days.to_string(),
+        };
+        let ms = &snap.microsoft_registration;
+        self.microsoft = MicrosoftDraft {
+            client_id: ms.client_id.clone(),
+            tenant: ms.tenant.clone(),
+        };
     }
 
     /// Read a text-input draft (the automation agent's `get`, the keyboard's read).
@@ -711,6 +933,10 @@ impl MailDrafts {
             OutboundTreat5xx => self.outbound.treat_5xx.clone(),
             AliasExactMax => self.alias.exact_max.clone(),
             AliasReservedLocalParts => self.alias.reserved_local_parts.clone(),
+            DmarcAggregateRetention => self.dmarc.aggregate_retention.clone(),
+            DmarcForensicRetention => self.dmarc.forensic_retention.clone(),
+            MicrosoftClientId => self.microsoft.client_id.clone(),
+            MicrosoftTenant => self.microsoft.tenant.clone(),
         }
     }
 
@@ -745,6 +971,10 @@ impl MailDrafts {
             OutboundTreat5xx => self.outbound.treat_5xx = value,
             AliasExactMax => self.alias.exact_max = value,
             AliasReservedLocalParts => self.alias.reserved_local_parts = value,
+            DmarcAggregateRetention => self.dmarc.aggregate_retention = value,
+            DmarcForensicRetention => self.dmarc.forensic_retention = value,
+            MicrosoftClientId => self.microsoft.client_id = value,
+            MicrosoftTenant => self.microsoft.tenant = value,
         }
     }
 
@@ -777,6 +1007,7 @@ impl MailDrafts {
             OutboundIpv6 => self.outbound.ipv6 = !self.outbound.ipv6,
             AliasSubaddressing => self.alias.subaddressing = !self.alias.subaddressing,
             AliasWildcardPrefix => self.alias.wildcard_prefix = !self.alias.wildcard_prefix,
+            DmarcRufPublish => self.dmarc.ruf_publish = !self.dmarc.ruf_publish,
         }
     }
 
@@ -885,6 +1116,22 @@ impl MailDrafts {
             wildcard_prefix_enabled: d.wildcard_prefix,
         }
     }
+
+    /// Gather the DMARC group's drafts into a full `DmarcPolicyView`: the four
+    /// edited fields over the persisted `base`, every record tag without a
+    /// control (`p`, `sp`, `pct`, `adkim`, `aspf`, `rua`, the `ruf` destination,
+    /// `ri`) carried through unchanged. A retention past its ceiling is sent as
+    /// typed — the nest refuses it onto `error-message`, never clamped here.
+    pub(super) fn gather_dmarc(&self, base: &DmarcPolicyView) -> DmarcPolicyView {
+        let d = &self.dmarc;
+        DmarcPolicyView {
+            ruf_publish: d.ruf_publish,
+            fo_mode: d.fo_mode.clone(),
+            aggregate_retention_days: pu32(&d.aggregate_retention, base.aggregate_retention_days),
+            forensic_retention_days: pu32(&d.forensic_retention, base.forensic_retention_days),
+            ..base.clone()
+        }
+    }
 }
 
 /// Parse a numeric draft over the persisted value (unparsed/blank → keep persisted;
@@ -936,7 +1183,7 @@ fn join_u64(values: &[u64]) -> String {
 mod tests {
     use fauna_client_mail_settings::admin_policy::{
         BaselinePublishView, BaselineStateView, DmarcPolicyView, MailHealthCheckView,
-        MailPolicyStatus,
+        MailPolicyStatus, MicrosoftRegistrationView,
     };
 
     use super::*;
@@ -946,6 +1193,7 @@ mod tests {
         MailPolicySnapshot {
             mail_enabled: true,
             auto_enable_mail_for_new_users: true,
+            mail_unavailable_here: false,
             spam: SpamPolicyView {
                 max_score_before_spam_folder: 5,
                 max_score_before_reject: 0,
@@ -1018,11 +1266,18 @@ mod tests {
                 aggregate_retention_days: 90,
                 forensic_retention_days: 30,
             },
+            microsoft_registration: MicrosoftRegistrationView {
+                client_id: "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c".into(),
+                tenant: "common".into(),
+                is_default: false,
+            },
             status: MailPolicyStatus::Idle,
             baseline_publish_result: None,
             baseline_state: None,
             health: Some(sample_health()),
             error: None,
+            armed: None,
+            secret_rotation: None,
         }
     }
 
@@ -1074,8 +1329,64 @@ mod tests {
             .collect()
     }
 
+    /// `admin.md` § 6 Mail: on a box that cannot enable mail the deployment
+    /// toggle reads `unavailable`, is disabled, and the notice sits right under
+    /// it; an available box keeps today's live toggle and no notice.
+    #[test]
+    fn an_unavailable_box_disables_the_enable_toggle_under_the_notice() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Mail;
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::MailSnapshot(Box::new(MailPolicySnapshot {
+                mail_enabled: false,
+                mail_unavailable_here: true,
+                ..sample_snapshot()
+            })),
+        );
+        let els = mail_elements(&app.admin);
+        let ids = tagged_ids(&els);
+        let at = ids
+            .iter()
+            .position(|id| *id == "admin-mail-enabled-toggle")
+            .unwrap();
+        assert_eq!(ids[at + 1], "admin-mail-unavailable-notice");
+        assert_eq!(
+            els.iter()
+                .find(|e| e.id == "admin-mail-unavailable-notice")
+                .unwrap()
+                .text,
+            fauna_i18n::strings::mail_settings::UNAVAILABLE_NOTICE
+        );
+        let toggle = els
+            .iter()
+            .find(|e| e.id == "admin-mail-enabled-toggle")
+            .unwrap();
+        assert!(!toggle.enabled);
+        assert_eq!(
+            toggle.attrs,
+            vec![("state".to_string(), "unavailable".to_string())]
+        );
+
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::MailSnapshot(Box::new(MailPolicySnapshot {
+                mail_enabled: false,
+                ..sample_snapshot()
+            })),
+        );
+        let els = mail_elements(&app.admin);
+        assert!(!tagged_ids(&els).contains(&"admin-mail-unavailable-notice"));
+        let toggle = els
+            .iter()
+            .find(|e| e.id == "admin-mail-enabled-toggle")
+            .unwrap();
+        assert!(toggle.enabled);
+        assert_eq!(toggle.attrs, vec![("state".to_string(), "off".to_string())]);
+    }
+
     /// The page paints its ui.yaml `elements` in order — the two deployment toggles,
-    /// then the six policy groups (each its inputs/toggles/select then its Save),
+    /// then the seven policy groups (each its inputs/toggles/select then its Save),
     /// with the publish button + result and the read-only postmaster-cc value.
     #[test]
     fn mail_page_paints_ids_in_ui_yaml_order() {
@@ -1125,7 +1436,14 @@ mod tests {
                 "admin-mail-health-check-detail",
                 "admin-mail-health-recheck-button",
                 "admin-mail-health-warmup-reset-button",
+                "admin-mail-health-sender-dashboards-note",
+                "admin-mail-health-sender-dashboard-link",
+                "admin-mail-health-sender-dashboard-link",
                 "admin-mail-auto-enable-new-users-toggle",
+                // The deployment's own Microsoft registration
+                "admin-mail-microsoft-client-id-input",
+                "admin-mail-microsoft-tenant-input",
+                "admin-mail-microsoft-save-button",
                 // Spam
                 "admin-mail-spam-threshold-junk",
                 "admin-mail-spam-threshold-reject",
@@ -1187,6 +1505,16 @@ mod tests {
                 "admin-mail-alias-subaddressing-toggle",
                 "admin-mail-alias-wildcard-prefix-toggle",
                 "admin-mail-alias-save-button",
+                // DMARC reports
+                "admin-mail-dmarc-ruf-publish-toggle",
+                "admin-mail-dmarc-ruf-warning",
+                "admin-mail-dmarc-fo-mode-select",
+                "admin-mail-dmarc-aggregate-retention-input",
+                "admin-mail-dmarc-forensic-retention-input",
+                "admin-mail-dmarc-save-button",
+                // Secrets
+                "admin-mail-list-unsubscribe-secret-rotate-button",
+                "admin-mail-forward-srs-secret-rotate-button",
             ]
         );
 
@@ -1196,6 +1524,68 @@ mod tests {
             .find(|e| e.id == "admin-mail-spam-threshold-junk")
             .expect("junk painted");
         assert_eq!(junk.text, "5");
+    }
+
+    /// § Microsoft sign-in, *An admin-supplied registration*: the two fields
+    /// seed from the snapshot's stored pair, the section says which
+    /// registration is in force, and Save sends the drafts as typed — the
+    /// shared machine checks them.
+    #[test]
+    fn the_microsoft_section_seeds_its_fields_and_saves_the_drafts() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Mail;
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::MailSnapshot(Box::new(sample_snapshot())),
+        );
+        let els = mail_elements(&app.admin);
+        assert_eq!(
+            texts(&els, ids::ADMIN_MAIL_MICROSOFT_CLIENT_ID_INPUT),
+            vec!["0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c"]
+        );
+        assert_eq!(
+            texts(&els, ids::ADMIN_MAIL_MICROSOFT_TENANT_INPUT),
+            vec!["common"]
+        );
+        assert!(
+            els.iter()
+                .any(|e| e.text == t::mail_page::MICROSOFT_USING_OWN),
+            "an admin-set registration says so"
+        );
+
+        let mut default = sample_snapshot();
+        default.microsoft_registration = MicrosoftRegistrationView {
+            is_default: true,
+            ..Default::default()
+        };
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::MailSnapshot(Box::new(default)),
+        );
+        let els = mail_elements(&app.admin);
+        assert_eq!(
+            texts(&els, ids::ADMIN_MAIL_MICROSOFT_CLIENT_ID_INPUT),
+            vec![""]
+        );
+        assert!(
+            els.iter()
+                .any(|e| e.text == t::mail_page::MICROSOFT_USING_DEFAULT)
+        );
+
+        app.admin
+            .mail_drafts
+            .set_text(MailField::MicrosoftClientId, "draft-id".into());
+        app.admin
+            .mail_drafts
+            .set_text(MailField::MicrosoftTenant, "contoso.example".into());
+        assert_eq!(
+            app.admin.mail_drafts.text(MailField::MicrosoftTenant),
+            "contoso.example"
+        );
+        assert_eq!(
+            app.admin.mail_drafts.microsoft.client_id, "draft-id",
+            "the drafts are what Save sends"
+        );
     }
 
     fn texts<'a>(els: &'a [Element], id: &str) -> Vec<&'a str> {
@@ -1211,7 +1601,7 @@ mod tests {
     /// the detail empty. No health read yet → no section at all.
     #[test]
     fn health_section_paints_the_shared_fold() {
-        let els = health_elements(&sample_health(), false, 1_700_000_000_000);
+        let els = health_elements(&sample_health(), None, 1_700_000_000_000);
         let status = texts(&els, "admin-mail-health-status");
         assert_eq!(
             status,
@@ -1261,7 +1651,7 @@ mod tests {
     fn health_section_delist_link_and_armed_reset() {
         let mut health = sample_health();
         health.delist_url = Some("https://check.spamhaus.org/".into());
-        let els = health_elements(&health, true, 0);
+        let els = health_elements(&health, Some(MailPolicyConfirm::ResetWarmup), 0);
         let link = texts(&els, "admin-mail-health-delist-link");
         assert_eq!(link.len(), 1);
         assert!(link[0].ends_with("https://check.spamhaus.org/"), "{link:?}");
@@ -1271,35 +1661,105 @@ mod tests {
         );
     }
 
-    /// The warm-up reset is a two-click confirm: the first press only arms (no
-    /// op), the second disarms and dispatches, and a mail fold never leaves it
-    /// armed.
+    /// The sender-dashboard note is always painted under the readout, with one
+    /// link per receiver in the shared order, each carrying its URL as `href`.
     #[test]
-    fn warmup_reset_arms_then_dispatches_and_a_fold_disarms() {
+    fn health_section_paints_the_sender_dashboard_note_and_links() {
+        let els = health_elements(&sample_health(), None, 0);
+        assert_eq!(
+            texts(&els, "admin-mail-health-sender-dashboards-note"),
+            vec![t::mail_page::HEALTH_SENDER_DASHBOARDS_NOTE]
+        );
+        let links = texts(&els, "admin-mail-health-sender-dashboard-link");
+        assert_eq!(links.len(), 2, "{links:?}");
+        assert!(links[0].starts_with(t::mail_page::HEALTH_SENDER_DASHBOARD_GMAIL));
+        assert!(links[1].starts_with(t::mail_page::HEALTH_SENDER_DASHBOARD_OUTLOOK));
+        for (link, (_, url)) in links.iter().zip(SENDER_DASHBOARD_LINKS) {
+            assert!(link.ends_with(url), "{link:?}");
+        }
+    }
+
+    /// Every confirm button is one `Press` gesture the machine resolves (no
+    /// local arm), and each relabels to its confirm sentence exactly while the
+    /// snapshot names it armed — never a sibling.
+    #[test]
+    fn confirm_buttons_press_the_machine_and_relabel_from_the_snapshot() {
+        let mut snap = sample_snapshot();
+        snap.health = Some(sample_health());
+        let label = |snap: &MailPolicySnapshot, id: &str| -> Vec<String> {
+            let state = AdminState {
+                mail_snapshot: Some(snap.clone()),
+                ..Default::default()
+            };
+            let els = mail_elements(&state);
+            texts(&els, id).into_iter().map(str::to_string).collect()
+        };
+        let rows = [
+            (
+                ids::ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON,
+                MailPolicyConfirm::ResetWarmup,
+                t::mail_page::HEALTH_WARMUP_RESET,
+                t::mail_page::HEALTH_WARMUP_RESET_CONFIRM,
+            ),
+            (
+                ids::ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON,
+                MailPolicyConfirm::RotateListUnsubscribeSecret,
+                t::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE,
+                t::mail_page::LIST_UNSUBSCRIBE_SECRET_ROTATE_CONFIRM,
+            ),
+            (
+                ids::ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON,
+                MailPolicyConfirm::RotateSrsSecret,
+                t::mail_page::FORWARD_SRS_SECRET_ROTATE,
+                t::mail_page::FORWARD_SRS_SECRET_ROTATE_CONFIRM,
+            ),
+            (
+                ids::ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON,
+                MailPolicyConfirm::PublishSpamBaseline,
+                t::mail_page::PUBLISH_SPAM_BASELINE_BUTTON,
+                t::mail_page::PUBLISH_SPAM_BASELINE_CONFIRM,
+            ),
+        ];
+        for (id, button, rest, confirm) in rows {
+            snap.armed = None;
+            assert_eq!(label(&snap, id), vec![rest], "{id} at rest");
+            snap.armed = Some(button);
+            assert_eq!(label(&snap, id), vec![confirm], "{id} armed");
+            for (other, ..) in rows.iter().filter(|r| r.0 != id) {
+                assert_ne!(label(&snap, other), vec![confirm], "{other} armed by {id}");
+            }
+        }
+        // The press itself: the test app builds no machine, so there is no op
+        // to hand out — and no local state to arm either.
         let mut app = crate::app::tests::test_app();
         app.admin.sub = AdminPage::Mail;
-        super::super::apply_outcome(
-            &mut app,
-            super::super::Outcome::MailSnapshot(Box::new(sample_snapshot())),
+        assert!(
+            super::super::apply_local(
+                &mut app,
+                Action::PressMailConfirm(MailPolicyConfirm::RotateSrsSecret)
+            )
+            .is_none()
         );
-        assert!(!app.admin.mail_warmup_reset_armed);
+    }
 
-        assert!(super::super::apply_local(&mut app, Action::ResetMailWarmup).is_none());
-        assert!(app.admin.mail_warmup_reset_armed, "first press arms only");
-
-        let op = super::super::apply_local(&mut app, Action::ResetMailWarmup);
-        assert!(!app.admin.mail_warmup_reset_armed, "the confirm disarms");
-        // The test app builds no machine, so there is no op to hand out — what
-        // matters is that the confirm reached the dispatch arm (disarmed) rather
-        // than arming again.
-        drop(op);
-
-        app.admin.mail_warmup_reset_armed = true;
-        super::super::apply_outcome(
-            &mut app,
-            super::super::Outcome::MailSnapshot(Box::new(sample_snapshot())),
+    /// The last rotation's outcome shows under the two buttons, through the
+    /// shared text.
+    #[test]
+    fn secrets_group_shows_the_last_rotation() {
+        let mut snap = sample_snapshot();
+        assert_eq!(
+            secrets_elements(Some(&snap)).len(),
+            4,
+            "title, desc, two buttons"
         );
-        assert!(!app.admin.mail_warmup_reset_armed, "a re-read disarms");
+        snap.secret_rotation = Some(
+            fauna_client_mail_settings::admin_policy::SecretRotationView::ListUnsubscribe {
+                members_retokenized: 3,
+            },
+        );
+        let els = secrets_elements(Some(&snap));
+        assert_eq!(els.len(), 5);
+        assert!(format!("{:?}", els.last().unwrap()).contains('3'));
     }
 
     /// A mail-snapshot fold re-seeds every group's drafts from persisted state and
@@ -1364,6 +1824,81 @@ mod tests {
             drafts.gather_spam(&base).max_score_before_spam_folder,
             base.max_score_before_spam_folder,
         );
+    }
+
+    /// The DMARC Save carries the four edited fields and round-trips every
+    /// record tag the page has no control for — a Save must never reset a
+    /// deployment's `p=` or destinations to whatever the drafts lack.
+    #[test]
+    fn gather_dmarc_carries_the_four_edits_and_round_trips_the_rest() {
+        let mut snap = sample_snapshot();
+        snap.dmarc.policy_mode = "quarantine".into();
+        snap.dmarc.pct = 50;
+        snap.dmarc.rua_destination = Some("mailto:reports@example.net".into());
+        let mut drafts = MailDrafts::default();
+        drafts.seed(&snap);
+        assert_eq!(drafts.dmarc.forensic_retention, "30");
+        assert_eq!(drafts.dmarc.fo_mode, "1");
+
+        drafts.toggle(MailToggle::DmarcRufPublish);
+        drafts.dmarc.fo_mode = "d".into();
+        drafts.set_text(MailField::DmarcForensicRetention, "60".into());
+        drafts.set_text(MailField::DmarcAggregateRetention, "oops".into());
+        let gathered = drafts.gather_dmarc(&snap.dmarc);
+        assert_eq!(
+            gathered,
+            DmarcPolicyView {
+                ruf_publish: true,
+                fo_mode: "d".into(),
+                forensic_retention_days: 60,
+                // Unparsed → the persisted value.
+                aggregate_retention_days: 90,
+                ..snap.dmarc.clone()
+            }
+        );
+        assert_eq!(gathered.policy_mode, "quarantine");
+        assert_eq!(gathered.pct, 50);
+    }
+
+    /// § Default off: the PII text paints whatever the toggle says, and the
+    /// retention warning appears only once the forensic draft passes 30 days.
+    #[test]
+    fn dmarc_group_paints_the_warning_always_and_the_retention_warning_past_30() {
+        let mut app = crate::app::tests::test_app();
+        app.admin.sub = AdminPage::Mail;
+        super::super::apply_outcome(
+            &mut app,
+            super::super::Outcome::MailSnapshot(Box::new(sample_snapshot())),
+        );
+        let has_text = |app: &crate::app::App, text: &str| {
+            mail_elements(&app.admin).iter().any(|e| e.text == text)
+        };
+        assert_eq!(
+            texts(&mail_elements(&app.admin), "admin-mail-dmarc-ruf-warning"),
+            vec![t::mail_page::DMARC_RUF_WARNING]
+        );
+        assert!(!has_text(
+            &app,
+            t::mail_page::DMARC_FORENSIC_RETENTION_WARNING
+        ));
+        app.admin
+            .mail_drafts
+            .set_text(MailField::DmarcForensicRetention, "31".into());
+        assert!(has_text(
+            &app,
+            t::mail_page::DMARC_FORENSIC_RETENTION_WARNING
+        ));
+        // The select offers the shared catalog's raw tags.
+        let select = mail_elements(&app.admin)
+            .into_iter()
+            .find(|e| e.id == "admin-mail-dmarc-fo-mode-select")
+            .expect("fo select painted");
+        match &select.role {
+            crate::element::Role::Select { options, .. } => {
+                assert_eq!(options, &["1", "0", "d", "s"])
+            }
+            other => panic!("expected a select, got {other:?}"),
+        }
     }
 
     /// The publish-baseline result renders empty until a result is stashed, then the

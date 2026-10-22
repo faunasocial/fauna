@@ -99,7 +99,7 @@ const OTHER_VERSION_NEEDS_HISTORY_KEY: &str = "devices.error_other_version_needs
 /// ([`fauna_protocol::member_rows`], which the Media page runs too) and
 /// re-exported here so every app's `fauna_devices_machine::MlsQuery` import
 /// stands.
-pub use fauna_protocol::member_rows::MlsQuery;
+pub use fauna_protocol::member_rows::{FolderChannelOwners, MlsQuery};
 
 /// One **foreign** (cross-nest) shared set from the member's own `fauna.state.folder-keys`
 /// foreign-set row (`fauna_core::data::ForeignFolder`, written at accept time) — the
@@ -120,7 +120,7 @@ pub struct ForeignSetRow {
     /// The member's access grant on the set (`"reader"`/`"writer"`), as the
     /// **home** nest resolved it — seeded on the Welcome relay, refreshed by the
     /// `caller_access` stamp on federated read replies
-    /// (`docs/goal/architecture/federation.md` § Cross-nest → *Recipient-side
+    /// (`docs/goal/architecture/federation-shared-folders.md` § Cross-nest → *Recipient-side
     /// access discovery*). Surfaced as [`FolderSummary::access`], which is what
     /// splits a client's row into the writer binding UI vs. a read-only row.
     ///

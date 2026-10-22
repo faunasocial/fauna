@@ -79,3 +79,18 @@ def test_the_updater_is_built_alone_and_ships_beside_the_nest():
         text,
         re.MULTILINE,
     )
+
+
+def test_the_image_healthcheck_hands_an_updater_container_to_its_own_check():
+    """The updater container inherits the image's HEALTHCHECK, and nothing
+    listens on the nest's port inside it: the check must read the updater's
+    own liveness there (``fauna-updater --health``) and probe the nest's
+    listener everywhere else (``nest/update-channel.md`` § The updater →
+    *Its health*)."""
+    text = _read("Dockerfile")
+    check = re.search(r"^HEALTHCHECK .*?(?<!\\)\n", text, re.MULTILINE | re.DOTALL)
+    assert check, "the image declares a HEALTHCHECK"
+    body = check.group(0)
+    assert '"$(cat /proc/1/comm)" = fauna-updater' in body, body
+    assert "exec /usr/local/bin/fauna-updater --health" in body, body
+    assert "/api/v1/health" in body, "the nest container keeps its listener probe"

@@ -29,6 +29,15 @@ re-points each at `<proxy>/acme-le/<path>` before fetching. The proxy preserves
 all response headers, so the `Replay-Nonce` / `Location` headers ACME relies on
 pass through intact. See `docs/goal/architecture/nest/tls-certificates.md` § C.
 
+### Registry route
+
+- `ghcr` → `https://ghcr.io` — the browser setup wizard's anonymous read of which
+  update channels of the nest image have a build
+  (`docs/goal/behavior/onboarding-provisioning.md` § 5). The registry's bearer
+  challenge names `https://ghcr.io/token`; the client re-points it at
+  `<proxy>/ghcr/token`, as the ACME client re-points the CA's URLs. Pull tokens are
+  anonymous, so the proxy stays credential-blind.
+
 ## Self-hosting
 
 If you don't trust `proxy.fauna.social`, run your own:

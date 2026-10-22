@@ -102,6 +102,29 @@ public enum MailEnableGlue {
         }
     }
 
+    /// Seal the DNS-provider credential the wizard verified at its `dns_config`
+    /// step into the admin's account store (`onboarding-provisioning.md` § 4.
+    /// DNS configuration, *Capture at onboarding, seal via the launched app*).
+    /// The rule lives once in shared Rust (`seal_captured_dns_credential`); this
+    /// is the call site at the signed-in edge, the twin of android's
+    /// `PostAuthGlueVM.sealCapturedDnsCredential`. Consume-once; a no-op when
+    /// nothing was captured. Best-effort and log-only: the same credential is
+    /// re-enterable from the admin DNS page, which is also where a failure shows.
+    #if !FAUNA_KIDS
+    @MainActor
+    public static func sealCapturedDnsCredential(api: APIClient, session: SessionState) async {
+        guard let credential = session.pendingDnsCredential else { return }
+        session.pendingDnsCredential = nil  // consume once
+        do {
+            try await api.sealCapturedDnsCredential(credential)
+        } catch {
+            logMessage(
+                level: .warn, target: "fauna.dnsglue",
+                message: "sealing the captured DNS credential failed (re-enterable from the DNS page): \(error)")
+        }
+    }
+    #endif
+
     /// Admin host-address reporting — `domains-and-tls-bootstrap.md`
     /// § Host-address acquisition. Fires at **every** authenticated launch (not
     /// latch-gated like the enable glue above): the client reports the nest's
@@ -196,6 +219,9 @@ public enum MailEnableGlue {
         #endif
         await applyPendingTrustPromptGrant(api: api, session: session)
         await registerPendingRecoveryKit(api: api, session: session)
+        #if !FAUNA_KIDS
+        await sealCapturedDnsCredential(api: api, session: session)
+        #endif
         await reportHostAddress(api: api)
         await selfHealDeploymentSeedCustody(api: api, session: session)
     }

@@ -155,6 +155,7 @@ private fun AftermathProgressLines(progress: AftermathProgress) {
     line(progress.backupRegrant, Ids.RECOVERY_KIT_BACKUP_REGRANT_STATUS)
     line(progress.mlsReseal, Ids.RECOVERY_KIT_MLS_RESEAL_STATUS)
     line(progress.grantRemint, Ids.RECOVERY_KIT_GRANT_REMINT_STATUS)
+    line(progress.periodRotation, Ids.RECOVERY_KIT_PERIOD_ROTATION_STATUS)
     line(progress.corpusReseal, Ids.RECOVERY_KIT_CORPUS_RESEAL_STATUS)
     line(progress.draftsReseal, Ids.RECOVERY_KIT_DRAFTS_RESEAL_STATUS)
     line(progress.mailBurn, Ids.RECOVERY_KIT_MAIL_BURN_STATUS)

@@ -505,3 +505,73 @@ def test_integration_the_list_still_only_grows_inside_the_window(ratified_repo: 
     result = _run_gate(ratified_repo)
     assert result.returncode == 1, result.stdout + result.stderr
     assert "missing from HEAD" in result.stdout, result.stdout
+
+
+# ── Revivals are the LIST's invariant: refused inside the window too, and a
+# malformed merge-base line never wedges the commit that fixes it ───────────
+
+
+def _revive_foo(repo: Path, version: str) -> subprocess.CompletedProcess:
+    (repo / "Cargo.toml").write_text(f'[workspace.package]\nversion = "{version}"\n')
+    (repo / gate.SCHEMAS_DIR / "foo.cddl").write_text(
+        "Bar = {\n  x: tstr,\n}\nFoo = {\n  y: tstr,\n}\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "revive Foo, entry kept")
+    return _run_gate(repo)
+
+
+def test_integration_a_revival_is_refused_inside_the_0_1_x_window(ratified_repo: Path):
+    result = _revive_foo(ratified_repo, "0.1.4")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "revives type `Foo`" in result.stdout, result.stdout
+
+
+def test_integration_a_revival_is_refused_at_0_2_0(ratified_repo: Path):
+    result = _revive_foo(ratified_repo, "0.2.0")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "revives type `Foo`" in result.stdout, result.stdout
+
+
+def test_parse_ratified_breaks_lenient_skips_bad_lines_and_keeps_good_ones(capsys):
+    text = (
+        "rsut Foo removed 2026-09-24 a typo'd gate token\n"
+        "cddl Foo removed 2026-09-24 well-formed\n"
+        "cddl Bar.x 2026-09-24 no transition\n"
+    )
+    assert gate.parse_ratified_breaks(text, lenient=True) == frozenset({("Foo", REMOVED)})
+    assert "line 1" in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        gate.parse_ratified_breaks(text)
+
+
+def test_integration_a_malformed_base_line_does_not_wedge_the_fixing_commit(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / gate.SCHEMAS_DIR).mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / gate.SCHEMAS_DIR / "foo.cddl").write_text("Bar = {\n  x: tstr,\n}\n")
+    (repo / gate.RATIFIED_BREAKS_PATH).write_text(
+        "rsut Foo removed 2026-09-24 malformed at the base\n"
+        "cddl Foo removed 2026-09-24 well-formed\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "branch", "origin/main")
+    # The fix drops the malformed line and keeps the well-formed one.
+    (repo / gate.RATIFIED_BREAKS_PATH).write_text("cddl Foo removed 2026-09-24 well-formed\n")
+    _git(repo, "commit", "-aqm", "drop the malformed line")
+    result = _run_gate(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # ...but the only-grows check still reds on a well-formed base entry
+    # missing from HEAD, and a malformed HEAD line is still exit 2.
+    (repo / gate.RATIFIED_BREAKS_PATH).write_text("")
+    _git(repo, "commit", "-aqm", "drop everything")
+    result = _run_gate(repo)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "missing from HEAD" in result.stdout, result.stdout
+    (repo / gate.RATIFIED_BREAKS_PATH).write_text("rsut Foo removed 2026-09-24 still malformed\n")
+    _git(repo, "commit", "-aqm", "malformed head")
+    result = _run_gate(repo)
+    assert result.returncode == 2, result.stdout + result.stderr

@@ -9,14 +9,31 @@
 //! be config theatre — the same anti-pattern already ruled out for
 //! `fauna.admin.set_serving_port` on a router-fronted nest (`common.md` § Serving
 //! port). Fields are additive-only: an older router ignores what it does not know.
+//!
+//! **Loopback-only, fail-closed** (`worker.md` § Router Status Endpoint): the
+//! route sits on the public listener and every field is what
+//! `network-exposure.md` § Target posture → *Discovery* keeps from an anonymous
+//! caller (user counts, the exact version), so the handler runs the shared
+//! [`crate::sidecar_channel::internal_ws_allowlist_gate`] first — a non-loopback
+//! peer, or a request with no peer address, gets 403 and no body field. A
+//! remote-backend router polling over `tunnel_ip` is deliberately NOT excepted:
+//! no deployment runs one, and its authorization to poll arrives with the
+//! roaming-nest frontend's design as nest-state enrollment, never an interim
+//! secret, source range or flag.
 
 use crate::routes::AppState;
 use axum::extract::State;
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 use std::sync::Arc;
 
-pub async fn get_router_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_router_status(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+) -> Response {
+    if let Err(resp) = crate::sidecar_channel::internal_ws_allowlist_gate(&req, "router-status") {
+        return resp;
+    }
     let current_users = state.db.count_all_users().await.unwrap_or(0);
     // The live client-set storage cap (boot-resolved from the
     // `nest_max_storage_bytes` DB row, else the `config.nest.max_storage_bytes`
@@ -54,4 +71,5 @@ pub async fn get_router_status(State(state): State<Arc<AppState>>) -> impl IntoR
         "invite_required": invite_required,
         "handle_domain": handle_domain,
     }))
+    .into_response()
 }

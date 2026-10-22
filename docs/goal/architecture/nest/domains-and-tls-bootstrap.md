@@ -21,8 +21,10 @@ were interim scaffolding; this is the target they collapse onto.
    any IP / any address the admin points at it, with no hosts-file editing and
    no `FAUNA_DOMAIN`.
 2. **Serves self-signed HTTPS from boot** — the always-live floor (§ Boot). Native
-   clients trust it via channel-binding (identity pin); browsers / MUAs accept the
-   one self-signed prompt.
+   clients trust it via channel-binding (identity pin); a browser loading the
+   nest-served `/app/` and MUAs accept the one self-signed prompt; a web app loaded
+   from any other origin needs a trusted cert ([`tls-certificates.md`](tls-certificates.md)
+   § The four audiences, the two web-app rows).
 3. **Claimed with a handle ALONE** — no domain required, and **no domain
    auto-registered from the access address** (§ Claim).
 4. **Domains (any number) are added by an app AFTER install** — Admin→DNS /
@@ -41,9 +43,12 @@ a listener never has *no* cert"); see that doc for the cert mechanics (stable
 floor key, per-SNI valid-else-floor, auto-renew). The glue claims this doc owns:
 
 - A **domainless** nest's floor is **loopback-only** (SANs `localhost` + `127.0.0.1`,
-  CN `fauna-nest`) — `write_self_signed_bootstrap(None)`. A browser reaching it by
-  IP sees the one expected self-signed prompt; native apps pin the identity and
-  ignore the name (channel binding, `security.md` § Transport trust). A box with a
+  CN `fauna-nest`) — `write_self_signed_bootstrap(None)`. A browser reaching its
+  `/app/` by IP sees the one expected self-signed prompt, and that bypass covers
+  the app's same-origin API calls (the split by origin is owned by
+  [`tls-certificates.md`](tls-certificates.md) § The four audiences); native apps
+  pin the identity and ignore the name (channel binding, `transport-trust.md`
+  § Transport trust). A box with a
   **directly-attached public IP** additionally obtains a short-lived trusted cert
   for that IP and serves it to IP dials until its domain cert is live — the IP
   bridge cert, owner [`tls-certificates.md`](tls-certificates.md) § B-IP (ratified
@@ -505,8 +510,9 @@ claim-authoritative-identity-domain / `FAUNA_DOMAIN`-retirement change.
   escape), dropping the boot-time domain requirement (`main.rs`), and reads the apex
   **per-iteration** from `handle_domain()` with an empty/`!is_public_dns_name` guard (`acme_http01.rs`
   `cert_lifecycle_loop`), so a claim issues a trusted cert immediately. ACME account
-  creation omits the contact when no email is configured (RFC 8555 — there is no
-  `FAUNA_DOMAIN` to default `acme@<domain>`).
+  creation registers with no contact address — the CA and the contact are constants
+  ([`tls-certificates.md`](tls-certificates.md) § ACME settings; contact is optional in
+  RFC 8555), and there is no `FAUNA_DOMAIN` to default `acme@<domain>`.
 - **Unconditional, domainless-capable floor — written on EVERY entry path.** The
   always-live floor is written by the shared `self_signed_cert::ensure_floor_present`
   helper (idempotent: writes `write_self_signed_bootstrap` only when no cert exists,
@@ -636,7 +642,13 @@ claim-authoritative-identity-domain / `FAUNA_DOMAIN`-retirement change.
   falling back to the boot-time domain only for a `Host`-less request and answering 400
   when both are absent — so a domainless box's pre-claim window redirects correctly, and
   a custom web domain / subdomain bounces to *its* https origin instead of the apex. The
-  ACME challenge route itself is token-based and unaffected.
+  ACME challenge route itself is token-based and unaffected. **The echoed host must be
+  one the nest serves (2026-10-17):** the boot-time domain or a host a certificate the
+  nest holds names (`MultiDomainCertResolver::serves_host`); any other `Host` is `404`,
+  never a redirect — the open redirect of
+  [`../deployment-threat-model.md`](../deployment-threat-model.md) § Concern 1a, finding
+  M2. A host's redirect therefore starts once its certificate (or the floor naming it) is
+  installed.
 
 **Unbuilt (remaining scope):**
 - ~~**`tui` host-address reporting.**~~ **Done (2026-07-29).** All 7 apps now

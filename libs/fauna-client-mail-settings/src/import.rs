@@ -67,9 +67,9 @@
 //! did not start — it was restarted, or is another of the person's devices —
 //! adopts it cold on `hydrate` (§ Resume protocol steps 1–3): the source comes
 //! back from the row's `source_descriptor`, the mailbox selection from its
-//! `scope`, each cursor from [`ImportSessionView::cursors`] and the since date
-//! from `date_from`, and [`MailImportSnapshot::resume_needs_credentials`] is
-//! set. Its Resume then needs the password again — or the Microsoft sign-in
+//! `scope`, each cursor from [`ImportSessionView::cursors`], the since date
+//! from `date_from` and the duplicates choice from `skip_dedup`, and
+//! [`MailImportSnapshot::resume_needs_credentials`] is set. Its Resume then needs the password again — or the Microsoft sign-in
 //! on the Outlook source — and opens the source with it before anything else
 //! happens; without one it is refused with a sentence and reaches neither the
 //! source nor the nest (§ Credential handling: the credential lived only in
@@ -77,8 +77,13 @@
 //! crashed without pausing) is resumed without a nest `resume_import_session`,
 //! which refuses a running session. Each mailbox then continues from
 //! `last_processed_source_uid + 1` (the real seam's enumeration filters to
-//! `uid >= n`, § Resume protocol step 3), and `examine`'s UIDVALIDITY check is
-//! step 4. One difference remains between the two resumes: a message a full
+//! `uid >= n`, § Resume protocol step 3), and step 4 is the loop's own
+//! comparison of the cursor's UIDVALIDITY against the one `examine` reports:
+//! a mismatch means the source rebuilt that mailbox, so it is passed over
+//! with a warning ([`MailImportSnapshot::rebuilt_mailboxes`]), the session
+//! pauses rather than completing, and
+//! [`MailImportAction::RestartRebuiltMailboxes`] walks it again from its first
+//! message. One difference remains between the two resumes: a message a full
 //! mailbox turned away advances the row's cursor, so the cold resume passes it
 //! by where the warm one offers it again.
 //!
@@ -124,10 +129,13 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fauna_client_config::MailImportSourceStore;
 use fauna_core::localized::LocalizedText;
+use fauna_core::mail_import_source::RememberedImportSource;
 use fauna_core::secret::SecretString;
 use fauna_mail::imap_client::oauth_device::{
-    self, DeviceFlow, FlowOutcome, OAuthClient, OAuthHttpResponse, TokenGrant,
+    self, DeviceFlow, FlowOutcome, MicrosoftRegistration, OAuthClient, OAuthHttpResponse,
+    TokenGrant,
 };
 use fauna_mail::imap_client::{
     BatchPacker, FetchOutcome, ImapClock, ImportUnit, MailboxEstimate, MailboxStatus, SpecialUse,
@@ -136,8 +144,10 @@ use fauna_mail::imap_client::{
 use fauna_protocol::MaybeSendSync;
 use fauna_protocol::bridge_routing::{
     ClientImportOutcome, ClientImportOutcomeKind, IMPORT_SKIP_QUOTA_EXCEEDED, ImportMessageItem,
+    RecordImportOutcomesReply,
 };
 use serde::{Deserialize, Serialize};
+use std::ops::ControlFlow;
 
 use crate::error::{DispatchError, NestError};
 
@@ -362,6 +372,14 @@ pub struct ImportSessionView {
     /// the range the user asked for and not the whole mailbox. Empty means
     /// unbounded (the user's choice).
     pub date_from: String,
+    /// The scope step's "Import duplicates anyway" choice recorded at
+    /// `start_import_session` (§ Opt-out per session) — what a resumed walk
+    /// sends as every message's `skip_dedup`, so a resume after a restart
+    /// neither duplicates mail the user did not ask to nor drops the snapshot
+    /// they did. `false` (dedup on) for a session that recorded none.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub skip_dedup: bool,
     /// The row's per-mailbox resume cursors (§ Resume protocol step 3).
     /// Empty for a session that has handed nothing over yet.
     #[cfg_attr(feature = "uniffi", uniffi(default = []))]
@@ -436,6 +454,12 @@ pub enum ImportPauseReason {
     /// The source server or the nest stayed unreachable through every retry
     /// (§ Failure handling → *Source-side errors*, *Nest-side errors*).
     ConnectionLost,
+    /// The source rebuilt a mailbox since the import began — its UIDVALIDITY
+    /// no longer matches the cursor (§ Resume protocol step 4). The run took
+    /// every other mailbox and stopped short of completing, so the restart
+    /// offer ([`MailImportSnapshot::rebuilt_mailboxes`]) stays on the progress
+    /// step.
+    MailboxRebuilt,
 }
 
 /// Coarse machine status for spinner / disabled-control rendering.
@@ -540,6 +564,15 @@ pub struct MailImportSnapshot {
     pub date_from: String,
     /// Bytes; default 50 MiB (§ Wizard steps step 3).
     pub max_size_bytes: u64,
+    /// The advanced "Import duplicates anyway" option
+    /// (`mail-import-scope-import-duplicates-toggle`, § Opt-out per session):
+    /// off by default; on, every message is sent with `skip_dedup`, so mail
+    /// the nest already holds is stored a second time. Recorded on the
+    /// session row at Start and adopted from it by a wizard that finds the
+    /// session (§ Resume protocol step 3).
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub import_duplicates: bool,
     // ── progress / done (steps 5–6; from the session) ──────────────
     pub session_state: Option<ImportSessionState>,
     pub imported_count: u64,
@@ -572,6 +605,17 @@ pub struct MailImportSnapshot {
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     #[serde(default)]
     pub pause_reason: Option<ImportPauseReason>,
+    /// Source mailboxes the old provider rebuilt since the import began — the
+    /// UIDVALIDITY `examine` reports no longer matches the cursor
+    /// (`mailbox-migration.md` § Resume protocol step 4). The run passes each
+    /// over with its warning in [`Self::error_log`] and pauses the session
+    /// instead of completing it; every app paints `mail-import-restart-button`
+    /// while this is non-empty, and
+    /// [`MailImportAction::RestartRebuiltMailboxes`] takes them again from
+    /// their first message. Lives for the wizard's process, like the cursors.
+    #[cfg_attr(feature = "uniffi", uniffi(default = []))]
+    #[serde(default)]
+    pub rebuilt_mailboxes: Vec<String>,
     /// This app adopted a live session it did not start — it was restarted,
     /// or is another of the person's devices — so it holds no source
     /// credential: Resume first asks for the password again (Gmail and
@@ -595,6 +639,13 @@ pub struct MailImportSnapshot {
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     #[serde(default)]
     pub microsoft_signin: Option<MicrosoftSignInView>,
+    /// Whether the account remembers a source's server, port, connection
+    /// security and username (`mailbox-migration.md` § Credential handling)
+    /// — the Source step paints `mail-import-source-forget-button` while it
+    /// does, and [`MailImportAction::ForgetSource`] clears it.
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    #[serde(default)]
+    pub source_remembered: bool,
 }
 
 /// § Wizard steps step 3's default mailbox selection: every mailbox starts
@@ -650,6 +701,7 @@ impl MailImportSnapshot {
             mailboxes: Vec::new(),
             date_from: String::new(),
             max_size_bytes: 50 * 1024 * 1024,
+            import_duplicates: false,
             session_state: None,
             imported_count: 0,
             skipped_count: 0,
@@ -662,9 +714,11 @@ impl MailImportSnapshot {
             status: ImportStatus::Idle,
             error: None,
             pause_reason: None,
+            rebuilt_mailboxes: Vec::new(),
             resume_needs_credentials: false,
             microsoft_signin_available: false,
             microsoft_signin: None,
+            source_remembered: false,
         }
     }
 
@@ -687,7 +741,7 @@ impl MailImportSnapshot {
         )
     }
 
-    /// The `(source_descriptor, total_count, scope, date_from)` tuple
+    /// The `(source_descriptor, total_count, scope, date_from, skip_dedup)` tuple
     /// `start_session` sends — descriptor never carries the password
     /// (`mailbox-migration.md` § Progress lives nest-side:
     /// `source_descriptor` is "provider + hostname + username — no
@@ -695,8 +749,9 @@ impl MailImportSnapshot {
     /// resumed session knows what to re-`EXAMINE` (§ Resume protocol); and
     /// `date_from` is the scope step's since date, recorded for the same
     /// reason one step on — the row is the only durable record of how much
-    /// of those mailboxes the session was allowed to take.
-    fn start_args(&self) -> (String, u64, Vec<String>, String) {
+    /// of those mailboxes the session was allowed to take — and `skip_dedup`,
+    /// the duplicates choice, for the same reason (§ Opt-out per session).
+    fn start_args(&self) -> (String, u64, Vec<String>, String, bool) {
         let descriptor = format!(
             "{}:{}@{}",
             source_kind_label(self.source_kind),
@@ -710,7 +765,13 @@ impl MailImportSnapshot {
             .map(|m| m.name.clone())
             .collect();
         let total = self.selected_totals().messages;
-        (descriptor, total, scope, self.date_from.clone())
+        (
+            descriptor,
+            total,
+            scope,
+            self.date_from.clone(),
+            self.import_duplicates,
+        )
     }
 
     /// What the Confirm step summarizes (`mailbox-migration.md` § Wizard
@@ -739,6 +800,12 @@ impl MailImportSnapshot {
         if self.date_from.is_empty() {
             self.date_from = s.date_from.clone();
         }
+        // The duplicates choice is the row's, whatever this wizard holds: it
+        // was fixed at Start and nothing changes it after, so the row is what
+        // every message of this session is sent under (§ Resume protocol
+        // step 3) — a fresh wizard that kept its own `false` would quietly
+        // drop the snapshot the user asked for.
+        self.import_duplicates = s.skip_dedup;
         self.session_state = Some(s.state);
         // A session that has ended has nothing left to resume, so nothing to
         // ask a credential for.
@@ -754,8 +821,15 @@ impl MailImportSnapshot {
         self.total_count = s.total_count;
         self.started_at = s.started_at;
         self.last_progress_at = s.last_progress_at;
+        // § A failed import is a record …: the recorded reason is the error
+        // log's LAST line — on a cold adoption its only one, since the
+        // per-message lines live in the app that ran the import. Written only
+        // when it is not already there, so a repeated refresh, or the run's
+        // own `fail_and_report`, never writes it twice. `error-message` is the
+        // run's own error, set by the run that failed; a record adopted cold
+        // carries none.
         if s.state == ImportSessionState::Errored && !s.error_reason.is_empty() {
-            self.error = Some(s.error_reason);
+            self.note_failure_reason(s.error_reason);
         }
         self.step = match s.state {
             ImportSessionState::Completed => ImportStep::Done,
@@ -766,6 +840,53 @@ impl MailImportSnapshot {
             _ => ImportStep::Progress,
         };
     }
+
+    /// End the error log with a failed import's reason, once.
+    fn note_failure_reason(&mut self, reason: String) {
+        if self.error_log.last() != Some(&reason) {
+            self.error_log.push(reason);
+        }
+    }
+
+    /// Return the wizard to the Source step with no session: everything a
+    /// session or a run wrote goes, while the source the person last named —
+    /// its kind, server and username, never a password — stays filled in, so
+    /// the next import starts from where the last one pointed.
+    fn reset_to_source(&mut self) {
+        let mut fresh = MailImportSnapshot::empty();
+        fresh.source_kind = self.source_kind;
+        fresh.host = std::mem::take(&mut self.host);
+        fresh.port = self.port;
+        fresh.tls_mode = self.tls_mode;
+        fresh.username = std::mem::take(&mut self.username);
+        fresh.microsoft_signin_available = self.microsoft_signin_available;
+        fresh.source_remembered = self.source_remembered;
+        *self = fresh;
+    }
+}
+
+/// Which listed session a machine holding none adopts (`mailbox-migration.md`
+/// § A failed import is a record the wizard shows until the user moves on):
+/// the newest live one (`running` / `paused`); with none, the newest
+/// `errored` one; a `completed` one never — its Done step has nothing to
+/// collect — and a `cancelled` one never. The listing arrives newest first
+/// (`list_import_sessions` orders by `started_at` descending), so "newest" is
+/// the first match.
+fn session_to_show(sessions: &[ImportSessionView]) -> Option<ImportSessionView> {
+    sessions
+        .iter()
+        .find(|s| {
+            matches!(
+                s.state,
+                ImportSessionState::Running | ImportSessionState::Paused
+            )
+        })
+        .or_else(|| {
+            sessions
+                .iter()
+                .find(|s| s.state == ImportSessionState::Errored)
+        })
+        .cloned()
 }
 
 /// `source_descriptor`'s provider label — lowercase, matching
@@ -797,29 +918,121 @@ fn parse_source_descriptor(descriptor: &str) -> Option<(ImportSourceKind, String
     Some((kind, username.to_string(), host.to_string()))
 }
 
+/// [`ImportTlsMode`]'s label in a [`RememberedImportSource`].
+fn tls_mode_label(mode: ImportTlsMode) -> &'static str {
+    match mode {
+        ImportTlsMode::Implicit => "implicit",
+        ImportTlsMode::StartTls => "starttls",
+    }
+}
+
+/// A [`RememberedImportSource`] read back into the wizard's own types —
+/// `None` for a record this build cannot read (a provider or connection
+/// security it does not know, an empty host or username, port 0), which
+/// prefills nothing rather than a guess.
+fn parse_remembered(
+    r: &RememberedImportSource,
+) -> Option<(ImportSourceKind, ImportTlsMode, &RememberedImportSource)> {
+    let kind = SOURCE_KINDS
+        .iter()
+        .copied()
+        .find(|k| source_kind_label(*k) == r.provider)?;
+    let tls = TLS_MODES
+        .iter()
+        .copied()
+        .find(|m| tls_mode_label(*m) == r.tls_mode)?;
+    if r.host.is_empty() || r.username.is_empty() || r.port == 0 {
+        return None;
+    }
+    Some((kind, tls, r))
+}
+
+impl MailImportSnapshot {
+    /// What a successful connection remembers (§ Credential handling): the
+    /// source this snapshot connected to, never the password.
+    fn remembered_source(&self) -> RememberedImportSource {
+        RememberedImportSource {
+            provider: source_kind_label(self.source_kind).to_string(),
+            host: self.host.clone(),
+            port: self.port,
+            tls_mode: tls_mode_label(self.tls_mode).to_string(),
+            username: self.username.clone(),
+        }
+    }
+
+    /// Prefill the Source step from what the account remembers — a preset
+    /// provider keeps its own server, as `SelectSourceKind` would set it.
+    fn prefill_from(&mut self, remembered: &RememberedImportSource) {
+        let Some((kind, tls, r)) = parse_remembered(remembered) else {
+            return;
+        };
+        self.source_kind = kind;
+        self.username = r.username.clone();
+        match provider_preset(kind) {
+            Some((host, port)) => {
+                self.host = host.to_string();
+                self.port = port;
+                self.tls_mode = ImportTlsMode::Implicit;
+            }
+            None => {
+                self.host = r.host.clone();
+                self.port = r.port;
+                self.tls_mode = tls;
+            }
+        }
+    }
+
+    /// The Source step's fields back to a first visit's: the Gmail preset and
+    /// no username — what the user's Forget leaves on screen.
+    fn clear_source_fields(&mut self) {
+        let empty = Self::empty();
+        self.source_kind = empty.source_kind;
+        self.host = empty.host;
+        self.port = empty.port;
+        self.tls_mode = empty.tls_mode;
+        self.username = empty.username;
+        self.password = SecretString::default();
+    }
+}
+
 impl MailImportSnapshot {
     /// A fresh app adopting a live session (§ Resume protocol steps 2–3):
     /// the source it reconnects to from the row's descriptor — a provider's
-    /// own server and port, or Generic's recorded host on the 993 implicit-TLS
-    /// default the person can change beside the password, since the row does
-    /// not record either — and the walk from the row's scope, every mailbox
-    /// selected (the scope IS the selection). The since date arrives through
-    /// [`Self::apply_session`]. Nothing about the credential: Resume asks.
-    fn adopt_session_source(&mut self, s: &ImportSessionView) {
+    /// own server and port, or Generic's recorded host with the port and
+    /// connection security the account remembers for that host and username
+    /// (§ Credential handling; the row records neither), on the 993
+    /// implicit-TLS default only when nothing matching is remembered — and
+    /// the walk from the row's scope, every mailbox selected (the scope IS
+    /// the selection). The since date arrives through [`Self::apply_session`].
+    /// Nothing about the credential: Resume asks.
+    fn adopt_session_source(
+        &mut self,
+        s: &ImportSessionView,
+        remembered: Option<&RememberedImportSource>,
+    ) {
         if let Some((kind, username, host)) = parse_source_descriptor(&s.source_descriptor) {
-            self.source_kind = kind;
-            self.username = username;
+            self.tls_mode = ImportTlsMode::Implicit;
             match provider_preset(kind) {
                 Some((preset_host, port)) => {
                     self.host = preset_host.to_string();
                     self.port = port;
                 }
                 None => {
+                    let matching = remembered
+                        .and_then(parse_remembered)
+                        .filter(|(k, _, r)| *k == kind && r.host == host && r.username == username);
+                    match matching {
+                        Some((_, tls, r)) => {
+                            self.port = r.port;
+                            self.tls_mode = tls;
+                        }
+                        None => self.port = 993,
+                    }
                     self.host = host;
-                    self.port = 993;
                 }
             }
-            self.tls_mode = ImportTlsMode::Implicit;
+            self.source_kind = kind;
+            self.username = username;
         }
         self.mailboxes = s
             .scope
@@ -840,8 +1053,9 @@ impl MailImportSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum MailImportAction {
-    /// Page load / resume: jump to a resumable (`running` / `paused`) session's
-    /// Progress screen, if one exists. A `completed` session is not resumed.
+    /// Page load / resume: jump to the newest live (`running` / `paused`)
+    /// session's Progress screen; with none, to the newest failed one's, as a
+    /// record. A `completed` session is not adopted.
     Refresh,
     /// Step 1 — pick the provider; pre-fills host/port/tls_mode for a preset.
     SelectSourceKind { kind: ImportSourceKind },
@@ -855,6 +1069,11 @@ pub enum MailImportAction {
     SetUsername { value: String },
     /// Step 1 — password / app-password.
     SetPassword { value: SecretString },
+    /// Step 1 — forget the remembered source
+    /// (`mail-import-source-forget-button`, § Credential handling): the
+    /// account's record is deleted and the Source step's fields return to a
+    /// first visit's. Refused when the machine has no store to forget from.
+    ForgetSource,
     /// Step 1 (Outlook) — ask Microsoft for a sign-in code
     /// (`mail-import-source-oauth-button`) and show it on
     /// [`MailImportSnapshot::microsoft_signin`]; the app glue then spawns
@@ -874,6 +1093,10 @@ pub enum MailImportAction {
     SetDateFrom { value: String },
     /// Step 3 — max message size in bytes.
     SetMaxSizeBytes { value: u64 },
+    /// Step 3 — the advanced "Import duplicates anyway" option
+    /// (`mail-import-scope-import-duplicates-toggle`, § Opt-out per session).
+    /// Takes effect at `Start`, which records it on the session row.
+    SetImportDuplicates { value: bool },
     /// Advance Scope → Confirm (client-side; no round-trip).
     Next,
     /// Go back Confirm → Scope → Source (client-side).
@@ -888,6 +1111,26 @@ pub enum MailImportAction {
     /// Step 5 — cancel (confirms client-side first; already-imported
     /// messages are kept, § UX shape step 5).
     Cancel,
+    /// Step 5 — restart every mailbox in
+    /// [`MailImportSnapshot::rebuilt_mailboxes`]
+    /// (`mail-import-restart-button`, § Resume protocol step 4): forget its
+    /// cursor and resume the paused session, so the run walks it again from
+    /// its first message — the nest's dedup skips what already arrived
+    /// (§ Dedup vs. existing mail). The app spawns `run_import` after it
+    /// exactly as after a `Resume`. Refused while no mailbox is pending.
+    RestartRebuiltMailboxes,
+    /// Step 5, the full-mailbox notice (`mail-import-quota-skip-rest-button`,
+    /// § Failure handling → *Nest-side errors*): take a paused import up
+    /// again, recording every message it has not taken yet as skipped — a
+    /// plain skip, never `quota_exceeded`, so the nest's quota hold lifts —
+    /// and finish the session. Like `Resume`, the app then spawns
+    /// [`MailImportMachine::run_import`], which walks the rest by UID alone.
+    SkipRest,
+    /// Step 5 — a FAILED import's one control (`mail-import-dismiss-button`,
+    /// § A failed import is a record the wizard shows until the user moves
+    /// on): delete the record (`discard_import_session`) and return to Source.
+    /// Refused with a sentence on a live import, which is cancelled instead.
+    Dismiss,
 }
 
 /// Step 1→2: the whole Source form as one ordered multi-action dispatch —
@@ -946,6 +1189,25 @@ pub fn connect_actions(
     actions
 }
 
+/// Step 1's **Sign in with Microsoft** (`mail-import-source-oauth-button`) as
+/// one ordered dispatch — [`connect_actions`]' twin for the Outlook source:
+/// commit the account's address the field holds (the XOAUTH2 user), then ask
+/// Microsoft for a code. The app glue spawns
+/// [`MailImportMachine::run_microsoft_sign_in`] once the dispatch leaves the
+/// sign-in [`MicrosoftSignInState::Waiting`], and that grant connects by
+/// itself (`mailbox-migration.md` § Microsoft sign-in — the device-code
+/// grant). On the Progress step of an adopted session the address is the
+/// session's own, so the caller dispatches a bare `BeginMicrosoftSignIn`.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn microsoft_sign_in_actions(username: &str) -> Vec<MailImportAction> {
+    vec![
+        MailImportAction::SetUsername {
+            value: username.trim().to_string(),
+        },
+        MailImportAction::BeginMicrosoftSignIn,
+    ]
+}
+
 /// Step 5's Resume as one ordered dispatch — [`connect_actions`]' twin for
 /// the Progress step, over the snapshot's `resume_needs_credentials` and
 /// `source_kind`. While [`MailImportSnapshot::resume_needs_credentials`] is
@@ -973,6 +1235,23 @@ pub fn resume_actions(
     }
     actions.push(MailImportAction::Resume);
     actions
+}
+
+/// Whether a successful dispatch of `action` obliges the app to spawn
+/// [`MailImportMachine::run_import`] once: `Start`, `Resume`,
+/// `RestartRebuiltMailboxes` (a Resume with the rebuilt mailboxes' cursors
+/// dropped) and `SkipRest` (a Resume that walks the rest recording skips).
+/// The one list every app asks, so a new run-starting action reaches all
+/// seven at once.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn import_action_starts_run(action: MailImportAction) -> bool {
+    matches!(
+        action,
+        MailImportAction::Start
+            | MailImportAction::Resume
+            | MailImportAction::RestartRebuiltMailboxes
+            | MailImportAction::SkipRest
+    )
 }
 
 /// The max-size field's pre-fill text, in **MB** — the string form of the
@@ -1067,15 +1346,25 @@ impl FetchWindow {
 pub trait MailImportNest: MaybeSendSync {
     /// `fauna.bridges.list_import_sessions` — resume protocol step 1.
     async fn list_sessions(&self) -> Result<Vec<ImportSessionView>, NestError>;
+    /// The deployment's own Microsoft app registration, `None` when the admin
+    /// set none (`mailbox-migration.md` § Microsoft sign-in, *An
+    /// admin-supplied registration*). Answered from the `fauna.setup.status`
+    /// reply (`SetupStatusReply::microsoft_registration`) — no kind of its
+    /// own. Read at every [`MailImportMachine`] refresh, beside
+    /// [`Self::list_sessions`].
+    async fn microsoft_registration(&self) -> Result<Option<MicrosoftRegistration>, NestError>;
     /// `fauna.bridges.start_import_session`. `scope` is every mailbox the
     /// wizard's scope step selected (§ Resume protocol); `date_from` is the
-    /// scope step's since date, empty for unbounded (§ Wizard steps step 3).
+    /// scope step's since date, empty for unbounded (§ Wizard steps step 3);
+    /// `skip_dedup` is the duplicates choice the row records
+    /// (§ Opt-out per session).
     async fn start_session(
         &self,
         source_descriptor: String,
         total_count: u64,
         scope: Vec<String>,
         date_from: String,
+        skip_dedup: bool,
     ) -> Result<ImportSessionView, NestError>;
     /// `fauna.bridges.pause_import_session`.
     async fn pause_session(&self, session_id: String) -> Result<ImportSessionView, NestError>;
@@ -1084,6 +1373,10 @@ pub trait MailImportNest: MaybeSendSync {
     /// `fauna.bridges.cancel_import_session` — already-imported messages are
     /// kept.
     async fn cancel_session(&self, session_id: String) -> Result<ImportSessionView, NestError>;
+    /// `fauna.bridges.discard_import_session` — a failed import's Dismiss
+    /// (§ A failed import is a record the wizard shows until the user moves
+    /// on). Deletes a terminal row; `Ok(false)` is a row already gone.
+    async fn discard_session(&self, session_id: String) -> Result<bool, NestError>;
     /// `fauna.bridges.finalize_import_session`. Not yet dispatched by this
     /// module (no `MailImportAction` variant calls it) — the future
     /// `run_import` calls it at end-of-enumeration.
@@ -1099,9 +1392,9 @@ pub trait MailImportNest: MaybeSendSync {
     ) -> Result<ImportSessionView, NestError>;
 
     /// `fauna.bridges.import_message` / `_message_batch`, dispatched by
-    /// `unit`'s variant (§ Batching). `skip_dedup` mirrors the wizard's dedup
-    /// opt-out (§ Dedup § Opt-out per session — not yet surfaced in ui.yaml
-    /// this pass; `run_import` always sends `false` today). The real
+    /// `unit`'s variant (§ Batching). `skip_dedup` is the session's
+    /// duplicates choice ([`MailImportSnapshot::import_duplicates`],
+    /// § Opt-out per session). The real
     /// `rpc_glue` impl wraps `fauna_mail::imap_client::MailImportClient::send_unit`,
     /// projecting its wire reply's `ImportMessageOutcome`(s) down to
     /// [`SendOutcome`].
@@ -1121,14 +1414,15 @@ pub trait MailImportNest: MaybeSendSync {
     /// loop decided about without sending (over the size limit, unreadable at
     /// the source), so the nest's counters and cursor carry them: the session
     /// row, not this client, is what a restart and every other device read
-    /// (§ Progress lives nest-side).
+    /// (§ Progress lives nest-side). Answers the session's counters after the
+    /// call.
     async fn record_client_outcomes(
         &self,
         session_id: String,
         mailbox: String,
         uid_validity: u32,
         outcomes: Vec<ClientImportOutcome>,
-    ) -> Result<(), NestError>;
+    ) -> Result<RecordImportOutcomesReply, NestError>;
 }
 
 /// What went wrong when the source would not connect, as the person reads it
@@ -1294,6 +1588,11 @@ struct SignInState {
     reconnect_pending: bool,
     /// A refresh was refused mid-run; the loop ends the session.
     sign_in_again: bool,
+    /// The registration's endpoints the flow was started with. The token's
+    /// refresh and the consent sentence use these, so an admin changing the
+    /// registration mid-import never sends one client's refresh token under
+    /// another client's ID.
+    client: Option<OAuthClient>,
 }
 
 /// What a reconnect's refresh came to.
@@ -1349,16 +1648,13 @@ pub trait ImportSourceNest: MaybeSendSync {
 
     /// `EXAMINE` `mailbox` read-only (never `SELECT` — § per-message flow
     /// step 1's precedent: the source must be left exactly as the user found
-    /// it). When `cursor` is `Some`, validates its `source_uid_validity`
-    /// against what the source reports now (§ Resume protocol step 4); a
-    /// mismatch is [`NestError::Rejected`] — per-mailbox, not session-fatal,
-    /// the caller logs it and moves to the next mailbox (this pass has no
-    /// restart-import UI — no ui.yaml surface for it yet).
-    async fn examine(
-        &self,
-        mailbox: &str,
-        cursor: Option<MailboxCursor>,
-    ) -> Result<MailboxStatus, NestError>;
+    /// it), reporting its UIDVALIDITY as the source holds it now. The seam
+    /// does not judge it: comparing it against the cursor is the loop's
+    /// (§ Resume protocol step 4 — a mismatch is a rebuilt mailbox, which the
+    /// person is offered to restart). [`NestError::Rejected`] when the source
+    /// refuses the mailbox (it vanished, …) — per-mailbox, not session-fatal:
+    /// the caller logs it and moves to the next mailbox.
+    async fn examine(&self, mailbox: &str) -> Result<MailboxStatus, NestError>;
 
     /// One throttled fetch window (§ Throttling — the real seam owns the
     /// per-source-server rate cap internally): at most `max` messages
@@ -1378,6 +1674,18 @@ pub trait ImportSourceNest: MaybeSendSync {
         max: usize,
         max_size_bytes: u64,
     ) -> Result<FetchWindow, NestError>;
+
+    /// The enumeration alone: at most `max` of the mailbox's messages after
+    /// `cursor`, each with the size and date the source reports, and no body
+    /// fetched — what "Skip the rest" walks ([`MailImportAction::SkipRest`]).
+    /// Same calling contract and errors as [`Self::fetch_window`]; an empty
+    /// answer means the mailbox is exhausted.
+    async fn enumerate_window(
+        &self,
+        mailbox: &str,
+        cursor: Option<MailboxCursor>,
+        max: usize,
+    ) -> Result<Vec<UidEntry>, NestError>;
 
     /// `LOGOUT` — § Credential handling: ends the source session and the
     /// lifetime of the source credentials this run held. Called once
@@ -1549,6 +1857,9 @@ fn pause_reason_sentence(reason: ImportPauseReason) -> &'static str {
         ImportPauseReason::ConnectionLost => {
             fauna_i18n::strings::mail_import::PAUSED_CONNECTION_LOST
         }
+        ImportPauseReason::MailboxRebuilt => {
+            fauna_i18n::strings::mail_import::PAUSED_MAILBOX_REBUILT
+        }
     }
 }
 
@@ -1589,14 +1900,37 @@ pub struct MailImportMachine {
     /// drains its window and then pauses the nest itself — or finds no loop
     /// and pauses the nest directly; never neither.
     run_active: Mutex<bool>,
+    /// Set by an accepted [`MailImportAction::SkipRest`]: the runs that
+    /// follow walk the rest of the scope recording skips instead of
+    /// importing, through a Pause and Resume too, until the session ends.
+    skip_rest: Mutex<bool>,
     /// The Microsoft sign-in's HTTPS seam; [`NoOAuthHttp`] until the shell
     /// supplies one.
     oauth: Arc<dyn ImportOAuthHttp>,
     oauth_available: bool,
-    /// The identity platform's endpoints and the project's client ID —
-    /// [`fauna_mail::imap_client::MICROSOFT`]'s, through its one door.
-    microsoft: OAuthClient,
+    /// The identity platform's endpoints and the effective registration's
+    /// client ID — `MicrosoftRegistration::effective` over the admin's pair
+    /// [`MailImportNest::microsoft_registration`] answers, re-read at every
+    /// [`Self::refresh`]. PRIVATE state: the UI has nothing to show, so it
+    /// never reaches the rendered snapshot.
+    microsoft: Mutex<OAuthClient>,
+    /// A test's scripted far end, which [`Self::refresh`] must not replace.
+    #[cfg(test)]
+    microsoft_pinned: bool,
     signin: Mutex<SignInState>,
+    /// Where the account remembers the source (§ Credential handling);
+    /// `None` until the shell supplies one ([`Self::with_source_memory`]) —
+    /// the wizard then remembers nothing.
+    memory: Option<Arc<dyn MailImportSourceStore>>,
+    /// The record [`Self::refresh`] last read through `memory`, kept for the
+    /// cold adoption's seed. PRIVATE state: the snapshot carries only
+    /// whether one exists.
+    remembered: Mutex<Option<RememberedImportSource>>,
+    /// Bumped on every write of the held session view. [`Self::refresh`]
+    /// reads it before its listing and drops a listing the view moved past
+    /// while it was in flight — a stale read must never paint an older state
+    /// over a newer one.
+    view_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl MailImportMachine {
@@ -1615,11 +1949,90 @@ impl MailImportMachine {
             error_budget: Mutex::new(ErrorBudget::default()),
             stop: Mutex::new(StopRequest::None),
             run_active: Mutex::new(false),
+            skip_rest: Mutex::new(false),
             oauth: Arc::new(NoOAuthHttp),
             oauth_available: false,
-            microsoft: fauna_mail::imap_client::MICROSOFT.client(),
+            microsoft: Mutex::new(MicrosoftRegistration::project().client()),
+            #[cfg(test)]
+            microsoft_pinned: false,
             signin: Mutex::new(SignInState::default()),
+            memory: None,
+            remembered: Mutex::new(None),
+            view_epoch: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Give the machine the account's store for the remembered source
+    /// (`mailbox-migration.md` § Credential handling): every refresh reads it
+    /// to prefill the Source step, every successful connection writes it, and
+    /// [`MailImportAction::ForgetSource`] deletes it.
+    pub fn with_source_memory(mut self, memory: Arc<dyn MailImportSourceStore>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Read the remembered source, keeping it for the cold adoption. A read
+    /// that fails — no account runtime up yet, a store refusal — remembers
+    /// nothing: the fields stay as they are, and the next refresh reads
+    /// again.
+    async fn load_remembered(&self) -> Option<RememberedImportSource> {
+        let memory = self.memory.as_ref()?;
+        let remembered = match memory.load().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    target: "fauna_mail_settings",
+                    "the remembered import source could not be read: {e}"
+                );
+                return None;
+            }
+        };
+        *self.remembered.lock().expect("remembered mutex") = remembered.clone();
+        remembered
+    }
+
+    /// Remember the source the snapshot just connected to. A refused write
+    /// costs the user only the next visit's prefill, so it is logged, never
+    /// put between them and the import.
+    async fn remember_source(&self) {
+        let Some(memory) = self.memory.as_ref() else {
+            return;
+        };
+        let record = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .remembered_source();
+        match memory.save(Some(record.clone())).await {
+            Ok(()) => {
+                *self.remembered.lock().expect("remembered mutex") = Some(record);
+                self.inner.lock().expect("snapshot mutex").source_remembered = true;
+            }
+            Err(e) => tracing::warn!(
+                target: "fauna_mail_settings",
+                "the import source could not be remembered: {e}"
+            ),
+        }
+    }
+
+    /// `ForgetSource`: delete the account's record and return the Source
+    /// step's fields to a first visit's.
+    async fn forget_source(&self) -> Result<(), DispatchError> {
+        let Some(memory) = self.memory.as_ref() else {
+            return Err(DispatchError::InvalidState(
+                "this app remembers no import source".into(),
+            ));
+        };
+        self.set_status(ImportStatus::Working);
+        memory.save(None).await?;
+        *self.remembered.lock().expect("remembered mutex") = None;
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.source_remembered = false;
+        if snap.step == ImportStep::Source {
+            snap.clear_source_fields();
+        }
+        snap.status = ImportStatus::Idle;
+        Ok(())
     }
 
     /// Give the machine the platform's HTTPS seam for the Microsoft sign-in
@@ -1632,20 +2045,49 @@ impl MailImportMachine {
     }
 
     /// Point the sign-in at another identity far end — the tests' scripted
-    /// one. Production goes through [`fauna_mail::imap_client::MICROSOFT`].
+    /// one. Production goes through `MicrosoftRegistration::effective`.
     #[cfg(test)]
     fn with_microsoft_client(mut self, client: OAuthClient) -> Self {
-        self.microsoft = client;
+        *self.microsoft.get_mut().expect("microsoft mutex") = client;
+        self.microsoft_pinned = true;
         self.refresh_signin_availability();
         self
     }
 
+    /// Adopt the registration the nest reports (`None` — the project's):
+    /// § Microsoft sign-in, *An admin-supplied registration*. An admin-set
+    /// registration makes the button live even while the project's constant
+    /// is unfilled.
+    fn adopt_microsoft_registration(&self, admin: Option<MicrosoftRegistration>) {
+        #[cfg(test)]
+        if self.microsoft_pinned {
+            return;
+        }
+        *self.microsoft.lock().expect("microsoft mutex") =
+            MicrosoftRegistration::effective(admin.as_ref()).client();
+        self.refresh_signin_availability();
+    }
+
+    fn microsoft_client(&self) -> OAuthClient {
+        self.microsoft.lock().expect("microsoft mutex").clone()
+    }
+
+    /// The client the running sign-in was started with, else the current one.
+    fn signin_client(&self) -> OAuthClient {
+        self.signin
+            .lock()
+            .expect("sign-in mutex")
+            .client
+            .clone()
+            .unwrap_or_else(|| self.microsoft_client())
+    }
+
     fn refresh_signin_availability(&self) {
+        let available = self.oauth_available && !self.microsoft_client().client_id.is_empty();
         self.inner
             .lock()
             .expect("snapshot mutex")
-            .microsoft_signin_available =
-            self.oauth_available && !self.microsoft.client_id.is_empty();
+            .microsoft_signin_available = available;
     }
 
     fn set_signin_view(&self, view: Option<MicrosoftSignInView>) {
@@ -1670,6 +2112,7 @@ impl MailImportMachine {
         let mut signin = self.signin.lock().expect("sign-in mutex");
         signin.token = None;
         signin.flow = None;
+        signin.client = None;
         signin.reconnect_pending = false;
     }
 
@@ -1684,6 +2127,8 @@ impl MailImportMachine {
     }
 
     fn store_session(&self, session: ImportSessionView) {
+        self.view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.session_id.lock().expect("session id mutex") = Some(session.session_id.clone());
         self.inner
             .lock()
@@ -1699,37 +2144,112 @@ impl MailImportMachine {
             .ok_or_else(|| DispatchError::InvalidState("no active import session".into()))
     }
 
-    /// Page load / resume. If a resumable session exists — `running` or
-    /// `paused`, the only states `mailbox-migration.md` § Resume protocol
-    /// resumes — jumps straight to its Progress screen; the wizard chrome
-    /// (Source screen) is otherwise the default. A `completed` session is
-    /// deliberately not resumed: it would hold every later visit on Done, with no
-    /// Source step to start the next import from. (The export twin does resume
-    /// `completed` — a finished export still has a download to collect; see
-    /// `mail-export.md`'s `list_export_sessions` row.)
+    /// Page load / resume, and the re-read an import event nudges
+    /// (§ A failed import is a record the wizard shows until the user moves
+    /// on). Shows the newest live session (`running` / `paused`, the states
+    /// § Resume protocol resumes) on its Progress screen; with none, the
+    /// newest `errored` one — the failure as a record, until it is dismissed
+    /// or another import starts. A `completed` session is never adopted: it
+    /// would hold every later visit on Done, with no Source step to start the
+    /// next import from (the export twin does adopt `completed` — a finished
+    /// export still has a download to collect). A `cancelled` one is shown
+    /// only by the app session that cancelled it, which still holds it.
     async fn refresh(&self) -> Result<(), DispatchError> {
         self.set_status(ImportStatus::Loading);
+        let remembered = self.load_remembered().await;
+        let epoch = self.view_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let sessions = self.nest.list_sessions().await?;
-        let active = sessions.into_iter().find(|s| {
+        let registration = self.nest.microsoft_registration().await?;
+        self.adopt_microsoft_registration(registration);
+        self.set_status(ImportStatus::Idle);
+        if self.memory.is_some() {
+            self.inner.lock().expect("snapshot mutex").source_remembered =
+                self.remembered.lock().expect("remembered mutex").is_some();
+        }
+        if self.view_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            // The held view moved while the listing was on its way — the run
+            // paused it, a control answered — so the listing is older than
+            // what is painted, and the newer state stands.
+            return Ok(());
+        }
+        if *self.run_active.lock().expect("run mutex") {
+            // A machine holding a run ignores the nudge: its loop is the
+            // session view's writer, the import events are its own, and
+            // whatever another device did to the session reaches it as a
+            // refused call on its next send.
+            return Ok(());
+        }
+        let held = self.session_id.lock().expect("session id mutex").clone();
+        // The session this app finished or cancelled itself stays up for
+        // review — step 5's counts and skip log, step 6's Done — however the
+        // listing ranks it, unless a live import has since begun.
+        let held_row = held
+            .as_deref()
+            .and_then(|id| sessions.iter().find(|s| s.session_id == id));
+        let any_live = sessions.iter().any(|s| {
             matches!(
                 s.state,
                 ImportSessionState::Running | ImportSessionState::Paused
             )
         });
-        self.set_status(ImportStatus::Idle);
-        if let Some(active) = active {
+        if let Some(row) = held_row
+            && matches!(
+                row.state,
+                ImportSessionState::Completed | ImportSessionState::Cancelled
+            )
+            && !any_live
+        {
+            self.store_session(row.clone());
+            return Ok(());
+        }
+        let walking =
+            held.is_none() && self.inner.lock().expect("snapshot mutex").step != ImportStep::Source;
+        if walking {
+            // Part-way through its own walk (Scope, Confirm) the wizard is the
+            // person's: a refresh does not pull it onto another device's
+            // import. They meet that import at Start — the per-source lock —
+            // or on their next visit, which opens on the Source step.
+            return Ok(());
+        }
+        if let Some(shown) = session_to_show(&sessions) {
             // A session this machine did not start or adopt already is one a
             // restarted app — or another of the person's devices — finds
             // (§ Resume protocol steps 1–3): it holds no run state for it, so
             // the walk is taken from the row — the source, the scope and each
             // mailbox's cursor — and Resume asks for the credential again.
-            let held = self.session_id.lock().expect("session id mutex").clone();
-            if held.as_deref() != Some(active.session_id.as_str()) {
-                self.adopt_cold(&active);
+            if held.as_deref() != Some(shown.session_id.as_str()) {
+                self.adopt_cold(&shown, remembered.as_ref());
             }
-            self.store_session(active);
+            self.store_session(shown);
+        } else if held.is_some() {
+            // The session this machine holds is no longer listed as anything
+            // to show — dismissed or swept from another of the person's
+            // devices, or expired. Keeping it would paint a record that no
+            // longer exists; only a HELD session is dropped, so a wizard mid-way
+            // through Source or Scope keeps its choices across a refresh.
+            self.clear_session();
+        } else if let Some(remembered) = &remembered {
+            // § Credential handling: the source the account remembers fills
+            // a Source step the user has not started typing into — never one
+            // they have, and never a later step.
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            if snap.step == ImportStep::Source && snap.username.is_empty() {
+                snap.prefill_from(remembered);
+            }
         }
         Ok(())
+    }
+
+    /// Forget the held session and every run's state, back to the Source step.
+    fn clear_session(&self) {
+        self.view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.session_id.lock().expect("session id mutex") = None;
+        self.cursors.lock().expect("cursors mutex").clear();
+        *self.error_budget.lock().expect("error budget mutex") = ErrorBudget::default();
+        *self.stop.lock().expect("stop mutex") = StopRequest::None;
+        *self.skip_rest.lock().expect("skip mutex") = false;
+        self.inner.lock().expect("snapshot mutex").reset_to_source();
     }
 
     /// [`Self::refresh`]'s cold adoption: seed the snapshot's source and scope
@@ -1737,11 +2257,16 @@ impl MailImportMachine {
     /// mailbox continues after its `last_processed_source_uid`, and step 4's
     /// UIDVALIDITY check runs against the recorded validity). A cursor for a
     /// mailbox outside the scope is ignored.
-    fn adopt_cold(&self, s: &ImportSessionView) {
-        self.inner
-            .lock()
-            .expect("snapshot mutex")
-            .adopt_session_source(s);
+    fn adopt_cold(&self, s: &ImportSessionView, remembered: Option<&RememberedImportSource>) {
+        {
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            snap.adopt_session_source(s, remembered);
+            // Another session's lines and rows are not this one's.
+            snap.error_log.clear();
+            snap.mailbox_progress.clear();
+            snap.rebuilt_mailboxes.clear();
+            snap.pause_reason = None;
+        }
         *self.cursors.lock().expect("cursors mutex") = s
             .cursors
             .iter()
@@ -1813,10 +2338,15 @@ impl MailImportMachine {
                 kind, e.failure,
             )));
         }
-        let mut snap = self.inner.lock().expect("snapshot mutex");
-        snap.password = SecretString::default();
-        snap.microsoft_signin = None;
-        snap.resume_needs_credentials = false;
+        {
+            let mut snap = self.inner.lock().expect("snapshot mutex");
+            snap.password = SecretString::default();
+            snap.microsoft_signin = None;
+            snap.resume_needs_credentials = false;
+        }
+        // The port and connection security the person may have just corrected
+        // are what the next resume, here or on another device, re-uses.
+        self.remember_source().await;
         Ok(())
     }
 
@@ -1883,6 +2413,7 @@ impl MailImportMachine {
             )));
         }
         let mailboxes = self.source.list_source_mailboxes().await?;
+        self.remember_source().await;
         let mut snap = self.inner.lock().expect("snapshot mutex");
         snap.mailboxes = mailboxes
             .into_iter()
@@ -1927,9 +2458,13 @@ impl MailImportMachine {
                 s::MICROSOFT_NEEDS_ADDRESS.into(),
             ));
         }
+        let client = self.microsoft_client();
         {
             let mut signin = self.signin.lock().expect("sign-in mutex");
-            *signin = SignInState::default();
+            *signin = SignInState {
+                client: Some(client.clone()),
+                ..SignInState::default()
+            };
         }
         self.set_status(ImportStatus::Working);
         self.set_signin_view(Some(MicrosoftSignInView {
@@ -1940,7 +2475,7 @@ impl MailImportMachine {
         }));
         let started = DeviceFlow::start(
             &DynOAuthHttp(self.oauth.as_ref()),
-            &self.microsoft,
+            &client,
             self.clock.now_ms(),
         )
         .await;
@@ -2055,7 +2590,7 @@ impl MailImportMachine {
             }
             FlowOutcome::AdminConsentRequired => Err(self.signin_ended(
                 MicrosoftSignInState::AdminConsentRequired,
-                s::microsoft_admin_consent_fmt(&admin_consent_url(&self.microsoft)),
+                s::microsoft_admin_consent_fmt(&admin_consent_url(&self.signin_client())),
             )),
             FlowOutcome::Failed(detail) => {
                 tracing::warn!(target: "fauna_mail_settings", "Microsoft sign-in failed: {detail}");
@@ -2084,7 +2619,7 @@ impl MailImportMachine {
         };
         let refreshed = oauth_device::refresh(
             &DynOAuthHttp(self.oauth.as_ref()),
-            &self.microsoft,
+            &self.signin_client(),
             &refresh_token,
             self.clock.now_ms(),
         )
@@ -2200,7 +2735,7 @@ impl MailImportMachine {
 
     async fn start(&self) -> Result<(), DispatchError> {
         self.set_status(ImportStatus::Working);
-        let (descriptor, total_count, scope, date_from) = {
+        let (descriptor, total_count, scope, date_from, skip_dedup) = {
             let snap = self.inner.lock().expect("snapshot mutex");
             snap.start_args()
         };
@@ -2214,7 +2749,7 @@ impl MailImportMachine {
         }
         let session = self
             .nest
-            .start_session(descriptor, total_count, scope, date_from)
+            .start_session(descriptor, total_count, scope, date_from, skip_dedup)
             .await
             .map_err(DispatchError::refused_control)?;
         self.store_session(session);
@@ -2235,8 +2770,14 @@ impl MailImportMachine {
                 .collect();
         }
         *self.cursors.lock().expect("cursors mutex") = HashMap::new();
+        self.inner
+            .lock()
+            .expect("snapshot mutex")
+            .rebuilt_mailboxes
+            .clear();
         *self.error_budget.lock().expect("error budget mutex") = ErrorBudget::default();
         *self.stop.lock().expect("stop mutex") = StopRequest::None;
+        *self.skip_rest.lock().expect("skip mutex") = false;
         self.set_status(ImportStatus::Idle);
         Ok(())
     }
@@ -2247,7 +2788,51 @@ impl MailImportMachine {
     /// pauses the nest-side session once its window is handed over, because
     /// the nest takes messages only into a running session; with none, it
     /// pauses the session here. It never blocks on the loop noticing.
+    /// Pause, Resume and Cancel move a `running` / `paused` session only. On
+    /// a failed or cancelled one they are not offered (§ A failed import is a
+    /// record the wizard shows until the user moves on), and should an app
+    /// still send one it is refused here with a sentence, before the nest is
+    /// asked — the nest would refuse it too, naming nothing the user can act
+    /// on.
+    fn refuse_on_terminal_session(&self) -> Result<(), DispatchError> {
+        use fauna_i18n::strings::mail_import as s;
+        match self.inner.lock().expect("snapshot mutex").session_state {
+            Some(ImportSessionState::Errored) => {
+                Err(DispatchError::InvalidState(s::FAILED_IMPORT_CONTROL.into()))
+            }
+            Some(ImportSessionState::Cancelled) => Err(DispatchError::InvalidState(
+                s::CANCELLED_IMPORT_CONTROL.into(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// Dismiss (`mail-import-dismiss-button`): delete a finished session's
+    /// record and return to Source. Refused on a live one before the nest is
+    /// asked; a record already gone — dismissed on another device — is the
+    /// same outcome.
+    async fn dismiss(&self) -> Result<(), DispatchError> {
+        let state = self.inner.lock().expect("snapshot mutex").session_state;
+        if matches!(
+            state,
+            Some(ImportSessionState::Running | ImportSessionState::Paused)
+        ) {
+            return Err(DispatchError::InvalidState(
+                fauna_i18n::strings::mail_import::DISMISS_LIVE_IMPORT.into(),
+            ));
+        }
+        let id = self.current_session_id()?;
+        self.set_status(ImportStatus::Working);
+        self.nest
+            .discard_session(id)
+            .await
+            .map_err(DispatchError::refused_control)?;
+        self.clear_session();
+        Ok(())
+    }
+
     async fn pause(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         let id = self.current_session_id()?;
         {
             // A run in flight pauses the session itself, after handing its
@@ -2272,6 +2857,7 @@ impl MailImportMachine {
     }
 
     async fn resume(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         let id = self.current_session_id()?;
         {
             // Resume before the running loop got to its pause (`pause`): the
@@ -2310,12 +2896,31 @@ impl MailImportMachine {
         Ok(())
     }
 
+    /// § Failure handling → *Nest-side errors*: "skip remaining" on the
+    /// full-mailbox notice. The session is taken up again exactly as a
+    /// Resume does (a cold one asks for its credentials first — the walk
+    /// still enumerates the source), and the runs that follow record what is
+    /// left as skipped rather than import it.
+    async fn skip_the_rest(&self) -> Result<(), DispatchError> {
+        let paused = self.inner.lock().expect("snapshot mutex").session_state
+            == Some(ImportSessionState::Paused);
+        if !paused {
+            return Err(DispatchError::InvalidState(
+                "only a paused import can skip the rest".into(),
+            ));
+        }
+        self.resume().await?;
+        *self.skip_rest.lock().expect("skip mutex") = true;
+        Ok(())
+    }
+
     /// § UX shape step 5: cancel keeps already-imported messages, so — unlike
     /// export's `Cancel` — the wizard stays on the Progress screen (via
     /// `apply_session`) rather than resetting to step 1. `run_import`'s loop
     /// aborts the in-flight fetch window rather than draining it (see
     /// [`StopRequest::Cancel`]).
     async fn cancel(&self) -> Result<(), DispatchError> {
+        self.refuse_on_terminal_session()?;
         self.set_status(ImportStatus::Working);
         let id = self.current_session_id()?;
         let session = self
@@ -2326,8 +2931,57 @@ impl MailImportMachine {
         self.store_session(session);
         self.forget_microsoft_token();
         *self.stop.lock().expect("stop mutex") = StopRequest::Cancel;
-        self.set_status(ImportStatus::Idle);
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.rebuilt_mailboxes.clear();
+        snap.status = ImportStatus::Idle;
         Ok(())
+    }
+
+    /// `RestartRebuiltMailboxes` (§ Resume protocol step 4): resume the
+    /// paused session with every rebuilt mailbox's cursor forgotten, so the
+    /// run that follows walks each from its first message under the new
+    /// UIDVALIDITY — the nest folds the new value over the row's cursor
+    /// (`fold_mailbox`), and its dedup skips what already arrived. The
+    /// cursors go only once the Resume has landed: a refused one leaves the
+    /// offer standing.
+    async fn restart_rebuilt_mailboxes(&self) -> Result<(), DispatchError> {
+        let rebuilt = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .rebuilt_mailboxes
+            .clone();
+        if rebuilt.is_empty() {
+            return Err(DispatchError::InvalidState(
+                "no rebuilt mailbox to restart".into(),
+            ));
+        }
+        self.resume().await?;
+        let mut cursors = self.cursors.lock().expect("cursors mutex");
+        for mailbox in &rebuilt {
+            cursors.remove(mailbox);
+        }
+        drop(cursors);
+        self.inner
+            .lock()
+            .expect("snapshot mutex")
+            .rebuilt_mailboxes
+            .clear();
+        Ok(())
+    }
+
+    /// The run found `mailbox` rebuilt (§ Resume protocol step 4): note it for
+    /// the restart offer and log the warning, once however many runs meet it.
+    fn note_rebuilt(&self, mailbox: &str) {
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        if snap.rebuilt_mailboxes.iter().any(|m| m == mailbox) {
+            return;
+        }
+        snap.rebuilt_mailboxes.push(mailbox.to_string());
+        snap.error_log
+            .push(fauna_i18n::strings::mail_import::mailbox_rebuilt_fmt(
+                mailbox,
+            ));
     }
 
     fn push_error_log(&self, line: String) {
@@ -2400,6 +3054,7 @@ impl MailImportMachine {
         let _ = self.source.logout().await;
         self.forget_microsoft_token();
         let mut snap = self.inner.lock().expect("snapshot mutex");
+        snap.note_failure_reason(reason.clone());
         crate::state::set_snapshot_error(&mut snap.error, reason.clone());
         snap.status = ImportStatus::Idle;
         DispatchError::InvalidState(reason)
@@ -2425,12 +3080,15 @@ impl MailImportMachine {
             let mailbox = mailboxes.get(i).map_or("", String::as_str);
             skip_log_line(mailbox, uids.get(i).copied().unwrap_or(0), reason)
         };
+        // The session's duplicates choice — fixed at Start and adopted from
+        // the row by a wizard that found the session (§ Opt-out per session).
+        let skip_dedup = self.inner.lock().expect("snapshot mutex").import_duplicates;
         let reply = self
             .retrying(|| {
                 // No revision: the total the session opened with is already
                 // the range's own count (`Self::next`).
                 self.nest
-                    .send_unit(session_id.to_string(), unit.clone(), false, None)
+                    .send_unit(session_id.to_string(), unit.clone(), skip_dedup, None)
             })
             .await?;
         let mut sent = SentUnit::default();
@@ -2574,6 +3232,14 @@ impl MailImportMachine {
         if !self.refresh_after_resume().await {
             return Err(self.fail_and_report(session_id, sign_in_again()).await);
         }
+        if *self.skip_rest.lock().expect("skip mutex") {
+            if let ControlFlow::Break(end) =
+                self.skip_rest_walk(&session_id, mailboxes, &floor).await
+            {
+                return end;
+            }
+            return self.end_of_walk(session_id).await;
+        }
         'mailboxes: for mailbox in mailboxes {
             loop {
                 if *self.stop.lock().expect("stop mutex") != StopRequest::None {
@@ -2586,31 +3252,19 @@ impl MailImportMachine {
                     .get(&mailbox)
                     .copied();
 
-                let status = match self
-                    .retrying_source(|| self.source.examine(&mailbox, cursor))
-                    .await
-                {
-                    Ok(s) => s,
-                    Err(NestError::Rejected(_)) if self.take_sign_in_again() => {
-                        return Err(self.fail_and_report(session_id, sign_in_again()).await);
-                    }
-                    Err(NestError::Rejected(_)) if self.source.take_sign_in_refused() => {
-                        let reason = self.sign_in_refused_sentence();
-                        return Err(self.fail_and_report(session_id, reason).await);
-                    }
-                    Err(NestError::Rejected(reason)) => {
-                        self.push_error_log(format!("{mailbox}: {reason}"));
+                let status = match self.retrying_source(|| self.source.examine(&mailbox)).await {
+                    // § Resume protocol step 4: every stored UID of a rebuilt
+                    // mailbox is meaningless, so it is never walked against
+                    // the new UID space — the person is offered a restart.
+                    Ok(s) if cursor.is_some_and(|c| c.source_uid_validity != s.uid_validity) => {
+                        self.note_rebuilt(&mailbox);
                         continue 'mailboxes;
                     }
-                    Err(NestError::Transient(reason)) => {
-                        return self
-                            .pause_on_its_own(
-                                session_id,
-                                ImportPauseReason::ConnectionLost,
-                                &reason,
-                            )
-                            .await;
-                    }
+                    Ok(s) => s,
+                    Err(e) => match self.on_source_failure(&session_id, &mailbox, e).await {
+                        ControlFlow::Break(end) => return end,
+                        ControlFlow::Continue(()) => continue 'mailboxes,
+                    },
                 };
 
                 let window = match self
@@ -2625,26 +3279,10 @@ impl MailImportMachine {
                     .await
                 {
                     Ok(w) => w,
-                    Err(NestError::Rejected(_)) if self.take_sign_in_again() => {
-                        return Err(self.fail_and_report(session_id, sign_in_again()).await);
-                    }
-                    Err(NestError::Rejected(_)) if self.source.take_sign_in_refused() => {
-                        let reason = self.sign_in_refused_sentence();
-                        return Err(self.fail_and_report(session_id, reason).await);
-                    }
-                    Err(NestError::Rejected(reason)) => {
-                        self.push_error_log(format!("{mailbox}: {reason}"));
-                        continue 'mailboxes;
-                    }
-                    Err(NestError::Transient(reason)) => {
-                        return self
-                            .pause_on_its_own(
-                                session_id,
-                                ImportPauseReason::ConnectionLost,
-                                &reason,
-                            )
-                            .await;
-                    }
+                    Err(e) => match self.on_source_failure(&session_id, &mailbox, e).await {
+                        ControlFlow::Break(end) => return end,
+                        ControlFlow::Continue(()) => continue 'mailboxes,
+                    },
                 };
 
                 if window.is_empty() {
@@ -2793,7 +3431,7 @@ impl MailImportMachine {
                         })
                         .await;
                     match recorded {
-                        Ok(()) => {
+                        Ok(_) => {
                             let mut snap = self.inner.lock().expect("snapshot mutex");
                             snap.skipped_count += skipped;
                             snap.errored_count += errored;
@@ -2843,8 +3481,32 @@ impl MailImportMachine {
                 }
             }
         }
+        self.end_of_walk(session_id).await
+    }
 
+    /// Where both walks end once they stop of their own accord: every
+    /// mailbox done (the session finalized), or a Pause or Cancel seen.
+    async fn end_of_walk(&self, session_id: String) -> Result<(), DispatchError> {
         match self.end_run() {
+            // A rebuilt mailbox is still to be taken: the session pauses on
+            // the progress step, where the restart is offered, rather than
+            // completing without it.
+            StopRequest::None
+                if !self
+                    .inner
+                    .lock()
+                    .expect("snapshot mutex")
+                    .rebuilt_mailboxes
+                    .is_empty() =>
+            {
+                return self
+                    .pause_on_its_own(
+                        session_id,
+                        ImportPauseReason::MailboxRebuilt,
+                        "a source mailbox's UIDVALIDITY changed",
+                    )
+                    .await;
+            }
             StopRequest::None => {
                 let session = self.nest.finalize_session(session_id).await?;
                 self.store_session(session);
@@ -2865,6 +3527,154 @@ impl MailImportMachine {
             StopRequest::Cancel => {}
         }
         Ok(())
+    }
+
+    /// A source call that failed through its retries (§ Failure handling →
+    /// *Source-side errors*): a refused sign-in ends the session asking for
+    /// new credentials, a dropped connection pauses it with the cursor kept
+    /// (both `Break`, with the run's answer), and any other refusal is that
+    /// mailbox's alone — logged, and the walk goes on to the next
+    /// (`Continue`).
+    async fn on_source_failure(
+        &self,
+        session_id: &str,
+        mailbox: &str,
+        e: NestError,
+    ) -> ControlFlow<Result<(), DispatchError>> {
+        let session_id = session_id.to_string();
+        match e {
+            NestError::Rejected(_) if self.take_sign_in_again() => {
+                ControlFlow::Break(Err(self.fail_and_report(session_id, sign_in_again()).await))
+            }
+            NestError::Rejected(_) if self.source.take_sign_in_refused() => {
+                let reason = self.sign_in_refused_sentence();
+                ControlFlow::Break(Err(self.fail_and_report(session_id, reason).await))
+            }
+            NestError::Rejected(reason) => {
+                self.push_error_log(format!("{mailbox}: {reason}"));
+                ControlFlow::Continue(())
+            }
+            NestError::Transient(reason) => ControlFlow::Break(
+                self.pause_on_its_own(session_id, ImportPauseReason::ConnectionLost, &reason)
+                    .await,
+            ),
+        }
+    }
+
+    /// "Skip the rest" ([`MailImportAction::SkipRest`]): walk what is left of
+    /// the scope by UID alone, never fetching a body, and record each message
+    /// the import still wanted as a plain skip — the message the full mailbox
+    /// turned away first, which lifts the nest's quota hold (§ Progress lives
+    /// nest-side → *The quota hold*). A message the since date excludes is out
+    /// of scope and is passed over uncounted, as the import walk does.
+    ///
+    /// The counters come from the nest's answer, not a local tally: the hold
+    /// makes the walk re-offer messages the nest already counted (the
+    /// turned-away one, and any of its batch that landed), which the nest
+    /// counts once. `Continue` when the walk stopped of its own accord —
+    /// every mailbox done, or a Pause or Cancel seen between windows.
+    async fn skip_rest_walk(
+        &self,
+        session_id: &str,
+        mailboxes: Vec<String>,
+        floor: &ImportDateFloor,
+    ) -> ControlFlow<Result<(), DispatchError>> {
+        'mailboxes: for mailbox in mailboxes {
+            loop {
+                if *self.stop.lock().expect("stop mutex") != StopRequest::None {
+                    break 'mailboxes;
+                }
+                let cursor = self
+                    .cursors
+                    .lock()
+                    .expect("cursors mutex")
+                    .get(&mailbox)
+                    .copied();
+                let status = match self.retrying_source(|| self.source.examine(&mailbox)).await {
+                    // A rebuilt mailbox is the restart offer's, as in the
+                    // import walk (§ Resume protocol step 4).
+                    Ok(s) if cursor.is_some_and(|c| c.source_uid_validity != s.uid_validity) => {
+                        self.note_rebuilt(&mailbox);
+                        continue 'mailboxes;
+                    }
+                    Ok(s) => s,
+                    Err(e) => match self.on_source_failure(session_id, &mailbox, e).await {
+                        ControlFlow::Break(end) => return ControlFlow::Break(end),
+                        ControlFlow::Continue(()) => continue 'mailboxes,
+                    },
+                };
+                let entries = match self
+                    .retrying_source(|| {
+                        self.source
+                            .enumerate_window(&mailbox, cursor, FETCH_WINDOW_SIZE)
+                    })
+                    .await
+                {
+                    Ok(entries) => entries,
+                    Err(e) => match self.on_source_failure(session_id, &mailbox, e).await {
+                        ControlFlow::Break(end) => return ControlFlow::Break(end),
+                        ControlFlow::Continue(()) => continue 'mailboxes,
+                    },
+                };
+                let Some(last) = entries.iter().map(|e| e.uid).max() else {
+                    continue 'mailboxes;
+                };
+                let skipped: Vec<ClientImportOutcome> = entries
+                    .iter()
+                    .filter(|e| e.internal_date_epoch.is_none_or(|d| floor.admits(d)))
+                    .map(|e| ClientImportOutcome {
+                        uid: e.uid,
+                        kind: ClientImportOutcomeKind::SkippedByUser,
+                        extra: Default::default(),
+                    })
+                    .collect();
+                if !skipped.is_empty() {
+                    let recorded = self
+                        .retrying(|| {
+                            self.nest.record_client_outcomes(
+                                session_id.to_string(),
+                                mailbox.clone(),
+                                status.uid_validity,
+                                skipped.clone(),
+                            )
+                        })
+                        .await;
+                    match recorded {
+                        Ok(counters) => {
+                            let mut snap = self.inner.lock().expect("snapshot mutex");
+                            let newly = counters.skipped_count.saturating_sub(snap.skipped_count);
+                            snap.imported_count = counters.imported_count;
+                            snap.skipped_count = counters.skipped_count;
+                            snap.errored_count = counters.errored_count;
+                            if let Some(row) = snap.mailbox_row(&mailbox) {
+                                row.skipped += newly;
+                            }
+                        }
+                        // Unrecorded, so the cursor stays: the Resume walks
+                        // this window again.
+                        Err(NestError::Transient(detail)) => {
+                            return ControlFlow::Break(
+                                self.pause_on_its_own(
+                                    session_id.to_string(),
+                                    ImportPauseReason::ConnectionLost,
+                                    &detail,
+                                )
+                                .await,
+                            );
+                        }
+                        Err(e) => return ControlFlow::Break(Err(e.into())),
+                    }
+                }
+                self.cursors.lock().expect("cursors mutex").insert(
+                    mailbox.clone(),
+                    MailboxCursor {
+                        last_processed_source_uid: last,
+                        source_uid_validity: status.uid_validity,
+                    },
+                );
+            }
+        }
+        ControlFlow::Continue(())
     }
 
     /// The run's last look at the stop request, taken as it stops counting
@@ -2901,6 +3711,7 @@ impl MailImportMachine {
             }
             MailImportAction::SetDateFrom { value } => snap.date_from = value.clone(),
             MailImportAction::SetMaxSizeBytes { value } => snap.max_size_bytes = *value,
+            MailImportAction::SetImportDuplicates { value } => snap.import_duplicates = *value,
             // Scope → Confirm asks the source first (`Self::next`).
             MailImportAction::Next if snap.step != ImportStep::Scope => {}
             MailImportAction::Back => snap.step = prev_step(snap.step),
@@ -3002,6 +3813,7 @@ impl MailImportMachine {
             match action {
                 MailImportAction::Refresh => self.refresh().await,
                 MailImportAction::Connect => self.connect().await,
+                MailImportAction::ForgetSource => self.forget_source().await,
                 MailImportAction::BeginMicrosoftSignIn => self.begin_microsoft_sign_in().await,
                 MailImportAction::CancelMicrosoftSignIn => {
                     self.cancel_microsoft_sign_in();
@@ -3012,6 +3824,11 @@ impl MailImportMachine {
                 MailImportAction::Pause => self.pause().await,
                 MailImportAction::Resume => self.resume().await,
                 MailImportAction::Cancel => self.cancel().await,
+                MailImportAction::RestartRebuiltMailboxes => {
+                    self.restart_rebuilt_mailboxes().await
+                }
+                MailImportAction::SkipRest => self.skip_the_rest().await,
+                MailImportAction::Dismiss => self.dismiss().await,
                 // The client-side variants were handled above.
                 _ => Ok(()),
             }
@@ -3051,6 +3868,16 @@ mod tests {
         /// Every request the machine sent, serialized — § Microsoft sign-in's
         /// tier_1 witness reads these for the token's bytes.
         outbound: StdMutex<Vec<String>>,
+        /// What `microsoft_registration` answers — the admin's pair off
+        /// `fauna.setup.status`, `None` by default.
+        registration: StdMutex<Option<MicrosoftRegistration>>,
+        /// A whole listing, newest first, in place of the one `session` —
+        /// the adoption rule's tests list several rows.
+        listing: StdMutex<Option<Vec<ImportSessionView>>>,
+        /// `(entered, release)`: `list_sessions` reads its answer, signals
+        /// `entered`, and waits for `release` before returning it — a stale
+        /// listing in flight while the test moves the machine's view.
+        list_gate: StdMutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     }
 
     impl FakeNest {
@@ -3065,7 +3892,20 @@ mod tests {
                 send_errors: StdMutex::new(VecDeque::new()),
                 start_errors: StdMutex::new(VecDeque::new()),
                 outbound: StdMutex::new(Vec::new()),
+                registration: StdMutex::new(None),
+                listing: StdMutex::new(None),
+                list_gate: StdMutex::new(None),
             }
+        }
+
+        /// The calls the machine made, by name, in order.
+        fn calls(&self) -> Vec<String> {
+            self.outbound
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.split(' ').next().unwrap_or_default().to_string())
+                .collect()
         }
 
         fn record(&self, call: &str, args: impl Serialize) {
@@ -3111,6 +3951,7 @@ mod tests {
             error_reason: String::new(),
             scope: Vec::new(),
             date_from: String::new(),
+            skip_dedup: false,
             cursors: Vec::new(),
             started_at: 1_000,
             last_progress_at: 1_000,
@@ -3146,7 +3987,19 @@ mod tests {
     impl MailImportNest for FakeNest {
         async fn list_sessions(&self) -> Result<Vec<ImportSessionView>, NestError> {
             self.record("list_sessions", ());
-            Ok(self.session.lock().unwrap().clone().into_iter().collect())
+            let answer = match self.listing.lock().unwrap().clone() {
+                Some(listing) => listing,
+                None => self.session.lock().unwrap().clone().into_iter().collect(),
+            };
+            let gate = self.list_gate.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+            Ok(answer)
+        }
+        async fn microsoft_registration(&self) -> Result<Option<MicrosoftRegistration>, NestError> {
+            Ok(self.registration.lock().unwrap().clone())
         }
         async fn start_session(
             &self,
@@ -3154,6 +4007,7 @@ mod tests {
             total_count: u64,
             scope: Vec<String>,
             date_from: String,
+            skip_dedup: bool,
         ) -> Result<ImportSessionView, NestError> {
             self.record(
                 "start_session",
@@ -3165,6 +4019,7 @@ mod tests {
             let mut s = session(ImportSessionState::Running, total_count);
             s.scope = scope;
             s.date_from = date_from;
+            s.skip_dedup = skip_dedup;
             *self.session.lock().unwrap() = Some(s.clone());
             Ok(s)
         }
@@ -3204,6 +4059,26 @@ mod tests {
             *guard = Some(s.clone());
             Ok(s)
         }
+        async fn discard_session(&self, session_id: String) -> Result<bool, NestError> {
+            self.record("discard_session", &session_id);
+            // The real handler's rule: a terminal row goes, a live one stays.
+            let mut guard = self.session.lock().unwrap();
+            match guard.as_ref() {
+                Some(s) if s.session_id == session_id => {
+                    if matches!(
+                        s.state,
+                        ImportSessionState::Running | ImportSessionState::Paused
+                    ) {
+                        return Err(NestError::Rejected(format!(
+                            "import session '{session_id}' is live"
+                        )));
+                    }
+                    *guard = None;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            }
+        }
         async fn finalize_session(
             &self,
             _session_id: String,
@@ -3236,7 +4111,7 @@ mod tests {
             &self,
             _session_id: String,
             unit: ImportUnit,
-            _skip_dedup: bool,
+            skip_dedup: bool,
             revised_total_count: Option<u64>,
         ) -> Result<SendUnitReply, NestError> {
             let wire: Vec<&ImportMessageItem> = match &unit {
@@ -3283,7 +4158,9 @@ mod tests {
                         SendOutcome::Skipped {
                             reason: IMPORT_SKIP_QUOTA_EXCEEDED.into(),
                         }
-                    } else if dedup_uids.contains(&item.source_uid) {
+                    } else if !skip_dedup && dedup_uids.contains(&item.source_uid) {
+                        // The real handler's `skip_dedup` imports again
+                        // instead of skipping (§ Opt-out per session).
                         if let Some(s) = session.as_mut() {
                             s.skipped_count += 1;
                         }
@@ -3313,23 +4190,32 @@ mod tests {
             mailbox: String,
             _uid_validity: u32,
             outcomes: Vec<ClientImportOutcome>,
-        ) -> Result<(), NestError> {
+        ) -> Result<RecordImportOutcomesReply, NestError> {
             self.record(
                 "record_client_outcomes",
                 (&_session_id, &mailbox, _uid_validity, &outcomes),
             );
-            // The real handler's fold: too large is a skip, anything else a
-            // failure.
+            // The real handler's fold: too large and skipped by the user are
+            // skips, anything else a failure — and, as the quota hold's
+            // count-once rule has it, a message already sent was already
+            // counted.
+            let sent = self.sent_uids.lock().unwrap().clone();
+            let mut reply = RecordImportOutcomesReply::default();
             if let Some(s) = self.session.lock().unwrap().as_mut() {
                 for o in &outcomes {
                     match o.kind {
-                        ClientImportOutcomeKind::TooLarge { .. } => s.skipped_count += 1,
+                        ClientImportOutcomeKind::SkippedByUser if sent.contains(&o.uid) => {}
+                        ClientImportOutcomeKind::TooLarge { .. }
+                        | ClientImportOutcomeKind::SkippedByUser => s.skipped_count += 1,
                         _ => s.errored_count += 1,
                     }
                 }
+                reply.imported_count = s.imported_count;
+                reply.skipped_count = s.skipped_count;
+                reply.errored_count = s.errored_count;
             }
             self.recorded.lock().unwrap().push((mailbox, outcomes));
-            Ok(())
+            Ok(reply)
         }
     }
 
@@ -3361,6 +4247,10 @@ mod tests {
         examine_errors: StdMutex<HashMap<String, VecDeque<NestError>>>,
         /// Same, for `fetch_window`.
         fetch_errors: StdMutex<HashMap<String, VecDeque<NestError>>>,
+        /// Every `fetch_window` call's mailbox — the calls that move bodies.
+        fetched: StdMutex<Vec<String>>,
+        /// Every `enumerate_window` call's mailbox.
+        enumerated: StdMutex<Vec<String>>,
         logged_out: StdMutex<bool>,
         /// `can_ever_connect`'s answer — models the web stub.
         can_never_connect: bool,
@@ -3406,6 +4296,8 @@ mod tests {
                 fail_uids: HashSet::new(),
                 examine_errors: StdMutex::new(HashMap::new()),
                 fetch_errors: StdMutex::new(HashMap::new()),
+                fetched: StdMutex::new(Vec::new()),
+                enumerated: StdMutex::new(Vec::new()),
                 logged_out: StdMutex::new(false),
                 can_never_connect: false,
                 connects: StdMutex::new(Vec::new()),
@@ -3608,11 +4500,7 @@ mod tests {
                 bytes: Some(in_range.iter().map(|m| m.body.len() as u64).sum()),
             })
         }
-        async fn examine(
-            &self,
-            mailbox: &str,
-            cursor: Option<MailboxCursor>,
-        ) -> Result<MailboxStatus, NestError> {
+        async fn examine(&self, mailbox: &str) -> Result<MailboxStatus, NestError> {
             if let Some(e) = self
                 .examine_errors
                 .lock()
@@ -3621,13 +4509,6 @@ mod tests {
                 .and_then(VecDeque::pop_front)
             {
                 return Err(e);
-            }
-            if let Some(c) = cursor
-                && c.source_uid_validity != self.uid_validity
-            {
-                return Err(NestError::Rejected(format!(
-                    "{mailbox}: source UIDVALIDITY changed"
-                )));
             }
             let exists = self.messages.get(mailbox).map_or(0, |m| m.len() as u32);
             Ok(MailboxStatus {
@@ -3642,6 +4523,7 @@ mod tests {
             max: usize,
             max_size_bytes: u64,
         ) -> Result<FetchWindow, NestError> {
+            self.fetched.lock().unwrap().push(mailbox.to_string());
             if self.refuse_sign_in_at_fetch.lock().unwrap().remove(mailbox) {
                 *self.sign_in_refused.lock().unwrap() = true;
                 return Err(NestError::Rejected(
@@ -3701,6 +4583,29 @@ mod tests {
                 outcomes,
                 too_large,
             })
+        }
+        async fn enumerate_window(
+            &self,
+            mailbox: &str,
+            cursor: Option<MailboxCursor>,
+            max: usize,
+        ) -> Result<Vec<UidEntry>, NestError> {
+            self.enumerated.lock().unwrap().push(mailbox.to_string());
+            let from = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
+            Ok(self
+                .messages
+                .get(mailbox)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.uid >= from)
+                .take(max)
+                .map(|m| UidEntry {
+                    uid: m.uid,
+                    size: Some(m.body.len() as u32),
+                    internal_date_epoch: Some(m.internal_date_epoch),
+                })
+                .collect())
         }
         async fn logout(&self) -> Result<(), NestError> {
             *self.logged_out.lock().unwrap() = true;
@@ -4209,6 +5114,306 @@ mod tests {
         assert_eq!(m.snapshot().step, ImportStep::Source);
     }
 
+    // ── § A failed import is a record the wizard shows until the user moves on
+
+    fn listed(id: &str, state: ImportSessionState, reason: &str) -> ImportSessionView {
+        ImportSessionView {
+            session_id: id.into(),
+            error_reason: reason.into(),
+            ..session(state, 10)
+        }
+    }
+
+    /// What a fresh machine hydrated against `listing` (newest first) shows:
+    /// the session it holds and the step.
+    async fn adopted(listing: Vec<ImportSessionView>) -> (Option<String>, MailImportSnapshot) {
+        let nest = FakeNest::new();
+        *nest.listing.lock().unwrap() = Some(listing);
+        let m = MailImportMachine::new(
+            Arc::new(nest),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        );
+        m.hydrate().await.unwrap();
+        (m.current_session_id().ok(), m.snapshot())
+    }
+
+    /// The adoption rule: the newest live session; with none, the newest
+    /// `errored` one; a `completed` or `cancelled` one never.
+    #[tokio::test]
+    async fn refresh_adopts_the_newest_live_session_else_the_newest_failure() {
+        use ImportSessionState::*;
+        let (held, snap) = adopted(vec![
+            listed("err", Errored, "boom"),
+            listed("run", Running, ""),
+        ])
+        .await;
+        assert_eq!(
+            held.as_deref(),
+            Some("run"),
+            "a live import outranks a newer failure"
+        );
+        assert_eq!(snap.session_state, Some(Running));
+
+        let (held, snap) = adopted(vec![
+            listed("done", Completed, ""),
+            listed("err", Errored, "the source refused the sign-in"),
+        ])
+        .await;
+        assert_eq!(
+            held.as_deref(),
+            Some("err"),
+            "a finished import is never shown"
+        );
+        assert_eq!(snap.step, ImportStep::Progress);
+        assert_eq!(snap.session_state, Some(Errored));
+        assert_eq!(snap.error_log, vec!["the source refused the sign-in"]);
+        assert_eq!(snap.error, None, "the record is the log line, not an error");
+        assert!(
+            !snap.resume_needs_credentials,
+            "a failed import has nothing to resume"
+        );
+
+        for state in [Completed, Cancelled] {
+            let (held, snap) = adopted(vec![listed("x", state, "")]).await;
+            assert_eq!(held, None, "{state:?}");
+            assert_eq!(snap.step, ImportStep::Source, "{state:?}");
+        }
+    }
+
+    /// The run's own failure: the reason is the error log's last line, after
+    /// the per-message lines this app wrote, and `error-message` says it too.
+    #[tokio::test]
+    async fn a_failed_run_ends_its_log_with_the_reason() {
+        use fauna_i18n::strings::mail_import as s;
+        let total = 60u32;
+        let mut source = FakeSource::new(&[("INBOX", true, total)]).with_messages("INBOX", total);
+        for uid in 1..=total {
+            source = source.failing_uid(uid);
+        }
+        let nest = Arc::new(FakeNest::new());
+        let m = started(nest.clone(), source, Arc::new(FakeClock::new())).await;
+
+        assert!(m.run_import().await.is_err());
+        let snap = m.snapshot();
+        assert_eq!(snap.session_state, Some(ImportSessionState::Errored));
+        assert!(snap.error_log.len() > 1, "the per-message lines are kept");
+        assert_eq!(
+            snap.error_log.last().map(String::as_str),
+            Some(s::ERROR_BUDGET_EXCEEDED)
+        );
+        assert_eq!(snap.error.as_deref(), Some(s::ERROR_BUDGET_EXCEEDED));
+
+        // A refresh in the same app (the import's own error event) neither
+        // drops the record nor writes the reason a second time.
+        let lines = snap.error_log.len();
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ImportStep::Progress);
+        assert_eq!(snap.error_log.len(), lines);
+    }
+
+    /// Pause, Resume and Cancel are not offered on a failed or cancelled
+    /// import; should an app send one the machine refuses it with a sentence,
+    /// without a call to the nest.
+    #[tokio::test]
+    async fn the_three_controls_are_refused_on_a_terminal_session_without_a_seam_call() {
+        for state in [ImportSessionState::Errored, ImportSessionState::Cancelled] {
+            let nest = Arc::new(FakeNest::new());
+            *nest.session.lock().unwrap() = Some(listed("t", state, "boom"));
+            let m = MailImportMachine::new(
+                nest.clone(),
+                Arc::new(FakeSource::new(&[])),
+                Arc::new(FakeClock::new()),
+            );
+            m.store_session(listed("t", state, "boom"));
+            for action in [
+                MailImportAction::Pause,
+                MailImportAction::Resume,
+                MailImportAction::Cancel,
+            ] {
+                let err = m.dispatch(action.clone()).await.unwrap_err();
+                assert!(
+                    matches!(&err, DispatchError::InvalidState(msg) if !msg.is_empty()),
+                    "{state:?} {action:?}: {err:?}"
+                );
+                assert_eq!(
+                    m.snapshot().step,
+                    ImportStep::Progress,
+                    "{state:?} {action:?}"
+                );
+            }
+            assert!(nest.calls().is_empty(), "{state:?}: {:?}", nest.calls());
+        }
+    }
+
+    /// Dismiss deletes the record through the seam and returns the wizard to
+    /// Source; no record comes back on the next load.
+    #[tokio::test]
+    async fn dismissing_a_failed_import_discards_it_and_returns_to_source() {
+        let nest = Arc::new(FakeNest::new());
+        *nest.session.lock().unwrap() = Some(listed("sess-1", ImportSessionState::Errored, "boom"));
+        let m = MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        );
+        m.hydrate().await.unwrap();
+        assert_eq!(m.snapshot().step, ImportStep::Progress);
+
+        m.dispatch(MailImportAction::Dismiss).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ImportStep::Source);
+        assert_eq!(snap.session_state, None);
+        assert!(snap.error_log.is_empty());
+        assert!(m.current_session_id().is_err());
+        assert!(nest.calls().contains(&"discard_session".to_string()));
+
+        m.hydrate().await.unwrap();
+        assert_eq!(
+            m.snapshot().step,
+            ImportStep::Source,
+            "no record comes back"
+        );
+    }
+
+    /// Dismiss is a failed import's control only: on a live one it is refused
+    /// with a sentence and the nest is not asked.
+    #[tokio::test]
+    async fn dismiss_is_refused_on_a_live_import() {
+        let nest = Arc::new(FakeNest::new());
+        let m = MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        );
+        m.store_session(listed("sess-1", ImportSessionState::Paused, ""));
+        assert!(matches!(
+            m.dispatch(MailImportAction::Dismiss).await,
+            Err(DispatchError::InvalidState(_))
+        ));
+        assert!(nest.calls().is_empty());
+        assert_eq!(m.snapshot().session_state, Some(ImportSessionState::Paused));
+    }
+
+    /// A cancelled import stays on Progress in the app session that cancelled
+    /// it — a refresh keeps it — but is never adopted anywhere else.
+    #[tokio::test]
+    async fn a_held_cancelled_import_survives_a_refresh() {
+        let m = machine(&[("INBOX", true, 1)]);
+        connected(&m).await;
+        m.dispatch(MailImportAction::Next).await.unwrap();
+        m.dispatch(MailImportAction::Next).await.unwrap();
+        m.dispatch(MailImportAction::Start).await.unwrap();
+        m.dispatch(MailImportAction::Cancel).await.unwrap();
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ImportStep::Progress);
+        assert_eq!(snap.session_state, Some(ImportSessionState::Cancelled));
+    }
+
+    /// A held failure discarded from another device is dropped at the next
+    /// refresh: the wizard returns to Source instead of painting a record that
+    /// no longer exists.
+    #[tokio::test]
+    async fn a_held_failure_gone_from_the_listing_is_dropped() {
+        let nest = Arc::new(FakeNest::new());
+        *nest.session.lock().unwrap() = Some(listed("sess-1", ImportSessionState::Errored, "boom"));
+        let m = MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        );
+        m.hydrate().await.unwrap();
+        *nest.session.lock().unwrap() = None;
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.step, ImportStep::Source);
+        assert_eq!(snap.session_state, None);
+    }
+
+    /// A wizard part-way through its own walk is not pulled onto another
+    /// device's import by a refresh (the push re-read): past the Source step
+    /// the walk in hand is the person's, and they meet the other import at
+    /// Start — the per-source lock — or on their next visit.
+    #[tokio::test]
+    async fn a_refresh_does_not_pull_a_walk_in_progress_onto_another_import() {
+        let m = machine(&[("INBOX", true, 1)]);
+        connected(&m).await;
+        m.dispatch(MailImportAction::Next).await.unwrap();
+        assert_eq!(m.snapshot().step, ImportStep::Confirm);
+        let nest = FakeNest::new();
+        *nest.listing.lock().unwrap() =
+            Some(vec![listed("theirs", ImportSessionState::Running, "")]);
+        let m = MailImportMachine {
+            nest: Arc::new(nest),
+            ..m
+        };
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.step,
+            ImportStep::Confirm,
+            "the walk stays where it was"
+        );
+        assert_eq!(snap.session_state, None);
+        assert!(m.current_session_id().is_err());
+    }
+
+    /// A listing read before another writer moved the held view is stale:
+    /// the refresh drops it rather than painting the older state over the
+    /// newer one (a progress push's re-read racing the run's own pause).
+    #[tokio::test]
+    async fn a_refresh_whose_listing_went_stale_in_flight_changes_nothing() {
+        let nest = Arc::new(FakeNest::new());
+        *nest.session.lock().unwrap() = Some(listed("sess-1", ImportSessionState::Running, ""));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *nest.list_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let m = Arc::new(MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        ));
+        m.store_session(listed("sess-1", ImportSessionState::Running, ""));
+
+        let refreshing = {
+            let m = Arc::clone(&m);
+            tokio::spawn(async move { m.dispatch(MailImportAction::Refresh).await })
+        };
+        entered.notified().await;
+        // The run paused the session while the listing was on its way.
+        m.store_session(listed("sess-1", ImportSessionState::Paused, ""));
+        release.notify_one();
+        refreshing.await.unwrap().unwrap();
+
+        assert_eq!(m.snapshot().session_state, Some(ImportSessionState::Paused));
+    }
+
+    /// A machine holding a run ignores the nudge: its loop is the session
+    /// view's writer.
+    #[tokio::test]
+    async fn a_refresh_leaves_the_session_of_a_held_run_alone() {
+        let nest = Arc::new(FakeNest::new());
+        let m = MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        );
+        m.store_session(listed("sess-1", ImportSessionState::Running, ""));
+        *m.run_active.lock().unwrap() = true;
+        *nest.listing.lock().unwrap() = Some(vec![listed(
+            "other",
+            ImportSessionState::Errored,
+            "elsewhere",
+        )]);
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        assert_eq!(m.current_session_id().unwrap(), "sess-1");
+        let snap = m.snapshot();
+        assert_eq!(snap.session_state, Some(ImportSessionState::Running));
+        assert!(snap.error_log.is_empty());
+    }
+
     #[test]
     fn start_args_never_includes_the_password() {
         let mut snap = MailImportSnapshot::empty();
@@ -4221,12 +5426,14 @@ mod tests {
             byte_total: None,
         }];
         snap.date_from = "2023-11-14".into();
-        let (descriptor, total, scope, date_from) = snap.start_args();
+        snap.import_duplicates = true;
+        let (descriptor, total, scope, date_from, skip_dedup) = snap.start_args();
         assert_eq!(descriptor, "gmail:user@example.com@imap.gmail.com");
         assert!(!descriptor.contains("super-secret"));
         assert_eq!(total, 7);
         assert_eq!(scope, vec!["INBOX".to_string()]);
         assert_eq!(date_from, "2023-11-14");
+        assert!(skip_dedup);
     }
 
     #[test]
@@ -4309,6 +5516,21 @@ mod tests {
         );
     }
 
+    /// The Outlook button commits the trimmed address before asking for a
+    /// code, so `begin_microsoft_sign_in` reads the user the field shows.
+    #[test]
+    fn microsoft_sign_in_actions_commit_the_address_then_begin() {
+        assert_eq!(
+            microsoft_sign_in_actions("  user@outlook.example  "),
+            vec![
+                MailImportAction::SetUsername {
+                    value: "user@outlook.example".into()
+                },
+                MailImportAction::BeginMicrosoftSignIn,
+            ]
+        );
+    }
+
     #[test]
     fn connect_actions_drops_an_unparseable_port() {
         let actions = connect_actions(
@@ -4376,7 +5598,16 @@ mod tests {
         source: FakeSource,
         clock: Arc<FakeClock>,
     ) -> MailImportMachine {
-        let m = MailImportMachine::new(nest, Arc::new(source), clock);
+        started_with_source(nest, Arc::new(source), clock).await
+    }
+
+    /// [`started`], keeping a handle on the source to read what it was asked.
+    async fn started_with_source(
+        nest: Arc<FakeNest>,
+        source: Arc<FakeSource>,
+        clock: Arc<FakeClock>,
+    ) -> MailImportMachine {
+        let m = MailImportMachine::new(nest, source, clock);
         connected(&m).await;
         m.dispatch(MailImportAction::Next).await.unwrap();
         m.dispatch(MailImportAction::Next).await.unwrap();
@@ -4802,32 +6033,140 @@ mod tests {
         assert_eq!(m.snapshot().errored_count, 1);
     }
 
+    /// A started machine whose INBOX cursor was recorded under UIDVALIDITY 6
+    /// while the source now reports the fake's 7 — the source rebuilt INBOX
+    /// after the import began (§ Resume protocol step 4).
+    async fn started_with_a_rebuilt_inbox(nest: Arc<FakeNest>) -> MailImportMachine {
+        let source = FakeSource::new(&[("INBOX", true, 3), ("Work", true, 2)])
+            .with_messages("INBOX", 3)
+            .with_messages("Work", 2);
+        let m = started(nest, source, Arc::new(FakeClock::new())).await;
+        m.cursors.lock().unwrap().insert(
+            "INBOX".into(),
+            MailboxCursor {
+                last_processed_source_uid: 1,
+                source_uid_validity: 6,
+            },
+        );
+        m
+    }
+
+    /// § Resume protocol step 4: a changed UIDVALIDITY is per-mailbox — the
+    /// other mailboxes carry on — but the session neither completes nor
+    /// imports against the new UID space: it pauses with the warning, and the
+    /// rebuilt mailbox is what the restart offer is for.
     #[tokio::test]
-    async fn a_uidvalidity_mismatch_skips_the_mailbox_without_failing_the_session() {
-        // § Resume protocol step 4 / § Failure handling: per-mailbox, not
-        // session-fatal. Modeled here as the very first `examine` call
-        // (cursor `None`) still hitting the mismatch — the fake's mismatch
-        // check only fires with a cursor, so inject it as a `Rejected`
-        // directly via the examine-error queue instead.
+    async fn a_uidvalidity_mismatch_warns_skips_the_mailbox_and_pauses_for_a_restart() {
+        let nest = Arc::new(FakeNest::new());
+        let m = started_with_a_rebuilt_inbox(nest.clone()).await;
+
+        m.run_import().await.unwrap();
+
+        // INBOX not walked at all; Work fully imports.
+        assert_eq!(nest.sent_uids.lock().unwrap().as_slice(), &[1, 2]);
+        assert_eq!(
+            nest.session.lock().unwrap().as_ref().unwrap().state,
+            ImportSessionState::Paused,
+            "a pending rebuilt mailbox keeps the session on the progress step"
+        );
+        let snap = m.snapshot();
+        assert_eq!(snap.rebuilt_mailboxes, vec!["INBOX".to_string()]);
+        assert_eq!(snap.pause_reason, Some(ImportPauseReason::MailboxRebuilt));
+        assert_eq!(
+            snap.error.as_deref(),
+            Some(fauna_i18n::strings::mail_import::PAUSED_MAILBOX_REBUILT)
+        );
+        assert_eq!(
+            snap.error_log,
+            vec![fauna_i18n::strings::mail_import::mailbox_rebuilt_fmt(
+                "INBOX"
+            )],
+            "the log carries the warning, never the source's raw words"
+        );
+    }
+
+    /// The restart offer: the rebuilt mailbox's cursor is dropped and the
+    /// walk takes it again from its first message (the nest's dedup skips
+    /// what already arrived, § Dedup vs. existing mail), and the session then
+    /// completes.
+    #[tokio::test]
+    async fn restarting_a_rebuilt_mailbox_walks_it_from_its_first_message() {
+        let nest = Arc::new(FakeNest::new());
+        let m = started_with_a_rebuilt_inbox(nest.clone()).await;
+        m.run_import().await.unwrap();
+
+        m.dispatch(MailImportAction::RestartRebuiltMailboxes)
+            .await
+            .unwrap();
+        let snap = m.snapshot();
+        assert!(snap.rebuilt_mailboxes.is_empty());
+        assert_eq!(snap.pause_reason, None);
+        assert_eq!(snap.session_state, Some(ImportSessionState::Running));
+
+        m.run_import().await.unwrap();
+        assert_eq!(nest.sent_uids.lock().unwrap().as_slice(), &[1, 2, 1, 2, 3]);
+        assert_eq!(
+            nest.session.lock().unwrap().as_ref().unwrap().state,
+            ImportSessionState::Completed
+        );
+    }
+
+    /// A plain Resume while the rebuilt mailbox is still pending does not
+    /// import it either: the run pauses on it again, and the warning is not
+    /// written twice.
+    #[tokio::test]
+    async fn resuming_past_a_pending_rebuilt_mailbox_pauses_on_it_again() {
+        let nest = Arc::new(FakeNest::new());
+        let m = started_with_a_rebuilt_inbox(nest.clone()).await;
+        m.run_import().await.unwrap();
+
+        m.dispatch(MailImportAction::Resume).await.unwrap();
+        m.run_import().await.unwrap();
+
+        assert_eq!(nest.sent_uids.lock().unwrap().as_slice(), &[1, 2]);
+        let snap = m.snapshot();
+        assert_eq!(snap.session_state, Some(ImportSessionState::Paused));
+        assert_eq!(snap.rebuilt_mailboxes, vec!["INBOX".to_string()]);
+        assert_eq!(snap.error_log.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_restart_with_no_rebuilt_mailbox_is_refused() {
+        let nest = Arc::new(FakeNest::new());
+        let source = FakeSource::new(&[("INBOX", true, 3)]).with_messages("INBOX", 3);
+        let m = started(nest.clone(), source, Arc::new(FakeClock::new())).await;
+
+        assert!(
+            m.dispatch(MailImportAction::RestartRebuiltMailboxes)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            nest.session.lock().unwrap().as_ref().unwrap().state,
+            ImportSessionState::Running
+        );
+    }
+
+    /// A mailbox the source refuses to `EXAMINE` (it vanished) is still noted
+    /// and passed over without holding the session: only a rebuilt one waits
+    /// for the person.
+    #[tokio::test]
+    async fn a_mailbox_the_source_refuses_to_examine_is_skipped_and_the_session_completes() {
         let nest = Arc::new(FakeNest::new());
         let source = FakeSource::new(&[("INBOX", true, 3), ("Work", true, 2)])
             .with_messages("INBOX", 3)
             .with_messages("Work", 2)
-            .queue_examine_error(
-                "INBOX",
-                NestError::Rejected("INBOX: source UIDVALIDITY changed".into()),
-            );
+            .queue_examine_error("INBOX", NestError::Rejected("NO no such mailbox".into()));
         let m = started(nest.clone(), source, Arc::new(FakeClock::new())).await;
 
         m.run_import().await.unwrap();
 
-        // INBOX skipped entirely; Work still fully imports.
         assert_eq!(nest.sent_uids.lock().unwrap().as_slice(), &[1, 2]);
         assert_eq!(
             nest.session.lock().unwrap().as_ref().unwrap().state,
             ImportSessionState::Completed
         );
-        assert!(m.snapshot().error_log.iter().any(|l| l.contains("INBOX")));
+        assert!(m.snapshot().rebuilt_mailboxes.is_empty());
     }
 
     #[tokio::test]
@@ -4997,6 +6336,103 @@ mod tests {
             nest.session.lock().unwrap().as_ref().unwrap().state,
             ImportSessionState::Completed
         );
+    }
+
+    /// § Failure handling → *Nest-side errors*, "skip remaining": from the
+    /// full-mailbox pause, every message the import has not taken yet — the
+    /// turned-away one first — is recorded as a plain skip, never
+    /// `quota_exceeded` (so the nest's quota hold lifts, § Progress lives
+    /// nest-side → *The quota hold*), no body is fetched for it, each is
+    /// counted once, and the session finishes.
+    #[tokio::test]
+    async fn skip_the_rest_records_plain_skips_from_the_turned_away_message_and_finishes() {
+        let total = FETCH_WINDOW_SIZE as u32 + 8;
+        let nest = Arc::new(FakeNest::new().with_quota_uids(5..=total));
+        let source =
+            Arc::new(FakeSource::new(&[("INBOX", true, total)]).with_messages("INBOX", total));
+        let m = started_with_source(nest.clone(), source.clone(), Arc::new(FakeClock::new())).await;
+        m.run_import().await.unwrap();
+        assert_eq!(
+            m.snapshot().pause_reason,
+            Some(ImportPauseReason::MailboxFull)
+        );
+        let fetches_before = source.fetched.lock().unwrap().len();
+        let sent_before = nest.sent_uids.lock().unwrap().len();
+
+        m.dispatch(MailImportAction::SkipRest).await.unwrap();
+        assert!(import_action_starts_run(MailImportAction::SkipRest));
+        m.run_import().await.unwrap();
+
+        let recorded: Vec<ClientImportOutcome> = nest
+            .recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, o)| o.clone())
+            .collect();
+        assert_eq!(
+            recorded.iter().map(|o| o.uid).collect::<Vec<_>>(),
+            (5..=total).collect::<Vec<_>>(),
+            "from the turned-away message to the end"
+        );
+        assert!(
+            recorded
+                .iter()
+                .all(|o| o.kind == ClientImportOutcomeKind::SkippedByUser),
+            "a plain skip, never a quota refusal: {recorded:?}"
+        );
+        assert_eq!(
+            source.fetched.lock().unwrap().len(),
+            fetches_before,
+            "no body fetched"
+        );
+        assert_eq!(
+            nest.sent_uids.lock().unwrap().len(),
+            sent_before,
+            "nothing sent"
+        );
+        assert_eq!(
+            nest.session.lock().unwrap().as_ref().unwrap().state,
+            ImportSessionState::Completed
+        );
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.skipped_count,
+            u64::from(total - 4),
+            "each counted once"
+        );
+        assert_eq!(snap.imported_count, 4);
+        assert_eq!(snap.pause_reason, None);
+    }
+
+    /// Skip the rest is a way on from a pause; a running import refuses it.
+    #[tokio::test]
+    async fn skip_the_rest_needs_a_paused_import() {
+        let nest = Arc::new(FakeNest::new());
+        let source = FakeSource::new(&[("INBOX", true, 3)]).with_messages("INBOX", 3);
+        let m = started(nest.clone(), source, Arc::new(FakeClock::new())).await;
+        assert!(m.dispatch(MailImportAction::SkipRest).await.is_err());
+        assert!(nest.recorded.lock().unwrap().is_empty());
+    }
+
+    /// The one list of run-starting actions every app reads.
+    #[test]
+    fn the_run_starting_actions_include_skip_rest() {
+        for a in [
+            MailImportAction::Start,
+            MailImportAction::Resume,
+            MailImportAction::RestartRebuiltMailboxes,
+            MailImportAction::SkipRest,
+        ] {
+            assert!(import_action_starts_run(a));
+        }
+        for a in [
+            MailImportAction::Pause,
+            MailImportAction::Cancel,
+            MailImportAction::Connect,
+        ] {
+            assert!(!import_action_starts_run(a));
+        }
     }
 
     #[tokio::test]
@@ -5694,6 +7130,73 @@ mod tests {
         }
     }
 
+    /// § Microsoft sign-in, *An admin-supplied registration*: the pair the
+    /// nest reports is adopted at refresh, makes the button live even while
+    /// the project's constant is unfilled, stays out of the rendered snapshot,
+    /// and is the client ID and directory the device-code request carries; a
+    /// cleared one falls back to the project's.
+    #[tokio::test]
+    async fn the_admins_registration_is_what_the_device_code_request_carries() {
+        let id = "0b5c1a2e-3f4d-4e5a-8b6c-7d8e9f0a1b2c";
+        let nest = Arc::new(FakeNest::new());
+        *nest.registration.lock().unwrap() = Some(MicrosoftRegistration {
+            client_id: id.into(),
+            tenant: "contoso.example".into(),
+        });
+        let idp = FakeIdentity::new([code_answer()]);
+        let m = MailImportMachine::new(
+            nest.clone(),
+            Arc::new(FakeSource::new(&[])),
+            Arc::new(FakeClock::new()),
+        )
+        .with_oauth_http(idp.clone());
+
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        assert!(
+            m.snapshot().microsoft_signin_available,
+            "an admin-set registration makes the button live"
+        );
+        let rendered = serde_json::to_string(&m.snapshot()).unwrap();
+        assert!(
+            !rendered.contains(id) && !rendered.contains("contoso.example"),
+            "the registration is private state, never rendered: {rendered}"
+        );
+
+        m.dispatch(MailImportAction::SelectSourceKind {
+            kind: ImportSourceKind::Outlook,
+        })
+        .await
+        .unwrap();
+        m.dispatch(MailImportAction::SetUsername {
+            value: "person@contoso.example".into(),
+        })
+        .await
+        .unwrap();
+        m.dispatch(MailImportAction::BeginMicrosoftSignIn)
+            .await
+            .unwrap();
+        let requests = idp.requests.lock().unwrap().clone();
+        let (url, form) = requests.first().expect("a device-code request");
+        assert!(
+            form.contains(&format!("client_id={id}")),
+            "the admin's client ID, not the constant's: {form}"
+        );
+        if std::env::var(fauna_mail::imap_client::oauth_device::E2E_AUTHORITY_ENV).is_err() {
+            assert_eq!(
+                url,
+                "https://login.microsoftonline.com/contoso.example/oauth2/v2.0/devicecode"
+            );
+        }
+
+        // Cleared on the nest: the next refresh is the project's again.
+        *nest.registration.lock().unwrap() = None;
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        assert_eq!(
+            m.snapshot().microsoft_signin_available,
+            fauna_mail::imap_client::MICROSOFT.is_available()
+        );
+    }
+
     #[tokio::test]
     async fn the_sign_in_needs_the_outlook_source_and_an_address() {
         use fauna_i18n::strings::mail_import as s;
@@ -6282,6 +7785,77 @@ mod tests {
         );
     }
 
+    /// § Opt-out per session: "Import duplicates anyway" starts off, so a
+    /// message the nest already holds is skipped as a duplicate; turned on at
+    /// the Scope step it is recorded on the session row at Start and every
+    /// message is sent with `skip_dedup`, so the same message imports again.
+    #[tokio::test]
+    async fn the_duplicates_option_is_off_by_default_and_imports_again_when_on() {
+        assert!(!MailImportSnapshot::empty().import_duplicates);
+
+        let nest = Arc::new(FakeNest::new().with_dedup_uids([2]));
+        let source = FakeSource::new(&[("INBOX", true, 3)]).with_messages("INBOX", 3);
+        let m = started(nest.clone(), source, Arc::new(FakeClock::new())).await;
+        m.run_import().await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!((snap.imported_count, snap.skipped_count), (2, 1));
+        assert!(!nest.session.lock().unwrap().as_ref().unwrap().skip_dedup);
+
+        let nest = Arc::new(FakeNest::new().with_dedup_uids([2]));
+        let source = FakeSource::new(&[("INBOX", true, 3)]).with_messages("INBOX", 3);
+        let m = MailImportMachine::new(nest.clone(), Arc::new(source), Arc::new(FakeClock::new()));
+        connected(&m).await;
+        m.dispatch(MailImportAction::Next).await.unwrap();
+        m.dispatch(MailImportAction::SetImportDuplicates { value: true })
+            .await
+            .unwrap();
+        m.dispatch(MailImportAction::Next).await.unwrap();
+        m.dispatch(MailImportAction::Start).await.unwrap();
+        assert!(
+            nest.session.lock().unwrap().as_ref().unwrap().skip_dedup,
+            "the choice is recorded on the row at Start"
+        );
+        m.run_import().await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(
+            (snap.imported_count, snap.skipped_count),
+            (3, 0),
+            "{snap:?}"
+        );
+        assert!(snap.error_log.is_empty(), "{:?}", snap.error_log);
+    }
+
+    /// § Resume protocol step 3: a wizard that finds a session it did not
+    /// start takes the duplicates choice off the row, so a resume after a
+    /// restart sends what the user chose — neither duplicating mail they never
+    /// asked to, nor quietly dropping the snapshot they did.
+    #[tokio::test]
+    async fn a_resume_after_a_restart_keeps_the_sessions_duplicates_choice() {
+        for chosen in [true, false] {
+            let row = ImportSessionView {
+                skip_dedup: chosen,
+                ..a_session_left_by_an_app_that_closed(ImportSessionState::Paused)
+            };
+            let nest = Arc::new(FakeNest::new().with_dedup_uids([3]));
+            *nest.session.lock().unwrap() = Some(row);
+            let source = FakeSource::new(&[("INBOX", true, 3), ("Archive", true, 0)])
+                .with_dated_messages("INBOX", &[(1, DAY_START), (2, DAY_START), (3, DAY_START)]);
+            let m =
+                MailImportMachine::new(nest.clone(), Arc::new(source), Arc::new(FakeClock::new()));
+            m.hydrate().await.unwrap();
+            assert_eq!(m.snapshot().import_duplicates, chosen);
+            m.dispatch(MailImportAction::SetPassword {
+                value: "the-password".into(),
+            })
+            .await
+            .unwrap();
+            m.dispatch(MailImportAction::Resume).await.unwrap();
+            m.run_import().await.unwrap();
+            let skipped = m.snapshot().error_log.iter().any(|l| l.ends_with("dedup"));
+            assert_eq!(skipped, !chosen, "chosen = {chosen}: {:?}", m.snapshot());
+        }
+    }
+
     /// A run started on an adopted session before its Resume reached the
     /// source — an app spawning `run_import` on the `running` row a closed
     /// app left behind, after a Resume the machine refused — must not walk:
@@ -6463,5 +8037,251 @@ mod tests {
         );
         assert_eq!(parse_source_descriptor(""), None);
         assert_eq!(parse_source_descriptor("pop3:a@b"), None);
+    }
+
+    // ── The remembered source (§ Credential handling, outcome 29) ───────
+
+    /// The account's record, in memory: what every machine sharing it reads.
+    #[derive(Default)]
+    struct FakeSourceMemory {
+        record: StdMutex<Option<RememberedImportSource>>,
+        saves: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl MailImportSourceStore for FakeSourceMemory {
+        async fn load(&self) -> Result<Option<RememberedImportSource>, crate::error::StoreError> {
+            Ok(self.record.lock().unwrap().clone())
+        }
+
+        async fn save(
+            &self,
+            next: Option<RememberedImportSource>,
+        ) -> Result<(), crate::error::StoreError> {
+            *self.saves.lock().unwrap() += 1;
+            *self.record.lock().unwrap() = next;
+            Ok(())
+        }
+    }
+
+    fn remembering(memory: &Arc<FakeSourceMemory>, source: FakeSource) -> MailImportMachine {
+        MailImportMachine::new(
+            Arc::new(FakeNest::new()),
+            Arc::new(source),
+            Arc::new(FakeClock::new()),
+        )
+        .with_source_memory(memory.clone())
+    }
+
+    async fn connect_generic(m: &MailImportMachine) {
+        for action in [
+            MailImportAction::SelectSourceKind {
+                kind: ImportSourceKind::Generic,
+            },
+            MailImportAction::SetHost {
+                value: "mail.old.example".into(),
+            },
+            MailImportAction::SetPort { value: 143 },
+            MailImportAction::SetTlsMode {
+                mode: ImportTlsMode::StartTls,
+            },
+            MailImportAction::SetUsername {
+                value: "person@old.example".into(),
+            },
+            MailImportAction::SetPassword {
+                value: "secret".into(),
+            },
+            MailImportAction::Connect,
+        ] {
+            m.dispatch(action).await.unwrap();
+        }
+    }
+
+    /// Outcome 29: a successful connection remembers the server, port,
+    /// connection security and username — never the password — and the next
+    /// visit (a fresh machine over the same account) finds them filled in.
+    #[tokio::test]
+    async fn a_connected_source_is_remembered_and_prefills_the_next_visit() {
+        let memory = Arc::new(FakeSourceMemory::default());
+        let first = remembering(&memory, FakeSource::new(&[("INBOX", true, 1)]));
+        first.hydrate().await.unwrap();
+        assert!(!first.snapshot().source_remembered);
+        connect_generic(&first).await;
+        assert!(first.snapshot().source_remembered);
+        assert_eq!(
+            memory.record.lock().unwrap().clone(),
+            Some(RememberedImportSource {
+                provider: "imap".into(),
+                host: "mail.old.example".into(),
+                port: 143,
+                tls_mode: "starttls".into(),
+                username: "person@old.example".into(),
+            })
+        );
+
+        let next = remembering(&memory, FakeSource::new(&[("INBOX", true, 1)]));
+        next.hydrate().await.unwrap();
+        let snap = next.snapshot();
+        assert_eq!(snap.step, ImportStep::Source);
+        assert!(snap.source_remembered);
+        assert_eq!(snap.source_kind, ImportSourceKind::Generic);
+        assert_eq!(snap.host, "mail.old.example");
+        assert_eq!(snap.port, 143);
+        assert_eq!(snap.tls_mode, ImportTlsMode::StartTls);
+        assert_eq!(snap.username, "person@old.example");
+        assert!(snap.password.as_str().is_empty());
+    }
+
+    /// A failed connection remembers nothing, and a refresh never writes over
+    /// a username the user has started typing.
+    #[tokio::test]
+    async fn a_refused_connection_remembers_nothing_and_typing_is_never_overwritten() {
+        let memory = Arc::new(FakeSourceMemory::default());
+        let mut source = FakeSource::new(&[("INBOX", true, 1)]);
+        source.reject = true;
+        let m = remembering(&memory, source);
+        assert!(
+            m.dispatch(MailImportAction::SetUsername {
+                value: "typed@example.com".into(),
+            })
+            .await
+            .is_ok()
+        );
+        m.dispatch(MailImportAction::SetPassword { value: "x".into() })
+            .await
+            .unwrap();
+        assert!(m.dispatch(MailImportAction::Connect).await.is_err());
+        assert_eq!(*memory.saves.lock().unwrap(), 0);
+
+        *memory.record.lock().unwrap() = Some(RememberedImportSource {
+            provider: "gmail".into(),
+            host: "imap.gmail.com".into(),
+            port: 993,
+            tls_mode: "implicit".into(),
+            username: "remembered@example.com".into(),
+        });
+        m.dispatch(MailImportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.username, "typed@example.com");
+        assert!(snap.source_remembered);
+    }
+
+    /// Outcome 29's "until you delete them": Forget deletes the account's
+    /// record and leaves a first visit's fields; the next visit is blank.
+    #[tokio::test]
+    async fn forgetting_the_source_deletes_it_and_the_next_visit_is_blank() {
+        let memory = Arc::new(FakeSourceMemory::default());
+        let first = remembering(&memory, FakeSource::new(&[("INBOX", true, 1)]));
+        connect_generic(&first).await;
+
+        let next = remembering(&memory, FakeSource::new(&[("INBOX", true, 1)]));
+        next.hydrate().await.unwrap();
+        assert_eq!(next.snapshot().username, "person@old.example");
+        next.dispatch(MailImportAction::ForgetSource).await.unwrap();
+        let snap = next.snapshot();
+        assert!(!snap.source_remembered);
+        assert_eq!(memory.record.lock().unwrap().clone(), None);
+        let empty = MailImportSnapshot::empty();
+        assert_eq!(
+            (
+                snap.source_kind,
+                snap.host.as_str(),
+                snap.port,
+                snap.username.as_str()
+            ),
+            (empty.source_kind, empty.host.as_str(), empty.port, "")
+        );
+
+        let last = remembering(&memory, FakeSource::new(&[("INBOX", true, 1)]));
+        last.hydrate().await.unwrap();
+        assert!(!last.snapshot().source_remembered);
+        assert_eq!(last.snapshot().username, "");
+    }
+
+    /// A machine with no store to forget from refuses Forget, and never
+    /// claims a remembered source.
+    #[tokio::test]
+    async fn without_a_store_nothing_is_remembered_and_forget_is_refused() {
+        let m = machine(&[("INBOX", true, 1)]);
+        connected(&m).await;
+        assert!(!m.snapshot().source_remembered);
+        assert!(m.dispatch(MailImportAction::ForgetSource).await.is_err());
+    }
+
+    /// § Resume protocol step 2: an app adopting a Generic session after a
+    /// restart takes the port and connection security the account remembers
+    /// for that host and username, and the 993 implicit-TLS default for any
+    /// other — then remembers what the person corrected once the source
+    /// answers.
+    #[tokio::test]
+    async fn a_resume_after_a_restart_reuses_the_remembered_port_and_security() {
+        let remembered = |host: &str| RememberedImportSource {
+            provider: "imap".into(),
+            host: host.into(),
+            port: 143,
+            tls_mode: "starttls".into(),
+            username: "person@old.example".into(),
+        };
+        for (host, port, tls) in [
+            ("mail.old.example", 143, ImportTlsMode::StartTls),
+            ("another.example", 993, ImportTlsMode::Implicit),
+        ] {
+            let memory = Arc::new(FakeSourceMemory::default());
+            *memory.record.lock().unwrap() = Some(remembered(host));
+            let nest = Arc::new(FakeNest::new());
+            *nest.session.lock().unwrap() = Some(a_session_left_by_an_app_that_closed(
+                ImportSessionState::Paused,
+            ));
+            let source = Arc::new(five_dated_messages());
+            let m = MailImportMachine::new(nest, source.clone(), Arc::new(FakeClock::new()))
+                .with_source_memory(memory.clone());
+            m.hydrate().await.unwrap();
+            let snap = m.snapshot();
+            assert_eq!(snap.step, ImportStep::Progress);
+            assert_eq!(snap.host, "mail.old.example");
+            assert_eq!((snap.port, snap.tls_mode), (port, tls), "remembered {host}");
+
+            m.dispatch(MailImportAction::SetPort { value: 10143 })
+                .await
+                .unwrap();
+            m.dispatch(MailImportAction::SetPassword {
+                value: "secret".into(),
+            })
+            .await
+            .unwrap();
+            m.dispatch(MailImportAction::Resume).await.unwrap();
+            assert_eq!(source.connects.lock().unwrap()[0].2, 10143);
+            let record = memory.record.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                (record.host.as_str(), record.port),
+                ("mail.old.example", 10143)
+            );
+        }
+    }
+
+    /// A record this build cannot read prefills nothing rather than a guess.
+    #[test]
+    fn an_unreadable_remembered_source_prefills_nothing() {
+        let mut snap = MailImportSnapshot::empty();
+        for bad in [
+            RememberedImportSource {
+                provider: "pop3".into(),
+                host: "h".into(),
+                port: 1,
+                tls_mode: "implicit".into(),
+                username: "u".into(),
+            },
+            RememberedImportSource {
+                provider: "imap".into(),
+                host: "h".into(),
+                port: 1,
+                tls_mode: "plaintext".into(),
+                username: "u".into(),
+            },
+            RememberedImportSource::default(),
+        ] {
+            snap.prefill_from(&bad);
+            assert_eq!(snap, MailImportSnapshot::empty());
+        }
     }
 }

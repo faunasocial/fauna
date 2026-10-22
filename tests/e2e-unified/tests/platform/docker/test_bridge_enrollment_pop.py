@@ -73,6 +73,7 @@ from .helpers import (
     is_commanded_up as _is_commanded_up,
     register_primary_domain as _register_primary_domain,
     remove_container,
+    scanner_wired_network,
     start_container_with_ports,
     svstat as _svstat,
     wait_for_health,
@@ -141,18 +142,23 @@ def docker_image():
     yield IMAGE_TAG
 
 
-def _bring_up_mail_nest(name_prefix: str) -> dict:
+def _bring_up_mail_nest(name_prefix: str, network: str, scan_env: dict) -> dict:
     """Start a fresh container and bring it all the way to mail-enabled with
     both artifact-minted bridges auto-approved. Shared by the strict fixture
     and the lenient-box negative control (one bring-up path, so the ONLY
-    difference between the two boxes is the registry mutation)."""
+    difference between the two boxes is the registry mutation). ``network`` /
+    ``scan_env`` come from :func:`scanner_wired_network`: a box with no
+    content scanners refuses the mail enable."""
     http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))
     name = f"{name_prefix}-{http_port}"
+    # The nest binds container loopback (`start_container_with_ports`' *Nest
+    # port*); the router's :443 is the published path to it.
     start_container_with_ports(
         name,
-        {NEST_PORT: http_port, **mail_ports},
-        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": str(NEST_PORT)},
+        {443: http_port, **mail_ports},
+        env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": str(NEST_PORT), **scan_env},
+        network=network,
     )
     try:
         wait_for_health(http_port, name)
@@ -190,11 +196,12 @@ def serving_nest(docker_image):
     """One container, mail enabled + both artifact-minted bridges auto-approved.
     That the blessed+signing bridges reach `approved` IS the positive (ask 3a):
     if the slice-2 gate broke legitimate enrollment, this bring-up would fail."""
-    nest = _bring_up_mail_nest("fauna-pop-enroll")
-    try:
-        yield nest
-    finally:
-        remove_container(nest["name"])
+    with scanner_wired_network("fauna-pop-enroll") as (network, scan_env):
+        nest = _bring_up_mail_nest("fauna-pop-enroll", network, scan_env)
+        try:
+            yield nest
+        finally:
+            remove_container(nest["name"])
 
 
 @pytest.fixture()
@@ -205,14 +212,15 @@ def lenient_nest(docker_image):
     (`bridge_blob_handlers::blessed_pubkey_from_dir`), so no restart is needed
     for the removal to take effect. Function-scoped and never shared: the
     forged enrollment below POLLUTES nest state with an approved rogue row."""
-    nest = _bring_up_mail_nest("fauna-pop-lenient")
-    try:
-        for role in ("mta", "mda"):
-            rc, _, err = _exec_as(nest["name"], 0, "rm", BLESSED[role])
-            assert rc == 0, f"root must be able to remove {BLESSED[role]}: {err}"
-        yield nest
-    finally:
-        remove_container(nest["name"])
+    with scanner_wired_network("fauna-pop-lenient") as (network, scan_env):
+        nest = _bring_up_mail_nest("fauna-pop-lenient", network, scan_env)
+        try:
+            for role in ("mta", "mda"):
+                rc, _, err = _exec_as(nest["name"], 0, "rm", BLESSED[role])
+                assert rc == 0, f"root must be able to remove {BLESSED[role]}: {err}"
+            yield nest
+        finally:
+            remove_container(nest["name"])
 
 
 # ── Tests ──────────────────────────────────────────────────────────────

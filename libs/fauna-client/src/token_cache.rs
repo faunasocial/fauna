@@ -194,11 +194,33 @@ mod tests {
     /// clock of the four UniFFI apps. Were it the real
     /// clock while the anchor read the skewed one, a case-M-shaped witness on
     /// those seats would compare two different clocks; were both real, it
-    /// would pass without testing anything. The offset is process-global:
-    /// held for a single read, microseconds, and reset before returning.
+    /// would pass without testing anything. The offset is process-global and
+    /// every mint and cache test in this binary reads it, so the body runs in
+    /// a child process of its own (this binary re-run on this one test) where
+    /// nothing else can observe the skew; the private `now_secs` is why it
+    /// cannot move to `tests/` instead.
     #[test]
     fn the_spend_rule_reads_the_shared_client_clock() {
         use fauna_protocol::client_clock;
+        const CHILD: &str = "FAUNA_CLOCK_PIN_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let out = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "token_cache::tests::the_spend_rule_reads_the_shared_client_clock",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("re-run this test binary");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "the child run failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
+        }
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

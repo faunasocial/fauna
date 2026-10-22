@@ -162,8 +162,18 @@ third body\r\n";
 const MSG_STAMPS_ONLY: &[u8] = b"X-Fauna-Spam-Threshold: 0\r\n\
 X-Fauna-Address-Suffix: forged\r\n";
 
-/// A hostile source's mailbox: the stamp-only message beside an ordinary one,
-/// so one import call proves the refusal is per-message.
+/// The smallest stamp-only body: one reserved stamp, one CRLF.
+const MSG_ONE_STAMP: &[u8] = b"X-Fauna-Spam-Threshold: 0\r\n";
+
+/// The two-stamp form with bare-LF line endings — a source that never wrote
+/// CRLF. The header walk takes a bare LF as a line end too, so this strips to
+/// zero bytes exactly as the CRLF form does.
+const MSG_STAMPS_ONLY_BARE_LF: &[u8] = b"X-Fauna-Spam-Threshold: 0\n\
+X-Fauna-Address-Suffix: forged\n";
+
+/// A hostile source's mailbox: the stamp-only messages — CRLF two-stamp,
+/// single-stamp, bare-LF two-stamp — beside an ordinary one, so one import
+/// call proves the refusal is per-message.
 const HOSTILE_CORPUS: &[FixtureMessage] = &[
     FixtureMessage {
         uid: 3,
@@ -171,7 +181,17 @@ const HOSTILE_CORPUS: &[FixtureMessage] = &[
         body: MSG_STAMPS_ONLY,
     },
     FixtureMessage {
-        uid: 5,
+        uid: 4,
+        flags: "\\Seen",
+        body: MSG_ONE_STAMP,
+    },
+    FixtureMessage {
+        uid: 6,
+        flags: "\\Seen",
+        body: MSG_STAMPS_ONLY_BARE_LF,
+    },
+    FixtureMessage {
+        uid: 8,
         flags: "\\Seen",
         body: MSG_NO_ID,
     },
@@ -758,11 +778,14 @@ async fn a_body_the_stamp_strip_empties_is_refused_and_its_sibling_still_imports
     let items = fetch_from_source(&cert, source_port, HOSTILE_CORPUS).await;
     // The client ships the stamp-only bytes unmodified and non-empty; the
     // strip is the nest's, and it empties them.
-    assert_eq!(items[0].body, MSG_STAMPS_ONLY);
-    assert!(
-        fauna_mail::received_header::strip_fauna_headers(&items[0].body).is_empty(),
-        "the fixture must strip to zero bytes"
-    );
+    let stamp_only = [MSG_STAMPS_ONLY, MSG_ONE_STAMP, MSG_STAMPS_ONLY_BARE_LF];
+    for (item, fixture) in items.iter().zip(stamp_only) {
+        assert_eq!(item.body, fixture);
+        assert!(
+            fauna_mail::received_header::strip_fauna_headers(&item.body).is_empty(),
+            "the fixture must strip to zero bytes: {fixture:?}"
+        );
+    }
 
     let nest = connected_client(&base, ActorKeypair::from_secret(USER_SEED)).await;
     let sid = start_session(&nest, "generic:imap.hostile.example:alice").await;
@@ -779,20 +802,28 @@ async fn a_body_the_stamp_strip_empties_is_refused_and_its_sibling_still_imports
         .await
         .expect("import_message_batch RPC");
 
+    for (i, outcome) in reply.outcomes[..stamp_only.len()].iter().enumerate() {
+        assert!(
+            matches!(
+                outcome,
+                ImportMessageOutcome::Errored { reason } if reason.contains("X-Fauna-*")
+            ),
+            "a body the X-Fauna-* strip empties must be refused (item {i}), got {outcome:?}"
+        );
+    }
+    let sibling = stamp_only.len();
     assert!(
         matches!(
-            &reply.outcomes[0],
-            ImportMessageOutcome::Errored { reason } if reason.contains("X-Fauna-*")
+            &reply.outcomes[sibling],
+            ImportMessageOutcome::Imported { .. }
         ),
-        "a body the X-Fauna-* strip empties must be refused, got {:?}",
-        reply.outcomes[0]
-    );
-    assert!(
-        matches!(&reply.outcomes[1], ImportMessageOutcome::Imported { .. }),
         "the sibling in the same call must still import, got {:?}",
-        reply.outcomes[1]
+        reply.outcomes[sibling]
     );
-    assert_eq!((reply.imported_count, reply.errored_count), (1, 1));
+    assert_eq!(
+        (reply.imported_count, reply.errored_count),
+        (1, stamp_only.len() as u64)
+    );
 
     // The store holds the sibling alone — no zero-length record was filed, and
     // the refused message left no dedup row that would skip a later retry.
@@ -805,11 +836,13 @@ async fn a_body_the_stamp_strip_empties_is_refused_and_its_sibling_still_imports
         1,
         "only the sibling may rest in the mailbox"
     );
-    assert!(
-        !state
-            .db
-            .has_dedup_key(&user_id, &items[0].dedup_key)
-            .await
-            .unwrap()
-    );
+    for item in &items[..stamp_only.len()] {
+        assert!(
+            !state
+                .db
+                .has_dedup_key(&user_id, &item.dedup_key)
+                .await
+                .unwrap()
+        );
+    }
 }

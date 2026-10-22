@@ -1512,8 +1512,11 @@ def test_family_content_floor_blocks_flagged_feed_post(admin_app, request, nest_
     assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
 
     # The spam-labeled post is blocked: the notice renders, the body does not.
-    assert app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"), (
-        "spam-labeled post did not render the content-policy block notice"
+    assert app.family.content_notice_blocked("post-card[1]"), (
+        "spam-labeled post did not render the content-policy block notice "
+        f"({app.driver.diagnose('content-policy-blocked-notice')}; "
+        f"{app.driver.diagnose('nest-blocked-notice')}; engine sources: "
+        f"{(app.driver.get_state() or {}).get('content_policy_sources')!r})"
     )
     assert app.driver.count("feed-post-text", scope="post-card[1]") == 0, (
         "a blocked post must not render its body text"
@@ -1551,7 +1554,11 @@ def _set_ward_content_floor(
     guardian_actor = bytes.fromhex(guardian_identity["actor_id_hex"])
     guardian_seed = bytes(guardian_identity["signing_key"])
     policy = dict(DEFAULT_WARD_POLICY)
-    policy["content_policy"] = {**DEFAULT_WARD_POLICY["content_policy"], category: floor}
+    # A floors-only write, as an app still painting the four selects sends it:
+    # no `document` key, since a present document — even the reset's empty one —
+    # clears the floors it rides beside (nest-rules.md § The shared rule editor (b)).
+    content = {k: v for k, v in DEFAULT_WARD_POLICY["content_policy"].items() if k != "document"}
+    policy["content_policy"] = {**content, category: floor}
     with WsRpcAdminClient(nest_instance["url"], guardian_actor, guardian_seed) as guardian:
         guardian.call(
             "fauna.family.policy.update",
@@ -1627,8 +1634,8 @@ def test_family_content_floor_binds_on_ws_reconnect_without_relaunch(
     # floor the ward's OWN default spam threshold still COLLAPSES a spam-labeled
     # post (the every-user collapse, `moderation.md` § Categories & enforcement
     # item 1), so the body is hidden either way — only a `block` floor paints
-    # the notice, and only the guardian can set one.
-    assert app.driver.is_absent("content-policy-blocked-notice", scope="post-card[0]"), (
+    # the notice in state `blocked`, and only the guardian can set one.
+    assert not app.family.content_notice_blocked("post-card[0]"), (
         "the spam post was blocked BEFORE the guardian set any floor — this test needs "
         "the ward's policy at its defaults (family_pair resets it); the pre-state is wrong"
     )
@@ -1660,8 +1667,8 @@ def test_family_content_floor_binds_on_ws_reconnect_without_relaunch(
     deadline = time.monotonic() + RECONNECT_BIND_BUDGET_S
     blocked = False
     while time.monotonic() < deadline:
-        if app.feed.seed_posts([spam_post]) == 1 and app.driver.is_visible(
-            "content-policy-blocked-notice", scope="post-card[0]"
+        if app.feed.seed_posts([spam_post]) == 1 and app.family.content_notice_blocked(
+            "post-card[0]"
         ):
             blocked = True
             break
@@ -1916,6 +1923,12 @@ def test_own_spam_threshold_binds_on_ws_reconnect_without_relaunch(
     try:
         # ── The user lowers their own threshold elsewhere — after this client's read ──
         _set_own_spam_threshold(nest_instance, test_user, 200)
+        # Barrier (1) reads the feed's reload counters, and apple's reconnect
+        # re-fetch of the feed is view-owned (`.onReconnect` on the feed view), so
+        # with the Conversations page open no feed reload runs there. Park the app
+        # on the feed before the flip — every app reloads the feed on reconnect
+        # from there; the own-threshold re-read (app-level) is what (2) judges.
+        d.navigate_to("feed")
         reloads_before = feed_reload_baseline(d)
 
         # ── The benign flip: the WS drops; the client reconnects on its own ──
@@ -2038,7 +2051,7 @@ def test_family_guardian_notify_surfaces_flagged_count(admin_app, request, nest_
     ])
     assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
     # The floor fires — the enforcement event Guardian Notify counts.
-    assert app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"), (
+    assert app.family.content_notice_blocked("post-card[1]"), (
         "spam-labeled post did not render the block notice — there is nothing to count"
     )
     # Let the ward's client batch + flush the coarse report to the nest BEFORE we
@@ -2046,7 +2059,7 @@ def test_family_guardian_notify_surfaces_flagged_count(admin_app, request, nest_
     # report is eager (no prior flush).
     # Force the check now rather than waiting out the real flush-tick interval —
     # convention 14's run_now poke, on every app (contract:
-    # `fauna_e2e_agent::FAMILY_NOTIFY_CHECK_NOW`; web `$lib/family-notify-e2e`,
+    # `fauna_e2e_agent::FAMILY_NOTIFY_CHECK_NOW`; web `#lib/family-notify-e2e`,
     # windows `GuardianNotifyCache.CheckNowAsync`, linux `flush_notify_report`,
     # tui `due_notify_report`). The real cadence gate
     # (notify_report_min_interval_secs) still applies; only the tick wait is
@@ -2699,7 +2712,7 @@ def test_family_screen_time_budget_and_usage_readouts(admin_app, request, nest_i
     a test that waited for a real heartbeat would be DEFUNCT under testing.md
     § point 14 — minutes long and still untrustworthy under load. Instead the
     ward's clock is advanced through the `screen_time_heartbeat` poke (linux
-    `main.rs`, web `$lib/screen-time-e2e.ts`), which runs the app's own
+    `main.rs`, web `#lib/screen-time-e2e.ts`), which runs the app's own
     production heartbeat step over the real `fauna.family.usage_report` wire.
     The cadence and accrual RULES are not faked anywhere — they live in shared
     Rust and are proven exhaustively at tier_1 in `fauna_core::screen_time`.
@@ -3081,6 +3094,255 @@ def test_family_guardian_decides_a_strangers_contact_request(
 
 
 @pytest.mark.feature("family-safety")
+def test_family_ward_sees_a_strangers_request_waiting_for_the_guardian(
+    admin_app, request, nest_instance, family_pair
+):
+    """family-safety.md § App surface — "pending approval states render on the
+    blocked surfaces themselves (the knock row …)": while contact approval is on,
+    a stranger's request on the child's own contacts page is marked
+    `knock-guardian-pending` ("Waiting for your guardian's approval"), because
+    acceptance is then the guardian's (§ Reach approvals). The mark is derived on
+    the child's side from the policy it already holds
+    (`fauna_client_family::knocks_await_guardian`), so it sits on EVERY knock row
+    (convention 17: one mark per `knock-card`), and once the guardian turns
+    approval off the same row carries none — the half that lets the first
+    assertion fail.
+
+    The guardian turns approval on through the editor (point 8); the request is
+    stored through the nest's knock door, as the stranger's side is not under
+    test; turning approval back off is the module's own policy reset over the
+    wire (arranging the next step, not the action under test).
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.contacts.require_knock_guardian_pending()
+    url = nest_instance["url"]
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_contact_approval(True)
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+
+    suffix = _unique_suffix()
+    stranger = _admit_adult(nest_instance, f"family-knock-wait-{suffix}")
+    stranger_hex = stranger["actor_id_hex"]
+    _push_knock(url, ward_identity["actor_id_hex"], stranger_hex, f"hello from {suffix}")
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    app.driver.wait_for("supervised-indicator", timeout=20)
+    app.contacts.navigate()
+
+    def _rows() -> tuple[int | None, list[str], int]:
+        return (
+            app.contacts.knock_index_for(stranger_hex),
+            app.contacts.knock_guardian_pending_texts(),
+            app.contacts.knock_count(),
+        )
+
+    def _marked():
+        row, marks, cards = _rows()
+        if row is not None and len(marks) == cards:
+            return row, marks
+        app.contacts.navigate()
+        return None
+
+    row, marks = wait_until(
+        _marked,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            "with contact approval on, every knock row must carry knock-guardian-pending; "
+            f"(stranger's row, marks, knock-cards)={_rows()!r} "
+            f"{app.driver.diagnose('knock-guardian-pending')} error: {app.error_text()!r}"
+        ),
+    )
+    assert marks[row] == S.contacts.knock_guardian_pending, (
+        f"the stranger's row must say it waits for the guardian, read {marks[row]!r}"
+    )
+    assert set(marks) == {S.contacts.knock_guardian_pending}, f"every mark the same text: {marks!r}"
+
+    # The guardian turns approval off: the child decides again, and the mark goes.
+    reset_ward_policy(nest_instance, guardian_identity, ward_identity)
+
+    def _unmarked():
+        app.family.navigate()
+        app.family.reload()
+        app.contacts.navigate()
+        row, marks, _cards = _rows()
+        # A tuple, never the bare index: row 0 is falsy to wait_until.
+        return (row,) if row is not None and not marks else None
+
+    (row,) = wait_until(
+        _unmarked,
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: (
+            "with contact approval off the knock stays listed and carries no "
+            f"knock-guardian-pending; (stranger's row, marks, knock-cards)={_rows()!r} "
+            f"error: {app.error_text()!r}"
+        ),
+    )
+    # Leave no knock behind for the module's later tests: the child, now free to
+    # decide, dismisses it through the row.
+    app.contacts.dismiss_knock(row)
+    wait_until(
+        lambda: app.contacts.knock_index_for(stranger_hex) is None or app.contacts.navigate(),
+        RPC_ROUNDTRIP_S + UI_SETTLE_S,
+        diagnose=lambda: f"the dismissed knock must leave the list. error: {app.error_text()!r}",
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_collapse_floor_folds_content_the_child_can_still_show(
+    admin_app, request, nest_instance, family_pair
+):
+    """family-client-enforcement.md § Content policy — a category is inherit,
+    collapse with a reveal, or block: a guardian's `collapse` floor folds a
+    labeled post on the child's feed and a labeled message in the child's
+    conversation behind `content-policy-blocked-notice` in state `collapsed`,
+    with no body, and the child's `content-policy-collapsed-reveal-button`
+    shows each one. The category is `commercial` because the child's OWN
+    default thresholds cover spam and phishing and would collapse those with no
+    guardian involved; nothing but the guardian's floor folds a commercial label.
+
+    The labels are preconditions through the feed and conversation inject seams
+    (fixture setup, as the block witnesses above); the floor is set through the
+    guardian's editor and the reveal is the child's own tap (point 8).
+    """
+    from conftest import _login_app_as
+
+    app = admin_app
+    app.family.require_content_render_verdict_supported()
+    app.family.require_content_collapse_ids()
+    guardian_identity, ward_identity, _guardian_handle, ward_handle = family_pair
+    d = app.driver
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    app.family.set_content_floor("commercial", "collapse")
+    app.family.save_policy()
+    assert not app.has_error(), f"save raised: {app.error_text()!r}"
+    _reload_editor(app, ward_handle)
+    assert app.family.content_floor_label("commercial") == S.family.value_collapse, (
+        f"the commercial floor did not persist: {app.family.content_floor_label('commercial')!r}"
+    )
+
+    app.driver.reset()
+    _login_app_as(app, request, nest_instance, ward_identity)
+    d.wait_for("supervised-indicator", timeout=20)
+
+    # ── The feed: [0] clean, [1] commercial-labeled ──
+    count = app.feed.seed_posts([
+        {"post_id": "cc-clean", "author": "afriend", "body": "an ordinary post from a friend"},
+        {
+            "post_id": "cc-commercial",
+            "author": "aseller",
+            "body": "a commercial post folded away",
+            "labels": [{"category": "commercial", "confidence_per_mille": 900}],
+        },
+    ])
+    assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
+    assert d.is_visible("content-policy-blocked-notice", scope="post-card[1]"), (
+        f"the labeled post must fold behind the notice. {d.diagnose('content-policy-blocked-notice')}"
+        f"; engine sources: {(d.get_state() or {}).get('content_policy_sources')!r}"
+    )
+    assert d.get_attr("content-policy-blocked-notice", "state", scope="post-card[1]") == "collapsed"
+    assert d.count("feed-post-text", scope="post-card[1]") == 0, "a folded post shows no body"
+    assert d.is_absent("content-policy-blocked-notice", scope="post-card[0]"), "the clean post is untouched"
+
+    d.click("content-policy-collapsed-reveal-button", scope="post-card[1]")
+    wait_until(
+        lambda: d.count("feed-post-text", scope="post-card[1]") >= 1,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            "the child's reveal must show the folded post's body; "
+            f"{d.diagnose('content-policy-blocked-notice')} error: {app.error_text()!r}"
+        ),
+    )
+    assert d.is_absent("content-policy-blocked-notice", scope="post-card[1]"), (
+        "a revealed post carries no placeholder"
+    )
+
+    # ── A conversation: a clean message, then a commercial-labeled one ──
+    conv = app.conversations
+    sender = f"aseller-{_unique_suffix()}@self-nest.test"
+    thread_id = conv.inject_and_resolve_thread(
+        rail="FaunaMls", sender=sender, body="an ordinary message from a friend"
+    )
+    conv.inject_inbound_for_test(
+        rail="FaunaMls",
+        sender=sender,
+        body="a commercial message folded away",
+        labels=[{"category": "commercial", "confidence_per_mille": 900}],
+    )
+    wait_until(
+        lambda: any(
+            t.thread_id == thread_id and t.message_count >= 2 for t in conv.list_threads()
+        ),
+        RPC_ROUNDTRIP_S,
+        diagnose=lambda: "both messages must reach the thread before it is opened",
+    )
+    conv.open_thread_by_id(thread_id)
+    wait_until(
+        lambda: d.count("content-policy-blocked-notice") == 1 and d.count("dm-message-text") == 1,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            "the labeled message must fold behind the notice and the clean one show; "
+            f"notices={d.count('content-policy-blocked-notice')}, "
+            f"bodies={d.count('dm-message-text')}, error={app.error_text()!r}"
+        ),
+    )
+    assert d.get_attr("content-policy-blocked-notice", "state") == "collapsed"
+    d.click("content-policy-collapsed-reveal-button")
+    wait_until(
+        lambda: d.count("dm-message-text") == 2 and d.count("content-policy-blocked-notice") == 0,
+        UI_SETTLE_S,
+        diagnose=lambda: (
+            "the child's reveal must show the folded message; "
+            f"bodies={d.count('dm-message-text')}, error={app.error_text()!r}"
+        ),
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_editor_states_screen_time_is_enforced_on_the_childs_devices(
+    admin_app, request, nest_instance, family_pair
+):
+    """family-client-enforcement.md § Screen time — "the conforming-client bound
+    stated on the editor": the guardian's editor, beside the screen-time inputs,
+    says the limits are enforced by the apps on the child's own devices
+    (`family-policy-screen-hint`, the shared `family.policy_screen_caveat`)."""
+    app = admin_app
+    app.family.require_policy_hints()
+    guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    assert app.family.screen_hint_text() == S.family.policy_screen_caveat, (
+        f"the editor must state the screen-time bound; read {app.family.screen_hint_text()!r}. "
+        f"{app.driver.diagnose('family-policy-screen-hint')}"
+    )
+
+
+@pytest.mark.feature("family-safety")
+def test_family_editor_states_which_content_categories_are_not_detected_yet(
+    admin_app, request, nest_instance, family_pair
+):
+    """family-client-enforcement.md § Content policy → *Where it binds* — the
+    honest bound stated on the editor: the apps do not detect adult content or
+    ads yet, so a limit on them waits until a post or message is labelled that
+    way (`family-policy-content-hint`, the shared `family.policy_content_hint`)."""
+    app = admin_app
+    app.family.require_content_hint()
+    guardian_identity, _ward_identity, _guardian_handle, ward_handle = family_pair
+
+    _guardian_opens_editor(app, request, nest_instance, guardian_identity, ward_handle)
+    assert app.family.content_hint_text() == S.family.policy_content_hint, (
+        f"the editor must state the content-category bound; read {app.family.content_hint_text()!r}. "
+        f"{app.driver.diagnose('family-policy-content-hint')}"
+    )
+
+
+@pytest.mark.feature("family-safety")
 def test_family_screen_time_editor_refuses_half_or_empty_window(
     admin_app, request, nest_instance, family_pair
 ):
@@ -3305,7 +3567,7 @@ def test_family_guardian_hears_nothing_until_notify_is_on(
     ])
     assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
     wait_until(
-        lambda: app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"),
+        lambda: app.family.content_notice_blocked("post-card[1]"),
         UI_SETTLE_S,
         diagnose=lambda: "precondition: the spam floor must hide the post — nothing to count otherwise",
     )
@@ -3361,13 +3623,15 @@ def test_family_ward_can_make_their_own_filter_stricter_than_the_guardians_never
     the trigger) and one at 300 (under it). The child then moves their own
     threshold through Settings, twice:
 
-      * **looser** — 950: the 300 message shows, but the 900 one stays folded
-        away. The child's own looser setting does not undo the guardian's floor;
+      * **looser** — 900 (a stop on the settings slider's 0.1 grid,
+        `settings.md` § the spam threshold's `SPAM_THRESHOLD_STEP_PER_MILLE`): the
+        300 message shows, but the 900 one stays folded away. The child's own
+        looser setting does not undo the guardian's floor;
       * **stricter** — 200: now the 300 message folds away too, which the
         guardian's floor alone would never do.
 
-    The fold has no test id (the collapse reveal is untagged on every app), so
-    the witness is the set of message bodies that render. Each poll re-opens the
+    The witness is the set of message bodies that render, which reads the same
+    on every app whether or not it tags the collapse arm. Each poll re-opens the
     thread, so it renders against the thresholds the app holds now.
     """
     from conftest import _login_app_as
@@ -3428,11 +3692,11 @@ def test_family_ward_can_make_their_own_filter_stricter_than_the_guardians_never
 
     try:
         # ── Looser: the child's own permissive setting cannot undo the floor ──
-        _save_own_spam_threshold_in_settings(app, nest_instance, ward_identity, "0.95", 950)
+        _save_own_spam_threshold_in_settings(app, nest_instance, ward_identity, "0.9", 900)
         conv.navigate()
         _await_bodies(
             [clean, under_floor],
-            "with the child's own threshold at 950 the 300 message must show, and the "
+            "with the child's own threshold at 900 the 300 message must show, and the "
             "900 one must stay folded under the guardian's collapse floor",
         )
 
@@ -3508,10 +3772,11 @@ def test_family_guardian_notify_counts_only_what_the_guardians_limits_hid(
         UI_SETTLE_S,
         diagnose=lambda: (
             "precondition: the child's own threshold must fold the spam post away — "
-            f"nothing is hidden otherwise; {d.diagnose('feed-post-text')}"
+            f"nothing is hidden otherwise; {d.diagnose('feed-post-text')}; engine sources: "
+            f"{(d.get_state() or {}).get('content_policy_sources')!r}"
         ),
     )
-    assert d.is_absent("content-policy-blocked-notice", scope="post-card[1]"), (
+    assert not app.family.content_notice_blocked("post-card[1]"), (
         "the spam post must be folded by the child's own setting, not blocked by a "
         "guardian floor — the floor was left at the child's settings"
     )
@@ -3604,7 +3869,7 @@ def test_family_limits_and_lock_hold_while_the_app_cannot_reach_the_nest(
         ])
         assert count == 2, f"expected 2 seeded post-cards, got {count}. error: {app.error_text()!r}"
         wait_until(
-            lambda: app.driver.is_visible("content-policy-blocked-notice", scope="post-card[1]"),
+            lambda: app.family.content_notice_blocked("post-card[1]"),
             UI_SETTLE_S,
             diagnose=lambda: (
                 "with fauna.family.status unanswered the restored spam floor must still "

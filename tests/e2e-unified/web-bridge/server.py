@@ -148,8 +148,25 @@ _next_page_id = 2
 _CONTEXT_KWARGS = {"ignore_https_errors": True}
 
 _command_queue = []
+# Page ids whose renderer died (Playwright's `crash` event). Playwright 1.60
+# leaves a call in flight on a crashed page pending for good — measured: a
+# renderer SIGKILLed under a pending `page.evaluate`, the `crash` event
+# delivered, the evaluate never answered — so a crash is the watchdog's cue to
+# cut the server thread loose early (`_watchdog_tick`). Cleared when the
+# browser is relaunched (`_relaunch_browser`).
+_crashed: set[str] = set()
+# What the session's primary context was created with, so a relaunched browser
+# recreates it the same (`_handle_session_create`, `_relaunch_browser`).
+_session_context_kwargs: dict = {}
+_session_push_endpoint: str | None = None
 # App-state cache keyed by page id (each page is its own app instance).
 _cached_app_state: dict[str, dict] = {}
+
+# Page id → the CDP session holding that page's virtual WebAuthn authenticator
+# (`POST /webauthn/virtual-authenticator`). Kept referenced so the session — and
+# with it the authenticator and the credentials it holds — lives as long as the
+# page; a reload keeps the page's target, so both survive a hard reload.
+_webauthn_sessions: dict[str, object] = {}
 
 # Browser console + uncaught-error capture, keyed by page id. An unhandled
 # promise rejection in the SPA's async onMount is INVISIBLE to every DOM/store
@@ -320,8 +337,17 @@ def _attach_console_capture(page: Page, pid: str, *, tag: str = "") -> None:
         except Exception:
             pass
 
+    def on_crash(_page) -> None:
+        # Recorded only (no Playwright call from a handler); `_crashed` holds
+        # why. A throwaway tagged page (the factory-reset seed's) never stands
+        # for `pid`.
+        if not tag:
+            _crashed.add(pid)
+            _console_append(pid, "[bridge] page crashed (renderer gone)")
+
     page.on("console", on_console)
     page.on("pageerror", on_pageerror)
+    page.on("crash", on_crash)
 
 
 def _file_payloads(files: str | list[str]) -> list[dict]:
@@ -543,6 +569,259 @@ el => {
 
 
 # ---------------------------------------------------------------------------
+# Self-diagnosis watchdog
+# ---------------------------------------------------------------------------
+# The server is single-threaded on purpose (Playwright's sync API is bound to
+# the thread that started it), so a page-bound call that never returns takes
+# `/health` down with it, and from outside a pegged bridge says nothing about
+# WHY (`http_bridge._timeout_verdict`'s last branch). This daemon thread never
+# touches Playwright: it reads the request line the server thread is in, the
+# server thread's Python stack, and /proc for the bridge's descendant tree
+# (the playwright node and every Chromium process: RSS and CPU seconds spent
+# since the last look), and writes `[bridge-watchdog]` lines to stderr while
+# one request has run past `_WATCHDOG_BUSY_S`, plus one `[bridge-sample]`
+# line every `_WATCHDOG_SAMPLE_S` so a slow accumulation shows its trend. The
+# driver drains stderr (`port_util.drain_pipes`) and prints the tail on a
+# pegged verdict (`http_bridge._note_pegged`), so the next peg diagnoses
+# itself (convention 6).
+_WATCHDOG_TICK_S = 30.0
+_WATCHDOG_BUSY_S = 60.0
+_WATCHDOG_SAMPLE_S = 300.0
+
+# The stuck-call ceiling. A page-bound Playwright call has no bound of its own
+# (`page.evaluate` takes no timeout), so a page that never settles — a renderer
+# spinning, or a promise that never resolves — held the one server thread for
+# good: `/health` went silent with the listener still accepting, and the run
+# ended on the pegged-streak abort (twice, hours into whole tier_2/3 web runs).
+# Past this ceiling the watchdog first writes its diagnosis line, then SIGKILLs
+# the bridge's Chromium browser process — the one kill Playwright answers: a
+# killed renderer alone leaves the call pending (see `_crashed`), a closed
+# browser fails it with "Target page, context or browser has been closed".
+# The server thread frees, and its next page-bound request relaunches the
+# browser with every page reopened where it was (`_relaunch_browser`; the
+# pages' stores are gone, as across a machine wipe) — one failed test where
+# the run used to die. A call stuck on a page whose renderer has crashed is cut
+# loose at `_WATCHDOG_BUSY_S` instead: nothing will ever answer it. 420 s sits past the driver's longest ceiling
+# (`drivers/web.py::HEAVY_BOOT_TIMEOUT_S`, 400 s, so a slow boot the driver is
+# still waiting for is never cut short) and, with one tick of lateness, inside
+# the driver's 90 s /health confirm poll after it, so that poll sees the bridge
+# answer and the verdict is "alive", never "pegged".
+_STUCK_CALL_CEILING_S = 420.0
+
+_inflight_lock = threading.Lock()
+_inflight: tuple[str, float] | None = None  # (request line, monotonic start)
+_server_thread_id: int | None = None
+_killed_for: float | None = None  # start time of the request already cut loose
+
+
+def _note_inflight(requestline: str | None) -> None:
+    global _inflight
+    with _inflight_lock:
+        _inflight = (requestline, time.monotonic()) if requestline else None
+
+
+def _proc_children(pid: int) -> list[int]:
+    kids: list[int] = []
+    try:
+        for task in os.listdir(f"/proc/{pid}/task"):
+            with open(f"/proc/{pid}/task/{task}/children") as f:
+                kids.extend(int(c) for c in f.read().split())
+    except OSError:
+        pass
+    return kids
+
+
+def _proc_tree(root: int) -> list[int]:
+    out, todo = [], _proc_children(root)
+    while todo:
+        pid = todo.pop()
+        out.append(pid)
+        todo.extend(_proc_children(pid))
+    return out
+
+
+def _proc_stat(pid: int) -> tuple[str, int, float] | None:
+    """(kind, rss MiB, cpu seconds) for one process, or None once it is gone.
+    `kind` is Chromium's `--type=` (`renderer`, `gpu-process`, `utility`, …),
+    `browser` for a headless_shell without one, else the executable's name."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            # Chromium rewrites its process title into one space-joined
+            # string, so split on spaces too or `--type=` is never seen.
+            argv = f.read().replace(b"\0", b" ").split()
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+        with open(f"/proc/{pid}/statm") as f:
+            rss_pages = int(f.read().split()[1])
+    except (OSError, IndexError, ValueError):
+        return None
+    exe = os.path.basename(argv[0].decode(errors="replace")) if argv else "?"
+    kind = exe
+    for arg in argv[1:]:
+        if arg.startswith(b"--type="):
+            kind = arg[len(b"--type="):].decode(errors="replace")
+            break
+    else:
+        if "headless_shell" in exe or "chrom" in exe:
+            kind = "browser"
+    ticks = os.sysconf("SC_CLK_TCK")
+    cpu = (int(fields[11]) + int(fields[12])) / ticks  # utime + stime
+    rss = rss_pages * os.sysconf("SC_PAGE_SIZE") // (1 << 20)
+    return kind, rss, cpu
+
+
+def _tree_report(prev_cpu: dict[int, float], root: int | None = None) -> str:
+    """One line over the bridge's descendants, grouped by kind: count, total
+    RSS, and the CPU seconds spent since the previous report (the busiest
+    single process named, so a spinning renderer is told from an idle one)."""
+    groups: dict[str, list[int]] = {}
+    busiest: tuple[float, int, str] = (0.0, 0, "")
+    seen: dict[int, float] = {}
+    for pid in _proc_tree(root or os.getpid()):
+        st = _proc_stat(pid)
+        if st is None:
+            continue
+        kind, rss, cpu = st
+        delta = cpu - prev_cpu.get(pid, cpu)
+        seen[pid] = cpu
+        g = groups.setdefault(kind, [0, 0, 0.0])
+        g[0] += 1
+        g[1] += rss
+        g[2] += delta
+        if delta > busiest[0]:
+            busiest = (delta, pid, kind)
+    prev_cpu.clear()
+    prev_cpu.update(seen)
+    parts = [
+        f"{kind} x{n} {rss}MiB +{cpu:.1f}s"
+        for kind, (n, rss, cpu) in sorted(groups.items())
+    ]
+    if busiest[1]:
+        parts.append(f"busiest pid {busiest[1]} ({busiest[2]}) +{busiest[0]:.1f}s")
+    return "; ".join(parts) or "no descendants"
+
+
+def _server_stack(depth: int = 6) -> str:
+    import traceback
+
+    frame = sys._current_frames().get(_server_thread_id or -1)
+    if frame is None:
+        return "?"
+    frames = traceback.extract_stack(frame)[-depth:]
+    return " <- ".join(
+        f"{Path(f.filename).name}:{f.lineno} {f.name}" for f in reversed(frames)
+    )
+
+
+def _kill_browser() -> list[int]:
+    """SIGKILL the Chromium browser process(es) under this bridge (their
+    children follow); the pids killed."""
+    killed = []
+    for pid in _proc_tree(os.getpid()):
+        st = _proc_stat(pid)
+        if st is not None and st[0] == "browser":
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except OSError:
+                pass
+    return killed
+
+
+def _watchdog_tick(prev_cpu: dict[int, float], now: float, last_sample: float) -> tuple[list[str], float]:
+    """The lines one watchdog tick writes, and the new last-sample time."""
+    global _killed_for
+    with _inflight_lock:
+        inflight = _inflight
+    lines = []
+    if inflight is not None and now - inflight[1] >= _WATCHDOG_BUSY_S:
+        lines.append(
+            f"[bridge-watchdog] {inflight[0]!r} busy {now - inflight[1]:.0f}s; "
+            f"tree: {_tree_report(prev_cpu)}; server thread at: {_server_stack()}"
+        )
+        if _killed_for != inflight[1]:
+            if now - inflight[1] >= _STUCK_CALL_CEILING_S:
+                why = f"stuck past the {_STUCK_CALL_CEILING_S:.0f}s ceiling"
+            elif _crashed:
+                why = f"stuck after the renderer of page(s) {sorted(_crashed)} crashed"
+            else:
+                why = None
+            if why:
+                _killed_for = inflight[1]
+                lines.append(
+                    f"[bridge-watchdog] {inflight[0]!r} {why}: killed browser "
+                    f"pids {_kill_browser()} to free the server thread"
+                )
+        return lines, last_sample
+    if now - last_sample >= _WATCHDOG_SAMPLE_S:
+        lines.append(
+            f"[bridge-sample] pages {len(_pages)} contexts "
+            f"{len({id(c) for c in _contexts.values()})}; "
+            f"tree: {_tree_report(prev_cpu)}"
+        )
+        return lines, now
+    return lines, last_sample
+
+
+def _watchdog_loop() -> None:
+    prev_cpu: dict[int, float] = {}
+    last_sample = time.monotonic()
+    while True:
+        time.sleep(_WATCHDOG_TICK_S)
+        try:
+            lines, last_sample = _watchdog_tick(prev_cpu, time.monotonic(), last_sample)
+        except Exception as exc:  # a diagnostic must never take the bridge down
+            lines = [f"[bridge-watchdog] tick failed: {exc!r}"]
+        for line in lines:
+            print(line, file=sys.stderr, flush=True)
+
+
+def _relaunch_browser() -> None:
+    """The browser is gone (the watchdog's stuck-call kill, or a Chromium that
+    died): launch a fresh one and reopen every page id the session holds, each
+    in a fresh context of its own (a borrowed tab shares its owner's again),
+    navigated back to where it was. The stores are gone — a machine wipe —
+    and every page's console ring says so."""
+    global _browser
+    urls = {pid: page.url for pid, page in _pages.items()}
+    _browser = _playwright.chromium.launch(
+        timeout=_SESSION_LAUNCH_TIMEOUT_MS, **launch_kwargs(_playwright)
+    )
+    _crashed.clear()
+    _cached_app_state.clear()
+    owners = [pid for pid in _contexts if pid not in _borrowed_contexts]
+    owner_of = {
+        pid: next((o for o in owners if _contexts[o] is _contexts[pid]), None)
+        for pid in _borrowed_contexts
+    }
+    for pid in owners:
+        kwargs = _session_context_kwargs if pid == "1" else _CONTEXT_KWARGS
+        _contexts[pid] = _browser.new_context(**kwargs)
+        if pid == "1" and _session_push_endpoint:
+            _contexts[pid].add_init_script(_push_stand_in_js(_session_push_endpoint))
+    for pid, owner in owner_of.items():
+        _contexts[pid] = _contexts[owner] if owner else _browser.new_context(**_CONTEXT_KWARGS)
+    for pid, url in urls.items():
+        page = _contexts[pid].new_page()
+        _pages[pid] = page
+        _console_append(pid, f"[bridge] browser relaunched after it was killed or died "
+                             f"(page was at {url}; its store is gone)")
+        _attach_console_capture(page, pid)
+        _attach_download_capture(page, pid)
+        if url and url != "about:blank":
+            try:
+                page.goto(url, timeout=_SESSION_NAV_TIMEOUT_MS)
+            except Exception as exc:
+                _console_append(pid, f"[bridge] relaunch navigation failed: {exc}")
+
+
+def _start_watchdog() -> None:
+    global _server_thread_id
+    _server_thread_id = threading.get_ident()
+    threading.Thread(target=_watchdog_loop, name="bridge-watchdog", daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -550,6 +829,20 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass  # suppress request logs
+
+    def handle_one_request(self):
+        # Wrap the parse + dispatch so the watchdog can name the request the
+        # server thread is in (`parse_request` below sets it, this clears it).
+        try:
+            super().handle_one_request()
+        finally:
+            _note_inflight(None)
+
+    def parse_request(self):
+        ok = super().parse_request()
+        if ok:
+            _note_inflight(self.requestline)
+        return ok
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
@@ -583,6 +876,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _require_page(self, source: dict | None = None) -> Page:
         pid = str((source or {}).get("page") or "1")
+        if _browser is not None and not _browser.is_connected():
+            _relaunch_browser()
         page = _pages.get(pid)
         if page is None:
             raise RuntimeError(
@@ -631,7 +926,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # "text" is its label, the same as GTK/XCUITest return. A
                 # checkbox or radio is a button in this sense: its `.value` is
                 # the constant "on", so it reports its <label>'s text, as a GTK
-                # CheckButton reports its label.
+                # CheckButton reports its label. A password field reports a
+                # same-length bullet mask, never its value — the masking
+                # contract of the `unlock` page and the credential-store
+                # modal (ui.yaml), which tui's registry keeps the same way.
                 #
                 # Bound the wait to 3s (not Playwright's 30s default) and treat a
                 # transient miss as "". The shared count-then-get_text read pattern
@@ -650,6 +948,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         " if (t === 'input' && (el.type === 'checkbox' || el.type === 'radio'))"
                         " return el.labels && el.labels.length"
                         " ? (el.labels[0].textContent ?? '').trim() : '';"
+                        " if (t === 'input' && el.type === 'password')"
+                        " return '•'.repeat((el.value ?? '').length);"
                         " return (t === 'input' || t === 'textarea' || t === 'select')"
                         " ? (el.value ?? '') : (el.textContent ?? ''); }",
                         timeout=3000,
@@ -989,6 +1289,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 page.screenshot(path=path)
                 self._respond(200, {"path": str(path)})
 
+            elif route == "/webauthn/virtual-authenticator":
+                self._handle_virtual_authenticator()
+
             elif route == "/navigate":
                 req = self._read_json()
                 page = self._require_page(req)
@@ -1126,6 +1429,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         _contexts.clear()
         _cached_app_state.clear()
         _console_logs.clear()
+        _webauthn_sessions.clear()
+        _crashed.clear()
         if _browser:
             _browser.close()
             _browser = None
@@ -1135,6 +1440,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def _handle_session_create(self) -> None:
         global _playwright, _browser, _next_page_id
+        global _session_context_kwargs, _session_push_endpoint
         req = self._read_json()
         url = req.get("url", "")
         # Optional BCP-47 locale (e.g. "en-GB") — drives `navigator.language`
@@ -1160,6 +1466,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         context_kwargs = dict(_CONTEXT_KWARGS)
         if locale:
             context_kwargs["locale"] = locale
+        _session_context_kwargs, _session_push_endpoint = context_kwargs, push_endpoint
         _contexts["1"] = _browser.new_context(**context_kwargs)
         if push_endpoint:
             _contexts["1"].add_init_script(_push_stand_in_js(push_endpoint))
@@ -1220,8 +1527,39 @@ class BridgeHandler(BaseHTTPRequestHandler):
             _pages[pid].goto(url)
         self._respond(201, {"page_id": pid})
 
+    def _handle_virtual_authenticator(self) -> None:
+        """Attach a virtual WebAuthn authenticator to a page over CDP — a
+        platform authenticator (internal transport, resident keys, user
+        verification that always passes, presence simulated) offering the PRF
+        extension when ``has_prf`` (default true). Measured 2026-10-19 on
+        Chromium 148: PRF is offered on a named host (``localhost``), and every
+        ceremony on an IP-literal origin is refused (`web.md` § Identity store at
+        rest → *A passkey wrap*). Body: ``{"page", "has_prf"}``; responds
+        ``{"authenticator_id"}``. One per page: a second call replaces nothing
+        and 409s."""
+        req = self._read_json()
+        pid = str(req.get("page") or "1")
+        page = self._require_page(req)
+        if pid in _webauthn_sessions:
+            self._respond(409, {"error": f"page '{pid}' already has a virtual authenticator"})
+            return
+        cdp = page.context.new_cdp_session(page)
+        cdp.send("WebAuthn.enable")
+        added = cdp.send("WebAuthn.addVirtualAuthenticator", {"options": {
+            "protocol": "ctap2",
+            "transport": "internal",
+            "hasResidentKey": True,
+            "hasUserVerification": True,
+            "isUserVerified": True,
+            "automaticPresenceSimulation": True,
+            "hasPrf": bool(req.get("has_prf", True)),
+        }})
+        _webauthn_sessions[pid] = cdp
+        self._respond(200, {"authenticator_id": added["authenticatorId"]})
+
     def _handle_page_close(self) -> None:
         pid = str(self._query().get("page") or "")
+        _webauthn_sessions.pop(pid, None)
         page = _pages.pop(pid, None)
         ctx = _contexts.pop(pid, None)
         borrowed = pid in _borrowed_contexts
@@ -1418,9 +1756,16 @@ def bind_fresh_port(draw):
 
 
 def main():
+    global _STUCK_CALL_CEILING_S, _WATCHDOG_TICK_S, _WATCHDOG_BUSY_S
     if os.name == "posix":
         signal.signal(signal.SIGTERM, _forward_signal_to_group)
         signal.signal(signal.SIGINT, _forward_signal_to_group)
+    if "--stuck-ceiling" in sys.argv:
+        # For the bridge's own tests (`test_web_bridge_stuck_call.py`) only:
+        # a ceiling of seconds, with the watchdog's cadence scaled to it.
+        _STUCK_CALL_CEILING_S = float(sys.argv[sys.argv.index("--stuck-ceiling") + 1])
+        _WATCHDOG_TICK_S = min(_WATCHDOG_TICK_S, _STUCK_CALL_CEILING_S / 4)
+        _WATCHDOG_BUSY_S = min(_WATCHDOG_BUSY_S, _STUCK_CALL_CEILING_S / 2)
     if "--port" in sys.argv:
         # A caller-chosen port is theirs to own: one attempt, a conflict is loud.
         port = int(sys.argv[sys.argv.index("--port") + 1])
@@ -1428,6 +1773,7 @@ def main():
     else:
         server, port = bind_fresh_port(lambda: randint(18000, 19000))
     print(f"BRIDGE_PORT={port}", flush=True)
+    _start_watchdog()
     server.serve_forever()
 
 

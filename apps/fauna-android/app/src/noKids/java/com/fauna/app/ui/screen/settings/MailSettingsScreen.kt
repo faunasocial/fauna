@@ -15,6 +15,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -25,6 +27,7 @@ import com.fauna.app.ui.components.CopyButton
 import com.fauna.app.ui.components.DisabledControlReasonText
 import com.fauna.app.ui.navigation.LocalAppMessages
 import com.fauna.app.ui.util.faunaGate
+import com.fauna.app.ui.util.mailQuotaText
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.MailSettingsVM
 import uniffi.fauna_client_mail_settings.CredentialKind
@@ -33,6 +36,9 @@ import uniffi.fauna_client_mail_settings.MuaInstructions
 import uniffi.fauna_client_mail_settings.PendingRotationStatus
 import uniffi.fauna_client_mail_settings.SettingsStatus
 import uniffi.fauna_client_mail_settings.forwardPerHourHint
+import uniffi.fauna_client_mail_settings.mailOverQuotaNoticeOf
+import uniffi.fauna_client_mail_settings.mailQuotaDisplayOf
+import uniffi.fauna_client_mail_settings.mailSubmissionQuotaDisplayOf
 import uniffi.fauna_client_mail_settings.passwordStrengthLabel
 import uniffi.fauna_client_mail_settings.settingsStatusLabel
 import social.fauna.generated.Ids
@@ -65,6 +71,10 @@ fun MailSettingsScreen(
     val forwardAllTo by vm.forwardAllTo.collectAsState()
     val forwardPerHour by vm.forwardPerHour.collectAsState()
     val forwardCeiling by vm.forwardCeiling.collectAsState()
+    val switches by vm.switches.collectAsState()
+    val autorespond by vm.autorespond.collectAsState()
+    val autorespondMessage by vm.autorespondMessage.collectAsState()
+    val quotas by vm.quotas.collectAsState()
     val appMessages = LocalAppMessages.current
     val context = LocalContext.current
 
@@ -72,6 +82,7 @@ fun MailSettingsScreen(
 
     MailSettingsContent(
         enabled = snapshot.enabled,
+        mailUnavailableHere = snapshot.mailUnavailableHere,
         caldavEnabled = snapshot.caldavEnabled,
         carddavEnabled = snapshot.carddavEnabled,
         servesWebdavSet = snapshot.servesWebdavSet,
@@ -115,6 +126,27 @@ fun MailSettingsScreen(
         }.orEmpty(),
         onCommitForwardAllTo = vm::commitForwardAllTo,
         onCommitForwardPerHour = vm::commitForwardPerHour,
+        receiveEnabled = switches?.receiveEnabled,
+        sendEnabled = switches?.sendEnabled,
+        scanResultVisible = switches?.scanResultVisible,
+        onToggleReceive = vm::toggleReceive,
+        onToggleSend = vm::toggleSend,
+        onToggleScanResultVisible = vm::toggleScanResultVisible,
+        autorespondEnabled = autorespond?.enabled,
+        autorespondMessage = autorespondMessage,
+        onAutorespondMessageChange = vm::editAutorespondMessage,
+        onToggleAutorespond = vm::toggleAutorespond,
+        onCommitAutorespondMessage = vm::commitAutorespondMessage,
+        // The readout and the notice are worded and decided by the shared
+        // `mail_quota_display_of` / `mail_over_quota_notice_of`; FFI lives here,
+        // off the testable Content. Absent until the first read.
+        quotaText = quotas?.let { mailQuotaText(context, mailQuotaDisplayOf(it)) },
+        submissionQuotaText = quotas?.let {
+            resolveLocalized(context, mailSubmissionQuotaDisplayOf(it))
+        },
+        overQuotaNotice = quotas?.let {
+            resolveLocalized(context, mailOverQuotaNoticeOf(it))
+        },
     )
 }
 
@@ -128,6 +160,11 @@ private sealed interface CredForm {
 @Composable
 fun MailSettingsContent(
     enabled: Boolean,
+    // `MailSettingsSnapshot.mailUnavailableHere` — this box cannot enable mail (no
+    // content scanners). Read from the shared machine, never re-derived; while
+    // mail is off the toggle is disabled with state `unavailable` and the notice
+    // stands in for the enable subtitle (mail-settings.md § Layout & flow).
+    mailUnavailableHere: Boolean = false,
     caldavEnabled: Boolean,
     carddavEnabled: Boolean,
     // True iff this actor serves >=1 folder over WebDAV
@@ -182,6 +219,25 @@ fun MailSettingsContent(
     forwardPerHourHint: String = "",
     onCommitForwardAllTo: (String) -> Unit = {},
     onCommitForwardPerHour: (String) -> Unit = {},
+    // The receive / send switches, the automatic reply and the mailbox quota
+    // (mail-policy-config.md § Tier 3; email-filters.md § The auto-respond
+    // setting; imap-server.md § Composition with submission quota). `null` =
+    // that control's first read has not landed, so its id is absent. Defaults
+    // keep the pre-existing Content tests compiling.
+    receiveEnabled: Boolean? = null,
+    sendEnabled: Boolean? = null,
+    scanResultVisible: Boolean? = null,
+    onToggleReceive: () -> Unit = {},
+    onToggleSend: () -> Unit = {},
+    onToggleScanResultVisible: () -> Unit = {},
+    autorespondEnabled: Boolean? = null,
+    autorespondMessage: String = "",
+    onAutorespondMessageChange: (String) -> Unit = {},
+    onToggleAutorespond: () -> Unit = {},
+    onCommitAutorespondMessage: () -> Unit = {},
+    quotaText: String? = null,
+    submissionQuotaText: String? = null,
+    overQuotaNotice: String? = null,
 ) {
     var form by remember { mutableStateOf<CredForm>(CredForm.Closed) }
     var showRotate by remember { mutableStateOf(false) }
@@ -220,17 +276,22 @@ fun MailSettingsContent(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // ── Enabled toggle ──
+            // A mailbox already on keeps its live toggle so it can still be turned off.
+            val unavailable = !enabled && mailUnavailableHere
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(stringResource(R.string.settings_mail_enable_title), style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        stringResource(R.string.settings_mail_enable_subtitle),
+                        if (unavailable) stringResource(R.string.mail_settings_unavailable_notice)
+                        else stringResource(R.string.settings_mail_enable_subtitle),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = if (unavailable) Modifier.testTag(Ids.MAIL_SETTINGS_UNAVAILABLE_NOTICE) else Modifier,
                     )
                 }
                 Switch(
                     checked = enabled,
+                    enabled = !unavailable,
                     onCheckedChange = { on ->
                         // Off-path opens the destructive confirm dialog (the real
                         // decision point); the toggle stays rendering `enabled`
@@ -238,7 +299,9 @@ fun MailSettingsContent(
                         if (on && !enabled) form = CredForm.Enable
                         else if (!on && enabled) showDisableConfirm = true
                     },
-                    modifier = Modifier.testTag(Ids.MAIL_SETTINGS_ENABLED_TOGGLE),
+                    modifier = Modifier
+                        .testTag(Ids.MAIL_SETTINGS_ENABLED_TOGGLE)
+                        .semantics { stateDescription = if (enabled) "on" else if (unavailable) "unavailable" else "off" },
                 )
             }
 
@@ -426,6 +489,22 @@ fun MailSettingsContent(
                 // the Spam page's threshold shape (no Save button), so the
                 // control that issues the kind IS the field.
                 if (enabled) {
+                    AccountControlsSection(
+                        receiveEnabled = receiveEnabled,
+                        sendEnabled = sendEnabled,
+                        scanResultVisible = scanResultVisible,
+                        onToggleReceive = onToggleReceive,
+                        onToggleSend = onToggleSend,
+                        onToggleScanResultVisible = onToggleScanResultVisible,
+                        autorespondEnabled = autorespondEnabled,
+                        autorespondMessage = autorespondMessage,
+                        onAutorespondMessageChange = onAutorespondMessageChange,
+                        onToggleAutorespond = onToggleAutorespond,
+                        onCommitAutorespondMessage = onCommitAutorespondMessage,
+                        quotaText = quotaText,
+                        submissionQuotaText = submissionQuotaText,
+                        overQuotaNotice = overQuotaNotice,
+                    )
                     ForwardingSection(
                         forwardAllTo = forwardAllTo,
                         forwardPerHour = forwardPerHour,
@@ -495,6 +574,144 @@ fun MailSettingsContent(
     }
 }
 
+
+/**
+ * The receive / send switches, the automatic reply and the mailbox quota —
+ * the tui lead's `account_switch_elements` / `autorespond_elements` /
+ * `quota_elements`. Each switch is non-optimistic (its state is the nest's
+ * re-read) and absent until its first read; a dispatch-on-change toggle IS the
+ * commit, so there is no buffer for it to sit behind.
+ */
+@Composable
+private fun AccountControlsSection(
+    receiveEnabled: Boolean?,
+    sendEnabled: Boolean?,
+    scanResultVisible: Boolean?,
+    onToggleReceive: () -> Unit,
+    onToggleSend: () -> Unit,
+    onToggleScanResultVisible: () -> Unit,
+    autorespondEnabled: Boolean?,
+    autorespondMessage: String,
+    onAutorespondMessageChange: (String) -> Unit,
+    onToggleAutorespond: () -> Unit,
+    onCommitAutorespondMessage: () -> Unit,
+    quotaText: String?,
+    submissionQuotaText: String?,
+    overQuotaNotice: String?,
+) {
+    val switchesGate = faunaGate("fauna.bridges.set_mail_switches")
+    // The reply's writes are `fauna.email.filters.create` / update — offline-queued,
+    // so (like tui) they declare no gate here: a gate that can never desensitize
+    // is rejected by `check-offline-gate-kinds.py`.
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (receiveEnabled != null) {
+            AccountSwitchRow(
+                label = R.string.mail_settings_receive_label,
+                subtitle = R.string.mail_settings_receive_subtitle,
+                checked = receiveEnabled,
+                enabled = switchesGate.enabled,
+                onToggle = onToggleReceive,
+                testTag = Ids.MAIL_SETTINGS_RECEIVE_TOGGLE,
+            )
+        }
+        if (sendEnabled != null) {
+            AccountSwitchRow(
+                label = R.string.mail_settings_send_label,
+                subtitle = R.string.mail_settings_send_subtitle,
+                checked = sendEnabled,
+                enabled = switchesGate.enabled,
+                onToggle = onToggleSend,
+                testTag = Ids.MAIL_SETTINGS_SEND_TOGGLE,
+            )
+        }
+        if (scanResultVisible != null) {
+            AccountSwitchRow(
+                label = R.string.mail_settings_scan_result_visible_label,
+                subtitle = R.string.mail_settings_scan_result_visible_subtitle,
+                checked = scanResultVisible,
+                enabled = switchesGate.enabled,
+                onToggle = onToggleScanResultVisible,
+                testTag = Ids.MAIL_SETTINGS_SCAN_RESULT_VISIBLE_TOGGLE,
+            )
+        }
+        if (receiveEnabled != null || sendEnabled != null || scanResultVisible != null) DisabledControlReasonText(switchesGate.reason)
+        if (autorespondEnabled != null) {
+            AccountSwitchRow(
+                label = R.string.mail_settings_autorespond_label,
+                subtitle = R.string.mail_settings_autorespond_subtitle,
+                checked = autorespondEnabled,
+                enabled = true,
+                onToggle = onToggleAutorespond,
+                testTag = Ids.MAIL_SETTINGS_AUTORESPOND_TOGGLE,
+            )
+        }
+        Text(stringResource(R.string.mail_settings_autorespond_message_label), style = MaterialTheme.typography.bodyLarge)
+        OutlinedTextField(
+            value = autorespondMessage,
+            onValueChange = onAutorespondMessageChange,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+            ),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                onDone = { onCommitAutorespondMessage() },
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(Ids.MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT),
+        )
+        if (quotaText != null) {
+            Text(
+                quotaText,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.MAIL_SETTINGS_MAILBOX_QUOTA),
+            )
+        }
+        if (submissionQuotaText != null) {
+            Text(
+                submissionQuotaText,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.MAIL_SETTINGS_SUBMISSION_QUOTA),
+            )
+        }
+        if (overQuotaNotice != null) {
+            Text(
+                overQuotaNotice,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag(Ids.MAIL_SETTINGS_OVER_QUOTA_NOTICE),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AccountSwitchRow(
+    label: Int,
+    subtitle: Int,
+    checked: Boolean,
+    enabled: Boolean,
+    onToggle: () -> Unit,
+    testTag: String,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(stringResource(label), style = MaterialTheme.typography.bodyLarge)
+            Text(
+                stringResource(subtitle),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        // `checked` is the nest's last confirmed value, so a tap never repaints
+        // the switch by itself — the re-read does (the serve-here shape).
+        Switch(
+            checked = checked,
+            onCheckedChange = { onToggle() },
+            enabled = enabled,
+            modifier = Modifier.testTag(testTag),
+        )
+    }
+}
 
 @Composable
 private fun ForwardingSection(

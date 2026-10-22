@@ -205,7 +205,67 @@ use rusqlite::Connection;
 ///  `atproto.commit` door (`key-material-hierarchy.md` § *The oracle*).
 ///  Additive with a constant default of 0: a session that wrote before it
 ///  counts from its next write.
-pub const CURRENT_SCHEMA_VERSION: u32 = 143;
+///  144 = `mail_microsoft_registration` (2026-10-16): the deployment's own
+///  Microsoft app registration for the Outlook import (`mailbox-migration.md`
+///  § Microsoft sign-in, *An admin-supplied registration*). Additive: a new
+///  singleton table whose absent row is the project's registration.
+///  145 = the federated follow's subscribe twin (2026-10-17,
+///  `federated-follow.md` § Decision 2): `remote_follows` and
+///  `follow_intents_seen` (new tables), `home_nest_id` + `home_nest_url` on
+///  `subscribers` and `subscribe_requests`, and `outbox.peer_nest_id`. All
+///  additive and nullable: a row written before it is a same-nest one.
+///  146 = `nest_content_policy` (2026-10-17): the nest admin's published
+///  rules, signed (`nest-rules.md` § The nest content policy). Additive: a new
+///  singleton table whose absent row is "no rules".
+///  147 = `content.follow_delivered` (2026-10-17, `federated-follow.md`
+///  § Decision 3): marks a post envelope a federated follow delivered from
+///  its author's home, which every nest-wide read excludes. Additive with a
+///  constant default of 0: every row written before it is this nest's own.
+///  148 = `import_sessions.skip_dedup` (2026-10-17): the session's "Import
+///  duplicates anyway" choice, which a resume after a restart re-reads
+///  (`mailbox-migration.md` § Resume protocol). Additive with a constant
+///  default of 0: a session started before it kept dedup on.
+///  149 = `device_oracle_principals` + `device_oracle_ops` (2026-10-18): a
+///  device custodian's per-operation record, submitted over
+///  `fauna.principals.ops.record` (`conversations-oracle.md` § The
+///  per-operation record). New tables, additive; an older binary never reads
+///  them.
+///  150 = `device_oracle_principals.window_start` + `.window_count`
+///  (2026-10-18): the device custodian's ceiling window, carried with each
+///  record batch, so the roster's count in window is the custodian's own
+///  (`conversations-oracle.md` § The ceiling and the page). Additive with a
+///  constant default of 0: a row written before it reads no window.
+///  151 = `mail_account_settings.scan_result_visible` (2026-10-18): the
+///  user's own switch for the scan-result row on received messages
+///  (`mail-content-scanning.md` § Per-account opt-out for visible scan
+///  details). Additive with a constant default of 1: an account that existed
+///  before it keeps seeing the row.
+///  152 = `contacts.peer_nest_id` (2026-10-18): the verified origin nest of
+///  the federation knock that formed a contact edge, resolved to the peer's
+///  home URL at list time (`ui/contacts.md` § State & data shape). Additive
+///  and nullable: an edge formed before it carries no home.
+///  153 = `obligation_action_records.issuer_nest_id` + `.issuer_ref` +
+///  `.delivered_to_nest_id` (2026-10-19): an obligation row another nest
+///  delivered to the author's home, and on the issuer the home it reached
+///  (`moderation.md` § Legal takedown → *The author homed on another nest*).
+///  Additive and nullable: a row written before it is this nest's own,
+///  never delivered.
+///  154 = `users.first_session_at` (2026-10-19): the durable first-session
+///  mark, set at the actor's own session mints, which the verify reply's
+///  `first_sign_in` reads (`login.md` § Direct Auth → the verify reply).
+///  Additive and nullable: an account that existed before it reads as never
+///  signed in until its next own mint sets it — at worst one trust offer on a
+///  wizard sign-in, grantable or declinable like any other.
+///  155 = `content.origin_nest_id` (2026-10-19): a delivered post's home
+///  identity, the delivery's verified origin, which the feed item carries for
+///  the reader's byte plane (`transport-trust.md` § The post arm). Additive
+///  and nullable: an envelope delivered before it keeps the WebPKI floor until
+///  its home re-delivers it.
+///  156 = `guardian_policies.content_document` (2026-10-19): the guardian's
+///  content rule document, written by the shared rule editor
+///  (`nest-rules.md` § The shared rule editor (b)). Additive and nullable: a
+///  ward policy written before it carries no document, only its floors.
+pub const CURRENT_SCHEMA_VERSION: u32 = 156;
 
 /// The oldest `schema_version` whose binary can still safely **operate** a DB
 /// this binary writes. Bump **only** on a non-additive/breaking change (the
@@ -270,7 +330,8 @@ pub(super) const MIGRATIONS: &str = "
         eviction_warned_at INTEGER,
         eviction_suspend_at INTEGER,
         eviction_delete_at INTEGER,
-        locked_until INTEGER
+        locked_until INTEGER,
+        first_session_at INTEGER
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_handle
         ON users(handle) WHERE handle != '';
@@ -963,6 +1024,12 @@ pub(super) const MIGRATIONS_CONTACTS: &str = "
         status      TEXT NOT NULL,
         accepted_at INTEGER,
         created_at  INTEGER NOT NULL,
+        -- The VERIFIED origin nest of the federation arrival that formed the
+        -- edge (the inbox.deliver channel's authenticated peer); NULL for a
+        -- local peer or an edge formed otherwise. Resolved to the peer's
+        -- home URL at read time through nest_addresses, never stored as a
+        -- URL (ui/contacts.md § State & data shape).
+        peer_nest_id BLOB,
         PRIMARY KEY (actor_id, peer_id)
     );
 
@@ -1964,8 +2031,20 @@ pub(super) const MIGRATIONS_OBLIGATION_ACTIONS: &str = "
         action_taken    INTEGER NOT NULL,
         label_id        INTEGER REFERENCES content_labels(id),
         timestamp       INTEGER NOT NULL,
-        signature       BLOB NOT NULL
+        signature       BLOB NOT NULL,
+        -- A row another nest's admin decided and delivered here, to the
+        -- author's home (`moderation.md` § Legal takedown -> *The author homed
+        -- on another nest*): the VERIFIED origin nest id (hex) and the
+        -- issuer's own row id. NULL = this nest's own decision.
+        issuer_nest_id  TEXT,
+        issuer_ref      TEXT,
+        -- On the issuer: the verified id (hex) of the author's home the row
+        -- was delivered to — the one nest whose relayed appeal it accepts.
+        delivered_to_nest_id TEXT
     );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_obligation_actions_issuer_ref
+        ON obligation_action_records(issuer_nest_id, issuer_ref)
+        WHERE issuer_ref IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_obligation_actions_content
         ON obligation_action_records(content_type, content_id);
     CREATE INDEX IF NOT EXISTS idx_obligation_actions_obligation
@@ -2020,7 +2099,7 @@ pub(super) const MIGRATIONS_ABUSE_REPORTS: &str = "
 
     -- The federation triad's durable send queue (`moderation.md` § Routing):
     -- one pending `fauna.federation.abuse_report.{deliver,withdraw,outcome}`
-    -- call, retried with backoff until the peer answers or the entry ages
+    -- or `fauna.federation.moderation.obligation.deliver` call, retried with backoff until the peer answers or the entry ages
     -- out. `payload` is the canonical dag-cbor request; `peer_nest_id` (hex)
     -- pins the dial when the peer's identity is already known. Derived send
     -- state, not user data: a lost entry costs a forward, never a report.
@@ -2433,7 +2512,10 @@ pub(super) const MIGRATIONS_SPAM_MODEL_HOLDER_COPIES: &str = "
 // form is the deferred N1b upgrade). `forward_per_hour` is the per-account
 // forward rate cap (`mail.account.forward_per_hour`, default 100/h,
 // `mail-forwarding.md:168`). `receive_enabled` / `send_enabled` are the user's
-// own receive and send switches (`mail-policy-config.md` § Tier 3), 1 = on.
+// own receive and send switches (`mail-policy-config.md` § Tier 3), 1 = on;
+// `scan_result_visible` is the user's own "show the scan-result row on
+// received messages" switch (`mail-content-scanning.md` § Per-account opt-out
+// for visible scan details), 1 = shown.
 pub(super) const MIGRATIONS_MAIL_ACCOUNT_SETTINGS: &str = "
     CREATE TABLE IF NOT EXISTS mail_account_settings (
         actor_id         BLOB PRIMARY KEY,
@@ -2442,6 +2524,7 @@ pub(super) const MIGRATIONS_MAIL_ACCOUNT_SETTINGS: &str = "
         spam_threshold_override INTEGER,
         receive_enabled  INTEGER NOT NULL DEFAULT 1,
         send_enabled     INTEGER NOT NULL DEFAULT 1,
+        scan_result_visible INTEGER NOT NULL DEFAULT 1,
         updated_at       INTEGER NOT NULL
     );
 ";
@@ -2595,6 +2678,11 @@ pub(super) const MIGRATIONS_SUBSCRIPTIONS: &str = "
         -- Both nullable.
         admitted_tier TEXT,
         admitted_lapse_tier TEXT,
+        -- The subscriber's home nest when it is not this one: a follow relayed
+        -- across nests (federated-follow.md § Decision 2). Copied from the
+        -- request row at approval. NULL = a subscriber on this nest.
+        home_nest_id BLOB,
+        home_nest_url TEXT,
         PRIMARY KEY (author_id, subscriber_id, tier_name),
         FOREIGN KEY (author_id, tier_name) REFERENCES subscription_tiers (author_id, name)
     );
@@ -2621,11 +2709,47 @@ pub(super) const MIGRATIONS_SUBSCRIPTIONS: &str = "
         -- The paid window the payment carried (epoch seconds; NULL = none),
         -- stamped onto the subscribers row at approval.
         valid_until INTEGER,
+        -- The subscriber's home nest when it is not this one: the verified
+        -- origin that carried the follow intent and the URL resolved from it
+        -- (federated-follow.md § Decision 2). NULL = a subscriber on this nest.
+        home_nest_id BLOB,
+        home_nest_url TEXT,
         UNIQUE (author_id, subscriber_id, tier_name, kind),
         FOREIGN KEY (author_id, tier_name) REFERENCES subscription_tiers (author_id, name)
     );
     CREATE INDEX IF NOT EXISTS idx_subscribe_requests_author
         ON subscribe_requests (author_id);
+
+    -- The follower-side record of a follow of an author homed on another nest
+    -- (federated-follow.md § Decision 2). One row per subscriber + author + tier
+    -- written by the subscribe door's remote arm and moved by the home's
+    -- follow.state pushes. state is this nest's latest word from the home.
+    CREATE TABLE IF NOT EXISTS remote_follows (
+        subscriber_id    BLOB NOT NULL,
+        author_id        BLOB NOT NULL,
+        tier             TEXT NOT NULL,
+        home_nest_id     BLOB NOT NULL,
+        home_nest_url    TEXT NOT NULL,
+        state            TEXT NOT NULL CHECK(state IN ('pending', 'approved', 'rejected', 'removed')),
+        request_id       INTEGER,
+        latest_intent_at INTEGER,
+        created_at       INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        PRIMARY KEY (subscriber_id, author_id, tier)
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_follows_author
+        ON remote_follows (author_id);
+
+    -- On an author's nest: the newest follow intent seen per author + subscriber +
+    -- tier — the monotonic rule of federated-follow.md § Decision 2. An intent
+    -- no newer than this changes nothing so a replay never undoes a later act.
+    CREATE TABLE IF NOT EXISTS follow_intents_seen (
+        author_id         BLOB NOT NULL,
+        subscriber_id     BLOB NOT NULL,
+        tier              TEXT NOT NULL,
+        latest_created_at INTEGER NOT NULL,
+        PRIMARY KEY (author_id, subscriber_id, tier)
+    );
 
     -- The subscriber encapsulation-key registry (post-quantum.md § surface B:
     -- the subscriber publishes its encapsulation key, a new registry entry). One row per
@@ -2876,6 +3000,26 @@ pub(super) const MIGRATIONS_NEST_UPDATE_CHANNEL: &str = "
     );
 ";
 
+/// The nest admin's published rules (`db/content_policy.rs`; `nest-rules.md`
+/// § The nest content policy → *Nest state, written in the app*): the
+/// canonical dag-cbor of the document as the nest validated it for publisher
+/// `nest:<domain>`, the monotonic `sequence` and `issued_at` the accepted write
+/// stamped, and the nest's identity-key signature over the three. Written only
+/// by `fauna.admin.content_policy.set`; withdrawing every rule stores the
+/// empty document under a newer sequence, so the row is never deleted and the
+/// sequence never runs backwards. An **absent row** is a nest that has never
+/// published rules.
+pub(super) const MIGRATIONS_NEST_CONTENT_POLICY: &str = "
+    CREATE TABLE IF NOT EXISTS nest_content_policy (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        domain     TEXT NOT NULL,
+        document   BLOB NOT NULL,
+        sequence   INTEGER NOT NULL,
+        issued_at  INTEGER NOT NULL,
+        signature  BLOB NOT NULL
+    );
+";
+
 /// The deployment's own public address(es) (`dns-management.md` § Records
 /// covered + § Implementation status today; Slice 2b). Singleton row (id = 1),
 /// upserted by the `fauna.dns.set_host_address` onboarding hand-off. The address
@@ -3016,7 +3160,8 @@ pub(super) const MIGRATIONS_CONV_RECORD_AUTHORS: &str = "
     );
 ";
 
-/// Blobs withheld from `GET /api/v1/blob/{id}` by a legal takedown.
+/// Blobs withheld from `GET /api/v1/blob/{id}` by a legal takedown or by the
+/// admin's block of a reported item (`ground` says which).
 ///
 /// A **derived** set, never a floor: it records nothing the box does not
 /// already hold, and is rebuilt wholesale from `legal_takedown_ref` joined
@@ -3028,7 +3173,11 @@ pub(super) const MIGRATIONS_CONV_RECORD_AUTHORS: &str = "
 /// bytes (`moderation.md` § Legal takedown → the blob-serve door).
 pub(super) const MIGRATIONS_BLOB_LEGAL_WITHHOLD: &str = "
     CREATE TABLE IF NOT EXISTS blob_legal_withhold (
-        blob_hash BLOB NOT NULL PRIMARY KEY
+        blob_hash BLOB NOT NULL PRIMARY KEY,
+        -- The withhold's ground picks the door's status: 'legal' for a legal
+        -- takedown (451) or 'admin_block' for the admin's block of a reported
+        -- item (403). A blob both grounds reach is 'legal'.
+        ground TEXT NOT NULL DEFAULT 'legal'
     );
 ";
 
@@ -3601,6 +3750,13 @@ pub(super) const MIGRATIONS_BRIDGE_ABSORPTION: &str = "
         -- withholds future per-record fetches, cannot recall already-delivered
         -- content or reach opaque client-sealed snapshot blobs.
         legal_takedown_ref TEXT,
+        -- The admin's block of one reported conv record (moderation.md
+        -- § Admin block of a reported item) — the second withhold flag beside
+        -- `legal_takedown_ref`; the value is the `abuse_reports.id` it cites.
+        -- NULL = not blocked. Keys on `record_cid` only as the takedown does:
+        -- the relay persists no sender. A blocked record is withheld from
+        -- every future fetch (the author's other devices included).
+        admin_block_report_id TEXT,
         -- Canonical 32-byte report-hash for distributed report sharing
         -- (report-sharing.md § Content identity). Mail-kind sparse: NULL for
         -- other kinds. The segment footer
@@ -5231,6 +5387,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
         MIGRATIONS_MAIL_AUTO_ENABLE_NEW_USERS,
     ),
     (
+        "MIGRATIONS_MAIL_MICROSOFT_REGISTRATION",
+        MIGRATIONS_MAIL_MICROSOFT_REGISTRATION,
+    ),
+    (
         "MIGRATIONS_NEST_REGISTRATION_MODE",
         MIGRATIONS_NEST_REGISTRATION_MODE,
     ),
@@ -5251,6 +5411,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     (
         "MIGRATIONS_NEST_UPDATE_CHANNEL",
         MIGRATIONS_NEST_UPDATE_CHANNEL,
+    ),
+    (
+        "MIGRATIONS_NEST_CONTENT_POLICY",
+        MIGRATIONS_NEST_CONTENT_POLICY,
     ),
     ("MIGRATIONS_WEB_APEX_ACTOR", MIGRATIONS_WEB_APEX_ACTOR),
     (
@@ -5326,6 +5490,7 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
         MIGRATIONS_POST_AUTHOR_ORACLE,
     ),
     ("MIGRATIONS_ATPROTO_ORACLE", MIGRATIONS_ATPROTO_ORACLE),
+    ("MIGRATIONS_DEVICE_ORACLE", MIGRATIONS_DEVICE_ORACLE),
     (
         "MIGRATIONS_DMARC_INBOUND_FORENSIC_REPORTS",
         MIGRATIONS_DMARC_INBOUND_FORENSIC_REPORTS,
@@ -5341,6 +5506,10 @@ const GENESIS_BLOCKS: &[(&str, &str)] = &[
     (
         "MIGRATIONS_DMARC_INBOUND_AGGREGATE_OVERSIZE",
         MIGRATIONS_DMARC_INBOUND_AGGREGATE_OVERSIZE,
+    ),
+    (
+        "MIGRATIONS_PROFILE_AUTHOR_ORACLE",
+        MIGRATIONS_PROFILE_AUTHOR_ORACLE,
     ),
 ];
 
@@ -5515,6 +5684,14 @@ pub fn run_migrations(conn: &Connection) -> Result<()> {
              WHERE warmup_held_until IS NOT NULL;",
     )
     .context("create the outbound warm-up hold index")?;
+    // Backs the follow-delivery purge (`follow_delivery::purge_unfollowed`):
+    // the few foreign copies a federated follow put here, by author.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_content_follow_delivered
+             ON content (author)
+             WHERE follow_delivered = 1;",
+    )
+    .context("create the follow-delivered index")?;
     // A guarded one-shot step (§ Genesis, the non-additive bullet) goes here,
     // keyed on the version the database was stamped with before this boot.
     // None exists: the genesis is the only schema this line has had.
@@ -6741,6 +6918,24 @@ pub(super) const MIGRATIONS_MAIL_AUTO_ENABLE_NEW_USERS: &str = "
     );
 ";
 
+/// The deployment's own Microsoft app registration for the Outlook import
+/// (`db/mail_enable.rs`; `mailbox-migration.md` § Microsoft sign-in, *An
+/// admin-supplied registration*) — a sibling of the auto-enable singleton
+/// above: a client-read deployment default surfaced on `fauna.setup.status`,
+/// never read by the bridge. `client_id` is a GUID and `tenant` a tenant ID, a
+/// verified domain or one of `common` / `organizations` / `consumers`, both
+/// normalised by `fauna_protocol::microsoft_registration::normalize` before the
+/// write. Public identifiers, not secrets. An **absent row** is the project's
+/// own registration (the Rust constant); the admin's clear deletes the row.
+pub(super) const MIGRATIONS_MAIL_MICROSOFT_REGISTRATION: &str = "
+    CREATE TABLE IF NOT EXISTS mail_microsoft_registration (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        client_id  TEXT NOT NULL,
+        tenant     TEXT NOT NULL,
+        set_at     INTEGER NOT NULL
+    );
+";
+
 // Deployment-wide apex web-content actor designation — the web analogue of the
 // per-domain catch-all *mail* actor (`mail_domains.catch_all_actor_id`), but a
 // nest-wide singleton (the apex is the single node domain, not a per-domain row).
@@ -6837,7 +7032,12 @@ pub(super) const MIGRATIONS_IMPORT_SESSIONS: &str = "
         -- keeps a mailbox's cursor short of a message the full mailbox turned
         -- away, and counts the re-walk it forces once (mailbox-migration.md
         -- § Failure handling; `db/mail_import.rs::fold_mailbox`).
-        quota_holds TEXT NOT NULL DEFAULT '{}'
+        quota_holds TEXT NOT NULL DEFAULT '{}',
+        -- The scope step's Import duplicates anyway choice (1 = every
+        -- message is sent with skip_dedup), recorded so a resume after a
+        -- restart sends what the user chose rather than guessing
+        -- (mailbox-migration.md § Opt-out per session, § Resume protocol).
+        skip_dedup INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_import_sessions_actor
         ON import_sessions(actor_id, state);
@@ -7004,7 +7204,14 @@ pub(super) const MIGRATIONS_FAMILY: &str = "
         -- guardianship -- which this table already guarantees. NULL = the
         -- guardian expressed no feature opinion -- which is the
         -- unsupervised-equivalent and is NOT the same as an authored allow.
-        features_document   BLOB
+        features_document   BLOB,
+        -- The guardian's content rule document (`nest-rules.md` § The shared
+        -- rule editor (b); `ContentPolicy.document`): the canonical dag-cbor
+        -- of a `ContentPolicyDocument` for publisher `guardian`, written by
+        -- the shared rule editor through `fauna.family.policy.update`.
+        -- Storing one clears the four floor columns above in the same write.
+        -- NULL = no document authored (the floors alone bind).
+        content_document    BLOB
     );
 ";
 
@@ -7658,7 +7865,7 @@ pub(super) const MIGRATIONS_POST_AUTHOR_ORACLE: &str = "
     -- one row per post the custodian authored (`op` = 'create') or retracted
     -- ('delete') for a principal; a delete is served only for a post a
     -- 'create' row of the same principal names. `detail` is `<op> <post id
-    -- hex>`. Bounded to the newest `post_author_oracle::OPS_KEPT_PER_PRINCIPAL`
+    -- hex>`. Bounded to the newest `authoring_oracle::OPS_KEPT_PER_PRINCIPAL`
     -- per principal.
     CREATE TABLE IF NOT EXISTS post_author_ops (
         id           INTEGER PRIMARY KEY,
@@ -7672,6 +7879,44 @@ pub(super) const MIGRATIONS_POST_AUTHOR_ORACLE: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_post_author_ops_principal
         ON post_author_ops(actor_id, principal_id, id);
+";
+
+/// The oracle's **profile custodian** (`key-material-hierarchy.md` § Audience:
+/// deployment infrastructure → *The oracle*, the `profile.author` row; written
+/// only by `profile_author_oracle.rs`). Its own table pair, as every class
+/// keeps one; the owner's roster reads merge them.
+pub(super) const MIGRATIONS_PROFILE_AUTHOR_ORACLE: &str = "
+    -- One row per (account, third-party principal) that has had the profile
+    -- edited: the audit counters and the rate ceiling's fixed window
+    -- (`fauna_core::identity_op::RateWindow`). NOT the authority -- every
+    -- request re-resolves the owner's live `identity.op` grant and the
+    -- account's authoring delegation. Deleted with the principal and at
+    -- succession.
+    CREATE TABLE IF NOT EXISTS profile_author_principals (
+        actor_id      TEXT NOT NULL,
+        principal_id  BLOB NOT NULL,
+        last_used_at  INTEGER,
+        use_count     INTEGER NOT NULL DEFAULT 0,
+        window_start  INTEGER NOT NULL DEFAULT 0,
+        window_count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (actor_id, principal_id)
+    );
+
+    -- The per-operation record (the audit split): one row per profile edit
+    -- the custodian signed for a principal (`op` = 'set'). `detail` is `set
+    -- <the fields named>`. Bounded to the newest
+    -- `authoring_oracle::OPS_KEPT_PER_PRINCIPAL` per principal.
+    CREATE TABLE IF NOT EXISTS profile_author_ops (
+        id           INTEGER PRIMARY KEY,
+        actor_id     TEXT NOT NULL,
+        principal_id BLOB NOT NULL,
+        at           INTEGER NOT NULL,
+        class        TEXT NOT NULL,
+        op           TEXT NOT NULL,
+        detail       TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_profile_author_ops_principal
+        ON profile_author_ops(actor_id, principal_id, id);
 ";
 
 /// The oracle's `atproto.service_auth` class at the nest's door
@@ -7710,6 +7955,48 @@ pub(super) const MIGRATIONS_ATPROTO_ORACLE: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_atproto_oracle_ops_principal
         ON atproto_oracle_ops(actor_id, principal_id, id);
+";
+
+/// The record a **device** custodian keeps of the operations it performed for
+/// a principal (`conversations-oracle.md` § The per-operation record): the
+/// signed-in first-party app hosting the account's conversations engine
+/// submits each row over `fauna.principals.ops.record`, so the account's other
+/// apps read it on the roster. The ceiling's window is the custodian's own,
+/// kept on the device; the nest keeps the record, a lifetime count, and the
+/// newest window position a batch reported, which the roster reads.
+pub(super) const MIGRATIONS_DEVICE_ORACLE: &str = "
+    -- One row per (account, third-party principal) a device custodian has
+    -- recorded an operation for: the lifetime count the roster summary reads,
+    -- and the newest ceiling window a batch reported (window_start, then
+    -- window_count, as the custodian's RateWindow holds them; 0, 0 until one
+    -- does). NOT the authority -- the custodian re-resolves the owner's grant
+    -- log per operation and binds its own ceiling. Deleted with the
+    -- principal, the account, and at succession.
+    CREATE TABLE IF NOT EXISTS device_oracle_principals (
+        actor_id      TEXT NOT NULL,
+        principal_id  BLOB NOT NULL,
+        last_used_at  INTEGER,
+        use_count     INTEGER NOT NULL DEFAULT 0,
+        window_start  INTEGER NOT NULL DEFAULT 0,
+        window_count  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (actor_id, principal_id)
+    );
+
+    -- The per-operation record (the audit split): class, the room id as its
+    -- detail, and when. `op_id` is the custodian's, so a resubmission keeps
+    -- one row. Bounded to the newest PRINCIPAL_OPS_PAGE per principal.
+    CREATE TABLE IF NOT EXISTS device_oracle_ops (
+        id           INTEGER PRIMARY KEY,
+        actor_id     TEXT NOT NULL,
+        principal_id BLOB NOT NULL,
+        op_id        BLOB NOT NULL,
+        at           INTEGER NOT NULL,
+        class        TEXT NOT NULL,
+        detail       TEXT NOT NULL,
+        UNIQUE (actor_id, principal_id, op_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_oracle_ops_principal
+        ON device_oracle_ops(actor_id, principal_id, id);
 ";
 
 #[cfg(test)]

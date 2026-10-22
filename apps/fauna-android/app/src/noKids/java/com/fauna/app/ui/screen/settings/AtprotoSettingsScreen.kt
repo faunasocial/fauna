@@ -72,7 +72,7 @@ import social.fauna.generated.Ids
  * - **hosted panel** — pre-mint: the DID-method radio; post-mint: the
  *   identity summary (`atproto-hosted-handle`).
  * - **full-PDS panel** — the F1 login-plane surface (app credentials,
- *   connected-app sessions, the external-apps kill-switch), gated on level =
+ *   connected-app sessions; the external-apps switch lives on Connected apps), gated on level =
  *   `hosted_full`.
  * - **delete presence** (`atproto-delete-presence`) — visible whenever a
  *   hosted identity exists; the destructive flow itself is S5-scoped (no
@@ -102,8 +102,6 @@ import social.fauna.generated.Ids
  *   move and stages the card on every other pick. Two declaration sites, one
  *   kind.
  * - **the delete-presence confirm** — `atproto.delete_presence`.
- * - **the external-apps kill switch** — `atproto.set_external_apps_enabled`; a
- *   dispatch-on-change toggle IS the commit.
  * - **mint / revoke on a credential row** —
  *   `atproto.provision_app_credential` / `.revoke_app_credential`.
  * - **a connected app's revoke** — `atproto.revoke_session`.
@@ -170,7 +168,6 @@ fun AtprotoSettingsScreen(
         onCancelTransition = vm::cancelTransition,
         onSetDidMethod = vm::setDidMethod,
         onSetHistoryBackfill = vm::setHistoryBackfill,
-        onSetExternalAppsEnabled = vm::setExternalAppsEnabled,
         onMint = vm::mint,
         onRevealSecret = vm::revealSecret,
         onRevoke = vm::revoke,
@@ -206,6 +203,7 @@ private fun syntheticUnlinkedBluesky() = FfiBridgeStatus(
     mode = null,
     settings = emptyList(),
     supportsFollows = false,
+    supportsFollowRequests = false,
     linkModes = listOf(
         FfiBridgeLinkMode(
             mode = "oauth",
@@ -237,7 +235,6 @@ fun AtprotoSettingsContent(
     onCancelTransition: () -> Unit,
     onSetDidMethod: (String) -> Unit,
     onSetHistoryBackfill: (Boolean) -> Unit,
-    onSetExternalAppsEnabled: (Boolean) -> Unit,
     // Mint a new app credential; returns (credentialId, secret) so the caller
     // can show the secret inline on the just-minted row (the only time it is
     // ever shown — never in the passive snapshot, D3).
@@ -398,8 +395,7 @@ fun AtprotoSettingsContent(
                     snapshot = snapshot,
                     revealed = revealed,
                     defaultCredentialLabelTemplate = defaultCredentialLabelTemplate,
-                    onSetExternalAppsEnabled = onSetExternalAppsEnabled,
-                    onMint = { scope.launch { onMint(formatNamed(defaultCredentialLabelTemplate, listOf(snapshot.credentials.size + 1)), false)?.let { (id, secret) -> revealed[id] = secret } } },
+                    onMint = { dmAllowed -> scope.launch { onMint(formatNamed(defaultCredentialLabelTemplate, listOf(snapshot.credentials.size + 1)), dmAllowed)?.let { (id, secret) -> revealed[id] = secret } } },
                     onRevealSecret = { id -> scope.launch { onRevealSecret(id)?.let { revealed[id] = it } } },
                     onRevoke = onRevoke,
                     onAuthorizeExternalApps = onAuthorizeExternalApps,
@@ -695,7 +691,7 @@ private fun DidMethodRung(id: String, titleRes: Int, descRes: Int, selected: Boo
     }
 }
 
-/** The F1 login-plane surface: kill-switch, app credentials and the D10
+/** The F1 login-plane surface: app credentials and the D10
  *  authoring-delegation row — in that order. Gated by the caller on level =
  *  `hosted_full`. The consent card and the connected-app rows moved to the
  *  Connected apps page (`connected-apps.md` § Architectural rules) — a row
@@ -705,36 +701,13 @@ private fun FullPdsPanel(
     snapshot: AtprotoSettingsSnapshot,
     revealed: MutableMap<String, String>,
     defaultCredentialLabelTemplate: String,
-    onSetExternalAppsEnabled: (Boolean) -> Unit,
-    onMint: () -> Unit,
+    onMint: (dmAllowed: Boolean) -> Unit,
     onRevealSecret: (String) -> Unit,
     onRevoke: (String) -> Unit,
     onAuthorizeExternalApps: () -> Unit,
     onDeauthorizeExternalApps: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        // mail-settings-enabled-toggle idiom: rendered unconditionally, bound
-        // to computed state, never wrapped in an `if`. Non-destructive in both
-        // directions — the lists below stay rendered while this is off.
-        // A dispatch-on-change toggle IS the commit — there is no Save beside it
-        // to carry the declaration, so the switch itself declares.
-        val killSwitchGate = faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(stringResource(R.string.atproto_settings_external_apps_toggle), modifier = Modifier.weight(1f))
-            Switch(
-                checked = snapshot.externalAppsEnabled,
-                onCheckedChange = onSetExternalAppsEnabled,
-                enabled = killSwitchGate.enabled,
-                modifier = Modifier.testTag(Ids.ATPROTO_EXTERNAL_APPS_ENABLE),
-            )
-        }
-        DisabledControlReasonText(killSwitchGate.reason)
-        Text(
-            stringResource(R.string.atproto_settings_external_apps_hint),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
         Column(modifier = Modifier.testTag(Ids.ATPROTO_APP_CREDENTIALS_LIST), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.atproto_settings_app_credentials_heading), style = MaterialTheme.typography.titleSmall)
             if (snapshot.credentials.isEmpty()) {
@@ -745,7 +718,23 @@ private fun FullPdsPanel(
                 }
             }
             val mintGate = faunaGate("fauna.bridges.atproto.provision_app_credential")
-            Button(onClick = onMint, enabled = mintGate.enabled, modifier = Modifier.testTag(Ids.ATPROTO_APP_CREDENTIAL_MINT)) {
+            // `atproto-app-credential-dm-access`: page-local, off by default
+            // (least privilege), read when the mint button is pressed.
+            var mintDmAccess by remember { mutableStateOf(false) }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .testTag(Ids.ATPROTO_APP_CREDENTIAL_DM_ACCESS)
+                    .toggleable(
+                        value = mintDmAccess,
+                        role = Role.Checkbox,
+                        onValueChange = { mintDmAccess = it },
+                    ),
+            ) {
+                Checkbox(checked = mintDmAccess, onCheckedChange = null)
+                Text(stringResource(R.string.atproto_settings_mint_dm_access_label))
+            }
+            Button(onClick = { onMint(mintDmAccess) }, enabled = mintGate.enabled, modifier = Modifier.testTag(Ids.ATPROTO_APP_CREDENTIAL_MINT)) {
                 Text(stringResource(R.string.atproto_settings_mint_button))
             }
             DisabledControlReasonText(mintGate.reason)
@@ -923,6 +912,13 @@ private fun CredentialItemRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (cred.dmAllowed) {
+                Text(
+                    stringResource(R.string.atproto_settings_credential_dm_access),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             // Reveal, inches to the left, declares NOTHING and stays live: the
             // lead app treats it as a class-Read local read, which ruling 1
             // leaves alone — the secret is recovered from this device's own

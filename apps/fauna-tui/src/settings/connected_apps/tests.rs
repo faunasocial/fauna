@@ -111,6 +111,98 @@ fn a_key_replacing_card_says_what_the_approve_ends() {
     assert!(!plain.contains(line) && !plain.contains(writer));
 }
 
+fn install_request(development: bool) -> ConsentCardRow {
+    let mut card = request("beef", "INS-TAL", Some("Hello Plugin"));
+    card.install = Some(fauna_atproto_settings_machine::ConsentInstallRow {
+        execution_form: "wasm".into(),
+        requested_kinds: vec!["ext.plugins.example.notes".into()],
+        settings: vec![fauna_atproto_settings_machine::ConsentInstallSettingRow {
+            key: "greeting".into(),
+            label: "Greeting".into(),
+            setting_type: "string".into(),
+        }],
+        publisher_domain: "plugins.example".into(),
+        publisher_key: (!development).then(|| "did:key:pub".into()),
+        module_digest: "sha256:0123".into(),
+        hosts: vec!["api.plugins.example".into()],
+        ingress_paths: vec![],
+        development,
+        bind: false,
+    });
+    card
+}
+
+/// An install card paints its section's seven leaves inside the card, each
+/// with its own fact; an ordinary card paints none of them.
+#[test]
+fn an_install_card_paints_its_section_inside_the_card() {
+    let app = app_with(|s| s.requests = vec![install_request(false)]);
+    let els = els(&app);
+    let leaf = |id: &str| -> &Element {
+        let el = find(&els, id);
+        assert_eq!(
+            el.path.first(),
+            Some(&(ids::CONNECTED_APPS_REQUEST_CARD.to_string(), 0)),
+            "{id} is scoped within its card"
+        );
+        el
+    };
+    assert!(!leaf(ids::CONNECTED_APPS_REQUEST_INSTALL).text.is_empty());
+    let heading_at = els
+        .iter()
+        .position(|e| e.id == ids::CONNECTED_APPS_REQUEST_INSTALL)
+        .unwrap();
+    assert!(
+        els[heading_at + 1]
+            .text
+            .starts_with("Installing runs this code on your nest."),
+        "the framing line sits directly under the heading: {:?}",
+        els[heading_at + 1].text
+    );
+    let form = leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_FORM);
+    assert_eq!(attr(form, "form"), Some("wasm"));
+    assert!(form.text.contains("wasm"));
+    let publisher = &leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER).text;
+    assert!(publisher.contains("plugins.example") && publisher.contains("did:key:pub"));
+    assert!(
+        leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_DIGEST)
+            .text
+            .contains("sha256:0123")
+    );
+    assert!(
+        leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_KINDS)
+            .text
+            .contains("ext.plugins.example.notes")
+    );
+    assert!(
+        leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_HOSTS)
+            .text
+            .contains("api.plugins.example")
+    );
+    assert!(
+        leaf(ids::CONNECTED_APPS_REQUEST_INSTALL_SETTINGS)
+            .text
+            .contains("Greeting (string)")
+    );
+
+    let plain = app_with(|s| s.requests = vec![request("abcd", "ABC-DEF", Some("Example App"))]);
+    assert!(!has(
+        &connected_apps_elements(&plain.settings),
+        ids::CONNECTED_APPS_REQUEST_INSTALL
+    ));
+}
+
+/// A development plugin's card names it as one and paints no `did:key`.
+#[test]
+fn a_development_install_card_paints_no_key() {
+    let app = app_with(|s| s.requests = vec![install_request(true)]);
+    let publisher = find(&els(&app), ids::CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER)
+        .text
+        .clone();
+    assert!(publisher.contains("Development plugin"), "{publisher}");
+    assert!(!publisher.contains("did:key"), "{publisher}");
+}
+
 /// An authed app whose page holds a machine over the in-memory seam — the
 /// fixture builds no page machines itself.
 fn app_with_machine() -> App {
@@ -251,6 +343,48 @@ fn a_roster_row_paints_name_badge_publisher_scopes_and_revoke() {
     assert!(!has(&els, ids::CONNECTED_APPS_EMPTY));
     assert!(has(&els, ids::CONNECTED_APPS_ITEM_REVOKE));
     assert!(!has(&els, ids::CONNECTED_APPS_ITEM_REVOKE_CONFIRM));
+}
+
+/// A hosted plugin's row — and only that — links to its settings card, and the
+/// link opens the Bridges page, where the card is.
+#[test]
+fn a_plugin_row_links_to_its_settings_card_on_the_bridges_page() {
+    let mut app = app_with(|s| {
+        s.principals = vec![
+            row("principal:01", class::DEVICE, "Device App"),
+            row("principal:02", class::WASM, "Hello Plugin"),
+        ]
+    });
+    let reg = crate::automation::Registry::of(els(&app));
+    let scope = |i| [(ids::CONNECTED_APPS_ITEM.to_string(), i)];
+    assert_eq!(
+        reg.count_scoped(ids::CONNECTED_APPS_ITEM_SETTINGS_LINK, &scope(0)),
+        0
+    );
+    assert_eq!(
+        reg.count_scoped(ids::CONNECTED_APPS_ITEM_SETTINGS_LINK, &scope(1)),
+        1
+    );
+    let link = els(&app)
+        .into_iter()
+        .find(|e| e.id == ids::CONNECTED_APPS_ITEM_SETTINGS_LINK)
+        .unwrap();
+    let crate::element::Role::Button(gesture) = link.role else {
+        panic!("the link is a button");
+    };
+    app.bridges.nest = Some(fauna_client::NestClient::new(
+        "http://127.0.0.1:9".to_string(),
+        fauna_core::identity::ActorKeypair::from_secret([7u8; 32]),
+    ));
+    let Gesture::Bridges(action) = gesture else {
+        panic!("the link is a Bridges gesture");
+    };
+    let op = crate::bridges::apply_local(&mut app, action);
+    assert_eq!(app.page, crate::pages::Page::Bridges);
+    assert!(
+        matches!(op, Some(crate::bridges::Op::Refresh { .. })),
+        "opening the page reads it, as entering its tab does"
+    );
 }
 
 #[test]
@@ -855,6 +989,57 @@ fn unblock_carries_the_client_id_to_the_machine() {
             ConnectedAppsGesture::Unblock("https://pushy.example/client.json".into())
         ),
         other => panic!("expected the unblock op, got {}", other.is_some()),
+    }
+}
+
+/// The external-apps switch paints at every integration level — it no longer
+/// waits for a full-PDS account to reach it — before any read has returned,
+/// and carries the nest's answer in its `state` attr.
+#[test]
+fn the_external_apps_switch_paints_before_and_after_the_first_read() {
+    let before = els(&authed_app());
+    let toggle = before
+        .iter()
+        .find(|e| e.id == ids::ATPROTO_EXTERNAL_APPS_ENABLE)
+        .expect("the switch is on the page before the first read");
+    assert_eq!(
+        attr(toggle, "state"),
+        Some("on"),
+        "the flag's default is ON"
+    );
+
+    let app = app_with(|s| s.external_apps_off = true);
+    let els = els(&app);
+    let at = els
+        .iter()
+        .position(|e| e.id == ids::ATPROTO_EXTERNAL_APPS_ENABLE)
+        .unwrap();
+    assert_eq!(attr(&els[at], "state"), Some("off"));
+    assert_eq!(
+        els[at + 1].text,
+        card_t::EXTERNAL_APPS_HINT,
+        "the hint says what OFF pauses, right under the switch"
+    );
+    let roster = els
+        .iter()
+        .position(|e| e.text == t::ROSTER_HEADING)
+        .unwrap();
+    assert!(at < roster, "the switch sits above the rows it pauses");
+}
+
+/// The switch flips the nest's value, read off the snapshot — never a carried
+/// guess — and routes through the shared connected-apps machine.
+#[test]
+fn the_switch_carries_the_flipped_value_to_the_machine() {
+    for (off, want) in [(false, false), (true, true)] {
+        let mut app = app_with(|s| s.external_apps_off = off);
+        let op = super::super::apply_local(&mut app, Action::ConnectedAppsToggleExternalApps);
+        match op {
+            Some(super::super::Op::ConnectedApps { gesture, .. }) => {
+                assert_eq!(gesture, ConnectedAppsGesture::SetExternalApps(want))
+            }
+            other => panic!("expected the switch op, got {}", other.is_some()),
+        }
     }
 }
 

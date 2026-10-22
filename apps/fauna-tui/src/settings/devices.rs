@@ -809,6 +809,19 @@ fn custody_elements(state: &DevicesState, els: &mut Vec<Element>) {
             )
             .within(ids::CUSTODY_HELD_CARD, i),
         );
+        // A NEST-form hold carries the address the owner's cold device
+        // restores from — the accept's URL verbatim, handed over out of band
+        // (`devices.md` § Custody facet; the owner's half is `nests.md`
+        // § Trust facet — restore from a custodian nest).
+        if let Some(address) = &held.custodian_nest_url {
+            els.push(
+                Element::label(
+                    ids::CUSTODY_HELD_RESTORE_ADDRESS,
+                    t::custody_held_restore_address(address),
+                )
+                .within(ids::CUSTODY_HELD_CARD, i),
+            );
+        }
     }
 
     // (3) Incoming offers — the consent surface. The floor copy is REQUIRED
@@ -989,6 +1002,7 @@ pub(crate) fn custody_walk_facet() -> CustodyFacetSnapshot {
                     attested_at_micros: 6_000_000,
                 }),
                 stopped: false,
+                custodian_nest_url: Some("https://my-nest.example".into()),
             },
             HeldCustodyView {
                 grant_id: vec![0x44; 16],
@@ -997,6 +1011,7 @@ pub(crate) fn custody_walk_facet() -> CustodyFacetSnapshot {
                 retained_bytes_cap: 4_096,
                 receipt: None,
                 stopped: true,
+                custodian_nest_url: None,
             },
         ],
         offers: vec![CustodyOfferView {
@@ -2072,6 +2087,18 @@ mod succession_custody_tests {
         // never empty.
         let held_bytes = by_id("custody-held-bytes");
         assert!(!held_bytes[1].text.is_empty());
+        // The NEST-form hold (the first) carries the owner's restore address,
+        // the accept's URL verbatim; the device-form hold carries none.
+        let addresses = by_id("custody-held-restore-address");
+        assert_eq!(addresses.len(), 1, "only the NEST-form hold renders it");
+        assert!(addresses[0].text.contains("https://my-nest.example"));
+        assert!(
+            addresses[0]
+                .path
+                .iter()
+                .any(|s| s.0 == "custody-held-card" && s.1 == 0),
+            "the address scopes under its own card"
+        );
 
         // The consent card: the REQUIRED floor copy, and both verdict
         // buttons live.

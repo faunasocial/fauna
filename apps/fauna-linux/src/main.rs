@@ -24,6 +24,7 @@ mod debounce;
 mod drafts_autosave;
 mod feature_editor;
 mod feed;
+mod file_manager_share;
 mod i18n;
 mod instance_remote;
 mod launcher_badge;
@@ -33,6 +34,7 @@ mod mail_glue;
 mod main_loop_meter;
 mod media_loads;
 mod mls;
+mod nest_rules;
 mod notifications;
 mod offline_gate;
 /// The co-present offline share-initiation ceremony (`docs/goal/behavior/p2p.md`
@@ -49,6 +51,7 @@ mod region;
 mod report;
 mod routes;
 mod rows;
+mod rule_editor;
 mod screen_lock;
 mod search;
 mod service_watcher;
@@ -747,6 +750,9 @@ fn build_ui(application: &adw::Application) {
     // surface renders and before the first relay fetch (`region-blocking.md`
     // § Fail posture — loaded at launch ahead of the first fetch).
     region::launch();
+    // The nest-rules book likewise: a nest's last-accepted rules bind before
+    // the session's first self-description read (`nest-rules.md` § Carriage).
+    nest_rules::launch();
 
     register_sign_out_handler(application);
     register_factory_reset_handler(application);
@@ -2735,6 +2741,9 @@ fn launch_authenticated(
     // for a user who never re-opens the window. Gated + tri-state inside;
     // `apps/linux.md` § Auto-start at sign-in.
     autostart::register_at_post_auth();
+    // The GNOME Files Share entry's module, named for this channel's agent
+    // (`apps/linux.md` § The file manager's Share entry (GNOME Files)).
+    file_manager_share::install_at_post_auth();
 
     let (tx, rx) = client::ui_channel();
     // The stored `node_url` is the identity truth (it is what the status row
@@ -2995,10 +3004,10 @@ fn start_element_agent_once(application: &adw::Application) {
 // ---------------------------------------------------------------------------
 
 /// Rebuild the Profile page for a target and show it — `None` = the viewer's own
-/// profile, `Some(hex)` = another actor's. See
-/// [`app::MainWindowResult::open_profile`] for why reaching a specific actor's
-/// profile is a rebuild rather than a stack switch.
-type OpenProfileFn = Rc<dyn Fn(Option<String>)>;
+/// profile, `Some(hex)` = another actor's, plus the open's optional home hint.
+/// See [`app::MainWindowResult::open_profile`] for why reaching a specific
+/// actor's profile is a rebuild rather than a stack switch.
+type OpenProfileFn = views::profile::OpenProfile;
 
 /// The active main window's [`OpenProfileFn`], re-pointed at each of the four
 /// sites that hand a freshly built main window to the test-command drain.
@@ -4256,7 +4265,21 @@ fn handle_test_command(
                         let opener = current_open_profile.borrow().clone();
                         if let Some(open_profile) = opener {
                             let me = current_client.borrow().as_ref().and_then(|c| c.actor_id());
-                            open_profile(test_agent::profile_nav_target(actor, me.as_deref()));
+                            // The entry's optional `home_nest_url` is the open
+                            // target's routing hint (`profile.md` § Layout & flow
+                            // → *Reaching another actor's profile*), the same
+                            // slot the real doors fill.
+                            let home = nav
+                                .get("stack")
+                                .and_then(|s| s.as_array())
+                                .and_then(|a| a.first())
+                                .and_then(|f| f.get("home_nest_url"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            open_profile(
+                                test_agent::profile_nav_target(actor, me.as_deref()),
+                                home,
+                            );
                         } else {
                             // Convention 11 again: a profile-by-actor nav we
                             // cannot honour fails LOUDLY. Silence here would
@@ -4380,6 +4403,7 @@ fn handle_test_command(
                         // Per view, like the real nav edge (`app.rs`).
                         "notifications" => client.fetch_notifications_for_view(),
                         "events" => client.fetch_calendars(),
+                        "bridges" => crate::views::bridges::plugins::refresh(client),
                         // The Devices/Peers page refreshes off the shared
                         // `DevicesMachine` when it becomes visible (wired on
                         // the stack in app.rs), so no per-nav fetch here.
@@ -4944,6 +4968,22 @@ fn handle_test_command(
                 .unwrap_or(0);
             fauna_client_capabilities::trust_clock::set_clock_offset_secs(offset);
         }
+        // Moves the submission-token refresh's clock
+        // (`fauna_client_mail_settings::token_refresh`) — the `now` the 7-day
+        // re-mint cadence is measured against and each re-minted token's
+        // `issued_at`, never the bearer clock — so "a mail app keeps sending
+        // month after month" is reached by convention 14's fake clock. tui's
+        // twin is `automation.rs`'s arm. `now_offset_secs: 0` resets; the
+        // offset is process-wide. Nothing runs here: the shared connect-time
+        // trigger reads the clock on its next pass (a reconnect or the tick).
+        "mail_token_refresh_advance_clock" => {
+            let offset = cmd
+                .payload
+                .get("now_offset_secs")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            fauna_client_mail_settings::token_refresh::set_clock_offset_secs(offset);
+        }
         // Moves the co-present ceremony's ADMISSION clock
         // (`fauna_sync_engine::ceremony_clock`), the `now` a receive-act
         // expectation is minted and judged against — outcome 6's lapsed
@@ -5357,7 +5397,7 @@ fn handle_test_command(
         fauna_e2e_agent::FAMILY_NOTIFY_CHECK_NOW => {
             // Guardian Notify flush cadence e2e command (convention 14's
             // "run_now poke"), the linux twin of web's
-            // `family_notify_check_now` ($lib/family-notify-e2e.ts). Drives
+            // `family_notify_check_now` (#lib/family-notify-e2e.ts). Drives
             // `FaunaClient::flush_notify_report` directly rather than waiting
             // out the real 5s poll tick, which `start_notify_flush_poll` no
             // longer arms under e2e (`crate::e2e_mode_enabled()`) — so under
@@ -5372,7 +5412,7 @@ fn handle_test_command(
         fauna_e2e_agent::CONV_RECEIVE_NOW => {
             // The receive loop's run-one-cycle-now poke (convention 14's
             // `run_now`), the linux twin of tui's arm and web's
-            // `conv_receive_now` ($lib/conversations.ts). Signals the shared
+            // `conv_receive_now` (#lib/conversations.ts). Signals the shared
             // loop, which runs the identical `full_sweep!` its 30 s backstop
             // ticker runs — the real delivery path, not a per-rail shortcut.
             // Fire-and-forget: the barrier is `conv_receive_cycles`, not this
@@ -6439,6 +6479,16 @@ fn update_shared_state(
                                 .into_iter()
                                 .map(|(url, state)| json!({ "url": url, "state": state.name() }))
                                 .collect::<Vec<_>>(),
+                            // The author face (`feed.md` § The read model → *The
+                            // remote author's byline*): `null` until a remote
+                            // author's resolve has answered, then the face — an
+                            // empty one when the author shows none. What lets a
+                            // test wait for that answer before it reads the
+                            // card's id fallback as final. tui's key.
+                            "author_display": p.author_display.as_ref().map(|a| json!({
+                                "handle": a.handle,
+                                "display_name": a.display_name,
+                            })),
                         })
                     })
                     .collect();
@@ -6843,6 +6893,9 @@ fn update_shared_state(
             "succession_witness":
                 crate::conversations::conv_backend::witness_state_json(),
             "feed": feed_json,
+            // The Profile page's `profile.is_self` / `actor_id` /
+            // `home_nest_url` (ui.yaml `pages.profile.state_fields`).
+            "profile": views::profile::state_json(),
             "contacts": contacts_json,
             "knocks": knocks_json,
             "events": events_json,
@@ -6882,7 +6935,14 @@ fn update_shared_state(
     // which the invariant reads as a lost shape — before a stack exists.
     if let Some(stack) = stack {
         state_json["region_block_render"] = region::block_render_json(stack);
+        // Its nest twin, `nest-block-never-silent` (`nest_rules::block_render_json`).
+        state_json["nest_block_render"] = nest_rules::block_render_json(stack);
     }
+    // The nest's changed notice (no element id, `nest-rules.md` § Element IDs)
+    // and the guardian document's rule count on the ward's device — tui's
+    // additive state fields `test_nest_rules.py` reads.
+    state_json["nest_rules_changed_notice"] = nest_rules::changed_notice().into();
+    state_json["ward_rule_document_rules"] = content_policy::ward_document_rule_count().into();
 
     if let Ok(mut s) = shared.lock() {
         s.state_json = state_json;

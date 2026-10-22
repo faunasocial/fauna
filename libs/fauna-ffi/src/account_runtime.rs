@@ -360,6 +360,19 @@ pub(crate) fn mail_store() -> std::sync::Arc<dyn fauna_client_config::MailStore>
     ))
 }
 
+/// The mail import's remembered source (`fauna.state.mail-import-source`)
+/// over this seat's runtime, waiting for the runtime when it is not up yet.
+/// Its one caller is the mail-admin import machine.
+#[cfg(feature = "mail-admin")]
+pub(crate) fn mail_import_source_store()
+-> std::sync::Arc<dyn fauna_client_config::MailImportSourceStore> {
+    std::sync::Arc::new(
+        fauna_sync_engine::account_runtime::AccountMailImportSourceStore::new(std::sync::Arc::new(
+            handle,
+        )),
+    )
+}
+
 /// The runtime the installed store's assembly ran on — where the conversations
 /// seams start their tasks when the pair completes from the session edge,
 /// which is a synchronous foreign call with no runtime of its own.
@@ -792,9 +805,15 @@ pub(crate) mod tests {
                 deleted: false,
                 is_own: false,
                 legal_takedown_ref: None,
+                admin_block_reason: None,
                 labels: vec![],
                 plane_ref: None,
                 can_delete: false,
+                undelivered: false,
+                warmup_hold: None,
+                scan_result_lines: Vec::new(),
+                delivered_to: None,
+                withheld: None,
             };
             let thread = manager.restore_channel_slice(&ChannelHistorySlice {
                 channel_id_hex: CHANNEL.to_string(),

@@ -12,8 +12,8 @@
   // every gesture back through the machine. No folder / conflict HTTP and no
   // wizard logic in the SPA (priority #2). Behaviour + IDs:
   // docs/goal/ui/folders.md, ui.yaml § folders.
-  import { identity } from '$lib/store';
-  import { nodeUrl } from '$lib/api';
+  import { identity } from '#lib/store';
+  import { nodeUrl } from '#lib/api';
   import {
     ensureWasm,
     shortId,
@@ -21,7 +21,7 @@
     parseCountI64,
     devicePlaceLabel,
     accountEnrolledDeviceRow,
-  } from '$lib/wasm';
+  } from '#lib/wasm';
   import {
     conflictBadgeLabel,
     parsePathsField,
@@ -47,11 +47,11 @@
     unfollowPublicFolder,
     type NestPlaceEdit,
     type VersionRetentionEdit,
-  } from '$lib/wasm-folders';
-  import { getConversationsManager } from '$lib/conversations';
-  import { sessionDevicesMachine } from '$lib/devices-session';
-  import { parseRecipient } from '$lib/resolve';
-  import { refusedAsNotReady } from '$lib/wasm';
+  } from '#lib/wasm-folders';
+  import { getConversationsManager } from '#lib/conversations';
+  import { sessionDevicesMachine } from '#lib/devices-session';
+  import { parseRecipient } from '#lib/resolve';
+  import { refusedAsNotReady } from '#lib/wasm';
   import {
     defaultConflictPolicyGet,
     defaultConflictPolicySet,
@@ -66,14 +66,14 @@
     onPushEvent,
     staleSurfacesForPushKind,
     type SubscriptionTier,
-  } from '$lib/rpc';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
+  } from '#lib/rpc';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
-  import { registerActorScopedReset, sameActorSince } from '$lib/actorScope';
-  import { t } from '$lib/i18n/strings';
-  import { byteSize } from '$lib/value-format';
-  import { getDeviceId } from '$lib/device-id';
+  import { onStoreChange } from '#lib/store-change';
+  import { createActorScopedPoll, sameActorSince } from '#lib/actorScope';
+  import { t } from '#lib/i18n/strings';
+  import { byteSize } from '#lib/value-format';
+  import { getDeviceId } from '#lib/device-id';
   import {
     type ConflictSummary,
     type DevicesSnapshot,
@@ -86,9 +86,9 @@
     type PendingShare,
     type WizardDevice,
     type WizardSnapshot,
-  } from '$lib/devices-machine';
+  } from '#lib/devices-machine';
   import type { DevicesMachine } from '../../../static/fauna_wasm_folders.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The page-level error surface is the Settings shell's shared MessageBanner
   // (`error-message`); we write into its bound `error` so a read/write failure
@@ -98,15 +98,10 @@
   let machine: DevicesMachine | null = null;
   let snap = $state<DevicesSnapshot | null>(null);
   let ready = $state(false);
-  let timer: ReturnType<typeof setInterval> | null = null;
   // The 15 s poll writes this actor's rows, so the canonical drop retires it
   // (`account-scoping.md` § The scoping taxonomy: background loops die with the
   // state they write); it must not outlive an in-place identity change.
-  function stopTimer(): void {
-    if (timer) clearInterval(timer);
-    timer = null;
-  }
-  const unregisterActorReset = registerActorScopedReset(stopTimer);
+  const poll = createActorScopedPoll(15000);
   let unsubPush: (() => void) | null = null;
   let unlisten: (() => void) | null = null;
 
@@ -181,7 +176,7 @@
    *  pick overtook paints nothing. */
   let defaultConflictPolicyPicks = 0;
 
-  // The store-change re-read (`$lib/store-change`): the same read, level-shaped
+  // The store-change re-read (`#lib/store-change`): the same read, level-shaped
   // — a failed or overtaken re-read keeps the painted policy (the visit's own
   // load degrades a failure to "auto"; a notice must never repaint on a
   // failure).
@@ -452,12 +447,10 @@
       void loadPendingShares();
       // An identity change landing during the awaits above already ran the drop;
       // starting the poll now would resurrect the outgoing actor's loop.
-      if (sameActor()) {
-        timer = setInterval(() => {
-          machine?.refresh();
-          void loadPendingShares();
-        }, 15000);
-      }
+      poll.start(sameActor, () => {
+        machine?.refresh();
+        void loadPendingShares();
+      });
       // Remote-change nudge (file-sync.md § Remote-change nudge): the nest
       // fires `fauna.sync.changed` at every same-nest participant of a set
       // (owner's other devices, or a shared-set member) after a durable sync
@@ -489,7 +482,7 @@
     }
   });
 
-  // The store-change notice (`$lib/store-change`): the followed folders and
+  // The store-change notice (`#lib/store-change`): the followed folders and
   // foreign sets rest in the account store, so the open page runs the periodic
   // re-read's own body at once; the default conflict policy (a sync-prefs
   // state entry) re-reads too, keeping its painted value on a failure.
@@ -501,8 +494,7 @@
   });
 
   onDestroy(() => {
-    stopTimer();
-    unregisterActorReset();
+    poll.dispose();
     unsubPush?.();
     unsubStoreChange();
     unlisten?.();
@@ -1625,7 +1617,7 @@
                             {/each}
                           </select>
                           {#if !ownTiers.length}
-                            <span class="fs-webdav-needs-mail">{t.devices.paywall_tier_needs_tier}</span>
+                            <span class="fs-webdav-needs-mail" data-testid={IDS.FOLDER_PAYWALL_HINT}>{t.devices.paywall_tier_needs_tier}</span>
                           {/if}
                         </label>
                       {/if}

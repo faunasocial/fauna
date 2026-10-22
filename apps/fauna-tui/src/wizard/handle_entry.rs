@@ -3,7 +3,9 @@
 //! ui.yaml `onboarding.handle_entry` elements: `handle-input`,
 //! `handle-check-button`, `handle-message-area`,
 //! `handle-entry-continue-button`, `handle-entry-back-button`; optional
-//! `handle-control-checkbox` (visible only on the `RegisteredNoNest` outcome).
+//! `handle-control-checkbox` (visible only on the `RegisteredNoNest` outcome)
+//! and the terms notice `onboarding-terms-notice` + `onboarding-terms-link`
+//! (only while `terms_notice_visible` — a Continue that signs in).
 //!
 //! Everything is rendered from `handle_check_snapshot()`. The client recomputes
 //! nothing: `continue_enabled`, the checkbox's visibility/checked state and the
@@ -58,6 +60,12 @@ pub fn elements(w: &Wizard) -> Vec<Element> {
             snap.control_checkbox_checked,
             Action::SetControlCheckbox(!snap.control_checkbox_checked),
         ));
+    }
+
+    // Above the bottom row, only while Continue signs in — the snapshot's
+    // field, never an outcome comparison here.
+    if snap.terms_notice_visible {
+        out.extend(super::terms_notice());
     }
 
     out.push(Element::button(

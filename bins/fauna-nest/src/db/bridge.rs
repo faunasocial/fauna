@@ -3,8 +3,8 @@
 use super::{
     BridgeFeedSubscription, BridgeMessageRow, CacheDb, content, links, now_epoch_millis, search,
 };
-use crate::domain_hash::{HashField, write_fields};
 use anyhow::{Context, Result};
+use fauna_core::domain_hash::{HashField, write_fields};
 
 /// Domain tag for [`CacheDb::bridge_content_id`].
 const BRIDGE_CONTENT_ID_DST: &[u8] = b"fauna.bridge_content.id.v1";

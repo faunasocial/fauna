@@ -468,6 +468,31 @@ mod tests {
         }
     }
 
+    /// Block until the worker has processed every command sent before this call.
+    ///
+    /// The worker drains commands in FIFO order, so a throwaway engine on its own
+    /// key — started, then stopped — reports `Cancelled` only after every earlier
+    /// command has been handled. A test that must order a `Notify` after its
+    /// commands calls this first: firing the `Notify` straight after `send` races
+    /// the worker, and a lagging worker (a loaded box) sees the engine end before
+    /// the commands that were meant to queue behind it.
+    fn drain_commands(
+        tx: &StdUnboundedSender<EngineCommand<FakeDesc>>,
+        reports: &std::sync::mpsc::Receiver<Report>,
+    ) {
+        tx.send(EngineCommand::Start(FakeDesc::new("barrier")))
+            .unwrap();
+        tx.send(EngineCommand::Stop {
+            key: "barrier".to_string(),
+        })
+        .unwrap();
+        assert_eq!(recv_report(reports), Report::Started("barrier".to_string()));
+        assert_eq!(
+            recv_report(reports),
+            Report::Cancelled("barrier".to_string())
+        );
+    }
+
     /// 1. Starting with two initial descriptors makes BOTH engine futures live.
     #[test]
     fn starts_all_initial_engines() {
@@ -533,6 +558,7 @@ mod tests {
         wait_for_running(&running, 1);
 
         tx.send(EngineCommand::Start(FakeDesc::new("a"))).unwrap();
+        drain_commands(&tx, &reports);
         assert!(
             reports.recv_timeout(Duration::from_millis(300)).is_err(),
             "the replacement started beside the engine it replaces"
@@ -567,6 +593,7 @@ mod tests {
             key: "a".to_string(),
         })
         .unwrap();
+        drain_commands(&tx, &reports);
         first_done.notify_one();
 
         wait_for_running(&running, 0);
@@ -595,6 +622,7 @@ mod tests {
         )))
         .unwrap();
         tx.send(EngineCommand::Start(FakeDesc::new("a"))).unwrap();
+        drain_commands(&tx, &reports);
         first_done.notify_one();
 
         assert_eq!(recv_report(&reports), Report::Started("a".to_string()));

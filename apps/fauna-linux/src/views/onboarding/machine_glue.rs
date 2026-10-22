@@ -59,5 +59,11 @@ pub fn make_machine(tx: Sender<()>) -> Arc<OnboardingMachine> {
     // the declaration and `mod.rs`'s `STEP_RECOVERY_KIT` registration land
     // together, or the wizard strands on a step with no stack child.
     machine.set_renders_recovery_kit(true);
+    // A desktop app keeps a door key where SSH keys live: a door run writes it
+    // to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH door →
+    // *The key*), as tui does.
+    if let Some(home) = std::env::home_dir() {
+        machine.set_ssh_door_key_dir(Some(home.join(".ssh").display().to_string()));
+    }
     machine
 }

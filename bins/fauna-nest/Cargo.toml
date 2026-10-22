@@ -634,7 +634,12 @@ fauna-client-capabilities = { path = "../../libs/fauna-client-capabilities" }
 # longer reaches this module; name the feature that actually gates it. fauna-ffi
 # depends on fauna-nest-*http* only (not fauna-nest), so no cycle; it is NOT a
 # prod-dep of the nest, so this stays isolated to the test build.
-fauna-ffi = { path = "../../libs/fauna-ffi", default-features = false, features = ["file-provider-host"] }
+# `recovery-ceremony` + `recovery-aftermath` give
+# `conformance_ffi_stolen_ceremony_client.rs` the FFI stolen-identity driver
+# (`run_stolen_ceremony`) with the default-shipping link step, so the read-back
+# verdict and the predecessor link are pinned at the FFI face, not only the
+# shared composition. In-repo features only.
+fauna-ffi = { path = "../../libs/fauna-ffi", default-features = false, features = ["file-provider-host", "recovery-ceremony", "recovery-aftermath"] }
 # `test-helpers` exposes the MLS-2 attacker-simulation seam
 # `forge_key_package_bytes_for_test` so `conformance_conversations_keypackage.rs`
 # can prove the `keypackage.upload` handler rejects a forged-identity KeyPackage
@@ -679,6 +684,9 @@ serde_json.workspace = true
 ed25519-dalek.workspace = true
 reqwest = { workspace = true, features = ["http2", "multipart"] }
 tempfile = "3"
+# Test-only: property tests over the federation hello decode and signature
+# verify (`federation_channel.rs`, `federation_sig.rs`).
+proptest = { workspace = true }
 ring = "0.17"
 # `ServiceExt::oneshot` drives the real `build_router` in the MTA-STS serving
 # conformance test (no TCP, full Host-header control). tower 0.5 is already in

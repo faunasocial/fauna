@@ -14,9 +14,10 @@
 use fauna_protocol::ByteBuf;
 use fauna_protocol::RpcRequester;
 use fauna_protocol::posts::{
-    PostCreateReply, PostCreateRequest, PostDeleteReply, PostDeleteRequest, PostGetReply,
-    PostGetRequest, PostInteractReply, PostInteractRequest, PostRoomLabelsRemoteRequest,
-    PostRoomLabelsReply, PostRoomLabelsRequest, PostsListReply, PostsListRequest,
+    PostCreateReply, PostCreateRequest, PostDeleteReply, PostDeleteRequest, PostGetRemoteRequest,
+    PostGetReply, PostGetRequest, PostInteractReply, PostInteractRequest,
+    PostRoomLabelsRemoteRequest, PostRoomLabelsReply, PostRoomLabelsRequest, PostsListReply,
+    PostsListRequest,
 };
 
 pub use fauna_protocol::posts;
@@ -63,6 +64,35 @@ impl<R: RpcRequester> PostsClient<R> {
                 "fauna.posts.get",
                 PostGetRequest {
                     post_id: post_id.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    /// `fauna.posts.get_remote` — the same read for a post homed on
+    /// **another** nest (`feed.md` § The read model → *Opening a post the
+    /// timeline never loaded* → *A post homed on another nest*): this caller's
+    /// own nest originates `fauna.federation.post.get` to `nest_url` and
+    /// hands back the home's envelope, forwarded and unstored
+    /// (`author_display` always `None`). A post the home does not hold is the
+    /// same `fauna.posts.not_found` [`Self::posts_get`] answers.
+    ///
+    /// A **distinct kind**, not an additive `nest_url` on [`Self::posts_get`]:
+    /// an old own-nest that ignored the field would answer `not_found` from
+    /// its own store — the answer that sent the caller here — and the door
+    /// would stay shut with no signal. An unknown kind fails loud instead.
+    pub async fn posts_get_remote(
+        &self,
+        post_id: String,
+        nest_url: String,
+    ) -> Result<PostGetReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.posts.get_remote",
+                PostGetRemoteRequest {
+                    post_id,
+                    nest_url,
                     extra: std::collections::BTreeMap::new(),
                 },
             )
@@ -223,12 +253,12 @@ mod tests {
                 post_id: "ab".repeat(32),
                 extra: Default::default(),
             }),
-            "fauna.posts.get" => fauna_protocol::encode_canonical(&PostGetReply {
-                body: ByteBuf::from(vec![0x01, 0x02]),
-                legal_takedown: None,
-                author_display: None,
-                extra: Default::default(),
-            }),
+            "fauna.posts.get" | "fauna.posts.get_remote" => {
+                fauna_protocol::encode_canonical(&PostGetReply {
+                    body: ByteBuf::from(vec![0x01, 0x02]),
+                    ..Default::default()
+                })
+            }
             "fauna.posts.delete" => fauna_protocol::encode_canonical(&PostDeleteReply {
                 post_id: "ab".repeat(32),
                 deleted: true,
@@ -282,6 +312,21 @@ mod tests {
         assert_eq!(kind, "fauna.posts.get");
         let req: PostGetRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.post_id, hex32());
+    }
+
+    #[test]
+    fn posts_get_remote_composes_the_distinct_kind_and_names_the_home() {
+        let (rec, c) = client();
+        block_on(c.posts_get_remote(hex32(), "https://home.example".into()))
+            .expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(
+            kind, "fauna.posts.get_remote",
+            "a distinct kind, never an additive field on the same-nest read"
+        );
+        let req: PostGetRemoteRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.post_id, hex32());
+        assert_eq!(req.nest_url, "https://home.example");
     }
 
     #[test]

@@ -104,7 +104,7 @@ a missed push costs only latency (offline devices catch up on cadence — no new
 correctness dependency, so it fires unconditionally after a durable insert; a
 rare byte-identical replay's redundant nudge is a harmless no-op pull). **Same-nest
 only**; a **cross-nest** nudge would grow the deliberately-closed federation
-kind inventory (`federation.md` § Cross-nest) and therefore needs its own
+kind inventory (`federation-shared-folders.md` § Cross-nest) and therefore needs its own
 dedicated federation design + security pass before ratification — a named
 candidate, not a ratified target. Rationale: shrinking propagation latency
 directly shrinks the concurrent-edit divergence window, which is the dominant UX
@@ -213,11 +213,10 @@ deployment + migration shape.
   `backup_key = Some(BackupKey::derive(seed))` for owner-only sets (`apps/fauna-linux/src/sync.rs`;
   the retired *"box is trusted for the owner's own data"* rationale the no-modes ruling
   retired, `../architecture/nest/storage-modes.md`, is gone from the comment). **The
-  `bins/fauna-sync` headless daemon now seals too (2026-07-13)** — `run_ws_session` derives the
-  owner `convergent_chunk_root()` and threads it into the WS client, so its own
-  `chunk_and_cache` → `push_cached_file_to_nest` pipeline seals every chunk (ciphertext store
-  keys + `stored_hashes`), and its read/apply + `restore` paths open manifest-driven (both the
-  sealed and the legacy plaintext back-catalogue). No owner-only folder writer rests plaintext.
+  `bins/fauna-sync` headless daemon sealed too (2026-07-13; the daemon was removed 2026-10-02)** —
+  `run_ws_session` derived the owner `convergent_chunk_root()` and threaded it into the WS client,
+  so its own pipeline sealed every chunk (ciphertext store keys + `stored_hashes`). No owner-only
+  folder writer rests plaintext.
 - **macOS: one byte-sync path.** The in-process engines replace **both** legacy paths — the
   Swift `SyncEngine` + FSEvents `DirectoryWatcher` (the engine's own `notify` watcher uses
   FSEvents on macOS), **and** the launchctl-managed LaunchAgent path: `SyncDaemonManager`

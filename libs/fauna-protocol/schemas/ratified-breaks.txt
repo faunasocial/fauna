@@ -28,9 +28,12 @@
 # gates (exit 2); a line naming a real token but otherwise malformed (too
 # few fields, an unratifiable transition, a bare type tightened) fails only
 # that token's OWN gate (exit 2) — the sibling gate skips a line it doesn't
-# own without validating it.
+# own without validating it. Both rules bind HEAD's list; the merge base's
+# list feeds only the only-grows check and is read leniently (a line the
+# grammar rejects there is skipped with a warning, never exit 2).
 # `#` starts a comment. Entries are permanent: a removed name never comes
-# back — both gates refuse a head that revives a `removed` key, and each
+# back — both gates refuse a head that revives a `removed` key (at every
+# product version, the 0.1.x window included), and each
 # gate independently refuses a head whose own-gate entries drop one the
 # merge base carried, catching a deletion even without a revival — so
 # nothing ever needs to leave this list. Who writes a line is owned by

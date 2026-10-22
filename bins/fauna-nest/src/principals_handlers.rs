@@ -11,13 +11,15 @@ use fauna_protocol::{
     decode_strict as decode,
     principals::{
         ListPrincipalOpsReply, ListPrincipalOpsRequest, ListPrincipalsReply, ListPrincipalsRequest,
-        PRINCIPAL_OPS_PAGE, PrincipalInfo, RevokePrincipalReply, RevokePrincipalRequest,
+        PRINCIPAL_OP_DETAIL_MAX, PRINCIPAL_OPS_PAGE, PRINCIPAL_OPS_RECORD_BATCH, PrincipalInfo,
+        RecordPrincipalOpsReply, RecordPrincipalOpsRequest, RecordedPrincipalOp, RecordedWindow,
+        RevokePrincipalReply, RevokePrincipalRequest,
     },
 };
 use serde_bytes::ByteBuf;
 
 use crate::bridge_method_allowlist::require_permission_default as require_permission;
-use crate::rpc_errors::{encode_reply, internal, malformed};
+use crate::rpc_errors::{encode_reply, internal, invalid_params_ns, malformed, not_found_ns};
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
 /// `fauna.principals.list` — the roster read the connected-apps page composes
@@ -87,6 +89,98 @@ fn ops_handler() -> RpcHandler {
                 .map_err(internal)?;
             encode_reply(&ListPrincipalOpsReply {
                 ops,
+                extra: Default::default(),
+            })
+        })
+    })
+}
+
+/// How far ahead of the nest's clock a recorded operation's `at` may sit —
+/// device clocks drift; a row from the future beyond this is refused.
+const RECORD_CLOCK_SKEW_SECS: i64 = 300;
+
+/// Why a submitted ceiling position is no custodian's window, or `None`: it
+/// cannot open in the future beyond the skew, nor hold more than the ceiling
+/// admits.
+fn window_defect(window: &RecordedWindow, now: i64) -> Option<String> {
+    let start = i64::try_from(window.window_start).unwrap_or(i64::MAX);
+    if start > now.saturating_add(RECORD_CLOCK_SKEW_SECS) {
+        return Some("window_start is not a time the window could have opened".into());
+    }
+    if window.count > fauna_core::identity_op::OPS_PER_WINDOW {
+        return Some(format!(
+            "a window admits at most {} operations",
+            fauna_core::identity_op::OPS_PER_WINDOW
+        ));
+    }
+    None
+}
+
+/// Why a submitted row is not a device custodian's record, or `None`.
+fn record_row_defect(op: &RecordedPrincipalOp, now: i64) -> Option<String> {
+    if op.op_id.len() != 16 {
+        return Some("op_id must be 16 bytes".into());
+    }
+    if op.detail.is_empty() || op.detail.len() > PRINCIPAL_OP_DETAIL_MAX {
+        return Some(format!(
+            "detail must be 1..={PRINCIPAL_OP_DETAIL_MAX} bytes"
+        ));
+    }
+    if op.at <= 0 || op.at > now.saturating_add(RECORD_CLOCK_SKEW_SECS) {
+        return Some("at is not a time the operation could have run".into());
+    }
+    match fauna_core::identity_op::IdentityOpClass::parse(&op.class) {
+        Ok(class) if class.custodian().is_device() => None,
+        // A nest or bridge custodian records its own operations where it
+        // performs them; an app submitting one would forge that record.
+        Ok(_) => Some(format!("{} is not a device custodian's class", op.class)),
+        Err(e) => Some(format!("{}: {e}", op.class)),
+    }
+}
+
+/// `fauna.principals.ops.record` — a **device** custodian's submission of the
+/// operations it performed for one of the account's own principals
+/// (`conversations-oracle.md` § The per-operation record): the signed-in app
+/// hosting the conversations engine performs on the device, so its record
+/// reaches the account's other apps here, and `fauna.principals.ops` merges it
+/// as a second custodian's. Self-scoped: a principal that is not the caller's
+/// own is `not_found`, nothing written. Only a device class is accepted — the
+/// nest's and the bridges' custodians record where they perform. A resubmitted
+/// `op_id` keeps its one row, so the custodian's retry converges.
+fn record_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            const NS: &str = "fauna.principals.ops.record";
+            require_permission(&state, &actor_id, NS).await?;
+            let req: RecordPrincipalOpsRequest = decode(&payload).map_err(malformed)?;
+            if req.ops.len() > PRINCIPAL_OPS_RECORD_BATCH {
+                return Err(invalid_params_ns(
+                    NS,
+                    format!("at most {PRINCIPAL_OPS_RECORD_BATCH} operations per request"),
+                ));
+            }
+            let now = fauna_core::data::Timestamp::now_secs();
+            if let Some(defect) = req.ops.iter().find_map(|op| record_row_defect(op, now)) {
+                return Err(invalid_params_ns(NS, defect));
+            }
+            if let Some(defect) = req.window.as_ref().and_then(|w| window_defect(w, now)) {
+                return Err(invalid_params_ns(NS, defect));
+            }
+            let Some(recorded) = state
+                .db
+                .record_device_principal_ops(
+                    &actor_id,
+                    &req.principal_id,
+                    &req.ops,
+                    req.window.as_ref(),
+                )
+                .await
+                .map_err(internal)?
+            else {
+                return Err(not_found_ns(NS, "no such principal on this account"));
+            };
+            encode_reply(&RecordPrincipalOpsReply {
+                recorded,
                 extra: Default::default(),
             })
         })
@@ -180,6 +274,14 @@ pub fn register_principals_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: fetch,
             handler: ops_handler(),
+        },
+    );
+    b.add(
+        "fauna.principals.ops.record",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: fetch,
+            handler: record_handler(),
         },
     );
     b.add(

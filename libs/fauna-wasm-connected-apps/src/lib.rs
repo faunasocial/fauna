@@ -1,7 +1,7 @@
 //! WASM bindings for the Fauna connected-apps page — the page-level
 //! `ConnectedAppsMachine` (the roster, the Requests tray, Connect an app,
 //! per-client blocks; `docs/goal/ui/connected-apps.md`). The web route renders
-//! off the shared machine via `$lib/wasm-connected-apps`, exactly as the
+//! off the shared machine via `#lib/wasm-connected-apps`, exactly as the
 //! labeler-catalog route renders off `LabelerCatalogMachine` — one shared
 //! surface, all 7 apps (priority #1/#2). Mirrors `fauna-wasm-labeler-catalog`.
 
@@ -46,7 +46,7 @@ mod bindings {
     #[wasm_bindgen]
     impl ConnectedAppsMachine {
         /// Build the page machine over the SPA core chunk's socket, lent as
-        /// `port` (a `SharedRpcPort` — `$lib/rpc`'s `sharedRpcPort`), so web
+        /// `port` (a `SharedRpcPort` — `#lib/rpc`'s `sharedRpcPort`), so web
         /// keeps one WebSocket per actor. Throws on an object that is not a
         /// port. State starts empty; call `refresh()` to populate it.
         ///
@@ -56,7 +56,7 @@ mod bindings {
         /// the one the mail page builds (`secret` the actor's 32-byte seed,
         /// `node_url` the nest the MUA login names), reading the account's mail
         /// custody and succession ledger through `account` — the tab's account
-        /// port (`$lib/account-runtime`'s `sharedAccountPort`, minted for this
+        /// port (`#lib/account-runtime`'s `sharedAccountPort`, minted for this
         /// secret's account), which reaches the core chunk's runtime. Throws on
         /// a secret that is not 32 bytes, or on an object that is not a port.
         #[wasm_bindgen(constructor)]
@@ -178,6 +178,34 @@ mod bindings {
             })
         }
 
+        /// *Connect* on a hosted plugin's settings card: open this account's
+        /// bind card for the plugin whose install row is `principal_id_hex`
+        /// (`InstalledPluginText`'s / `PluginCardText`'s hex). A string that is
+        /// not even-length hex is ignored — the card cannot name one.
+        #[wasm_bindgen(js_name = bindPlugin)]
+        pub fn bind_plugin(&self, principal_id_hex: String) -> js_sys::Promise {
+            let inner = Arc::clone(&self.inner);
+            wasm_bindgen_futures::future_to_promise(async move {
+                if let Some(id) = fauna_core::format::hex_decode(&principal_id_hex) {
+                    inner.bind_plugin(id).await;
+                }
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// *Disconnect* on a hosted plugin's settings card: revoke this
+        /// account's binding row, `PluginCardText::binding_principal_id_hex`.
+        #[wasm_bindgen(js_name = revokePrincipal)]
+        pub fn revoke_principal(&self, principal_id_hex: String) -> js_sys::Promise {
+            let inner = Arc::clone(&self.inner);
+            wasm_bindgen_futures::future_to_promise(async move {
+                if let Some(id) = fauna_core::format::hex_decode(&principal_id_hex) {
+                    inner.revoke_principal(id).await;
+                }
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
         /// Approve or deny the pending request `consent_id_hex`.
         #[wasm_bindgen(js_name = resolveRequest)]
         pub fn resolve_request(&self, consent_id_hex: String, approved: bool) -> js_sys::Promise {
@@ -204,6 +232,18 @@ mod bindings {
             let inner = Arc::clone(&self.inner);
             wasm_bindgen_futures::future_to_promise(async move {
                 inner.unblock(client_id).await;
+                Ok(JsValue::UNDEFINED)
+            })
+        }
+
+        /// Flip the account's external-apps switch
+        /// (`atproto-external-apps-enable`) and re-read the page; the toggle
+        /// paints the re-read's `externalAppsOff`, never a local guess.
+        #[wasm_bindgen(js_name = setExternalAppsEnabled)]
+        pub fn set_external_apps_enabled(&self, enabled: bool) -> js_sys::Promise {
+            let inner = Arc::clone(&self.inner);
+            wasm_bindgen_futures::future_to_promise(async move {
+                inner.set_external_apps_enabled(enabled).await;
                 Ok(JsValue::UNDEFINED)
             })
         }
@@ -263,6 +303,28 @@ mod bindings {
                 .map_err(|e| JsValue::from_str(&format!("not a consent card: {e}")))?;
         let lines = fauna_client_connected_apps::compose::request_card_lines(&consent);
         serde_json::to_string(&lines).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// A request card's install section, composed once in shared Rust
+    /// (`compose::request_install_text`): takes one snapshot `requests` entry's
+    /// consent card (`ConsentCardRow`) as JSON and returns the
+    /// `InstallSectionText` as JSON, or `null` on every card but an admin's
+    /// hosted-plugin install card. Throws on a card that is not a
+    /// `ConsentCardRow`.
+    #[wasm_bindgen(js_name = requestInstallTextJson)]
+    pub fn request_install_text_json(consent_json: &str) -> Result<String, JsValue> {
+        let consent: fauna_atproto_settings_machine::ConsentCardRow =
+            serde_json::from_str(consent_json)
+                .map_err(|e| JsValue::from_str(&format!("not a consent card: {e}")))?;
+        let section = fauna_client_connected_apps::compose::request_install_text(&consent);
+        serde_json::to_string(&section).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// What the install section's multi-line leaves put between their lines
+    /// (`compose::LINE_SEPARATOR`).
+    #[wasm_bindgen(js_name = lineSeparator)]
+    pub fn line_separator() -> String {
+        fauna_client_connected_apps::compose::LINE_SEPARATOR.to_string()
     }
 
     // Each wasm chunk is its own module with its own Rust runtime, so the panic

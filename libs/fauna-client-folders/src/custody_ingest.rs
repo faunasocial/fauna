@@ -411,7 +411,7 @@ where
             let residency = reply.residency.clone();
             let stated = fauna_core::data::ForeignResidency::parse_stamp(residency.as_deref());
             // The cross-nest owner label, as this member's own nest verified
-            // it — a pair or nothing (`federation.md` § … *The cross-nest
+            // it — a pair or nothing (`federation-shared-folders.md` § … *The cross-nest
             // owner label*).
             let owner = reply.owner_handle.clone().zip(reply.owner_domain.clone());
             let changed = (access.is_some() && access != held.access)
@@ -1347,6 +1347,152 @@ mod tests {
         assert_eq!(block_on(readable.do_foreign_home_url(&channel)), Ok(None));
     }
 
+    /// The unknown-home rule above, one layer up: `leave_share`
+    /// — the one sequence every app runs, web's `foldersLeave` included —
+    /// over a backend whose RAM holds no home for the set (a relaunch, or a
+    /// launch seed that could not read custody) and
+    /// whose custody is unreadable stops before the roster leave goes out at
+    /// all — no same-nest `folders.leave` of a possibly-foreign set, and so no
+    /// `leave_folder` forget of the record a retry needs. Reddens if either the
+    /// backend's tri-state read or the leave's `?` folds the unknown home back
+    /// to same-nest.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_leave_with_an_unknown_home_sends_nothing() {
+        use fauna_client_testkit::{FailingRequester, block_on};
+        use fauna_conversations::ConversationsSession;
+        use fauna_core::identity::ActorKeypair;
+        use fauna_mls::engine::MlsEngine;
+
+        let engine = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+        let actor = engine.identity_actor_id();
+        let session = Arc::new(ConversationsSession::from_parts(
+            engine,
+            Arc::new(QuietChannelNest),
+            "member".into(),
+            actor,
+            None,
+        ));
+        session.set_folder_custody_sink(Arc::new(NestFolderCustodySink::new(
+            Arc::new(RosterNest::default()),
+            Arc::new(UnreadableStore),
+        )));
+        let nest = FailingRequester::new("the leave went out");
+
+        let err = block_on(crate::leave_share(
+            &nest,
+            &session.backend(),
+            hex::encode(group_channel()),
+        ))
+        .expect_err("an unknown home refuses the leave");
+        assert!(err.contains("custody record unreadable"), "{err}");
+        assert!(nest.kinds().is_empty(), "sent {:?}", nest.kinds());
+    }
+
+    /// Answers `fauna.folders.leave` with `left: true` and keeps every request
+    /// as sent; any other kind fails loud.
+    #[derive(Default)]
+    struct LeaveNest {
+        leaves: std::sync::Mutex<Vec<fauna_protocol::folders::MemberLeaveRequest>>,
+    }
+
+    impl RpcRequester for LeaveNest {
+        type Error = std::convert::Infallible;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            assert_eq!(kind, fauna_protocol::folders::KIND_FOLDERS_LEAVE);
+            let sent = fauna_protocol::encode_canonical(&payload).expect("encode request");
+            self.leaves
+                .lock()
+                .unwrap()
+                .push(fauna_protocol::decode_strict(&sent).expect("decode request"));
+            let reply =
+                fauna_protocol::encode_canonical(&fauna_protocol::folders::MemberLeaveReply {
+                    ok: true,
+                    channel_id: hex::encode(group_channel()),
+                    left: true,
+                    extra: Default::default(),
+                })
+                .expect("encode reply");
+            Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
+        }
+    }
+
+    /// The leave's local half on a foreign set: `leave_share` over a
+    /// backend whose RAM holds no home (a relaunch) and whose readable custody
+    /// records the set relays the roster leave to the RECORDED home, then
+    /// tombstones the foreign-set record — so the left set stops seeding a home
+    /// and stops listing as foreign. Reddens if the backend's forget drops the
+    /// record drop, or if the home read stops consulting custody.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_foreign_leave_relays_home_and_tombstones_the_record() {
+        use fauna_client_testkit::block_on;
+        use fauna_conversations::ConversationsSession;
+        use fauna_core::identity::ActorKeypair;
+        use fauna_mls::engine::MlsEngine;
+
+        const HOME: &str = "https://home.example";
+        let mut c = cfg();
+        custody::record_foreign_set(
+            &mut c,
+            fauna_core::data::ForeignFolder {
+                channel_id: group_channel(),
+                mls_group_id: GROUP.to_vec(),
+                home_nest_url: HOME.into(),
+                ..Default::default()
+            },
+            NOW,
+        );
+        let store = Arc::new(crate::MemoryFolderKeyStore::with(c));
+
+        let engine = Arc::new(MlsEngine::new_in_memory(ActorKeypair::generate()).unwrap());
+        let actor = engine.identity_actor_id();
+        let session = Arc::new(ConversationsSession::from_parts(
+            engine,
+            Arc::new(QuietChannelNest),
+            "member".into(),
+            actor,
+            None,
+        ));
+        session.set_folder_custody_sink(Arc::new(NestFolderCustodySink::new(
+            Arc::new(RosterNest::default()),
+            Arc::clone(&store) as Arc<dyn FolderKeyStore>,
+        )));
+        let nest = LeaveNest::default();
+
+        block_on(crate::leave_share(
+            &nest,
+            &session.backend(),
+            hex::encode(GROUP),
+        ))
+        .expect("a known-foreign leave succeeds");
+
+        let leaves = nest.leaves.lock().unwrap().clone();
+        assert_eq!(leaves.len(), 1, "one roster leave");
+        assert_eq!(
+            leaves[0].nest_url.as_deref(),
+            Some(HOME),
+            "relayed to the home the custody records"
+        );
+        let after = block_on(store.load()).expect("readable custody");
+        assert!(
+            after
+                .foreign_sets
+                .iter()
+                .all(|f| f.channel_id != group_channel() || !f.is_live()),
+            "the left set's foreign record is tombstoned"
+        );
+    }
+
     /// A sink over `rows` and `store`, its re-fetch check throttled to
     /// `interval` microseconds.
     fn refetch_sink(
@@ -1589,6 +1735,7 @@ mod tests {
             &self,
             _c: String,
             _h: Option<String>,
+            _i: Option<String>,
             _s: String,
             _b: Vec<u8>,
         ) -> Result<(), fauna_conversations::backend::ConvRpcError> {
@@ -1598,6 +1745,7 @@ mod tests {
             &self,
             _c: String,
             _h: Option<String>,
+            _i: Option<String>,
             _s: String,
         ) -> Result<Option<Vec<u8>>, fauna_conversations::backend::ConvRpcError> {
             unreachable!("blob_get")

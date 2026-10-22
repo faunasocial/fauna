@@ -1,14 +1,14 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
-  import { identity, deliverWithheldActorChange } from '$lib/store';
+  import { identity, deliverWithheldActorChange } from '#lib/store';
   // The launch-path error classes (`TransientAuthError` / `NestOutdatedError` /
   // `NestIdentityChangedError`) and `forgetNestIdentityPin` are no longer imported
   // here: the shared `LaunchMachine` classifies the launch row and owns the
-  // pin-forget seam. They stay exported from `$lib/wasm` for the SPA's own
+  // pin-forget seam. They stay exported from `#lib/wasm` for the SPA's own
   // `challengeVerify` path (`lib/store.ts`'s background identity refresh).
-  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor } from '$lib/wasm';
-  import { base } from '$app/paths';
+  import { ensureWasm, parseIdentityImport, logMessage, recoveryBoxesLocal, recoverSelfhostedCommandLocal, shortNestId, actorIdFromSecret, resolveVerifiedSuccessor, adoptHeldSuccessor, termsUrl } from '#lib/wasm';
+  import { resolve } from '$app/paths';
   import {
     dnsManagementMachineWithCredentials,
     applyServingEnablement,
@@ -18,11 +18,11 @@
     recoveryRegisterDeferredKit,
     retireRpcClient,
     succeedStolenIdentityLocked,
-  } from '$lib/rpc';
-  import { qrDisplayFromUri } from '$lib/qr-display';
-  import NestRetirePage from '$lib/components/NestRetirePage.svelte';
-  import { primeTokenCache, storedNestUrlOrNull, latchAccountLocked } from '$lib/api';
-  import { setTabNestUrl } from '$lib/tabPin';
+  } from '#lib/rpc';
+  import { qrDisplayFromUri } from '#lib/qr-display';
+  import NestRetirePage from '#lib/components/NestRetirePage.svelte';
+  import { primeTokenCache, storedNestUrlOrNull, latchAccountLocked } from '#lib/api';
+  import { setTabNestUrl } from '#lib/tabPin';
   import {
     initOnboardingMachine,
     resetMachine,
@@ -37,26 +37,27 @@
     type ProviderStatus,
     type ContactInfo,
     type ProvisioningSnapshot,
+    type SshDoorReadout,
     type StepSnapshot,
     type NodeMode,
     type AwaitingManualDnsSnapshot,
     type BillOfMaterialsItem,
     type CredentialForm,
     type HostedAuthState,
-  } from '$lib/onboarding/machine.svelte';
+  } from '#lib/onboarding/machine.svelte';
   import {
     savePendingInvite,
     deletePendingInvite,
-  } from '$lib/onboarding/pending-invite-store';
+  } from '#lib/onboarding/pending-invite-store';
   import {
     loadPendingFactoryReset,
-  } from '$lib/onboarding/pending-factory-reset-store';
+  } from '#lib/onboarding/pending-factory-reset-store';
   import {
     loadAwaitingDnsJson,
-    saveAwaitingDns,
+    persistAwaitingDns,
     deleteAwaitingDns,
-  } from '$lib/onboarding/awaiting-dns-store';
-  import { runLoggedInTerminal } from '$lib/onboarding/logged-in-terminal';
+  } from '#lib/onboarding/awaiting-dns-store';
+  import { runLoggedInTerminal } from '#lib/onboarding/logged-in-terminal';
   import {
     createLaunchMachine,
     launchIdentityInputs,
@@ -72,7 +73,7 @@
     type LaunchMachine,
     type LaunchSnapshot,
     type AccountIndexRefusal,
-  } from '$lib/wasm-launch';
+  } from '#lib/wasm-launch';
   import {
     accountsActiveSessionMaterial,
     signOutReconciled,
@@ -82,9 +83,9 @@
     accountsPersistLoggedIn,
     accountsPersistRestoredPredecessors,
     accountsSwitch,
-  } from '$lib/accounts';
-  import { localizedRejectionText } from '$lib/rejection';
-  import { PROVIDERS, type ProviderMeta } from '$lib/generated/providers';
+  } from '#lib/accounts';
+  import { localizedRejectionText } from '#lib/rejection';
+  import { PROVIDERS, type ProviderMeta } from '#lib/generated/providers';
   import {
     formatPrice,
     serverTypeLabel,
@@ -97,10 +98,10 @@
     awaitingDnsPollMs,
     handleTld as handleTldShared,
     emergencyLockoutLockedMessage,
-  } from '$lib/wasm-onboarding';
-  import { t } from '$lib/i18n/strings';
-  import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '$lib/i18n/localized';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/wasm-onboarding';
+  import { t } from '#lib/i18n/strings';
+  import { resolveLocalized, resolveLocalizedNested, resolveKey, type LocalizedText } from '#lib/i18n/localized';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Step values produced by the OnboardingMachine. Snake-case translated
   // by `machine.svelte.ts:camelToSnake`. The forbidden stages
@@ -196,11 +197,11 @@
     void machineTick.value;
     return m?.currentHandle() ?? '';
   });
-  // The sign-out residue line (`$lib/accounts`'s `signOutResidue`), painted as
+  // The sign-out residue line (`#lib/accounts`'s `signOutResidue`), painted as
   // the `sign-out-residue` view on the step a sign-out and a signed-out load
   // land on, and only while nobody is signed in: "Add account" opens this same
   // step over a live session, where "Signed out, but …" would be false. It is
-  // `$lib/accounts` state, not the wizard's, re-read on every derivation, so a
+  // `#lib/accounts` state, not the wizard's, re-read on every derivation, so a
   // wizard tick cannot wipe it (`account-scoping.md` § Erasure follows scope,
   // the ⚠ *pin the line, not paint it once*).
   const signOutResidueLine: string = $derived(
@@ -365,6 +366,17 @@
     void machineTick.value;
     return m?.provisionMailModeEnabled() ?? true;
   });
+  // vps-config-ssh-door-toggle (default off) and, on nest_provisioning after a
+  // door run, the readout behind provisioning-ssh-door-command — both read
+  // from the shared machine (onboarding-provisioning.md § 5).
+  const provisionSshDoorEnabledValue: boolean = $derived.by(() => {
+    void machineTick.value;
+    return m?.provisionSshDoorEnabled() ?? false;
+  });
+  const sshDoorReadoutValue: SshDoorReadout | undefined = $derived.by(() => {
+    void machineTick.value;
+    return m?.sshDoorReadout();
+  });
   // vps-config-update-channel-row: the selected channel's id, read from the
   // shared machine (never a page-local copy). `UPDATE_CHANNEL_IDS` is
   // `UpdateChannel::ALL`'s order — the ids are the ui.yaml row keys.
@@ -521,7 +533,7 @@
   }
 
   // Resolve a dot-notation i18n key / a `LocalizedText` against the generated
-  // `t` table — the shared `$lib/i18n/localized` resolver (one helper for every
+  // `t` table — the shared `#lib/i18n/localized` resolver (one helper for every
   // consumer; was duplicated here + admin-dns + value formatting).
   const L = resolveKey;
   const Lookup = resolveLocalized;
@@ -996,7 +1008,7 @@
         (window as unknown as { __fauna_recordSessionTeardown?: () => void })
           .__fauna_recordSessionTeardown?.();
       }
-      window.location.assign(`${base}/feed`);
+      window.location.assign(resolve('/feed'));
     } catch (e) {
       console.warn('[launch] stolen-identity ceremony from the locked surface failed:', e);
       error = e instanceof Error ? e.message : String(e);
@@ -1138,7 +1150,7 @@
     const lockedUntil = lockedUntilOf(snap);
     if (lockedUntil !== null) {
       // Nothing else on this tab may keep asking the nest: latch the lock for
-      // both bearer mint paths (`$lib/api`), the web twin of the native mints'
+      // both bearer mint paths (`#lib/api`), the web twin of the native mints'
       // locked latch. The machine's own refresh at the unlock time is the way out.
       if (secret) latchAccountLocked(secret, lockedUntil);
       lockedShownUntil = lockedUntil;
@@ -1341,7 +1353,7 @@
         if (await adoptHeldSuccessor(predecessor, successor)) {
           console.info('[launch] adopting the held verified successor', successor);
           await accountsSwitch(successor);
-          window.location.assign(`${base}/feed`);
+          window.location.assign(resolve('/feed'));
           return;
         }
         m.beginImportIdentityWithReason(
@@ -1983,7 +1995,7 @@
   // Import-field parsing (bare 64-hex secret | `fauna://identity?secret=&handle=` query
   // form | iOS colon form) lives in shared Rust (`fauna_core::identity_qr`, over wasm) so
   // web, iOS, and android parse identical input instead of each hand-rolling it. See
-  // `$lib/wasm` `parseIdentityImport`.
+  // `#lib/wasm` `parseIdentityImport`.
 
   async function importIdentity() {
     error = '';
@@ -2244,7 +2256,7 @@
   // cannot go stale. Returns `null`/no-op for the manual / set-up-later /
   // returning-user paths. Fire-and-forget: the provider verify is a network
   // round-trip we must not block the user's landing on the feed; the WS client +
-  // machine are module-level singletons in `$lib/rpc`, so the dispatch outlives
+  // machine are module-level singletons in `#lib/rpc`, so the dispatch outlives
   // this page's navigation.
   function sealCapturedDnsCredential(secretHex: string, credJson: string | undefined): void {
     if (!credJson) return;
@@ -2509,6 +2521,14 @@
       // omitted, which is why that slot could never satisfy `seed_awaiting_manual_dns`
       // and was dead storage.
       //
+      // It is a TERMINAL: the shared `persist_awaiting_dns` registers the
+      // identity the wizard provisioned with and makes it active — in append
+      // mode the moment the appended identity becomes the account, as
+      // `LoggedIn`'s add + switch is for that exit (`onboarding.md`
+      // § Multi-account → *Append-mode deferred/incomplete states +
+      // abandonment*). The identity is read from the MACHINE, as at `LoggedIn`:
+      // in append mode it exists nowhere else yet.
+      //
       // No home nest is recorded: that is the *authenticated* nest, and
       // recording an un-DNS'd, unclaimed nest there is exactly what
       // made the next launch silent-challenge a dead host, fall through to
@@ -2520,7 +2540,14 @@
       // binding exposes `recordType`, so a hand-rolled round-trip silently
       // deserializes to an EMPTY list: an "Almost ready" page with nothing to add
       // at the registrar, and the failure is invisible until a relaunch.
-      void saveAwaitingDns({
+      const secret = m?.effectiveSecret();
+      if (!secret) {
+        // Structurally impossible (the wizard provisioned with a secret) — a
+        // loud bug, never a fallback to the store.
+        logMessage('error', 'fauna_web::onboarding', 'AwaitingManualDns exit: machine has no secret');
+        return;
+      }
+      void persistAwaitingDns(secret, {
         nestUrl: outcome.AwaitingManualDns.nest_url,
         handle: m?.currentHandle() ?? '',
         recordsJson: m?.awaitingDnsRecordsJson() ?? '[]',
@@ -2607,6 +2634,27 @@
   // the returned step. It returns the CURRENT step unchanged when the box is not
   // claimed yet, which `handleWizardExit` treats as a no-op like any other
   // non-terminal step.
+  // provisioning-ssh-door-save-key-button: the browser has no ~/.ssh, so the
+  // door key is handed over once as a download (`installers/vps.md` § The SSH
+  // door → *The key*). The machine drops its copy as it returns it, so the
+  // button goes once the file is saved.
+  let sshDoorKeySaved = $state(false);
+  function onSshDoorSaveKey() {
+    const key = m?.takeSshDoorPrivateKey();
+    const domain = sshDoorReadoutValue?.domain;
+    if (!key || !domain) return;
+    const url = URL.createObjectURL(new Blob([key], { type: 'application/x-pem-file' }));
+    try {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fauna-${domain}`;
+      a.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    sshDoorKeySaved = true;
+  }
+
   function onProvisioningContinue() {
     if (!m) return;
     error = '';
@@ -2618,7 +2666,31 @@
     }
   }
 
+  // The by-continuing terms notice's link target — `fauna_core::TERMS_URL`
+  // through the shared wasm face (terms-and-content-guidelines.md § The
+  // decisions, items 3 and 4); the page never spells the URL.
+  let termsHref = $state('');
+  void ensureWasm().then(() => { termsHref = termsUrl(); });
+
 </script>
+
+{#snippet termsNotice()}
+  <!-- The by-continuing notice, one sentence above the page's bottom row with
+       the link beside it — painted on invite_request, claim_code and
+       nest_provisioning always, and on handle_entry while the shared
+       `terms_notice_visible` is true (terms-and-content-guidelines.md § The
+       decisions, item 3). Nothing is persisted: no checkbox, no record. -->
+  <p class="terms-notice">
+    <span data-testid={IDS.ONBOARDING_TERMS_NOTICE}>{t.onboarding.terms.notice}</span>
+    <a
+      class="btn link"
+      data-testid={IDS.ONBOARDING_TERMS_LINK}
+      href={termsHref}
+      target="_blank"
+      rel="noopener noreferrer"
+    >{t.settings.terms_link}</a>
+  </p>
+{/snippet}
 
 <div class="onboarding">
   <!-- The "Almost ready" surface (onboarding.md § "Almost ready" surface).
@@ -3232,6 +3304,10 @@
         <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
       {/if}
 
+      {#if handleCheckSnapshotValue?.terms_notice_visible}
+        {@render termsNotice()}
+      {/if}
+
       <div class="button-group">
         <button
           class="btn link"
@@ -3580,6 +3656,22 @@
             </label>
             <p class="help">{t.onboarding.vps_config.mail_mode_desc}</p>
 
+            <label class="checkbox-row">
+              <input
+                type="checkbox"
+                data-testid={IDS.VPS_CONFIG_SSH_DOOR_TOGGLE}
+                checked={provisionSshDoorEnabledValue}
+                onchange={(e) =>
+                  m?.setProvisionSshDoor((e.currentTarget as HTMLInputElement).checked)}
+              />
+              {t.onboarding.vps_config.ssh_door_label}
+            </label>
+            {#if provisionSshDoorEnabledValue}
+              <p class="help warning" data-testid={IDS.VPS_CONFIG_SSH_DOOR_WARNING}>
+                {t.onboarding.vps_config.ssh_door_warning}
+              </p>
+            {/if}
+
             {#if vpsConfigValue && vpsConfigValue.server_types.length > 0}
               <fieldset class="server-type-picker">
                 <legend>{t.onboarding.vps_config.server_type_radio_legend}</legend>
@@ -3756,6 +3848,8 @@
         <div data-testid={IDS.ERROR_MESSAGE} class="error">{errorMessageValue}</div>
       {/if}
 
+      {@render termsNotice()}
+
       <div class="button-group">
         <button
           data-testid={IDS.INVITE_REQUEST_BACK_BUTTON}
@@ -3792,6 +3886,8 @@
           bind:value={claimCodeValue}
         />
       </div>
+
+      {@render termsNotice()}
 
       <button
         class="btn primary large"
@@ -3972,6 +4068,8 @@
         </div>
       {/if}
 
+      {@render termsNotice()}
+
       {#if provisioningSnapshotValue?.overall === 'Idle'}
         <!-- Top-region "Buy and set up" CTA (handle-check + progress design).
              Visible only at Idle; once startProvisioning() spawns, the
@@ -4017,6 +4115,36 @@
           <p data-testid={IDS.PROVISIONING_ELAPSED} class="prov-elapsed muted">
             {formatElapsed(provisioningSnapshotValue, nowMs)}
           </p>
+        {/if}
+
+        {#if provisioningSnapshotValue.overall === 'Succeeded' && sshDoorReadoutValue}
+          <!-- The SSH door after a door run: the command, and the key file
+               handed over once (onboarding-provisioning.md § 5). -->
+          <p data-testid={IDS.PROVISIONING_SSH_DOOR_COMMAND} class="prov-ssh-door">
+            {sshDoorReadoutValue.key_path
+              ? t.onboarding.nest_provisioning.ssh_door_command_template({
+                command: sshDoorReadoutValue.command,
+                address: sshDoorReadoutValue.admitted_from
+                  ?? t.onboarding.nest_provisioning.ssh_door_address_unknown,
+                path: sshDoorReadoutValue.key_path,
+                fingerprint: sshDoorReadoutValue.fingerprint,
+              })
+              : t.onboarding.nest_provisioning.ssh_door_command_no_path_template({
+                command: sshDoorReadoutValue.command,
+                address: sshDoorReadoutValue.admitted_from
+                  ?? t.onboarding.nest_provisioning.ssh_door_address_unknown,
+                fingerprint: sshDoorReadoutValue.fingerprint,
+              })}
+          </p>
+          {#if !sshDoorReadoutValue.key_path && !sshDoorKeySaved}
+            <div class="button-group">
+              <button
+                class="btn"
+                data-testid={IDS.PROVISIONING_SSH_DOOR_SAVE_KEY_BUTTON}
+                onclick={onSshDoorSaveKey}
+              >{t.onboarding.nest_provisioning.ssh_door_save_key_button}</button>
+            </div>
+          {/if}
         {/if}
 
         <div class="button-group">
@@ -4086,9 +4214,9 @@
       {:else}
         <div data-testid={IDS.RECOVER_BOX_LIST} class="recover-box-list">
           <span class="field-label">{t.onboarding.recovery.box_list_label}</span>
-          {#each recoveryBoxesValue as boxId, i (boxId)}
+          {#each recoveryBoxesValue as boxId (boxId)}
             <button
-              data-testid={`recover-box-item-${i}`}
+              data-testid={IDS.RECOVER_BOX_ITEM}
               class="recover-box-item"
               class:selected={recoverySelectedNestIdValue === boxId}
               aria-pressed={recoverySelectedNestIdValue === boxId}
@@ -4208,6 +4336,7 @@
   }
 
   .muted { color: var(--text-muted); }
+  .terms-notice { color: var(--text-muted); font-size: 0.9em; margin: 0.75rem 0; }
   .sign-out-residue {
     display: flex;
     flex-direction: column;

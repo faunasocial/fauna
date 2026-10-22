@@ -37,11 +37,9 @@ use common::signed_text_post;
 /// `AppState::for_test` already installs `SealedStorage` — no swap needed.
 async fn boot_router() -> (RpcRouter, Arc<AppState>, ActorKeypair) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().to_path_buf();
-    std::mem::forget(dir); // keep the acme/storage dir alive for the test
-    let backup_svc =
-        Arc::new(BackupService::new(db.clone(), None, false, dir_path.clone(), None).unwrap());
+    let base = AppState::for_test(db.clone());
+    let dir_path = base.test_scratch_path("blobs");
+    let backup_svc = Arc::new(BackupService::new(db.clone(), None, false, dir_path, None).unwrap());
     let token_store = Arc::new(TokenStore::new());
 
     let state = AppState {
@@ -50,7 +48,7 @@ async fn boot_router() -> (RpcRouter, Arc<AppState>, ActorKeypair) {
             token_store,
             ..Default::default()
         },
-        ..AppState::for_test(db.clone())
+        ..base
     };
     let state = Arc::new(state);
 

@@ -8,7 +8,7 @@
   // refresh() → render the roster slice → forward device-remove back through the
   // machine. No roster logic in the SPA (priority #2). Behaviour + IDs:
   // docs/goal/ui/devices.md, ui.yaml § devices.
-  import { identity } from '$lib/store';
+  import { identity } from '#lib/store';
   import {
     ensureWasm,
     deviceStatusLabel,
@@ -17,22 +17,22 @@
     shortId,
     accountEnrollmentNotice,
     accountEnrolledDeviceRow,
-  } from '$lib/wasm';
-  import { sessionDevicesMachine } from '$lib/devices-session';
+  } from '#lib/wasm';
+  import { sessionDevicesMachine } from '#lib/devices-session';
   import {
     custodyDegradedBadgeKey,
     custodyFacetLoad,
     custodyRevoke,
-  } from '$lib/wasm-folders';
-  import { custodyHeldBytesText, custodyReceiptStatusText } from '$lib/custody';
-  import { getDeviceId } from '$lib/device-id';
-  import { resolveLocalized, resolveLocalizedNested } from '$lib/i18n/localized';
+  } from '#lib/wasm-folders';
+  import { custodyHeldBytesText, custodyReceiptStatusText } from '#lib/custody';
+  import { getDeviceId } from '#lib/device-id';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import { onMount, onDestroy } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
-  import { t } from '$lib/i18n/strings';
-  import { type CustodyHolderRowView, type DevicesSnapshot } from '$lib/devices-machine';
+  import { onStoreChange } from '#lib/store-change';
+  import { t } from '#lib/i18n/strings';
+  import { type CustodyHolderRowView, type DevicesSnapshot } from '#lib/devices-machine';
   import type { DevicesMachine } from '../../../static/fauna_wasm_folders.js';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The page-level error surface is the Settings shell's shared MessageBanner
   // (`error-message`); we write into its bound `error` so a roster read/remove
@@ -186,7 +186,7 @@
     }
   });
 
-  // The store-change notice (`$lib/store-change`): the keyed set, the enrolled
+  // The store-change notice (`#lib/store-change`): the keyed set, the enrolled
   // row and the custody records rest in the account store, so the open page
   // runs the periodic re-read's own body at once, and re-folds the custody
   // facet — a fold only (a null fold keeps the rows), never a ceremony drive.

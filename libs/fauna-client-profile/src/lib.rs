@@ -23,12 +23,12 @@
 
 use fauna_protocol::RpcRequester;
 use fauna_protocol::profile::{
-    ProfileGetReply, ProfileGetRequest, ProfileSetReply, ProfileSetRequest,
+    ProfileGetRemoteRequest, ProfileGetReply, ProfileGetRequest, ProfileSetReply, ProfileSetRequest,
 };
 
 pub use fauna_protocol::profile;
 
-use fauna_core::data::{ContentHash, InboxMode, Profile, ProfileLink, Timestamp};
+use fauna_core::data::{ContentHash, InboxMode, Profile, ProfileAudience, ProfileLink, Timestamp};
 use fauna_core::encoding::{AuthoringOrigin, sign_and_pack};
 use fauna_core::identity::{ActorId, ActorKeypair};
 use fauna_core::recovery::{ChainHead, SignedIdentitySuccession};
@@ -137,10 +137,28 @@ fn content_hash_from_hex(hex_str: &str) -> Result<ContentHash, fauna_core::error
     Ok(ContentHash::from_digest_raw(digest))
 }
 
+/// The Profile page's header read ([`ProfileClient::profile_header_read`]):
+/// the signed bytes, and the home they were relayed from — `None` when this
+/// nest answered. The pictures the profile names rest on that same nest.
+#[derive(Clone, Debug)]
+pub struct HeaderRead {
+    pub reply: ProfileGetReply,
+    pub relayed_from: Option<String>,
+    /// The home's identity the reader's own nest stamped on the relay reply
+    /// (`ProfileGetReply::home_nest_actor_id`): what the picture plane
+    /// graduates its pin for [`Self::relayed_from`] against, so a home
+    /// serving the self-signed floor paints (`transport-trust.md` § The post
+    /// arm → *A relayed profile's pictures*). `None` whenever
+    /// `relayed_from` is — this nest's own blob route needs no foreign pin —
+    /// and when the relay carried none, which keeps the WebPKI floor. Never
+    /// read from the profile's own `nests[0].nest_id`.
+    pub home_nest_actor_id: Option<String>,
+}
+
 /// The editable fields the profile edit form populates from a fetched `Profile`
 /// (the projection of [`decode_profile_display`]) — the three text fields, plus
 /// the two image references so the form can render the current picture and
-/// offer a remove affordance.
+/// offer a remove affordance, plus the profile's `audience`.
 ///
 /// The remaining non-display fields (`nests` / `admin_nests` / `load_hint` /
 /// `inbox_mode`) are NOT exposed here — they are preserved internally by
@@ -156,6 +174,23 @@ pub struct ProfileDisplay {
     pub avatar: Option<ContentHash>,
     /// The stored banner blob reference, if the profile has one.
     pub banner: Option<ContentHash>,
+    /// Who beyond the actor's own nest may read the profile, so the form opens
+    /// on the current choice (`profile.md` § Where logic lives → *The remote
+    /// read*).
+    pub audience: ProfileAudience,
+}
+
+impl ProfileDisplay {
+    /// The avatar's hex blob hash — the `GET /api/v1/blob/{hash}` argument
+    /// the header's picture is fetched by.
+    pub fn avatar_hash_hex(&self) -> Option<String> {
+        self.avatar.as_ref().map(|h| hex::encode(h.digest()))
+    }
+
+    /// The banner's hex blob hash, as [`Self::avatar_hash_hex`].
+    pub fn banner_hash_hex(&self) -> Option<String> {
+        self.banner.as_ref().map(|h| hex::encode(h.digest()))
+    }
 }
 
 /// Decode the stored profile `body` (from [`ProfileClient::profile_get`]) and
@@ -170,7 +205,87 @@ pub fn decode_profile_display(body: &[u8]) -> Result<ProfileDisplay, fauna_core:
         links: profile.links,
         avatar: profile.avatar,
         banner: profile.banner,
+        audience: profile.audience,
     })
+}
+
+/// The OWN profile edit form's projection: [`decode_profile_display`] over the
+/// stored `body`, with `audience` resolved exactly as a save will sign it — the
+/// one resolver [`admit_base`] runs (`profile.md` § Where logic lives →
+/// *Profile publish/edit* → *Edit surface*), so the switch never shows an open
+/// profile a save would close. `own` is the signed-in identity, and
+/// `last_direct_body` is the owner's last identity-signed row the nest served
+/// beside a delegated `body` ([`OwnProfileBase::last_direct_body`]). Another
+/// actor's header keeps [`decode_profile_display`]: it shows what that actor's
+/// stored profile says, never a save.
+pub fn decode_own_profile_display(
+    own: &ActorId,
+    body: &[u8],
+    last_direct_body: Option<&[u8]>,
+) -> Result<ProfileDisplay, fauna_core::error::Error> {
+    let (profile, origin) = decode_profile(body)?;
+    let word = resolve_own_word(own, &profile, &origin, last_direct_body);
+    Ok(ProfileDisplay {
+        display_name: profile.display_name,
+        bio: profile.bio,
+        links: profile.links,
+        avatar: profile.avatar,
+        banner: profile.banner,
+        audience: word.audience,
+    })
+}
+
+/// The three fields only the signer's own identity-signed word carries —
+/// [`resolve_own_word`]'s answer. The default is the degrade: absent anchors and
+/// the closed audience.
+#[derive(Debug, Default)]
+struct OwnWord {
+    audience: ProfileAudience,
+    nests: Vec<fauna_core::data::NestEntry>,
+    recovery_head: Option<ChainHead>,
+}
+
+impl OwnWord {
+    fn of(profile: &Profile) -> Self {
+        Self {
+            audience: profile.audience.clone(),
+            nests: profile.nests.clone(),
+            recovery_head: profile.recovery_head,
+        }
+    }
+}
+
+/// Where `recovery_head`, `nests` and `audience` come from when `own`
+/// re-publishes `base` (`profile.md` § Persistence → *After an identity
+/// succession, the successor RE-PUBLISHES* → base-admission rule 3, amended
+/// 2026-10-21) — the ONE resolver [`admit_base`] and
+/// [`decode_own_profile_display`] share, so the form paints what the save signs.
+///
+/// In order: `base` itself when `own` signed it directly; else the owner's last
+/// identity-signed row the nest served beside it, admitted only when it decodes
+/// [`AuthoringOrigin::Direct`], is about `own` itself (a predecessor's row is
+/// another key's word) and is not newer than `base` (a later row is not the
+/// word behind this base); else the degrade. The served row is evidence because
+/// it carries the identity key's own signature: the nest can withhold it, never
+/// mint or alter it.
+fn resolve_own_word(
+    own: &ActorId,
+    base: &Profile,
+    base_origin: &AuthoringOrigin,
+    last_direct_body: Option<&[u8]>,
+) -> OwnWord {
+    if base.actor_id == *own && *base_origin == AuthoringOrigin::Direct {
+        return OwnWord::of(base);
+    }
+    last_direct_body
+        .and_then(|row| decode_profile(row).ok())
+        .filter(|(row, origin)| {
+            *origin == AuthoringOrigin::Direct
+                && row.actor_id == *own
+                && row.updated_at <= base.updated_at
+        })
+        .map(|(row, _)| OwnWord::of(&row))
+        .unwrap_or_default()
 }
 
 /// Where a knock sent from `actor`'s profile page must go — `fauna.inbox.send`'s
@@ -204,6 +319,39 @@ pub fn knock_recipient_nest_url(
         return None;
     }
     Some(home)
+}
+
+/// The OTHER actor's home nest — the one `actor_home` slot a profile page's
+/// follow and knock both read (`profile.md` § Where logic lives → *The actor's
+/// home*).
+///
+/// `carried` is the routing hint the page's open target carried (where the
+/// viewer met the actor: a Find User hit, a relayed post's origin, a contact
+/// edge) — never identity; `profile_body` is the profile the header read
+/// fetched, `None` before it answers. The actor's own signed profile wins
+/// ([`knock_recipient_nest_url`]'s rule, unchanged): it is the actor's word and
+/// moves with them on migration. Else the carried hint, normalized by the same
+/// authority compare, so a hint naming the viewer's own nest is `None`. Else
+/// `None` (deliver and follow on this nest).
+pub fn actor_home(
+    carried: Option<&str>,
+    actor: &ActorId,
+    profile_body: Option<&[u8]>,
+    own_nest_url: &str,
+) -> Option<String> {
+    if let Some(home) =
+        profile_body.and_then(|body| knock_recipient_nest_url(actor, body, own_nest_url))
+    {
+        return Some(home);
+    }
+    let hint = carried?;
+    let theirs = fauna_core::web::authority_of(hint);
+    if theirs.is_empty()
+        || theirs.eq_ignore_ascii_case(&fauna_core::web::authority_of(own_nest_url))
+    {
+        return None;
+    }
+    Some(hint.to_string())
 }
 
 /// Why a stored profile was refused as the base a writer re-signs.
@@ -312,10 +460,37 @@ where
 pub struct OwnProfileBase {
     /// The stored bytes, or `None` when the signer never published a profile.
     pub body: Option<Vec<u8>>,
+    /// The owner's last identity-signed row the nest served beside a delegated
+    /// `body` (`ProfileGetReply::last_direct_body`) — the word the writers'
+    /// admission and the own form's projection take `audience`, `nests` and
+    /// `recovery_head` from ([`admit_base`] rule 3). `None` beside a direct
+    /// body, and whenever the nest withheld it.
+    pub last_direct_body: Option<Vec<u8>>,
     /// Predecessors the base proves beyond the caller's `recorded` list,
     /// nearest hop first ([`learn_inherited_predecessors`]'s answer). Empty for
     /// an own base, a recorded predecessor's base, and a base nothing proves.
     pub proven: Vec<ActorId>,
+}
+
+/// An own profile edit form's base: the stored bytes the save re-signs, and the
+/// owner's last identity-signed row served beside them
+/// ([`OwnProfileBase::last_direct_body`]) — what the form's projection
+/// ([`decode_own_profile_display`]) and its save ([`build_edited_profile_with_images`])
+/// both read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditBase {
+    pub body: Vec<u8>,
+    pub last_direct_body: Option<Vec<u8>>,
+}
+
+impl OwnProfileBase {
+    /// The form's base, or `None` for a never-published profile.
+    pub fn edit_base(&self) -> Option<EditBase> {
+        self.body.clone().map(|body| EditBase {
+            body,
+            last_direct_body: self.last_direct_body.clone(),
+        })
+    }
 }
 
 /// Read `keypair`'s own stored profile — the base an edit form re-signs — and
@@ -346,14 +521,18 @@ where
     R::Error: fauna_protocol::RpcErrorClass,
 {
     let client = ProfileClient::new(nest);
-    let base = match client.profile_get(keypair.actor_id().to_hex()).await {
-        Ok(reply) => reply.body.into_vec(),
+    let (base, last_direct_body) = match client.profile_get(keypair.actor_id().to_hex()).await {
+        Ok(reply) => (
+            reply.body.into_vec(),
+            reply.last_direct_body.map(|b| b.into_vec()),
+        ),
         Err(e) if is_profile_not_found(&e) => return Ok(OwnProfileBase::default()),
         Err(e) => return Err(LearnPredecessorsError::Fetch(e)),
     };
     let proven = prove_base(&client, &keypair.actor_id(), &base, recorded).await;
     Ok(OwnProfileBase {
         body: Some(base),
+        last_direct_body,
         proven,
     })
 }
@@ -424,6 +603,7 @@ async fn prove_base<R: RpcRequester>(
 pub fn build_edited_profile(
     keypair: &ActorKeypair,
     base_body: Option<&[u8]>,
+    last_direct_body: Option<&[u8]>,
     predecessors: &[ActorId],
     display_name: Option<String>,
     bio: Option<String>,
@@ -432,13 +612,26 @@ pub fn build_edited_profile(
     build_edited_profile_with_images(
         keypair,
         base_body,
+        last_direct_body,
         predecessors,
         display_name,
         bio,
         links,
         ProfileImageEdit::Keep,
         ProfileImageEdit::Keep,
+        None,
     )
+}
+
+/// `profile-edit-audience-toggle`'s value as the audience it signs: on =
+/// [`ProfileAudience::Everyone`], off = [`ProfileAudience::ThisNest`] — the
+/// FFI and wasm faces' one mapping.
+pub fn audience_from_toggle(everyone: bool) -> ProfileAudience {
+    if everyone {
+        ProfileAudience::Everyone
+    } else {
+        ProfileAudience::ThisNest
+    }
 }
 
 /// Admit a stored profile as the **base `keypair` is about to re-publish**,
@@ -458,15 +651,22 @@ pub fn build_edited_profile(
 ///    took part in or restored. A base naming a predecessor is re-labelled to
 ///    the signer, because a succession re-points the row's ownership nest-side
 ///    while its signed bytes are still the predecessor's.
-/// 3. **The two harvest anchors survive only a base the signer itself signed
-///    with its own identity key** ([`AuthoringOrigin::Direct`]). `recovery_head`
-///    and `nests` are what a peer's harvest seeds as this identity's succession
-///    anchor and dial domain. A delegated edit is signed by the nest-held
-///    authoring sub-key, and a predecessor's profile is another identity's word
-///    (a seed thief's, if it was doctored during the compromise window). Either
-///    one carried forward would put that party's anchor under the owner's
-///    signature. So both fields degrade to absent — a cache miss that costs
-///    peers a chain fetch, never a poisoned anchor.
+/// 3. **`recovery_head`, `nests` and `audience` survive only the signer's own
+///    identity-signed word** ([`resolve_own_word`], which the own form's
+///    projection shares). `recovery_head` and `nests` are what a peer's harvest
+///    seeds as this identity's succession anchor and dial domain, and
+///    `audience` is the owner's consent to the cross-nest read (`profile.md`
+///    § Where logic lives → *The remote read*). A delegated edit is signed by
+///    the nest-held authoring sub-key, and a predecessor's profile is another
+///    identity's word (a seed thief's, if it was doctored during the
+///    compromise window); either one carried forward would put that party's
+///    word under the owner's signature. So the three come from the base when
+///    the signer signed it directly, else from the owner's last identity-signed
+///    row the nest served beside it (`last_direct_body`, from
+///    [`OwnProfileBase::last_direct_body`]), else degrade to absent and
+///    [`ProfileAudience::ThisNest`] — a cache miss that costs peers a chain
+///    fetch, never a poisoned anchor, and the closed default the owner can
+///    re-open from a form that shows exactly this.
 /// 4. **Everything else the admitted base holds travels with the account** —
 ///    the display fields, `avatar` / `banner`, `admin_nests`, `load_hint` and
 ///    `inbox_mode`. None of them is an anchor: nothing reads them to decide
@@ -485,24 +685,21 @@ pub fn build_edited_profile(
 fn admit_base(
     keypair: &ActorKeypair,
     base_body: &[u8],
+    last_direct_body: Option<&[u8]>,
     predecessors: &[ActorId],
 ) -> Result<Profile, ProfileWriteError> {
     let (mut profile, origin) = decode_profile(base_body)?;
     let own = keypair.actor_id();
-    let signed_by_self = if profile.actor_id == own {
-        origin == AuthoringOrigin::Direct
-    } else if predecessors.contains(&profile.actor_id) {
-        false
-    } else {
+    if profile.actor_id != own && !predecessors.contains(&profile.actor_id) {
         return Err(BaseRefusal::NotOwn {
             actor: profile.actor_id,
         }
         .into());
-    };
-    if !signed_by_self {
-        profile.recovery_head = None;
-        profile.nests.clear();
     }
+    let word = resolve_own_word(&own, &profile, &origin, last_direct_body);
+    profile.recovery_head = word.recovery_head;
+    profile.nests = word.nests;
+    profile.audience = word.audience;
     profile.actor_id = own;
     Ok(profile)
 }
@@ -518,6 +715,13 @@ fn admit_base(
 /// [`ProfileImageEdit::Keep`] on both (what [`build_edited_profile`] passes) is
 /// the text-only v1 behaviour.
 ///
+/// `audience` is the edit form's `profile-edit-audience-toggle` — the owner's
+/// own word on whether other nests may read the record (`profile.md` § Where
+/// logic lives → *The remote read*). `None` leaves what the admitted base holds
+/// (or [`ProfileAudience::ThisNest`] on a first publish), so a form that did
+/// not touch the toggle never rewrites an audience a newer build wrote
+/// ([`ProfileAudience::Unknown`]); `Some` sets it.
+///
 /// The images themselves are ordinary blobs already uploaded through the
 /// public-post blob path — `media.md` § Encryption at rest: avatar / banner
 /// blobs are signed plaintext, "the same shape" as public-post attachments —
@@ -526,19 +730,21 @@ fn admit_base(
 pub fn build_edited_profile_with_images(
     keypair: &ActorKeypair,
     base_body: Option<&[u8]>,
+    last_direct_body: Option<&[u8]>,
     predecessors: &[ActorId],
     display_name: Option<String>,
     bio: Option<String>,
     links: Vec<ProfileLink>,
     avatar: ProfileImageEdit,
     banner: ProfileImageEdit,
+    audience: Option<ProfileAudience>,
 ) -> Result<Vec<u8>, ProfileWriteError> {
     let mut profile = match base_body {
         Some(b) => {
             // `admit_base`, never a bare `decode_profile`: it re-labels a base
             // a succession moved onto this identity, and it refuses or strips
             // what the nest could have chosen.
-            let mut p = admit_base(keypair, b, predecessors)?;
+            let mut p = admit_base(keypair, b, last_direct_body, predecessors)?;
             p.display_name = display_name;
             p.bio = bio;
             p.links = links;
@@ -557,11 +763,15 @@ pub fn build_edited_profile_with_images(
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         },
     };
     avatar.apply(&mut profile.avatar);
     banner.apply(&mut profile.banner);
+    if let Some(audience) = audience {
+        profile.audience = audience;
+    }
     Ok(build_profile(keypair, &profile)?)
 }
 
@@ -605,12 +815,13 @@ pub fn build_edited_profile_with_images(
 pub fn build_profile_with_recovery_head(
     keypair: &ActorKeypair,
     base_body: Option<&[u8]>,
+    last_direct_body: Option<&[u8]>,
     predecessors: &[ActorId],
     head: ChainHead,
     home: Option<&HomeNest>,
 ) -> Result<Vec<u8>, ProfileWriteError> {
     let mut profile = match base_body {
-        Some(b) => admit_base(keypair, b, predecessors)?,
+        Some(b) => admit_base(keypair, b, last_direct_body, predecessors)?,
         None => Profile {
             actor_id: keypair.actor_id(),
             display_name: None,
@@ -623,6 +834,7 @@ pub fn build_profile_with_recovery_head(
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: ProfileAudience::ThisNest,
             updated_at: Timestamp::now(),
         },
     };
@@ -740,9 +952,14 @@ where
     R::Error: fauna_protocol::RpcErrorClass,
 {
     let client = ProfileClient::new(nest);
-    let base = match client.profile_get(keypair.actor_id().to_hex()).await {
-        Ok(reply) => Some(reply.body.into_vec()),
-        Err(e) if is_profile_not_found(&e) => None,
+    // The owner's last identity-signed row rides the same read: a mirror over
+    // an external app's edit must not close a profile the owner opened.
+    let (base, last_direct) = match client.profile_get(keypair.actor_id().to_hex()).await {
+        Ok(reply) => (
+            Some(reply.body.into_vec()),
+            reply.last_direct_body.map(|b| b.into_vec()),
+        ),
+        Err(e) if is_profile_not_found(&e) => (None, None),
         Err(e) => return Err(RecoveryHeadError::Fetch(e)),
     };
     // A base this device's registry cannot place may still be the signer's own
@@ -755,6 +972,7 @@ where
     let body = build_profile_with_recovery_head(
         keypair,
         base.as_deref(),
+        last_direct.as_deref(),
         &predecessors,
         head,
         home.as_ref(),
@@ -931,6 +1149,90 @@ impl<R: RpcRequester> ProfileClient<R> {
             .await
     }
 
+    /// `fauna.profile.get_remote` — the same read for an actor homed on
+    /// another nest: this nest relays it to `nest_url` and hands back the
+    /// home's signed bytes, unstored (`profile.md` § Where logic lives → *The
+    /// remote read*). The home serves only a profile whose owner opted in;
+    /// every other case is the same `fauna.profile.not_found` [`Self::profile_get`]
+    /// answers. Decode the reply exactly as that method's.
+    pub async fn profile_get_remote(
+        &self,
+        actor_id: impl Into<String>,
+        nest_url: impl Into<String>,
+    ) -> Result<ProfileGetReply, R::Error> {
+        self.nest
+            .request(
+                "fauna.profile.get_remote",
+                ProfileGetRemoteRequest {
+                    actor_id: actor_id.into(),
+                    nest_url: nest_url.into(),
+                    extra: std::collections::BTreeMap::new(),
+                },
+            )
+            .await
+    }
+
+    /// The Profile page's header read for an OTHER actor (`profile.md` § Where
+    /// logic lives → *The remote read*): this nest first, and on its
+    /// `not_found` with a `home` in hand — the page's `actor_home` slot, `None`
+    /// for this nest — the relay to that home. Every other outcome is the
+    /// local read's own. The bytes it returns feed what a local read's do
+    /// (`decode_profile`, [`actor_home`], the page-path harvest); a
+    /// `not_found` from either leg is the header's id fallback.
+    pub async fn profile_get_or_relay(
+        &self,
+        actor_id: impl Into<String>,
+        home: Option<&str>,
+    ) -> Result<ProfileGetReply, R::Error>
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
+        self.profile_header_read(actor_id, home)
+            .await
+            .map(|read| read.reply)
+    }
+
+    /// [`Self::profile_get_or_relay`], also naming which nest answered — what
+    /// the header's avatar and banner are fetched from (`profile.md` § Where
+    /// logic lives → *The remote read*, *Bytes direct, as for a relayed post*):
+    /// `relayed_from` is `None` when this nest served the profile (its own
+    /// blob route) and the relayed-to `home` when the relay did, whose public
+    /// blob route the app reads through `fauna_client::PostBlobHosts` —
+    /// handing it `home_nest_actor_id`, the home's identity the relay reply
+    /// stamped, so the plane's pin graduates before the first byte.
+    pub async fn profile_header_read(
+        &self,
+        actor_id: impl Into<String>,
+        home: Option<&str>,
+    ) -> Result<HeaderRead, R::Error>
+    where
+        R::Error: fauna_protocol::RpcErrorClass,
+    {
+        let actor_id = actor_id.into();
+        match self.profile_get(actor_id.clone()).await {
+            Err(e) if is_profile_not_found(&e) => match home {
+                Some(home) => {
+                    let reply = self.profile_get_remote(actor_id, home).await?;
+                    let home_nest_actor_id = reply.home_nest_actor_id.clone();
+                    Ok(HeaderRead {
+                        reply,
+                        relayed_from: Some(home.to_string()),
+                        home_nest_actor_id,
+                    })
+                }
+                None => Err(e),
+            },
+            // This nest answered: its own blob route serves the pictures, so a
+            // stamp on a local reply (which the nest never writes) is not a
+            // foreign home to pin.
+            other => other.map(|reply| HeaderRead {
+                reply,
+                relayed_from: None,
+                home_nest_actor_id: None,
+            }),
+        }
+    }
+
     /// `fauna.profile.set` — publish/replace the caller's own profile. `body`
     /// is the signed `EmbedAsBytes` wire from [`build_profile`]. The nest
     /// verifies the signature, asserts the inner `actor_id` is the caller, then
@@ -961,10 +1263,10 @@ mod tests {
     /// one arm per kind, each the minimal valid shape its `Reply` decodes.
     fn reply(kind: &'static str) -> Vec<u8> {
         match kind {
-            "fauna.profile.get" => {
+            "fauna.profile.get" | "fauna.profile.get_remote" => {
                 fauna_protocol::encode_canonical(&fauna_protocol::profile::ProfileGetReply {
                     body: ByteBuf::from(vec![0x01, 0x02]),
-                    extra: Default::default(),
+                    ..Default::default()
                 })
             }
             "fauna.profile.set" => {
@@ -991,6 +1293,20 @@ mod tests {
         assert_eq!(kind, "fauna.profile.get");
         let req: ProfileGetRequest = fauna_protocol::decode_strict(&payload).expect("decodes");
         assert_eq!(req.actor_id, hex32());
+    }
+
+    #[test]
+    fn profile_get_remote_composes_kind_and_payload() {
+        let rec = std::sync::Arc::new(RecordingRequester::new(reply));
+        let client = ProfileClient::new(rec.clone());
+        block_on(client.profile_get_remote(hex32(), "https://home.example"))
+            .expect("infallible mock");
+        let (kind, payload) = rec.recorded();
+        assert_eq!(kind, "fauna.profile.get_remote");
+        let req: ProfileGetRemoteRequest =
+            fauna_protocol::decode_strict(&payload).expect("decodes");
+        assert_eq!(req.actor_id, hex32());
+        assert_eq!(req.nest_url, "https://home.example");
     }
 
     #[test]
@@ -1022,6 +1338,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         }
     }
@@ -1094,6 +1411,69 @@ mod tests {
     }
 
     #[test]
+    fn the_actors_home_prefers_their_signed_profile_then_the_carried_hint() {
+        let kp = ActorKeypair::generate();
+        let actor = kp.actor_id();
+        let me = "https://home.example:8443";
+        let foreign = homed_at(&kp, &["https://peer.example:9000/"]);
+        assert_eq!(
+            actor_home(Some("https://met.example"), &actor, Some(&foreign), me).as_deref(),
+            Some("https://peer.example:9000/"),
+            "the actor's signed profile beats where the viewer met them",
+        );
+        assert_eq!(
+            actor_home(Some("https://met.example"), &actor, None, me).as_deref(),
+            Some("https://met.example"),
+            "before the header read answers, the carried hint stands",
+        );
+        // A profile naming no nest gives no better answer: the hint stands.
+        let none = homed_at(&kp, &[]);
+        assert_eq!(
+            actor_home(Some("https://met.example"), &actor, Some(&none), me).as_deref(),
+            Some("https://met.example"),
+        );
+    }
+
+    #[test]
+    fn a_hint_naming_the_viewers_own_nest_or_no_hint_is_this_nest() {
+        let actor = ActorKeypair::generate().actor_id();
+        let me = "https://home.example:8443";
+        assert_eq!(
+            actor_home(Some("https://HOME.example:8443/"), &actor, None, me),
+            None,
+            "the viewer's own authority, spelled differently, is local",
+        );
+        assert_eq!(actor_home(None, &actor, None, me), None);
+        assert_eq!(actor_home(Some(""), &actor, None, me), None);
+        // Same host, other port: a different nest.
+        assert_eq!(
+            actor_home(Some("https://home.example:9443"), &actor, None, me).as_deref(),
+            Some("https://home.example:9443"),
+        );
+    }
+
+    #[test]
+    fn a_profile_about_someone_else_never_displaces_the_hint() {
+        let kp = ActorKeypair::generate();
+        let body = homed_at(&kp, &["https://peer.example"]);
+        let stranger = ActorKeypair::generate().actor_id();
+        assert_eq!(
+            actor_home(
+                Some("https://met.example"),
+                &stranger,
+                Some(&body),
+                "https://home.example"
+            )
+            .as_deref(),
+            Some("https://met.example"),
+        );
+        assert_eq!(
+            actor_home(None, &stranger, Some(&body), "https://home.example"),
+            None,
+        );
+    }
+
+    #[test]
     fn build_profile_rejects_actor_id_keypair_mismatch() {
         let kp = ActorKeypair::generate();
         // Profile claims a different actor than the signing keypair.
@@ -1130,6 +1510,7 @@ mod tests {
             // Non-`None` for the same reason: an edit of the display fields
             // must never drop the cached RecoveryKey binding.
             recovery_head: Some(ChainHead::new([0xA7; 32], 3)),
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         }
     }
@@ -1142,6 +1523,7 @@ mod tests {
         let edited = build_edited_profile(
             &kp,
             Some(&base_bytes),
+            None,
             &[],
             Some("new".into()),
             Some("newbio".into()),
@@ -1168,7 +1550,7 @@ mod tests {
     #[test]
     fn build_edited_profile_first_publish_uses_defaults() {
         let kp = ActorKeypair::generate();
-        let fresh = build_edited_profile(&kp, None, &[], Some("fresh".into()), None, vec![])
+        let fresh = build_edited_profile(&kp, None, None, &[], Some("fresh".into()), None, vec![])
             .expect("build fresh");
 
         let (decoded, _) = decode_profile(&fresh).expect("decode fresh");
@@ -1213,8 +1595,16 @@ mod tests {
         let kp = ActorKeypair::generate();
         let base = build_profile(&kp, &base_profile_with_images(&kp)).expect("build base");
 
-        let edited = build_edited_profile(&kp, Some(&base), &[], Some("new".into()), None, vec![])
-            .expect("build edited");
+        let edited = build_edited_profile(
+            &kp,
+            Some(&base),
+            None,
+            &[],
+            Some("new".into()),
+            None,
+            vec![],
+        )
+        .expect("build edited");
 
         let (decoded, _) = decode_profile(&edited).expect("decode edited");
         assert_eq!(decoded.display_name, Some("new".into()));
@@ -1239,12 +1629,14 @@ mod tests {
         let edited = build_edited_profile_with_images(
             &kp,
             Some(&base),
+            None,
             &[],
             Some("new".into()),
             None,
             vec![],
             ProfileImageEdit::set_from_hex(&new_avatar).expect("valid hex"),
             ProfileImageEdit::Clear,
+            None,
         )
         .expect("build edited");
 
@@ -1266,12 +1658,14 @@ mod tests {
         let fresh = build_edited_profile_with_images(
             &kp,
             None,
+            None,
             &[],
             Some("fresh".into()),
             None,
             vec![],
             ProfileImageEdit::set_from_hex(&"ef".repeat(32)).expect("valid hex"),
             ProfileImageEdit::Keep,
+            None,
         )
         .expect("build fresh");
 
@@ -1341,6 +1735,7 @@ mod tests {
         let base = build_edited_profile(
             &keypair,
             None,
+            None,
             &[],
             Some("Ada".into()),
             Some("counts things".into()),
@@ -1354,6 +1749,7 @@ mod tests {
         let mirrored = build_profile_with_recovery_head(
             &keypair,
             Some(&base),
+            None,
             &[],
             ChainHead::new([0x7A; 32], 1),
             None,
@@ -1395,6 +1791,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: InboxMode::Open,
                 recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp::now(),
             },
         )
@@ -1403,6 +1800,7 @@ mod tests {
         let mirrored = build_profile_with_recovery_head(
             &successor,
             Some(&inherited),
+            None,
             &[predecessor.actor_id()],
             ChainHead::new([0x7A; 32], 1),
             None,
@@ -1446,6 +1844,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: InboxMode::Open,
                 recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp::now(),
             },
         )
@@ -1454,6 +1853,7 @@ mod tests {
         let edited = build_edited_profile(
             &successor,
             Some(&inherited),
+            None,
             &[predecessor.actor_id()],
             Some("Ada Lovelace".into()),
             Some("still counting".into()),
@@ -1490,6 +1890,7 @@ mod tests {
                 load_hint: None,
                 inbox_mode: InboxMode::Open,
                 recovery_head: None,
+                audience: fauna_core::data::ProfileAudience::ThisNest,
                 updated_at: Timestamp::now(),
             },
         );
@@ -1529,6 +1930,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::ContactsOnly,
             recovery_head: Some(ChainHead::new([0xAA; 32], 9)),
+            audience: fauna_core::data::ProfileAudience::Everyone,
             updated_at: Timestamp(0),
         }
     }
@@ -1563,6 +1965,7 @@ mod tests {
         let body = build_edited_profile(
             kp,
             Some(base),
+            None,
             predecessors,
             Some("new".into()),
             None,
@@ -1579,6 +1982,7 @@ mod tests {
         let body = build_profile_with_recovery_head(
             kp,
             Some(base),
+            None,
             predecessors,
             ChainHead::new([0x3E; 32], 4),
             Some(&HomeNest {
@@ -1662,6 +2066,11 @@ mod tests {
         );
         assert_eq!(edited.inbox_mode, InboxMode::ContactsOnly);
         assert_eq!(edited.admin_nests.len(), 1);
+        assert_eq!(
+            edited.audience,
+            ProfileAudience::ThisNest,
+            "the predecessor's cross-nest consent is not carried"
+        );
 
         let mirrored = mirror(&successor, &inherited, &[predecessor.actor_id()]).expect("adopted");
         assert_eq!(mirrored.recovery_head, Some(ChainHead::new([0x3E; 32], 4)));
@@ -1673,12 +2082,15 @@ mod tests {
     }
 
     #[test]
-    fn a_delegated_own_base_is_adopted_without_its_anchors() {
+    fn a_delegated_own_base_with_the_owners_word_withheld_is_adopted_without_its_anchors() {
         // A profile edit made through an external app is signed by the
         // nest-held authoring sub-key. It is still the owner's profile, so an
         // edit over it must work — but its head and home are what that key
         // chose, and re-signing them with the identity key would launder them
-        // into the harvest's anchor.
+        // into the harvest's anchor. With no identity-signed row of the
+        // owner's served beside it (the nest withheld it — the degrade), the
+        // three fields degrade; the served-row arm is
+        // `an_untouched_save_after_an_external_edit_keeps_the_owners_own_word`.
         let owner = ActorKeypair::generate();
         let delegated = delegated_wire(&owner, &anchored_profile(owner.actor_id()));
         assert!(
@@ -1692,6 +2104,18 @@ mod tests {
         let edited = edit(&owner, &delegated, &[]).expect("a delegated own base is admitted");
         assert_eq!(edited.recovery_head, None);
         assert!(edited.nests.is_empty());
+        assert_eq!(
+            edited.audience,
+            ProfileAudience::ThisNest,
+            "the sub-key's cross-nest consent is not laundered into the owner's"
+        );
+        assert_eq!(
+            decode_own_profile_display(&owner.actor_id(), &delegated, None)
+                .unwrap()
+                .audience,
+            ProfileAudience::ThisNest,
+            "and the form shows the switch off — exactly what the save signs"
+        );
         assert_eq!(edited.display_name.as_deref(), Some("new"));
         assert_eq!(edited.inbox_mode, InboxMode::ContactsOnly);
         assert_eq!(edited.admin_nests.len(), 1);
@@ -1704,6 +2128,187 @@ mod tests {
         assert_eq!(mirrored.nests[0].url, "https://home.example");
     }
 
+    fn edit_over(
+        kp: &ActorKeypair,
+        base: &[u8],
+        word: Option<&[u8]>,
+        predecessors: &[ActorId],
+    ) -> Profile {
+        let body = build_edited_profile(
+            kp,
+            Some(base),
+            word,
+            predecessors,
+            Some("new".into()),
+            None,
+            vec![],
+        )
+        .expect("admitted");
+        decode_profile(&body).expect("decode the edit").0
+    }
+
+    /// The owner's last identity-signed word (`profile.md` § Persistence →
+    /// *After an identity succession, the successor RE-PUBLISHES* →
+    /// base-admission rule 3, amended 2026-10-21): the whole sequence — the
+    /// owner opens the profile to everyone, an external app edits it, the
+    /// owner saves without touching the switch — and every arm of the rule.
+    #[test]
+    fn an_untouched_save_after_an_external_edit_keeps_the_owners_own_word() {
+        let owner = ActorKeypair::generate();
+        let mut own = anchored_profile(owner.actor_id());
+        own.updated_at = Timestamp(10);
+        let direct = build_profile(&owner, &own).expect("the owner's own publish");
+
+        // The external edit: the sub-key's word, carrying anchors of its own.
+        let mut external = anchored_profile(owner.actor_id());
+        external.bio = Some("edited in another app".into());
+        external.recovery_head = Some(ChainHead::new([0x66; 32], 1));
+        external.nests[0].url = "https://sub-key.example".into();
+        external.updated_at = Timestamp(20);
+        let delegated = delegated_wire(&owner, &external);
+
+        // Served: the three fields come from the owner's own row, the rest
+        // from the delegated base, and the form shows what the save signs.
+        let saved = edit_over(&owner, &delegated, Some(&direct), &[]);
+        assert_eq!(
+            saved.audience,
+            ProfileAudience::Everyone,
+            "the owner's own choice to open the profile survives"
+        );
+        assert_eq!(saved.recovery_head, Some(ChainHead::new([0xAA; 32], 9)));
+        assert_eq!(saved.nests.len(), 1);
+        assert_eq!(saved.nests[0].url, "https://attacker.example.net");
+        assert_eq!(saved.display_name.as_deref(), Some("new"));
+        let form = decode_own_profile_display(&owner.actor_id(), &delegated, Some(&direct))
+            .expect("projects");
+        assert_eq!(form.audience, saved.audience, "the switch paints the save");
+        assert_eq!(
+            form.bio.as_deref(),
+            Some("edited in another app"),
+            "the display fields are the delegated base's"
+        );
+
+        // The sign-in mirror runs through the same admission.
+        let mirrored = build_profile_with_recovery_head(
+            &owner,
+            Some(&delegated),
+            Some(&direct),
+            &[],
+            ChainHead::new([0x3E; 32], 4),
+            Some(&HomeNest {
+                url: "https://home.example".into(),
+                nest_id: None,
+            }),
+        )
+        .expect("mirrors");
+        let mirrored = decode_profile(&mirrored).unwrap().0;
+        assert_eq!(mirrored.audience, ProfileAudience::Everyone);
+        assert_eq!(
+            mirrored.nests[0].url, "https://attacker.example.net",
+            "the owner's own list is carried, never displaced"
+        );
+
+        // Withheld: the degrade, and the form agrees.
+        let withheld = edit_over(&owner, &delegated, None, &[]);
+        assert_eq!(withheld.audience, ProfileAudience::ThisNest);
+        assert_eq!(withheld.recovery_head, None);
+        assert!(withheld.nests.is_empty());
+        assert_eq!(
+            decode_own_profile_display(&owner.actor_id(), &delegated, None)
+                .unwrap()
+                .audience,
+            ProfileAudience::ThisNest
+        );
+
+        // A predecessor's identity-signed row is another key's word.
+        let predecessor = ActorKeypair::generate();
+        let mut theirs = anchored_profile(predecessor.actor_id());
+        theirs.updated_at = Timestamp(10);
+        let theirs = build_profile(&predecessor, &theirs).expect("the predecessor's publish");
+        let refused = edit_over(&owner, &delegated, Some(&theirs), &[predecessor.actor_id()]);
+        assert_eq!(refused.audience, ProfileAudience::ThisNest);
+        assert_eq!(refused.recovery_head, None);
+        assert!(refused.nests.is_empty());
+        assert_eq!(
+            decode_own_profile_display(&owner.actor_id(), &delegated, Some(&theirs))
+                .unwrap()
+                .audience,
+            ProfileAudience::ThisNest
+        );
+
+        // A row newer than the base is not the word behind it.
+        let mut later = anchored_profile(owner.actor_id());
+        later.updated_at = Timestamp(30);
+        let later = build_profile(&owner, &later).expect("a later own publish");
+        let refused = edit_over(&owner, &delegated, Some(&later), &[]);
+        assert_eq!(refused.audience, ProfileAudience::ThisNest);
+        assert_eq!(refused.recovery_head, None);
+        assert_eq!(
+            decode_own_profile_display(&owner.actor_id(), &delegated, Some(&later))
+                .unwrap()
+                .audience,
+            ProfileAudience::ThisNest
+        );
+
+        // A delegated row offered as the word is no word at all.
+        let refused = edit_over(&owner, &delegated, Some(&delegated), &[]);
+        assert_eq!(refused.audience, ProfileAudience::ThisNest);
+
+        // A direct base is its own word: the row is ignored.
+        let mut closed = base_profile(&owner);
+        closed.updated_at = Timestamp(40);
+        let closed = build_profile(&owner, &closed).expect("a closed own publish");
+        let kept = edit_over(&owner, &closed, Some(&direct), &[]);
+        assert_eq!(kept.audience, ProfileAudience::ThisNest);
+        assert_eq!(kept.recovery_head, Some(ChainHead::new([0xA7; 32], 3)));
+        assert_eq!(
+            decode_own_profile_display(&owner.actor_id(), &closed, Some(&direct))
+                .unwrap()
+                .audience,
+            ProfileAudience::ThisNest
+        );
+    }
+
+    /// The sign-in mirror over a delegated base the owner had opened: the
+    /// served row keeps the profile open, and its own home list stands.
+    #[test]
+    fn the_sign_in_mirror_keeps_the_owners_word_over_an_external_edit() {
+        let owner = ActorKeypair::generate();
+        let (reg, head) = registered(&owner);
+        let mut own = anchored_profile(owner.actor_id());
+        own.updated_at = Timestamp(10);
+        let direct = build_profile(&owner, &own).expect("own publish");
+        let mut external = anchored_profile(owner.actor_id());
+        external.updated_at = Timestamp(20);
+        let delegated = delegated_wire(&owner, &external);
+
+        let nest = MirrorNest::serving(delegated.clone())
+            .with_last_direct(direct.clone())
+            .with_chain(&[reg]);
+        let outcome = block_on(restore_delegated_anchors(
+            &nest,
+            &owner,
+            &[],
+            Some(&delegated),
+            home(),
+        ))
+        .expect("restores");
+        assert_eq!(outcome, AnchorRestore::Published);
+        let (profile, _) = decode_profile(&nest.published()[0]).expect("decodes");
+        assert_eq!(profile.recovery_head, Some(head));
+        assert_eq!(
+            profile.audience,
+            ProfileAudience::Everyone,
+            "a sign-in never closes a profile the owner opened"
+        );
+        assert_eq!(profile.nests[0].url, "https://attacker.example.net");
+
+        // The edit form's base load hands the row on with the body.
+        let base = block_on(fetch_own_profile_base(&nest, &owner, &[])).expect("reads");
+        assert_eq!(base.body.as_deref(), Some(delegated.as_slice()));
+        assert_eq!(base.last_direct_body.as_deref(), Some(direct.as_slice()));
+    }
+
     #[test]
     fn an_own_direct_base_round_trips_its_anchors() {
         // The control: what the owner signed with its own key, it keeps.
@@ -1712,6 +2317,18 @@ mod tests {
 
         let edited = edit(&owner, &own, &[]).expect("own base");
         assert_eq!(edited.recovery_head, Some(ChainHead::new([0xAA; 32], 9)));
+        assert_eq!(
+            edited.audience,
+            ProfileAudience::Everyone,
+            "the owner's own consent survives a text edit"
+        );
+        assert_eq!(
+            decode_profile_display(&build_profile(&owner, &edited).unwrap())
+                .unwrap()
+                .audience,
+            ProfileAudience::Everyone,
+            "and the form opens on it"
+        );
         assert_eq!(edited.nests.len(), 1);
         assert_eq!(edited.nests[0].url, "https://attacker.example.net");
 
@@ -2009,6 +2626,7 @@ mod tests {
         let body = build_profile_with_recovery_head(
             &keypair,
             None,
+            None,
             &[],
             ChainHead::new([0x11; 32], 1),
             None,
@@ -2029,6 +2647,7 @@ mod tests {
         let with_key = build_profile_with_recovery_head(
             &keypair,
             None,
+            None,
             &[],
             ChainHead::new([0x5C; 32], 2),
             None,
@@ -2038,6 +2657,7 @@ mod tests {
         let edited = build_edited_profile(
             &keypair,
             Some(&with_key),
+            None,
             &[],
             Some("new name".into()),
             None,
@@ -2052,6 +2672,214 @@ mod tests {
             "an ordinary profile edit must not retire the user's recovery binding"
         );
         assert_eq!(profile.display_name.as_deref(), Some("new name"));
+    }
+
+    // ── The audience toggle (`profile-edit-audience-toggle`) ──────────────
+
+    fn edit_audience(
+        kp: &ActorKeypair,
+        base: Option<&[u8]>,
+        audience: Option<ProfileAudience>,
+    ) -> ProfileAudience {
+        let body = build_edited_profile_with_images(
+            kp,
+            base,
+            None,
+            &[],
+            Some("new".into()),
+            None,
+            vec![],
+            ProfileImageEdit::Keep,
+            ProfileImageEdit::Keep,
+            audience,
+        )
+        .expect("build edited");
+        decode_profile(&body).expect("decode edited").0.audience
+    }
+
+    #[test]
+    fn the_toggle_sets_the_audience_and_an_untouched_toggle_keeps_the_base() {
+        let kp = ActorKeypair::generate();
+        // First publish: closed unless the owner turned the toggle on.
+        assert_eq!(edit_audience(&kp, None, None), ProfileAudience::ThisNest);
+        assert_eq!(
+            edit_audience(&kp, None, Some(ProfileAudience::Everyone)),
+            ProfileAudience::Everyone
+        );
+        // Re-edit over an opted-in base: the owner's own signed `Everyone`
+        // survives a save that did not touch the toggle, and turning it off
+        // closes it.
+        let mut opened = base_profile(&kp);
+        opened.audience = ProfileAudience::Everyone;
+        let opened = build_profile(&kp, &opened).expect("opened base");
+        assert_eq!(
+            edit_audience(&kp, Some(&opened), None),
+            ProfileAudience::Everyone
+        );
+        assert_eq!(
+            edit_audience(&kp, Some(&opened), Some(ProfileAudience::ThisNest)),
+            ProfileAudience::ThisNest
+        );
+    }
+
+    #[test]
+    fn an_untouched_toggle_carries_an_audience_this_build_does_not_name() {
+        // A newer build's audience rides through an older form's save whole
+        // (transport.md Rule 3 in full): the toggle shows it as off, but only
+        // the owner's own press may replace it.
+        let kp = ActorKeypair::generate();
+        let mut newer = base_profile(&kp);
+        newer.audience = fauna_core::encoding::canonical_decode(
+            &fauna_core::encoding::canonical_encode(&"Followers").expect("encode"),
+        )
+        .expect("an unnamed audience decodes to the carried arm");
+        assert!(matches!(newer.audience, ProfileAudience::Unknown(_)));
+        let carried = newer.audience.clone();
+        let newer = build_profile(&kp, &newer).expect("newer base");
+        assert_eq!(edit_audience(&kp, Some(&newer), None), carried);
+    }
+
+    // ── profile_get_or_relay: the OTHER header read ──────────────────────
+
+    /// Answers `fauna.profile.get` and `fauna.profile.get_remote` from two
+    /// configured legs and records which homes the relay was asked for.
+    struct RelayNest {
+        local: Result<Vec<u8>, MirrorErr>,
+        remote: Result<Vec<u8>, MirrorErr>,
+        relayed: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl RelayNest {
+        fn new(local: Result<Vec<u8>, MirrorErr>, remote: Result<Vec<u8>, MirrorErr>) -> Self {
+            Self {
+                local,
+                remote,
+                relayed: std::sync::Mutex::new(vec![]),
+            }
+        }
+        fn relayed(&self) -> Vec<(String, String)> {
+            self.relayed.lock().unwrap().clone()
+        }
+    }
+
+    fn not_found() -> MirrorErr {
+        MirrorErr(Some(fauna_protocol::RpcError::new(
+            fauna_protocol::RpcError::CODE_PROFILE_NOT_FOUND,
+            "error.test",
+        )))
+    }
+
+    impl RpcRequester for &RelayNest {
+        type Error = MirrorErr;
+
+        async fn request<Req, Reply>(
+            &self,
+            kind: &'static str,
+            payload: Req,
+        ) -> Result<Reply, Self::Error>
+        where
+            Req: serde::Serialize,
+            Reply: serde::de::DeserializeOwned,
+        {
+            let bytes = fauna_protocol::encode_canonical(&payload).expect("encode request");
+            let body = match kind {
+                "fauna.profile.get" => self.local.clone()?,
+                "fauna.profile.get_remote" => {
+                    let req: ProfileGetRemoteRequest =
+                        fauna_protocol::decode_strict(&bytes).expect("relay request decodes");
+                    self.relayed
+                        .lock()
+                        .unwrap()
+                        .push((req.actor_id, req.nest_url));
+                    self.remote.clone()?
+                }
+                other => panic!("RelayNest: unhandled kind {other}"),
+            };
+            // The relay stamps the home it dial-proved; a same-nest read
+            // never does (`profile_handlers::profile_get_remote_handler`).
+            let reply = fauna_protocol::encode_canonical(&ProfileGetReply {
+                body: ByteBuf::from(body),
+                home_nest_actor_id: (kind == "fauna.profile.get_remote").then(home_id),
+                ..Default::default()
+            })
+            .expect("encode reply");
+            Ok(fauna_protocol::decode_strict(&reply).expect("decode reply"))
+        }
+    }
+
+    const HOME: &str = "https://home.example";
+
+    /// The identity `RelayNest` stamps on every relay reply, as the reader's
+    /// own nest stamps the `peer_nest_id` it dialed the home as.
+    fn home_id() -> String {
+        "ab".repeat(32)
+    }
+
+    #[test]
+    fn the_header_read_relays_to_the_carried_home_only_on_a_local_not_found() {
+        // Local hit: the relay is never asked.
+        let nest = RelayNest::new(Ok(vec![1]), Ok(vec![2]));
+        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+            .expect("local hit");
+        assert_eq!(reply.body.into_vec(), vec![1]);
+        assert!(nest.relayed().is_empty());
+
+        // Local not_found with a home: the relay's bytes, asked of that home.
+        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
+        let reply = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+            .expect("relayed");
+        assert_eq!(reply.body.into_vec(), vec![2]);
+        assert_eq!(nest.relayed(), vec![(hex32(), HOME.to_string())]);
+    }
+
+    /// The header's pictures rest where its bytes came from: a profile this
+    /// nest answered names no home (its own blob route), a relayed one names
+    /// the home it was relayed from (`profile.md` § Where logic lives → *The
+    /// remote read*, *Bytes direct, as for a relayed post*) — with the
+    /// identity the relay reply stamped for it, which the picture plane pins
+    /// (`transport-trust.md` § The post arm → *A relayed profile's pictures*).
+    #[test]
+    fn the_header_read_names_the_home_a_relayed_profile_came_from() {
+        let nest = RelayNest::new(Ok(vec![1]), Ok(vec![2]));
+        let read = block_on(ProfileClient::new(&nest).profile_header_read(hex32(), Some(HOME)))
+            .expect("local hit");
+        assert_eq!(read.reply.body.into_vec(), vec![1]);
+        assert_eq!(read.relayed_from, None, "this nest answered: its own blobs");
+        assert_eq!(read.home_nest_actor_id, None, "and no foreign home to pin");
+
+        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
+        let read = block_on(ProfileClient::new(&nest).profile_header_read(hex32(), Some(HOME)))
+            .expect("relayed");
+        assert_eq!(read.reply.body.into_vec(), vec![2]);
+        assert_eq!(read.relayed_from.as_deref(), Some(HOME));
+        assert_eq!(
+            read.home_nest_actor_id.as_deref(),
+            Some(home_id().as_str()),
+            "the relay's stamp rides with the home it names"
+        );
+    }
+
+    #[test]
+    fn the_header_read_falls_back_without_a_home_or_on_any_other_error() {
+        // No home in hand: the local not_found stands, no relay.
+        let nest = RelayNest::new(Err(not_found()), Ok(vec![2]));
+        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), None))
+            .expect_err("no home, no relay");
+        assert!(is_profile_not_found(&err));
+        assert!(nest.relayed().is_empty());
+
+        // A local fault is not a not_found: no relay behind it.
+        let nest = RelayNest::new(Err(MirrorErr(None)), Ok(vec![2]));
+        assert!(
+            block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME))).is_err()
+        );
+        assert!(nest.relayed().is_empty());
+
+        // The home refusing (not opted in, not hosted) is the same not_found.
+        let nest = RelayNest::new(Err(not_found()), Err(not_found()));
+        let err = block_on(ProfileClient::new(&nest).profile_get_or_relay(hex32(), Some(HOME)))
+            .expect_err("home refused");
+        assert!(is_profile_not_found(&err));
     }
 
     // ── publish_recovery_head: the read-modify-write transport hop ────────
@@ -2086,6 +2914,9 @@ mod tests {
     /// published so the assertions can decode it.
     struct MirrorNest {
         get: Result<Vec<u8>, MirrorErr>,
+        /// What `fauna.profile.get` serves as `last_direct_body` — the owner's
+        /// last identity-signed row a real nest keeps beside a delegated one.
+        last_direct: Option<Vec<u8>>,
         published: std::sync::Mutex<Vec<Vec<u8>>>,
         /// What `fauna.recovery.succession.lookup` answers, whatever actor is
         /// asked about — a hostile nest serves what it likes.
@@ -2103,6 +2934,7 @@ mod tests {
         fn serving(body: Vec<u8>) -> Self {
             Self {
                 get: Ok(body),
+                last_direct: None,
                 published: std::sync::Mutex::new(vec![]),
                 statements: vec![],
                 lookups: std::sync::Mutex::new(vec![]),
@@ -2118,6 +2950,10 @@ mod tests {
                 .iter()
                 .map(|r| fauna_core::encoding::canonical_encode(r).expect("encode registration"))
                 .collect();
+            self
+        }
+        fn with_last_direct(mut self, row: Vec<u8>) -> Self {
+            self.last_direct = Some(row);
             self
         }
         fn chain_reads(&self) -> usize {
@@ -2139,6 +2975,7 @@ mod tests {
                     code,
                     "error.test",
                 )))),
+                last_direct: None,
                 published: std::sync::Mutex::new(vec![]),
                 statements: vec![],
                 lookups: std::sync::Mutex::new(vec![]),
@@ -2149,6 +2986,7 @@ mod tests {
         fn unreachable() -> Self {
             Self {
                 get: Err(MirrorErr(None)),
+                last_direct: None,
                 published: std::sync::Mutex::new(vec![]),
                 statements: vec![],
                 lookups: std::sync::Mutex::new(vec![]),
@@ -2179,7 +3017,8 @@ mod tests {
                     let body = self.get.clone()?;
                     fauna_protocol::encode_canonical(&fauna_protocol::profile::ProfileGetReply {
                         body: ByteBuf::from(body),
-                        extra: Default::default(),
+                        last_direct_body: self.last_direct.clone().map(ByteBuf::from),
+                        ..Default::default()
                     })
                 }
                 "fauna.profile.set" => {

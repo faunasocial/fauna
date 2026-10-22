@@ -27,20 +27,18 @@
 //! the ops that feed it, and the paint branch.
 //!
 //! **Cross-nest Find User + knock** (`contacts.md` § Implementation status
-//! today): a typed `bob@other.test` whose domain is not this nest's resolves
-//! **directly against that peer** — `fauna_core::resolve::is_foreign_handle_domain`
-//! decides, `fauna_provisioning::probe::peer_nest_url` derives the URL, and an
-//! anonymous `fauna.actor.by_handle` runs there. The page then carries that URL
-//! into `fauna.inbox.send`'s `recipient_nest_url`, so the home nest originates
-//! `fauna.federation.inbox.deliver` and the knock lands in the peer's queue.
+//! today): the lookup is the shared
+//! `fauna_client_core::find_user::find_user_across_nests` — a typed
+//! `bob@other.test` whose domain is not this nest's resolves **directly against
+//! that peer** (an anonymous `fauna.actor.by_handle` there). The page then
+//! carries the returned peer URL into `fauna.inbox.send`'s `recipient_nest_url`,
+//! so the home nest originates `fauna.federation.inbox.deliver` and the knock
+//! lands in the peer's queue.
 //!
-//! This is the conversations recipient picker's mechanism, not the older
-//! nest-proxied `resolve_nest` → `resolve_handle` chain (which linux has since
-//! left for the shared `find_user_across_nests`): the nest-proxied
-//! `fauna.nest.resolve` refuses loopback / IP-literal / `.local` authorities by
-//! design (`discovery_core.rs`), so dialing the typed authority directly is
-//! both the richer pattern (priority #4) and the only one a two-nest test
-//! topology can witness.
+//! The shared function dials the typed authority rather than going through the
+//! nest-proxied `fauna.nest.resolve`, which refuses loopback / IP-literal /
+//! `.local` authorities by design (`discovery_core.rs`), so a two-nest test
+//! topology can only witness the direct dial.
 
 use fauna_ui_ids as ids;
 use std::sync::Arc;
@@ -51,7 +49,6 @@ use fauna_client_family::family::FamilyContactRequestInfo;
 use fauna_core::identity::ActorKeypair;
 use fauna_i18n::strings::{common, contacts as t};
 use fauna_protocol::contacts::{ContactItem, KnockItem};
-use fauna_protocol::discovery::{ActorByHandleReply, ActorByHandleRequest};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -726,32 +723,27 @@ impl Op {
                 handle,
                 domain,
             } => {
-                let req = ActorByHandleRequest {
-                    handle: handle.clone(),
-                    domain: domain.clone(),
-                    extra: Default::default(),
-                };
-                let reply: Result<ActorByHandleReply, _> =
-                    nest.request("fauna.actor.by_handle", req).await;
-                // The same-nest reply's `domain` IS this nest's handle domain,
-                // which is what makes the typed one judgeable; a failed probe
-                // volunteers none, and the shared rule reads that as "go ask the
-                // peer" rather than silently resolving `bob@other.test` to a
-                // local `bob`.
-                let home_domain = reply.as_ref().ok().map(|r| r.domain.as_str());
-                if !fauna_core::resolve::is_foreign_handle_domain(domain.as_deref(), home_domain) {
-                    return match reply {
-                        Ok(r) => Outcome::Resolved {
-                            actor_id: r.actor_id,
-                            nest_url: None,
-                        },
-                        // An unknown handle is a rejection, not a transport
-                        // fault — both surface as not-found here (the page's
-                        // find-error), matching linux's HANDLE_NOT_FOUND arm.
-                        Err(_) => Outcome::NotFound,
-                    };
+                // The shared lookup (`contacts.md` § Cross-nest knocks): the home
+                // probe, the foreign-domain rule and the peer dial are one
+                // function every app calls, so none re-derives them. Any `Err`
+                // — an unknown handle (a rejection, not a transport fault), a
+                // refusal, an unreachable peer — is the page's one find-error.
+                use fauna_anon_client::AnonymousNestClient;
+                match fauna_client_core::find_user::find_user_across_nests(
+                    nest.as_ref(),
+                    &handle,
+                    domain.as_deref(),
+                    |d| fauna_provisioning::probe::peer_nest_url(Some(d.to_string())),
+                    |url| async move { AnonymousNestClient::connect(&url).await },
+                )
+                .await
+                {
+                    Ok(hit) => Outcome::Resolved {
+                        actor_id: hit.found.actor_id,
+                        nest_url: hit.nest_url,
+                    },
+                    Err(_) => Outcome::NotFound,
                 }
-                resolve_on_peer(handle, domain.expect("foreign implies a typed domain")).await
             }
             Op::SendKnock {
                 nest,
@@ -841,62 +833,6 @@ impl Op {
                 Outcome::AddressBookRefreshed { books, open }
             }
         }
-    }
-}
-
-/// Resolve `handle` on the **peer** nest that serves `domain` — the cross-nest
-/// half of Find User, reached once
-/// [`fauna_core::resolve::is_foreign_handle_domain`] has ruled the typed domain
-/// foreign.
-///
-/// An anonymous connection straight to the typed authority, exactly as the
-/// conversations recipient picker's `actor_by_handle_remote` does
-/// (`fauna_client_conversations`): `peer_nest_url` derives the base URL, and
-/// `fauna.actor.by_handle` runs there pre-identity. The home nest is not in the
-/// path — deliberately. The nest-proxied `fauna.nest.resolve` kind, which
-/// the older `resolve_nest` → `resolve_handle` chain went through, **refuses**
-/// loopback, IP-literal and `.local` authorities by design
-/// (`bins/fauna-nest/src/discovery_core.rs`), so it can neither reach a peer on
-/// a LAN address nor be witnessed by a two-nest test topology. Dialing the
-/// authority directly is both the richer existing pattern (priority #4) and the
-/// one that actually works.
-///
-/// The returned [`Outcome::Resolved`] carries the peer URL, which the knock
-/// send then hands to `fauna.inbox.send` as `recipient_nest_url`.
-///
-/// Every failure — the peer being unreachable, refusing, or not knowing the
-/// handle — collapses to [`Outcome::NotFound`], matching the same-nest arm: the
-/// page has one `contact-find-error` and the user's next move ("check the
-/// address") is the same either way.
-async fn resolve_on_peer(handle: String, domain: String) -> Outcome {
-    use fauna_anon_client::AnonymousNestClient;
-
-    let Some(peer_url) = fauna_provisioning::probe::peer_nest_url(Some(domain)) else {
-        return Outcome::NotFound;
-    };
-    let Ok(client) = AnonymousNestClient::connect(&peer_url).await else {
-        return Outcome::NotFound;
-    };
-    let reply: Result<ActorByHandleReply, _> = client
-        .request(
-            "fauna.actor.by_handle",
-            ActorByHandleRequest {
-                handle,
-                // `None`, not the typed domain: we are already talking to the
-                // nest that serves it, so the multi-domain qualifier has
-                // nothing left to disambiguate and the peer reports its own
-                // canonical domain. Same call shape as `actor_by_handle_remote`.
-                domain: None,
-                extra: Default::default(),
-            },
-        )
-        .await;
-    match reply {
-        Ok(r) => Outcome::Resolved {
-            actor_id: r.actor_id,
-            nest_url: Some(peer_url),
-        },
-        Err(_) => Outcome::NotFound,
     }
 }
 
@@ -1138,6 +1074,18 @@ pub fn elements(app: &App) -> Vec<Element> {
             true,
             Gesture::Contacts(Action::CopyActorId),
         ));
+        // Door (1) into the found actor's Profile: the lookup's nest URL — the
+        // same one the knock carries — rides in as the open target's home
+        // (`contacts.md` § Layout & flow region 3).
+        out.push(Element::gesture_button(
+            ids::CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON,
+            t::find_user::OPEN_PROFILE,
+            true,
+            Gesture::OpenProfile {
+                actor: Some(r.actor_id.clone()),
+                home: r.nest_url.clone(),
+            },
+        ));
         // The ward's in-app ask (`family-safety.md` § Child-initiated contact
         // requests). Offered only after the nest actually refused — the knob
         // may be off, in which case the ward contacts freely and an ask would be
@@ -1168,7 +1116,12 @@ pub fn elements(app: &App) -> Vec<Element> {
     }
 
     // Pending knocks (`knock-request-item` component), one flat-indexed block
-    // per knock in reply order.
+    // per knock in reply order. While the account is supervised with contact
+    // approval on, every knock is the guardian's to decide, so each row says so
+    // (`knock-guardian-pending`, `family-safety.md` § App surface) — the shared
+    // derivation over the caller's own status policy, no per-knock wire field.
+    let awaits_guardian =
+        fauna_client_family::knocks_await_guardian(app.family.own_policy.as_ref());
     for k in &st.knocks {
         out.push(Element::label(ids::KNOCK_CARD, k.summary.clone()));
         // Through the one resolver with no handle: the viewer's nickname for
@@ -1181,6 +1134,12 @@ pub fn elements(app: &App) -> Vec<Element> {
             fauna_core::format::peer_display_label(nickname.as_deref(), None, None, &k.sender)
                 .primary,
         ));
+        if awaits_guardian {
+            out.push(Element::label(
+                ids::KNOCK_GUARDIAN_PENDING,
+                t::KNOCK_GUARDIAN_PENDING,
+            ));
+        }
         out.push(Element::gesture_button(
             ids::CONTACTS_ACCEPT_BUTTON,
             common::ACCEPT,
@@ -1286,7 +1245,12 @@ pub fn elements(app: &App) -> Vec<Element> {
             c.peer_id.clone(),
             name.primary.clone(),
             true,
-            Gesture::OpenProfile(Some(c.peer_id.clone())),
+            // The edge's home (`ContactItem.home_nest_url`, `None` for a local
+            // peer) rides in as the open target's routing hint.
+            Gesture::OpenProfile {
+                actor: Some(c.peer_id.clone()),
+                home: c.home_nest_url.clone(),
+            },
         ));
         out.push(Element::label(ids::CONTACT_NAME, name.primary.clone()));
         // The private overlay's two row lines (contacts.md § The private
@@ -1360,7 +1324,7 @@ mod tests {
             created_at: 0,
             handle: handle.map(str::to_string),
             domain: handle.map(|_| "self-nest.test".to_string()),
-            extra: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -2048,6 +2012,72 @@ mod tests {
             }
             other => panic!("expected a SendKnock op, got {:?}", other.is_some()),
         }
+    }
+
+    /// The open-profile gesture an element dispatches, as `(actor, home)`.
+    fn open_target(app: &crate::app::App, id: &str) -> (Option<String>, Option<String>) {
+        let el = elements(app)
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} must paint"));
+        match el.role {
+            crate::element::Role::Button(Gesture::OpenProfile { actor, home }) => (actor, home),
+            _ => panic!("{id} must open a profile"),
+        }
+    }
+
+    /// Door (1) (`contacts.md` § Layout & flow region 3): the Find User
+    /// result's `contact-actor-id-open-profile-button` opens the found actor
+    /// with the lookup's nest URL — the same one the knock carries — as the
+    /// open target's home, and none for a same-nest hit.
+    #[test]
+    fn the_find_results_open_profile_button_carries_the_lookups_nest_url() {
+        let mut app = contacts_app();
+        apply_outcome(
+            &mut app,
+            Outcome::Resolved {
+                actor_id: "cd".repeat(32),
+                nest_url: Some("https://peer.test:8443".to_string()),
+            },
+        );
+        assert_eq!(
+            open_target(&app, ids::CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON),
+            (
+                Some("cd".repeat(32)),
+                Some("https://peer.test:8443".to_string())
+            ),
+        );
+        apply_outcome(
+            &mut app,
+            Outcome::Resolved {
+                actor_id: "ab".repeat(32),
+                nest_url: None,
+            },
+        );
+        assert_eq!(
+            open_target(&app, ids::CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON),
+            (Some("ab".repeat(32)), None),
+        );
+    }
+
+    /// Door (3): a contact row's tap carries the edge's home
+    /// (`ContactItem.home_nest_url`, `None` for a local peer).
+    #[test]
+    fn a_contact_rows_tap_carries_the_edges_home() {
+        let mut app = contacts_app();
+        let remote = ContactItem {
+            home_nest_url: Some("https://peer.test".to_string()),
+            ..a_contact(&"aa".repeat(32), Some("ada"), "confirmed")
+        };
+        app.contacts.contacts = vec![remote, a_contact(&"bb".repeat(32), Some("bo"), "confirmed")];
+        assert_eq!(
+            open_target(&app, &"aa".repeat(32)),
+            (Some("aa".repeat(32)), Some("https://peer.test".to_string())),
+        );
+        assert_eq!(
+            open_target(&app, &"bb".repeat(32)),
+            (Some("bb".repeat(32)), None)
+        );
     }
 
     /// Outcome folding: not-found surfaces `contact-find-error`; a sent knock

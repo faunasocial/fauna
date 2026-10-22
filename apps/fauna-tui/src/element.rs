@@ -108,11 +108,17 @@ pub enum Gesture {
     Report(crate::report::Action),
     Profile(crate::profile::Action),
     /// Open a profile **detail** view (`profile.md` § Relationship to Contacts).
-    /// `None` = the viewer's own (the `profile-tab` route, via `apply`);
-    /// `Some(hex)` = another actor (a contact-row tap, the linux
-    /// `open_profile(Some(hex))` twin). Carried as a distinct gesture because it
-    /// sets the viewed actor, not just the page.
-    OpenProfile(Option<String>),
+    /// `actor: None` = the viewer's own (the `profile-tab` route, via `apply`);
+    /// `Some(hex)` = another actor (a contact-row tap, a Find User hit, a post's
+    /// author line — the linux `open_profile(Some(hex))` twin). `home` is the
+    /// open target's routing hint — the nest the door met the actor on, never
+    /// identity (`profile.md` § Layout & flow → *Reaching another actor's
+    /// profile*). Carried as a distinct gesture because it sets the viewed
+    /// actor, not just the page.
+    OpenProfile {
+        actor: Option<String>,
+        home: Option<String>,
+    },
     Events(crate::events::Action),
     /// A Settings-shell gesture (`crate::settings`) — sub-page nav
     /// (`OpenTuiSettings` / `NavBack`) or the external-media select. All local,
@@ -138,6 +144,21 @@ pub enum Gesture {
     /// `notifications` doesn't own (`crate::notifications::open_notification`,
     /// `behavior/notifications.md` § Deep-link destinations).
     OpenNotification(fauna_client_notifications::NotificationDestination),
+    /// `dm-message-withheld-badge` activation — opens the appeal of the
+    /// author's queue row the badge was matched to, by its `content_id`
+    /// (`MessageSnapshot::withheld`). The [`Self::OpenNotification`] shape:
+    /// the destination is the moderation page's appeal form, a page
+    /// `conversations` doesn't own (`crate::moderation::queue_appeal`).
+    AppealWithheld {
+        content_id: String,
+    },
+    /// `room-search-result-item[i]` activation — carries the row's typed
+    /// [`fauna_conversations::room::RoomSearchNav`], the
+    /// [`Self::OpenSearchResult`] twin: a post hit opens on the feed page, so
+    /// it sits outside `crate::conversations::Action`
+    /// (`crate::conversations::open_room_search_hit`, `room-search.md`
+    /// § The surface → *Opening a hit*).
+    OpenRoomSearchHit(fauna_conversations::room::RoomSearchNav),
     /// A media-page gesture (`crate::media`) — the explorer's view/sort/filter
     /// chrome, the upload submit, and the `media-item-detail` surface.
     Media(crate::media::Action),
@@ -255,9 +276,11 @@ impl Gesture {
             // Navigation and view-local state: no nest call is issued, on any
             // path, so there is nothing for the gate to classify.
             Gesture::Nav(_)
-            | Gesture::OpenProfile(_)
+            | Gesture::OpenProfile { .. }
             | Gesture::OpenSearchResult(_)
             | Gesture::OpenNotification(_)
+            | Gesture::AppealWithheld { .. }
+            | Gesture::OpenRoomSearchHit(_)
             | Gesture::SelectCalendar(_)
             | Gesture::ToggleCalendarVisibility(_)
             | Gesture::OpenEventDetail(_) => None,
@@ -303,12 +326,6 @@ pub enum SelectTarget {
     RuleType,
     Combination,
     Factor,
-    /// `feed-post-train-target-sheet` — which trained factor the open post's
-    /// training verbs target. A raw-value picker over the stable `topic:<hex>`
-    /// keys (the [`Self::Factor`] split: the user's topic name is paint-only),
-    /// plus `crate::feed::NEW_TRAINED_TOPIC_OPTION`, which leaves for the
-    /// Trained-topics facet.
-    TrainTarget,
     /// `bridge-form-bridge-select` — the stable bridge **id** (what
     /// `subscribe_bridge` encodes) is both what `get_text` returns and what
     /// `select` takes; the human-readable name is the paint-only
@@ -478,6 +495,15 @@ pub enum SelectTarget {
     /// `get_text` returns and what `select` takes (the web `<option value={d}>`
     /// contract), chosen from the snapshot's `local_domains`.
     ForwarderDomain,
+    /// `admin-mail-reports-window-select` — the report window in days (`"7"` /
+    /// `"30"` / `"90"`, the shared `dmarc_report_window_options`). A raw-value
+    /// picker: the day count is what `get_text` returns and `select` takes; the
+    /// "Last N days" labels are paint-only.
+    MailReportsWindow,
+    /// `admin-mail-reports-domain-select` — one hosted local domain, or the
+    /// empty value for every domain. A raw-value picker like
+    /// [`Self::ForwarderDomain`]; the "All domains" label is paint-only.
+    MailReportsDomain,
     /// `admin-mail-fcrdns-mode-select` — the FCrDNS-mode wire value
     /// (`off` / `score_signal` / `enforce`, `admin.md` § 6 Mail). A raw-value picker:
     /// the wire token is both what `get_text` returns and what `select` takes,
@@ -487,6 +513,12 @@ pub enum SelectTarget {
     /// (`forbidden` / `allowed`, `admin.md` § 6 Mail). A raw-value picker like
     /// [`Self::MailFcrdnsMode`], stored on the IMAP draft (`ImapPolicyView.delete_nonempty`).
     MailImapDelete,
+    /// `admin-mail-dmarc-fo-mode-select` — the DMARC `fo=` tag (`1` / `0` / `d` /
+    /// `s`, `dmarc-reporting.md` § Default off). A raw-value picker like
+    /// [`Self::MailFcrdnsMode`], the localized option text from the shared
+    /// `dmarc_forensic_mode_options`; stored on the DMARC draft
+    /// (`DmarcPolicyView.fo_mode`).
+    MailDmarcFoMode,
     /// `admin-users-tier-select[row]` — the `row`-th user's tier (= quota, `admin.md`
     /// § 2 Users). A raw-value picker: the tier *name* is both what `get_text`
     /// returns and what `select` takes (the tier-list contract). The row is baked at
@@ -516,6 +548,11 @@ pub enum SelectTarget {
     /// [`Self::InviteGuardian`]; LOCAL draft, committed by
     /// `admin-users-admit-button`.
     AdmitGuardian,
+    /// `admin-users-admit-age-band-select` — the directly-admitted account's age
+    /// band (`family-safety.md` § App surface → *Age-band surfaces*). LOCAL
+    /// draft; option VALUES like [`Self::InviteAgeBand`], committed by
+    /// `admin-users-admit-button`.
+    AdmitAgeBand,
     /// `admin-users-invite-guardian-select` — the guardian for a supervised
     /// admission via a minted code (family-safety). **A LABEL picker** like
     /// [`Self::FamilyUnknownSender`]: the option value is the user's handle (the
@@ -576,6 +613,16 @@ pub enum SelectTarget {
     /// (`ui/folders.md` § Conflicts). A raw-value picker like
     /// [`Self::ReminderOffset`]: the wire value round-trips both ways.
     FolderConflictPolicy {
+        row: usize,
+    },
+    /// `muted-word-level-select` — one muted-word row's level, scoped to its
+    /// `muted-word-item[row]` (`ui/settings.md` § Muted words — the level
+    /// picker). A raw-value picker: the option values are the level's own
+    /// spelling (`fauna_core::scoring::MutedKeywordLevel::value`). Carries the
+    /// ROW because [`SelectTarget`] stays `Copy`; the dispatch resolves it to
+    /// the row's term, and the picker is disabled while a round trip is in
+    /// flight, so the list cannot shift between paint and pick.
+    MutedWordLevel {
         row: usize,
     },
     /// `folder-audience-select` — the per-folder audience control on the expanded
@@ -661,6 +708,14 @@ pub enum SelectTarget {
         bridge: usize,
         setting: usize,
     },
+    /// The [`Self::BridgeSetting`] picker on a plugin's settings card —
+    /// `plugin` into `App::bridges::plugin_cards`, `setting` into that card's
+    /// `settings` — committing through `fauna.plugins.set_settings`. Untagged
+    /// like every settings row.
+    PluginSetting {
+        plugin: usize,
+        setting: usize,
+    },
     /// `family-policy-unknown-sender-select` — the guardian's cold-inbound-mail
     /// knob (`family-safety.md` § Guardian policy pillar 1).
     ///
@@ -679,14 +734,14 @@ pub enum SelectTarget {
     /// (`family-safety.md` § The bridge-DM gate). Same label contract, this
     /// knob's two-option catalog.
     FamilyUnknownPeerDm,
-    /// `family-policy-content-{nsfw,spam,phishing,commercial}-select` — the
-    /// guardian's per-category content floor (§ Content policy). Same label
-    /// contract; `category` is the index into
-    /// `fauna_core::obligation::GUARDIAN_FLOOR_CATEGORIES`, carried as a `usize`
-    /// so [`SelectTarget`] stays `Copy` (the [`Self::FolderConflictPolicy`]
-    /// row-scoped-select convention).
-    FamilyContentFloor {
-        category: usize,
+    /// A per-rule picker of the shared `rule-editor` component
+    /// (`rule-editor-item-{kind,category,labeler,verdict,level}-select[row]`) —
+    /// a LABEL picker routed back to the mounting that hosts it
+    /// (`crate::rule_editor`).
+    RuleEditor {
+        host: crate::rule_editor::Host,
+        row: usize,
+        picker: crate::rule_editor::Picker,
     },
     /// `nest-trust-mint-scope-select` — the Nests page's scope-first mint
     /// picker (`nests.md` § Mint). A **LABEL** picker like
@@ -782,7 +837,6 @@ impl SelectTarget {
             SelectTarget::Combination => Gesture::Feed(crate::feed::Action::SetCombination(value)),
             SelectTarget::Factor => Gesture::Feed(crate::feed::Action::SetFactor(value)),
             SelectTarget::BridgeKind => Gesture::Feed(crate::feed::Action::SetBridgeKind(value)),
-            SelectTarget::TrainTarget => Gesture::Feed(crate::feed::Action::PickTrainTarget(value)),
             SelectTarget::ReminderOffset => {
                 Gesture::Events(crate::events::Action::SetReminderOffset(value))
             }
@@ -904,6 +958,12 @@ impl SelectTarget {
             SelectTarget::ForwarderDomain => {
                 Gesture::Admin(crate::admin::Action::SelectForwarderDomain(value))
             }
+            SelectTarget::MailReportsWindow => {
+                Gesture::Admin(crate::admin::Action::SelectMailReportsWindow(value))
+            }
+            SelectTarget::MailReportsDomain => {
+                Gesture::Admin(crate::admin::Action::SelectMailReportsDomain(value))
+            }
             SelectTarget::ApexActor => Gesture::Admin(crate::admin::Action::SelectApexActor(value)),
             SelectTarget::DnsCatchAll { row } => {
                 Gesture::Admin(crate::admin::Action::SelectDnsCatchAll { row, label: value })
@@ -930,6 +990,9 @@ impl SelectTarget {
             SelectTarget::MailImapDelete => {
                 Gesture::Admin(crate::admin::Action::SetImapDelete(value))
             }
+            SelectTarget::MailDmarcFoMode => {
+                Gesture::Admin(crate::admin::Action::SetDmarcFoMode(value))
+            }
             SelectTarget::UsersTier { row } => {
                 Gesture::Admin(crate::admin::Action::SetUserTier { row, tier: value })
             }
@@ -940,6 +1003,9 @@ impl SelectTarget {
             SelectTarget::AdmitTier => Gesture::Admin(crate::admin::Action::SetAdmitTier(value)),
             SelectTarget::AdmitGuardian => {
                 Gesture::Admin(crate::admin::Action::SetAdmitGuardian(value))
+            }
+            SelectTarget::AdmitAgeBand => {
+                Gesture::Admin(crate::admin::Action::SetAdmitAgeBand(value))
             }
             SelectTarget::InviteGuardian => {
                 Gesture::Admin(crate::admin::Action::SetInviteGuardian(value))
@@ -979,11 +1045,21 @@ impl SelectTarget {
                     value,
                 })
             }
+            SelectTarget::PluginSetting { plugin, setting } => {
+                Gesture::Bridges(crate::bridges::Action::SetPluginSelectSetting {
+                    plugin,
+                    setting,
+                    value,
+                })
+            }
             SelectTarget::FolderConflictPolicy { row } => {
                 Gesture::Settings(crate::settings::Action::SetFolderConflictPolicy {
                     row,
                     policy: value,
                 })
+            }
+            SelectTarget::MutedWordLevel { row } => {
+                Gesture::Settings(crate::settings::Action::SetMutedWordLevel { row, value })
             }
             SelectTarget::FolderNestSnapshots { row } => {
                 Gesture::Settings(crate::settings::Action::SetFolderNestSnapshots { row, value })
@@ -1037,11 +1113,16 @@ impl SelectTarget {
             SelectTarget::FamilyUnknownPeerDm => {
                 Gesture::Family(crate::family::Action::SetUnknownPeerDm(value))
             }
-            SelectTarget::FamilyContentFloor { category } => {
-                Gesture::Family(crate::family::Action::SetContentFloor {
-                    category,
-                    label: value,
-                })
+            SelectTarget::RuleEditor { host, row, picker } => {
+                let edit = crate::rule_editor::Edit::Pick { row, picker, value };
+                match host {
+                    crate::rule_editor::Host::Admin => {
+                        Gesture::Admin(crate::admin::Action::RuleEditor(edit))
+                    }
+                    crate::rule_editor::Host::Family => {
+                        Gesture::Family(crate::family::Action::RuleEditor(edit))
+                    }
+                }
             }
             SelectTarget::TrustMintScope => {
                 Gesture::Settings(crate::settings::Action::NestsSetMintScope(value))
@@ -1387,9 +1468,10 @@ impl Element {
     /// `scope: [{"id":"post-card","index":2}]` and the registry matches on the
     /// path. It is **not** either of the two id-string idioms it is easy to
     /// confuse it with: `dns-provider-row[<slug>]` puts a literal bracket *in
-    /// the id*, and `recover-box-item-3` puts a literal dash-index in it. The
-    /// three are not interchangeable; registering the wrong one leaves every
-    /// shared-test query resolving to nothing.
+    /// the id*, and `<id>-3` puts a literal dash-index in it (retired for
+    /// `indexed: true` elements — convention 1). The three are not
+    /// interchangeable; registering the wrong one leaves every shared-test
+    /// query resolving to nothing.
     pub fn within(mut self, container: &str, index: usize) -> Self {
         self.path.insert(0, (container.to_string(), index));
         self

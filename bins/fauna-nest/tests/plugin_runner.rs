@@ -230,6 +230,7 @@ async fn install_run_fault_bind_and_uninstall_a_hosted_plugin() {
     assert_eq!(section.settings_fields[0].label, "Greeting");
     assert_eq!(section.settings_fields[0].setting_type, "string");
     assert!(!section.development);
+    assert!(!section.bind, "an install card is not a bind card");
     assert_eq!(fetcher.calls(), [DOC_URL, MODULE_URL]);
 
     // A user may not install, and may not approve an install card.
@@ -471,6 +472,10 @@ async fn install_run_fault_bind_and_uninstall_a_hosted_plugin() {
     assert_eq!(section.execution_form, "wasm");
     assert_eq!(section.publisher_domain, "plugins.example");
     assert_eq!(section.settings, ["greeting"]);
+    assert!(
+        section.bind,
+        "the section says it rides a bind card, whose approve mints the grant"
+    );
     assert_eq!(
         card.holder_x25519.as_deref().map(Vec::as_slice),
         Some(plugin.holder_x25519.as_slice()),
@@ -1030,6 +1035,7 @@ async fn call_from<Req: serde::Serialize, Reply: serde::de::DeserializeOwned>(
                     correlation_id: 1,
                     peer_ip: None,
                     loopback_peer,
+                    served_name: None,
                 },
                 fut,
             )

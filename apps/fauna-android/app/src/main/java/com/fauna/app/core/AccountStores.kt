@@ -573,11 +573,10 @@ class AccountStores @Inject constructor(
      * the shared call no longer throws on a survivor, it reports one, which is
      * the whole reason android can now tell the user instead of logging at them.
      *
-     * The `catch` remains for a *hard* failure (a panic crossing the FFI, a
-     * root this process cannot even open). That is not a survivor list, so it
-     * cannot be reported as one: an empty sweep here would tell the user the
-     * device is clean on the one path where we know least about it. It stays a
-     * log line, loudly labelled, until it is given a shape of its own.
+     * Shared Rust folds a panic into a survivor itself, so the `catch` only sees
+     * an FFI load failure. It still answers with ONE survivor, never an empty
+     * sweep: an empty one would tell the user the device is clean on the one path
+     * where we know least about it.
      */
     private fun eraseRoot(root: File): com.fauna.ffi.FfiEraseSweep {
         return try {
@@ -589,11 +588,11 @@ class AccountStores @Inject constructor(
             ShellLog.w("AccountStores", "erase under ${root.name} failed outright: ${e.message}")
             com.fauna.ffi.FfiEraseSweep(
                 erased = 0u,
-                survivors = emptyList(),
+                survivors = listOf("<erase failed: ${e.message}>"),
                 residue = com.fauna.ffi.FfiEraseResidueView(
-                    survivors = 0u,
+                    survivors = 1u,
                     credentialsSurvived = false,
-                    owesWork = false,
+                    owesWork = true,
                 ),
             )
         }

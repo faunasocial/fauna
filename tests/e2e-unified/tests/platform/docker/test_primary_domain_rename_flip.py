@@ -59,7 +59,7 @@ from common.auth import (
 from helpers.local_domains import active_domains, add_local_domain, set_host_address
 from helpers.mail_wire import _connect_smtp_starttls
 from helpers.recipient_seal_key import provision_recipient_seal_key
-from helpers.tls_spki import served_leaf
+from helpers.tls_spki import leaf_of, served_leaf
 from helpers.waiting import wait_until
 
 from .helpers import (
@@ -202,7 +202,7 @@ def _rename_stack(*, mail: bool):
 
         start_container_with_ports(
             nest_name,
-            {3000: api_port, **mail_ports},
+            {443: api_port, **mail_ports},
             env={
                 "FAUNA_CLAIM_CODE": CLAIM_CODE,
                 "FAUNA_PORT": "3000",
@@ -464,8 +464,7 @@ def _smtp_starttls_leaf(port: int, sni: str) -> x509.Certificate:
     sent, so the HELO gates (they fire at the first MAIL FROM) never run."""
     deadline = time.monotonic() + 30
     with _connect_smtp_starttls(port, sni, deadline) as conn:
-        der = conn._sock.getpeercert(binary_form=True)
-    return x509.load_der_x509_certificate(der)
+        return leaf_of(conn._sock)
 
 
 def _restore_trusted_cert(nest) -> None:
@@ -514,7 +513,7 @@ def _post_one_click_on_its_host(nest, url: str) -> tuple[int, x509.Certificate]:
     ctx.verify_mode = ssl.CERT_NONE
     raw = socket.create_connection(("127.0.0.1", nest["port"]), timeout=15)
     tls = ctx.wrap_socket(raw, server_hostname=parts.hostname)
-    leaf = x509.load_der_x509_certificate(tls.getpeercert(binary_form=True))
+    leaf = leaf_of(tls)
     conn = http.client.HTTPSConnection(parts.hostname, nest["port"], timeout=15, context=ctx)
     conn.sock = tls
     try:

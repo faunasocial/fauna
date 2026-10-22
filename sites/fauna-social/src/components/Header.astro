@@ -1,0 +1,72 @@
+---
+import { nav as links } from '../data/nav.ts';
+
+const current = Astro.url.pathname;
+---
+<header class="site-header">
+  <nav class="wrap nav">
+    <a
+      href="/"
+      class="brand"
+      aria-label="Fauna — home"
+      aria-current={current === '/' ? 'page' : undefined}
+    >
+      {/* The drawn brand mark (public/favicon.svg — the beaver head): one file serves
+          the favicon, this header, and the platform app icons, so the brand
+          cannot fork. An <img>, not an inline copy, for the same reason.
+          aria-hidden because the adjacent "Fauna" text and the link's own
+          aria-label already name it. */}
+      <img class="brand-mark" src="/favicon.svg" alt="" aria-hidden="true" width="28" height="28" />
+      <span>Fauna</span>
+    </a>
+    <ul class="nav-links">
+      {links.map((l) => (
+        <li>
+          <a href={l.href} aria-current={current.startsWith(l.href) ? 'page' : undefined}>
+            {l.label}
+          </a>
+        </li>
+      ))}
+    </ul>
+  </nav>
+</header>
+
+<style>
+  .site-header {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    padding-top: 0.9rem;
+    padding-bottom: 0.9rem;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 900;
+    font-size: 1.35rem;
+    color: var(--text);
+  }
+  .brand:hover { text-decoration: none; }
+  .brand-mark { display: block; }
+  .nav-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.2rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .nav-links a {
+    color: var(--text-muted);
+    font-weight: 700;
+  }
+  .nav-links a:hover { color: var(--accent); text-decoration: none; }
+  .nav-links a[aria-current='page'] { color: var(--accent); }
+</style>

@@ -9,7 +9,7 @@ The web twin of Track B's `mintBearer` regression (`test_web_ws_rpc_echo.py`,
 which covers the `fauna.auth.handshake` mint).
 
 The SPA exposes `window.__fauna_silentSignIn(nestUrl?)` (always-installed in
-`+layout.svelte`, inert in production) that runs `silentSignIn` for the stored
+`RootShell.svelte`, inert in production) that runs `silentSignIn` for the stored
 identity. The test installs a `fetch` spy that records any hit to the HTTP auth
 twins, runs the ceremony, and asserts (a) a verified actor came back and (b) the
 spy recorded ZERO HTTP auth-twin hits — the regression that keeps the deleted

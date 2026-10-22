@@ -135,8 +135,8 @@ public let PROVIDERS: [ProviderMeta] = [
         capabilities: [.vps],
         corsPolicy: .open,
         fields: [FieldMeta(id: "app-key", type: .secret, labelKey: "provisioning.ovh.app_key", required: true, kinds: [.vps]), FieldMeta(id: "app-secret", type: .secret, labelKey: "provisioning.ovh.app_secret", required: true, kinds: [.vps]), FieldMeta(id: "consumer-key", type: .secret, labelKey: "provisioning.ovh.consumer_key", required: true, kinds: [.vps])],
-        postVerifySelect: PostVerifySelect(id: "project-select", labelKey: "provisioning.ovh.project", source: "projects", required: true),
-        curatedOffers: [],
+        postVerifySelect: PostVerifySelect(id: "location-select", labelKey: "provisioning.ovh.location", source: "regions", required: true),
+        curatedOffers: ["d2-2", "d2-4", "d2-8", "b2-7"],
         tldPricingEndpoint: nil,
         registrarNotesKey: nil
     ),

@@ -131,7 +131,7 @@ pub fn clear_repaint_subscribers() {
     REPAINT.with(|r| r.borrow_mut().clear());
 }
 
-fn request_repaint() {
+pub(crate) fn request_repaint() {
     REPAINT.with(|r| {
         r.borrow_mut().retain(|tx| {
             let _ = tx.try_send(());
@@ -579,6 +579,66 @@ pub async fn resolve_and_read(
     (verdict, read_queue(nest).await)
 }
 
+/// The blocked list (`fauna.moderation.admin_block.list`, Admin): every item
+/// this nest's admin blocked, newest first.
+pub async fn read_blocked(
+    nest: Arc<NestClient>,
+) -> Result<Vec<fauna_protocol::moderation::AdminBlockEntry>, String> {
+    ModerationClient::new(nest)
+        .admin_block_list()
+        .await
+        .map(|reply| reply.items)
+        .map_err(|e| format!("load blocked items: {e}"))
+}
+
+/// Dispatch one Block (or, with `restore`, Unblock), then re-read the queue and
+/// the blocked list (`moderation.md` § Admin block of a reported item). The
+/// first element is the shared `block_verdict` line.
+pub async fn block_and_read(
+    nest: Arc<NestClient>,
+    report_id: String,
+    restore: bool,
+) -> (
+    String,
+    Result<Vec<AbuseReportQueueEntry>, String>,
+    Result<Vec<fauna_protocol::moderation::AdminBlockEntry>, String>,
+) {
+    let error = ModerationClient::new(Arc::clone(&nest))
+        .admin_block(report_id, restore)
+        .await
+        .err()
+        .map(|e| e.to_string());
+    let verdict = resolve_nested(&fauna_client_moderation::block::block_verdict(
+        restore, error,
+    ));
+    let queue = read_queue(Arc::clone(&nest)).await;
+    (verdict, queue, read_blocked(nest).await)
+}
+
+/// The armed block / unblock confirm's text — verb, item and reason, the
+/// summary's `{item}` and `{reason}` arguments being keys themselves.
+pub fn block_confirm_text(
+    subject: &fauna_protocol::moderation::AbuseReportSubject,
+    reason: fauna_protocol::moderation::AbuseReportReason,
+    restore: bool,
+) -> String {
+    resolve_nested(&fauna_client_moderation::block::block_confirm_summary(
+        subject, reason, restore,
+    ))
+}
+
+/// The shared admin-block notice (`moderation.md` § Admin block of a reported
+/// item) a post, quote or message paints in its body position — `reason` is the
+/// marker's wire token.
+pub fn admin_block_notice(reason: &str) -> String {
+    resolve_nested(&fauna_core::obligation::admin_block_notice(reason))
+}
+
+/// Resolve a `LocalizedText` whose arguments may themselves be i18n keys.
+pub fn resolve_nested(text: &LocalizedText) -> String {
+    text.resolve_nested(crate::i18n::strings::lookup)
+}
+
 /// The words the withdraw control paints.
 pub fn withdraw_label() -> &'static str {
     t::WITHDRAW
@@ -634,6 +694,28 @@ mod tests {
         assert_eq!(
             resolved,
             format!("Impersonation · Resolved · {short} · Acted on — Sent to nest.example")
+        );
+    }
+
+    /// The armed confirm the e2e reads: it names the verb, the item and the
+    /// report's reason (the summary's `{item}`/`{reason}` arguments are keys
+    /// themselves, resolved nested) before anything dispatches.
+    #[test]
+    fn the_block_confirm_names_the_verb_the_item_and_the_reason() {
+        let subject = AbuseReportSubject::Post { cid: "cid1".into() };
+        let block = block_confirm_text(&subject, AbuseReportReason::Harassment, false);
+        assert!(block.starts_with("Block post cid1"), "{block}");
+        assert!(block.contains("Harassment"), "{block}");
+        let unblock = block_confirm_text(&subject, AbuseReportReason::Harassment, true);
+        assert!(unblock.starts_with("Unblock post cid1"), "{unblock}");
+    }
+
+    /// The notice every viewer but the author sees in the body's place.
+    #[test]
+    fn the_admin_block_notice_names_the_ground_and_the_reason() {
+        assert_eq!(
+            admin_block_notice("harassment"),
+            "Blocked by this nest's admin after a report: Harassment"
         );
     }
 }

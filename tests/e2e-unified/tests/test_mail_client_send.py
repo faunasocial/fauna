@@ -212,7 +212,7 @@ def test_client_send_without_committing_chip_still_relays(logged_in_app, mail_br
 # could not see it. Root cause (worth keeping, because the class is general):
 # `ActionLayer.error_text()` reads the state protocol first and falls back to the
 # DOM `error-message` element only when `messages` is None. `/app/conversations`
-# is NOT one of `+layout.svelte`'s bare-slot routes, so `<MessageBanner />` IS
+# is NOT one of `RootShell.svelte`'s bare-slot routes, so `<MessageBanner />` IS
 # mounted, so the agent reported a present-but-all-null `messages` — which maps
 # to "" (not None) and short-circuited that fallback permanently. The page's own
 # page-level error is a DIFFERENT element that merely shares the `error-message`

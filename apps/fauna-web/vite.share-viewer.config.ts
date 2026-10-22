@@ -40,6 +40,8 @@ export default defineConfig({
     // The wasm is fetched by URL, never inlined as a data: URI (the CSP allows
     // no data:).
     assetsInlineLimit: 0,
+    // The same CSS floor as the SPA (vite.config.ts).
+    cssTarget: ['chrome87', 'edge88', 'firefox78', 'safari14'],
     rollupOptions: {
       input: resolve(here, 'share-viewer/share-viewer.html'),
     },

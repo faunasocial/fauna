@@ -63,6 +63,23 @@ pub struct CloudInitParams {
     /// (today's behavior, and the *claim-an-existing-box* origin, where the
     /// seed is captured at **claim** rather than injected at provision).
     pub deployment_seed: Option<String>,
+    /// The admin's **SSH door** choice (`installers/vps.md` § The SSH door,
+    /// default off). `None` → the keyless, sshd-less box of
+    /// `deployment-threat-model.md` § Concern 1a, rendered byte-for-byte as
+    /// before the door existed. `Some` → a key-only sshd for `root` with the
+    /// door's public key installed; 22/tcp stays denied until the root
+    /// coordinator admits the one address the admin claims from.
+    pub ssh_door: Option<SshDoor>,
+}
+
+/// The SSH door's box-side input: the public half of the Ed25519 keypair the
+/// admin's app mints for this box alone (`installers/vps.md` § The SSH door).
+/// The private half never leaves the admin's device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshDoor {
+    /// One OpenSSH `authorized_keys` line (`ssh-ed25519 AAAA… [comment]`),
+    /// written as `root`'s only authorized key.
+    pub authorized_key: String,
 }
 
 /// Like `Serialize`/`Deserialize` derives — kept manual to keep
@@ -422,9 +439,295 @@ OnUnitActiveSec=15min
 [Install]
 WantedBy=timers.target"#;
 
+// ── The SSH door (installers/vps.md § The SSH door) ─────────────────────────
+//
+// Rendered only when the admin chose the door at create
+// ([`CloudInitParams::ssh_door`]); a door-less box carries none of it.
+
+/// `/etc/ssh/sshd_config.d/0-fauna-door.conf` — key-only sshd. Named to sort
+/// before the provider's `50-cloud-init.conf`: sshd keeps the first value it
+/// reads per keyword, and the provider's cloud-init writes
+/// `PasswordAuthentication yes` for a keyless create.
+const SSH_DOOR_DROPIN_PATH: &str = "/etc/ssh/sshd_config.d/0-fauna-door.conf";
+const SSH_DOOR_DROPIN: &str = r#"# The SSH door (installers/vps.md § The SSH door): key-only, for root.
+# Written by the Fauna installer; sorts before 50-cloud-init.conf so these win.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+AuthenticationMethods publickey"#;
+
+/// `/usr/local/sbin/fauna-ssh-door` — the root coordinator's door pass: admit
+/// the claimant's address once. Its own script and unit, written only on a door
+/// box, so a door-less box carries no door code at all and `ufw` can write
+/// `/etc/ufw` and `/run`, which the reboot coordinator's `ProtectSystem=strict`
+/// keeps read-only. The validation and admission functions are argument-only so
+/// the tests run the shipped shell against scratch paths with a stub `ufw`.
+const SSH_DOOR_SCRIPT: &str = r#"#!/bin/sh
+# fauna-ssh-door — the SSH door's one-shot admission on an onboarded fauna VPS.
+# Baked into cloud-init by libs/fauna-provisioning, only on a box whose admin
+# chose the door; no human ever edits or runs it by hand. Driven by
+# fauna-ssh-door.timer every minute until the admission is recorded.
+# Authority: docs/goal/architecture/installers/vps.md § The SSH door.
+#
+# Trust model: the same as fauna-reboot-coordinator's. This runs as ROOT and
+# reads one nest-written file, ssh-door-source, from the container-owned rw
+# $MAINT_DIR, DEFENSIVELY; its record, ssh-door-admitted, goes to the root-owned
+# $HOST_DIR the container cannot write to. A compromised nest in the claim
+# window can at most choose the one admitted address; once the admission is
+# recorded nothing the nest writes is read again.
+set -eu
+
+# nest->host (container-owned, rw): read defensively; root never writes here.
+MAINT_DIR=/opt/fauna/maintenance
+SSH_DOOR_SOURCE="$MAINT_DIR/ssh-door-source"
+# host->nest (root-owned, exported :ro to the container): only root writes here.
+HOST_DIR=/opt/fauna/maintenance-host
+SSH_DOOR_ADMITTED="$HOST_DIR/ssh-door-admitted"
+SSH_DOOR_DROPIN=/etc/ssh/sshd_config.d/0-fauna-door.conf
+
+# Pure validation: succeed iff $1 is one IPv4 dotted quad — four decimal octets,
+# none over 255, no leading zero, and not the unspecified 0.0.0.0.
+fauna_ssh_door_ipv4() {
+    _v4=$1
+    case "$_v4" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+    _n=0
+    _rest=$_v4
+    while :; do
+        _o=${_rest%%.*}
+        case "$_o" in ''|0[0-9]*|????*) return 1 ;; esac
+        [ "$_o" -le 255 ] || return 1
+        _n=$((_n + 1))
+        [ "$_rest" = "$_o" ] && break
+        _rest=${_rest#*.}
+    done
+    [ "$_n" -eq 4 ] && [ "$_v4" != 0.0.0.0 ]
+}
+
+# Pure validation: succeed iff $1 is one IPv6 literal — colon-separated groups of
+# at most four hex digits, at most one `::`, an optional dotted-quad tail, and
+# not the unspecified `::`. No prefix length, no zone, nothing ufw would read as
+# a range.
+fauna_ssh_door_ipv6() {
+    _v6=$1
+    case "$_v6" in ''|*[!0-9A-Fa-f:.]*|*:::*|*::*::*|::) return 1 ;; esac
+    case "$_v6" in *:*) : ;; *) return 1 ;; esac
+    _n=0
+    _rest=$_v6
+    while :; do
+        _f=${_rest%%:*}
+        if [ "$_rest" = "$_f" ]; then
+            case "$_f" in
+                *.*) fauna_ssh_door_ipv4 "$_f" || return 1; _n=$((_n + 2)) ;;
+                ?????*|*[!0-9A-Fa-f]*) return 1 ;;
+                *) _n=$((_n + 1)) ;;
+            esac
+            break
+        fi
+        case "$_f" in ?????*|*[!0-9A-Fa-f]*) return 1 ;; esac
+        _n=$((_n + 1))
+        _rest=${_rest#*:}
+    done
+    case "$_v6" in
+        *::*) [ "$_n" -le 9 ] ;;
+        *) [ "$_n" -eq 8 ] ;;
+    esac
+}
+
+# One IPv4 or IPv6 literal, and nothing else.
+fauna_ssh_door_valid_address() {
+    case "$1" in
+        *:*) fauna_ssh_door_ipv6 "$1" ;;
+        *) fauna_ssh_door_ipv4 "$1" ;;
+    esac
+}
+
+# The SSH door's one-shot admission. Argument-only so the tests can aim it at
+# scratch paths with a stub `ufw` on PATH:
+#   fauna_ssh_door_admit <source> <dropin> <admitted> <now>
+# Acts only on a box carrying the door's drop-in, and only while <admitted> does
+# not exist — once it does, whatever the nest writes later is ignored. The
+# container-owned <source> is read DEFENSIVELY, like nest-readiness: a symlink is
+# rejected, the read is timeout-bounded (a planted FIFO cannot wedge the unit),
+# and the value must be a single IP literal, handed to ufw as one argument and
+# never evaluated. `ufw prepend` puts the allow above the cloud-init deny in the
+# rule's own family's chain, IPv4 or IPv6 alike (ufw stops at the first matching
+# rule; `insert N` numbers the combined list, where IPv6 rules follow every
+# IPv4 one). A malformed
+# value is recorded as refused — the door stays shut for good, as the nest
+# writes the file only once — while a failing ufw exits non-zero under `set -e`
+# and leaves <admitted> unwritten, so the next pass retries.
+fauna_ssh_door_admit() {
+    _src=$1
+    _dropin=$2
+    _adm=$3
+    _at=$4
+    [ -e "$_adm" ] && return 0
+    [ -f "$_dropin" ] || return 0
+    if [ ! -f "$_src" ] || [ -L "$_src" ]; then
+        return 0
+    fi
+    _line=$(timeout 5 grep '^address=' "$_src" 2>/dev/null | head -n1 || true)
+    _ip=${_line#address=}
+    if fauna_ssh_door_valid_address "$_ip"; then
+        ufw prepend allow proto tcp from "$_ip" to any port 22
+        _outcome="address=$_ip"
+    else
+        logger -t fauna-ssh-door "refused a malformed ssh-door-source; the door stays shut" 2>/dev/null || true
+        _outcome="refused=malformed"
+    fi
+    {
+        printf '%s\n' "$_outcome"
+        printf 'at=%s\n' "$_at"
+    } > "$_adm.tmp"
+    mv "$_adm.tmp" "$_adm"
+}
+
+# The door pass the timer drives. Once the admission is recorded the timer has
+# nothing left to do and switches itself off.
+fauna_ssh_door_pass() {
+    fauna_ssh_door_admit "$SSH_DOOR_SOURCE" "$SSH_DOOR_DROPIN" "$SSH_DOOR_ADMITTED" "$(date +%s)"
+    if [ -e "$SSH_DOOR_ADMITTED" ]; then
+        systemctl disable --now fauna-ssh-door.timer 2>/dev/null || true
+    fi
+}
+
+# When sourced for unit testing (FAUNA_SSH_DOOR_TEST=1) expose only the
+# functions — do not read the box's files or touch the firewall.
+if [ "${FAUNA_SSH_DOOR_TEST:-}" != 1 ]; then
+    fauna_ssh_door_pass
+fi"#;
+
+/// `/etc/systemd/system/fauna-ssh-door.service` — runs [`SSH_DOOR_SCRIPT`].
+/// `ProtectSystem=true` (not the reboot coordinator's `strict`) because `ufw`
+/// writes `/etc/ufw` and `/run`; `/usr` and `/boot` stay read-only, and the
+/// script itself writes only `ssh-door-admitted` in the root-owned host dir.
+const SSH_DOOR_SERVICE: &str = r#"[Unit]
+Description=Fauna SSH door: admit the claimant's address once (oneshot; driven by the timer)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fauna-ssh-door
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=true
+ProtectHome=read-only"#;
+
+/// `/etc/systemd/system/fauna-ssh-door.timer` — every minute, so the door
+/// opens within about a minute of the claim; the pass disables the timer once
+/// the admission is recorded.
+const SSH_DOOR_TIMER: &str = r#"[Unit]
+Description=Run the Fauna SSH door pass every minute until the claimant is admitted
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target"#;
+
+/// The door's `write_files` entries. `root`'s `authorized_keys` is written
+/// `defer: true` — in cloud-init's final stage, after its `ssh` module has set
+/// up root's keys — so nothing rewrites it afterwards. Only the key's first
+/// line is used, trimmed: the value lands inside a YAML block scalar, and a
+/// newline must never reach the document.
+fn ssh_door_write_files(door: &SshDoor) -> String {
+    let key = door.authorized_key.lines().next().unwrap_or("").trim();
+    let mut s = String::new();
+    s.push_str(&write_file_entry(
+        SSH_DOOR_DROPIN_PATH,
+        SSH_DOOR_DROPIN,
+        "0644",
+    ));
+    s.push_str(&format!(
+        "  - path: /root/.ssh/authorized_keys\n    content: |\n{body}\n    permissions: '0600'\n    defer: true\n",
+        body = indent_block(key, 6),
+    ));
+    s.push_str(&write_script_entry(
+        "/usr/local/sbin/fauna-ssh-door",
+        SSH_DOOR_SCRIPT,
+    ));
+    s.push_str(&write_file_entry(
+        "/etc/systemd/system/fauna-ssh-door.service",
+        SSH_DOOR_SERVICE,
+        "0644",
+    ));
+    s.push_str(&write_file_entry(
+        "/etc/systemd/system/fauna-ssh-door.timer",
+        SSH_DOOR_TIMER,
+        "0644",
+    ));
+    s
+}
+
+/// The door's `runcmd` lines, after the coordinator timer (so after the
+/// `daemon-reload` that sees the door units): `/root/.ssh` to 0700, root's
+/// provider-expired password un-expired (`SSH_DOOR_UNEXPIRE_ROOT`), then the
+/// door timer.
+const SSH_DOOR_RUNCMD: &str = "\n  - chmod 0700 /root/.ssh\n  - chage -d \"$(date +%Y-%m-%d)\" root\n  - systemctl enable --now fauna-ssh-door.timer";
+
+/// The provider creates a keyless server with root's generated password
+/// already expired, and PAM's account check then ends every key login that has
+/// no TTY ("You are required to change your password immediately"). The door
+/// resets the last-change date to the boot's day; the password stays unknown
+/// and sshd never accepts it (`PasswordAuthentication no`).
+#[cfg(test)]
+const SSH_DOOR_UNEXPIRE_ROOT: &str = "  - chage -d \"$(date +%Y-%m-%d)\" root";
+
+/// Seconds between `docker compose up` attempts while the nest image will not
+/// pull (installers/vps.md § What Happens Behind the Scenes, step 3). Bucket 1 —
+/// no human chooses it; it matches the pre-release channels' registry interval.
+pub const NEST_UP_RETRY_INTERVAL_SECS: u64 = 60;
+
+/// `/usr/local/sbin/fauna-nest-up` — bring the nest compose up, retrying until
+/// it succeeds. A failed pull (tag not yet published, registry down, transient
+/// network) creates no container, so Docker's `restart:` policy never applies
+/// and nothing else retries — and sshd is already off, so nobody could by hand.
+/// A shell loop rather than `Restart=on-failure`: independent of the systemd
+/// version's oneshot-restart rules, and every attempt is logged.
+/// `FAUNA_NEST_UP_INTERVAL_S` exists only so the containerised test can shorten
+/// the wait; the unit never sets it.
+fn nest_up_script() -> String {
+    format!(
+        r#"#!/bin/sh
+# Bring up the Fauna nest compose; retry until the image pulls and it starts.
+INTERVAL="${{FAUNA_NEST_UP_INTERVAL_S:-{NEST_UP_RETRY_INTERVAL_SECS}}}"
+until docker compose -f /opt/fauna/docker-compose.yml up -d; do
+    logger -t fauna-nest-up "compose up failed; retrying in $INTERVAL s"
+    sleep "$INTERVAL"
+done"#
+    )
+}
+
+/// `/etc/systemd/system/fauna-nest.service` — runs `fauna-nest-up` on first
+/// boot (cloud-init starts it `--no-block`) and on every boot after (an
+/// idempotent `up -d`). `Type=exec` + `RemainAfterExit=yes`, NOT `oneshot`: a
+/// target gains an implicit `After=` on every unit it `Wants`, so a oneshot still
+/// retrying would hold `multi-user.target` — and everything ordered after it —
+/// for as long as the registry stays out of reach.
+const NEST_UP_SERVICE: &str = r#"[Unit]
+Description=Bring up the Fauna nest compose (retries until the image pulls)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=exec
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/fauna-nest-up
+
+[Install]
+WantedBy=multi-user.target"#;
+
+/// The final `runcmd` lines: enable the first-boot unit and start it WITHOUT
+/// blocking cloud-init, which must not wait on a pull that may take weeks. The
+/// `systemctl daemon-reload` in [`MAINTENANCE_RUNCMD`] precedes them.
+const NEST_UP_RUNCMD: &str =
+    "  - systemctl enable fauna-nest.service\n  - systemctl start --no-block fauna-nest.service";
+
 /// The host-maintenance `runcmd` lines, injected after `ufw --force enable` and
-/// before `docker compose up` so both bind-mount sources exist before the nest
-/// comes up. Two dirs, split by trust direction (installers/vps.md § Host OS
+/// before the `fauna-nest.service` start ([`NEST_UP_RUNCMD`]) so both bind-mount
+/// sources exist before the nest comes up. Two dirs, split by trust direction (installers/vps.md § Host OS
 /// Maintenance): `/opt/fauna/maintenance` is `chown`ed to the container's `fauna`
 /// uid 1000 (the nest writes nest-readiness / restart-requested there);
 /// `/opt/fauna/maintenance-host` is left **root-owned `0755`** (only root writes
@@ -464,6 +767,28 @@ fn write_file_entry(path: &str, content: &str, permissions: &str) -> String {
     )
 }
 
+/// A box-side `sh` script's `write_files` entry (mode 0755), rendered without
+/// its full-line comments: they document the script here, in the source, and
+/// on the box would only spend [`USER_DATA_MAX_BYTES`]. The shebang stays. Safe
+/// because none of these scripts carries a heredoc or a multi-line quoted
+/// string, where a `#` line would be data (pinned by
+/// `test_box_scripts_lose_only_their_comment_lines`).
+fn write_script_entry(path: &str, script: &str) -> String {
+    write_file_entry(path, &script_without_comments(script), "0755")
+}
+
+fn script_without_comments(script: &str) -> String {
+    script
+        .lines()
+        .enumerate()
+        .filter(|(i, line)| {
+            (*i == 0 && line.starts_with("#!")) || !line.trim_start().starts_with('#')
+        })
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// All host-maintenance `write_files` entries (apt config, needrestart defer,
 /// the reboot-coordinator script + its systemd service/timer), as a block to
 /// inject after the claim-code entry.
@@ -484,10 +809,9 @@ fn maintenance_write_files() -> String {
         NEEDRESTART_CONF,
         "0644",
     ));
-    s.push_str(&write_file_entry(
+    s.push_str(&write_script_entry(
         "/usr/local/sbin/fauna-reboot-coordinator",
         REBOOT_COORDINATOR_SCRIPT,
-        "0755",
     ));
     s.push_str(&write_file_entry(
         "/etc/systemd/system/fauna-reboot-coordinator.service",
@@ -497,6 +821,15 @@ fn maintenance_write_files() -> String {
     s.push_str(&write_file_entry(
         "/etc/systemd/system/fauna-reboot-coordinator.timer",
         REBOOT_COORDINATOR_TIMER,
+        "0644",
+    ));
+    s.push_str(&write_script_entry(
+        "/usr/local/sbin/fauna-nest-up",
+        &nest_up_script(),
+    ));
+    s.push_str(&write_file_entry(
+        "/etc/systemd/system/fauna-nest.service",
+        NEST_UP_SERVICE,
         "0644",
     ));
     s
@@ -520,6 +853,12 @@ fn maintenance_write_files() -> String {
 /// compares the guide's YAML block against this output modulo comments and blank
 /// lines — a drift fails the merge rather than silently shipping two different
 /// deployments.
+/// The most `user_data` any VPS adapter may send: Hetzner Cloud refuses a
+/// create whose `user_data` is longer than 32,768 bytes (`422 invalid_input`),
+/// the tightest limit among the adapters. Every render [`build_cloud_init`]
+/// can produce stays at or under it (unit-tested on the largest one).
+pub const USER_DATA_MAX_BYTES: usize = 32_768;
+
 pub fn build_cloud_init(params: &CloudInitParams) -> String {
     // Mail-only compose fragments — empty strings on a social-only box, so the
     // rendered YAML omits the ports / scan env / sidecars / ufw rules entirely.
@@ -600,13 +939,31 @@ pub fn build_cloud_init(params: &CloudInitParams) -> String {
     // defer, the reboot-coordinator script + systemd units) — always present;
     // installers/vps.md § Host OS Maintenance.
     let maintenance_files = maintenance_write_files();
+    // The SSH door (installers/vps.md § The SSH door): every fragment is empty
+    // on a door-less box, so its render is unchanged. With the door, sshd stays
+    // enabled (key-only) instead of being switched off; 22/tcp stays denied
+    // until the door pass admits the claimant's address.
+    let (door_pwauth, door_files, sshd_off, door_runcmd) = match &params.ssh_door {
+        Some(door) => (
+            "ssh_pwauth: false\n",
+            ssh_door_write_files(door),
+            "",
+            SSH_DOOR_RUNCMD,
+        ),
+        None => (
+            "",
+            String::new(),
+            "\n  - systemctl disable --now ssh.service ssh.socket",
+            "",
+        ),
+    };
     format!(
         r#"#cloud-config
-package_update: true
+{door_pwauth}package_update: true
 packages:
   - docker.io
   # docker.io is the engine only; the `docker compose` v2 plugin ships separately.
-  # List it explicitly so runcmd's `docker compose up` never depends on an implicit
+  # List it explicitly so the first-boot unit's `docker compose up` never depends on an implicit
   # Recommends. docker.io stays the base — it's in the Ubuntu archive, so the
   # unattended-upgrades below patch it (docker-ce from Docker's own repo would not
   # be covered by the Ubuntu-origin allowlist).
@@ -694,18 +1051,21 @@ write_files:
   - path: /opt/fauna/claim-code
     content: "{claim_code}"
     permissions: '0600'
-{maintenance_write_files}
+{maintenance_write_files}{door_files}
 runcmd:
   - systemctl enable docker
-  - systemctl start docker
-  - systemctl disable --now ssh.service ssh.socket
+  - systemctl start docker{sshd_off}
   - ufw deny 22/tcp
   - ufw allow 80/tcp
   - ufw allow 443/tcp
   - ufw allow 7842/udp{mail_ufw}
-  - ufw --force enable{maintenance_runcmd}
-  - docker compose -f /opt/fauna/docker-compose.yml up -d
+  - ufw --force enable{maintenance_runcmd}{door_runcmd}
+{nest_up_runcmd}
 "#,
+        door_pwauth = door_pwauth,
+        door_files = door_files,
+        sshd_off = sshd_off,
+        door_runcmd = door_runcmd,
         image_tag = params.image_tag,
         claim_code = params.claim_code,
         // NB: params.domain is no longer injected — the box boots DOMAINLESS and
@@ -722,6 +1082,7 @@ runcmd:
         mail_ufw = mail_ufw,
         maintenance_write_files = maintenance_files,
         maintenance_runcmd = MAINTENANCE_RUNCMD,
+        nest_up_runcmd = NEST_UP_RUNCMD,
     )
 }
 
@@ -741,6 +1102,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(output.starts_with("#cloud-config"));
@@ -763,6 +1125,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         for port in [
@@ -819,6 +1182,7 @@ mod tests {
                 claim_code: "AABBCC".into(),
                 enable_mail,
                 deployment_seed: None,
+                ssh_door: None,
             };
             let rendered = build_cloud_init(&params);
             // The one sanctioned override is the updater's own entrypoint — a
@@ -873,6 +1237,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         // The two sidecar services and their images.
@@ -915,6 +1280,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(
@@ -939,6 +1305,7 @@ mod tests {
             claim_code: "A1B2C3".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(
@@ -980,6 +1347,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: Some(seed.clone()),
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         // Injected into the compose env (12-space indent, alongside FAUNA_MODE).
@@ -1013,6 +1381,7 @@ mod tests {
                 claim_code: "AABBCC".into(),
                 enable_mail: false,
                 deployment_seed: None,
+                ssh_door: None,
             });
             assert!(
                 output.contains(&format!("image: ghcr.io/faunasocial/nest:{tag}")),
@@ -1037,6 +1406,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         });
         let updater = output
             .split("\n        fauna-updater:\n")
@@ -1065,6 +1435,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(
@@ -1090,6 +1461,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(
@@ -1115,6 +1487,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
 
@@ -1188,6 +1561,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
+            ssh_door: None,
         });
         assert!(
             output.contains("        fauna-data:\n    permissions: '0600'"),
@@ -1207,6 +1581,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: Some("SEEDSEED".into()),
+            ssh_door: None,
         });
         /// Non-comment lines of the `<service>:` block (6-space-indented compose).
         fn block(out: &str, service: &str) -> Vec<String> {
@@ -1282,6 +1657,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         assert!(
@@ -1326,6 +1702,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
+            ssh_door: None,
         };
         let output = build_cloud_init(&params);
         for needle in [
@@ -1632,6 +2009,7 @@ mod tests {
             claim_code: "CLAIMCODE".into(),
             enable_mail: true,
             deployment_seed: None,
+            ssh_door: None,
         });
         let body = rendered
             .split_once("  - path: /opt/fauna/docker-compose.yml\n    content: |\n")
@@ -1829,6 +2207,7 @@ mod tests {
             claim_code: "AABBCC".into(),
             enable_mail: false,
             deployment_seed: None,
+            ssh_door: None,
         });
         let runcmd = output.split_once("\nruncmd:\n").expect("runcmd").1;
         let publish = runcmd
@@ -1838,12 +2217,567 @@ mod tests {
             .find("chmod 0755 /opt/fauna/maintenance-host")
             .expect("host dir created in runcmd");
         let compose_up = runcmd
-            .find("docker compose -f /opt/fauna/docker-compose.yml up -d")
-            .expect("compose up in runcmd");
+            .find("- systemctl start --no-block fauna-nest.service")
+            .expect("first-boot unit started in runcmd");
         assert!(
             host_dir < publish,
             "publish only once the root-owned dir exists"
         );
         assert!(publish < compose_up, "publish before the nest comes up");
+    }
+
+    // ── the first-boot unit (installers/vps.md § What Happens Behind the
+    //    Scenes, step 3) ───────────────────────────────────────────────────────
+
+    /// The compose is never brought up by a one-shot runcmd line (a failed pull
+    /// would strand a box whose sshd is already off): cloud-init writes the
+    /// retry script + `fauna-nest.service`, and runcmd ENDS by enabling the unit
+    /// and starting it without blocking, after the daemon-reload and the
+    /// maintenance dirs.
+    #[test]
+    fn test_cloud_init_brings_the_nest_up_through_the_retry_unit() {
+        for enable_mail in [false, true] {
+            let output = build_cloud_init(&CloudInitParams {
+                domain: "x.com".into(),
+                image_tag: "dev".into(),
+                claim_code: "AABBCC".into(),
+                enable_mail,
+                deployment_seed: None,
+                ssh_door: None,
+            });
+            let (head, runcmd) = output.split_once("\nruncmd:\n").expect("runcmd");
+            assert!(head.contains("  - path: /usr/local/sbin/fauna-nest-up\n"));
+            assert!(head.contains(&indent_block(
+                &script_without_comments(&nest_up_script()),
+                6
+            )));
+            assert!(head.contains("  - path: /etc/systemd/system/fauna-nest.service\n"));
+            assert!(head.contains(&indent_block(NEST_UP_SERVICE, 6)));
+            assert!(
+                !runcmd.contains("docker compose"),
+                "runcmd must not run the compose itself: {runcmd}"
+            );
+            assert!(
+                runcmd.trim_end().ends_with(NEST_UP_RUNCMD),
+                "runcmd must end by enabling + no-block-starting the unit: {runcmd}"
+            );
+            let reload = runcmd.find("- systemctl daemon-reload").expect("reload");
+            let maint = runcmd
+                .find("- mkdir -p /opt/fauna/maintenance\n")
+                .expect("maint dir");
+            let start = runcmd
+                .find("- systemctl start --no-block fauna-nest.service")
+                .expect("start");
+            assert!(reload < start && maint < start);
+        }
+        let script = nest_up_script();
+        assert!(script.starts_with("#!/bin/sh\n"));
+        assert!(script.contains(&format!(
+            "${{FAUNA_NEST_UP_INTERVAL_S:-{NEST_UP_RETRY_INTERVAL_SECS}}}"
+        )));
+        assert!(script.contains("until docker compose -f /opt/fauna/docker-compose.yml up -d;"));
+        for needle in [
+            "Requires=docker.service",
+            "After=docker.service network-online.target",
+            "Wants=network-online.target",
+            "ExecStart=/usr/local/sbin/fauna-nest-up",
+            "RemainAfterExit=yes",
+            "WantedBy=multi-user.target",
+        ] {
+            assert!(NEST_UP_SERVICE.contains(needle), "unit missing {needle}");
+        }
+        // A oneshot still retrying would hold multi-user.target for the whole
+        // registry outage (a target is ordered After= what it Wants).
+        assert!(!NEST_UP_SERVICE.contains("Type=oneshot"));
+    }
+
+    /// The loop itself, against a stub `docker` that fails twice then succeeds:
+    /// three attempts, a logged retry per failure, exit 0. (The containerised
+    /// twin, `test_first_boot_nest_up.py`, runs it at its real path on Debian.)
+    /// unix-only: the stubs are `chmod`ed executables on `PATH`, run by `sh`.
+    #[cfg(unix)]
+    #[test]
+    fn test_nest_up_script_retries_until_compose_succeeds() {
+        let dir = std::env::temp_dir().join(format!("fauna-nest-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let stub = |name: &str, body: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write stub");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        };
+        let calls = dir.join("docker.calls");
+        stub(
+            "docker",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{c}'\n[ \"$(wc -l < '{c}')\" -ge 3 ]\n",
+                c = calls.display()
+            ),
+        );
+        stub(
+            "logger",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                dir.join("logger.calls").display()
+            ),
+        );
+        stub("sleep", "#!/bin/sh\nexit 0\n");
+        let path = format!(
+            "{}:{}",
+            dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .env("PATH", path)
+            .env("FAUNA_NEST_UP_INTERVAL_S", "0")
+            .arg("-c")
+            .arg(nest_up_script())
+            .output()
+            .expect("run sh");
+        assert!(
+            out.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let attempts = std::fs::read_to_string(&calls).expect("calls");
+        assert_eq!(
+            attempts.lines().collect::<Vec<_>>(),
+            vec!["compose -f /opt/fauna/docker-compose.yml up -d"; 3]
+        );
+        let logged = std::fs::read_to_string(dir.join("logger.calls")).expect("logged");
+        assert_eq!(logged.lines().count(), 2, "{logged}");
+        assert!(logged.contains("-t fauna-nest-up compose up failed; retrying in 0 s"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── The SSH door (installers/vps.md § The SSH door) ─────────────────────
+
+    const DOOR_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFaunaDoorTestKeyOnly fauna-door";
+
+    fn door_params(ssh_door: Option<SshDoor>) -> CloudInitParams {
+        CloudInitParams {
+            domain: "x.com".into(),
+            image_tag: "dev".into(),
+            claim_code: "AABBCC".into(),
+            enable_mail: true,
+            deployment_seed: None,
+            ssh_door,
+        }
+    }
+
+    fn door() -> Option<SshDoor> {
+        Some(SshDoor {
+            authorized_key: DOOR_KEY.into(),
+        })
+    }
+
+    /// The largest render — mail, a deployment seed and the door — fits the
+    /// tightest `user_data` limit of the adapters, Hetzner's 32,768 bytes.
+    /// Measured 2026-10-20: the first live door create (dev.fauna.build) was
+    /// refused `422 invalid input in field 'user_data'` — "Length must be
+    /// between 0 and 32768" — while the fake cloud of the tier_3 door journey
+    /// takes any length.
+    #[test]
+    fn test_cloud_init_largest_render_fits_the_user_data_limit() {
+        let params = CloudInitParams {
+            deployment_seed: Some("ab".repeat(32)),
+            ..door_params(door())
+        };
+        let len = build_cloud_init(&params).len();
+        assert!(
+            len <= USER_DATA_MAX_BYTES,
+            "the largest cloud-init is {len} bytes, over the {USER_DATA_MAX_BYTES}-byte limit \
+             (door files {}, maintenance files {})",
+            ssh_door_write_files(door().as_ref().unwrap()).len(),
+            maintenance_write_files().len(),
+        );
+    }
+
+    /// The box scripts reach the box without their full-line comments and
+    /// nothing else: no heredoc (where a `#` line would be data), the shebang
+    /// kept, every other line in order, and the result still parses as `sh`.
+    #[test]
+    fn test_box_scripts_lose_only_their_comment_lines() {
+        for script in [
+            REBOOT_COORDINATOR_SCRIPT.to_string(),
+            SSH_DOOR_SCRIPT.to_string(),
+            nest_up_script(),
+        ] {
+            assert!(
+                !script.contains("<<"),
+                "a heredoc makes comment-stripping unsafe"
+            );
+            let stripped = script_without_comments(&script);
+            assert!(stripped.starts_with("#!/bin/sh\n"), "{stripped}");
+            let kept: Vec<&str> = script
+                .lines()
+                .skip(1)
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect();
+            assert_eq!(stripped.lines().skip(1).collect::<Vec<_>>(), kept);
+            let out = std::process::Command::new("sh")
+                .args(["-n", "-c", &stripped])
+                .output()
+                .expect("sh");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// The door is purely additive: a door render, with the door's own
+    /// fragments taken out and the sshd-off line put back, is the door-less
+    /// render byte for byte — so `ssh_door: None` changes nothing on a box
+    /// whose admin left the door shut (`deployment-threat-model.md` § Concern
+    /// 1a), and nothing of the door leaks into one.
+    #[test]
+    fn test_cloud_init_door_less_render_is_unchanged() {
+        let without = build_cloud_init(&door_params(None));
+        for fragment in [
+            "ssh_pwauth",
+            "0-fauna-door",
+            "authorized_keys",
+            "fauna-ssh-door",
+            "ufw allow 22",
+        ] {
+            assert!(
+                !without.contains(fragment),
+                "door-less render carries {fragment}"
+            );
+        }
+        let with = build_cloud_init(&door_params(door()));
+        let stripped = with
+            .replacen("ssh_pwauth: false\n", "", 1)
+            .replacen(&ssh_door_write_files(&door().unwrap()), "", 1)
+            .replacen(SSH_DOOR_RUNCMD, "", 1)
+            .replacen(
+                "  - systemctl start docker\n",
+                "  - systemctl start docker\n  - systemctl disable --now ssh.service ssh.socket\n",
+                1,
+            );
+        assert_eq!(stripped, without);
+    }
+
+    /// With the door: key-only sshd for root (the four drop-in keywords, the
+    /// cloud-config `ssh_pwauth: false`), the key installed in the final stage,
+    /// sshd left enabled — and 22/tcp still denied and never allowed by the
+    /// render: only the door pass opens it, to one address.
+    #[test]
+    fn test_cloud_init_door_renders_key_only_sshd() {
+        let out = build_cloud_init(&door_params(door()));
+        assert!(out.starts_with("#cloud-config\nssh_pwauth: false\n"));
+        for line in [
+            "  - path: /etc/ssh/sshd_config.d/0-fauna-door.conf",
+            "      PasswordAuthentication no",
+            "      KbdInteractiveAuthentication no",
+            "      PermitRootLogin prohibit-password",
+            "      AuthenticationMethods publickey",
+            "  - path: /usr/local/sbin/fauna-ssh-door",
+            "  - path: /etc/systemd/system/fauna-ssh-door.service",
+            "  - path: /etc/systemd/system/fauna-ssh-door.timer",
+            "  - chmod 0700 /root/.ssh",
+            "  - systemctl enable --now fauna-ssh-door.timer",
+            "  - ufw deny 22/tcp",
+        ] {
+            assert!(out.contains(line), "door render lacks {line:?}");
+        }
+        assert!(out.contains(&format!(
+            "  - path: /root/.ssh/authorized_keys\n    content: |\n      {DOOR_KEY}\n    permissions: '0600'\n    defer: true\n"
+        )));
+        assert!(!out.contains("ufw allow 22"), "the render never opens 22");
+        assert!(
+            !out.contains("systemctl disable --now ssh.service ssh.socket"),
+            "the door keeps sshd enabled"
+        );
+        // root's provider-expired password would refuse every key login at the
+        // account check; the door clears the expiry (its own test below).
+        assert!(
+            out.contains(SSH_DOOR_UNEXPIRE_ROOT),
+            "door render lacks the unexpire line"
+        );
+        // The door timer starts after the reboot coordinator's, i.e. after the
+        // daemon-reload that sees the door units.
+        let reload = out.find("  - systemctl daemon-reload").unwrap();
+        let door_timer = out
+            .find("  - systemctl enable --now fauna-ssh-door.timer")
+            .unwrap();
+        assert!(reload < door_timer);
+    }
+
+    /// Hetzner creates a keyless server with root's generated password already
+    /// expired, so PAM's account check answers a key login with "You are
+    /// required to change your password immediately" and ends any session
+    /// without a TTY — measured 2026-10-20 on the first live door box
+    /// (dev.fauna.build), whose key authenticated and whose session was then
+    /// refused. The door resets root's last-change date to the day of the
+    /// boot, in `runcmd` (after every cloud-config module that sets or expires
+    /// a password); the password itself stays unknown and unusable over ssh
+    /// (`PasswordAuthentication no`). A door-less box runs no sshd and keeps
+    /// the provider's expiry untouched.
+    #[test]
+    fn test_door_clears_roots_provider_password_expiry() {
+        assert_eq!(
+            SSH_DOOR_UNEXPIRE_ROOT,
+            "  - chage -d \"$(date +%Y-%m-%d)\" root"
+        );
+        let out = build_cloud_init(&door_params(door()));
+        let runcmd = out.find("\nruncmd:\n").expect("runcmd");
+        let unexpire = out
+            .find(SSH_DOOR_UNEXPIRE_ROOT)
+            .expect("the door clears the expiry");
+        assert!(
+            unexpire > runcmd,
+            "the expiry is cleared in runcmd, after the config stage"
+        );
+        assert!(!build_cloud_init(&door_params(None)).contains("chage"));
+    }
+
+    /// sshd keeps the first value it reads per keyword, and the provider's
+    /// cloud-init writes `PasswordAuthentication yes` into
+    /// `50-cloud-init.conf`: the drop-in's name must sort before it.
+    #[test]
+    fn test_door_dropin_sorts_before_cloud_init_dropin() {
+        let name = SSH_DOOR_DROPIN_PATH.rsplit('/').next().unwrap();
+        assert_eq!(name, "0-fauna-door.conf");
+        assert!(name < "50-cloud-init.conf");
+    }
+
+    /// Only the key's first line reaches the YAML: a value carrying a newline
+    /// cannot inject a document key.
+    #[test]
+    fn test_door_key_newline_cannot_reach_the_document() {
+        let out = build_cloud_init(&door_params(Some(SshDoor {
+            authorized_key: format!("{DOOR_KEY}\nruncmd:\n  - id"),
+        })));
+        assert!(!out.contains("\nruncmd:\n  - id"));
+        assert_eq!(out.matches("\nruncmd:\n").count(), 1);
+    }
+
+    /// Run `body` against the sourced door script (functions only —
+    /// `FAUNA_SSH_DOOR_TEST=1` skips the pass) and return (status, stdout).
+    fn run_door_fns(body: &str) -> (bool, String) {
+        let script = format!("{SSH_DOOR_SCRIPT}\n{body}\n");
+        let out = std::process::Command::new("sh")
+            .env("FAUNA_SSH_DOOR_TEST", "1")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run sh");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    /// The validator admits exactly one IPv4 or IPv6 literal and refuses
+    /// everything ufw could read as more — a range, `any`, the unspecified
+    /// address, a shell fragment.
+    #[test]
+    fn test_door_address_validation() {
+        for good in [
+            "203.0.113.7",
+            "1.2.3.4",
+            "255.255.255.255",
+            "2001:db8::7",
+            "2a01:4f8:c012:1234::1",
+            "::1",
+            "2001:db8:0:0:0:0:0:1",
+            "::ffff:203.0.113.7",
+        ] {
+            let (ok, _) = run_door_fns(&format!("fauna_ssh_door_valid_address '{good}'"));
+            assert!(ok, "{good} must be accepted");
+        }
+        for bad in [
+            "",
+            "any",
+            "0.0.0.0",
+            "::",
+            "1.2.3",
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "01.2.3.4",
+            "1.2.3.4/0",
+            "1.2.3.4; rm -rf /",
+            "$(id)",
+            "1..2.3",
+            "2001:db8:::1",
+            "2001::db8::1",
+            "2001:db8:0:0:0:0:0:0:1",
+            "2001:db8:0:0:0:0:1",
+            "12345::1",
+            "fe80::1%eth0",
+            "2001:db8::/32",
+        ] {
+            let (ok, _) = run_door_fns(&format!("fauna_ssh_door_valid_address '{bad}'"));
+            assert!(!ok, "{bad:?} must be refused");
+        }
+    }
+
+    /// A scratch box for the door pass: the maintenance + host dirs, the
+    /// drop-in (when `door`), and a stub `ufw` logging its arguments.
+    #[cfg(unix)]
+    struct DoorBox {
+        dir: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl DoorBox {
+        fn new(tag: &str, door: bool) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("fauna-door-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for sub in ["maint", "host", "bin"] {
+                std::fs::create_dir_all(dir.join(sub)).unwrap();
+            }
+            if door {
+                std::fs::write(dir.join("0-fauna-door.conf"), SSH_DOOR_DROPIN).unwrap();
+            }
+            let ufw = dir.join("bin/ufw");
+            std::fs::write(
+                &ufw,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                    dir.join("ufw.calls").display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&ufw, std::fs::Permissions::from_mode(0o755)).unwrap();
+            DoorBox { dir }
+        }
+        fn source(&self) -> std::path::PathBuf {
+            self.dir.join("maint/ssh-door-source")
+        }
+        fn admitted(&self) -> std::path::PathBuf {
+            self.dir.join("host/ssh-door-admitted")
+        }
+        fn admit(&self, now: &str) {
+            let (ok, _) = run_door_fns(&format!(
+                "PATH='{bin}':$PATH\nfauna_ssh_door_admit '{src}' '{dropin}' '{adm}' {now}",
+                bin = self.dir.join("bin").display(),
+                src = self.source().display(),
+                dropin = self.dir.join("0-fauna-door.conf").display(),
+                adm = self.admitted().display(),
+            ));
+            assert!(ok, "the door pass must not fail");
+        }
+        fn ufw_calls(&self) -> String {
+            std::fs::read_to_string(self.dir.join("ufw.calls")).unwrap_or_default()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for DoorBox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The pass admits the claimant's address once, above the deny, and
+    /// records it; a later write by the nest is ignored for good.
+    #[cfg(unix)]
+    #[test]
+    fn test_door_pass_admits_once() {
+        let b = DoorBox::new("once", true);
+        b.admit("100");
+        assert_eq!(b.ufw_calls(), "", "no source yet: nothing to admit");
+        assert!(!b.admitted().exists());
+
+        std::fs::write(b.source(), "address=203.0.113.7\n").unwrap();
+        b.admit("200");
+        assert_eq!(
+            b.ufw_calls(),
+            "prepend allow proto tcp from 203.0.113.7 to any port 22\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.admitted()).unwrap(),
+            "address=203.0.113.7\nat=200\n"
+        );
+
+        std::fs::write(b.source(), "address=198.51.100.9\n").unwrap();
+        b.admit("300");
+        assert_eq!(
+            b.ufw_calls(),
+            "prepend allow proto tcp from 203.0.113.7 to any port 22\n",
+            "a second write is ignored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(b.admitted()).unwrap(),
+            "address=203.0.113.7\nat=200\n"
+        );
+    }
+
+    /// IPv6 is admitted the same way (`prepend` lands in the v6 chain).
+    #[cfg(unix)]
+    #[test]
+    fn test_door_pass_admits_ipv6() {
+        let b = DoorBox::new("v6", true);
+        std::fs::write(b.source(), "address=2001:db8::7\n").unwrap();
+        b.admit("1");
+        assert_eq!(
+            b.ufw_calls(),
+            "prepend allow proto tcp from 2001:db8::7 to any port 22\n"
+        );
+    }
+
+    /// A door-less box (no drop-in) ignores the file the nest writes at every
+    /// claim.
+    #[cfg(unix)]
+    #[test]
+    fn test_door_pass_ignored_on_door_less_box() {
+        let b = DoorBox::new("doorless", false);
+        std::fs::write(b.source(), "address=203.0.113.7\n").unwrap();
+        b.admit("1");
+        assert_eq!(b.ufw_calls(), "");
+        assert!(!b.admitted().exists());
+    }
+
+    /// A symlinked source is never followed; a malformed value never reaches
+    /// ufw and shuts the door for good.
+    #[cfg(unix)]
+    #[test]
+    fn test_door_pass_rejects_symlink_and_malformed_source() {
+        let b = DoorBox::new("symlink", true);
+        let target = b.dir.join("planted");
+        std::fs::write(&target, "address=203.0.113.7\n").unwrap();
+        std::os::unix::fs::symlink(&target, b.source()).unwrap();
+        b.admit("1");
+        assert_eq!(b.ufw_calls(), "", "a symlink is never followed");
+        assert!(!b.admitted().exists());
+
+        let b = DoorBox::new("malformed", true);
+        std::fs::write(b.source(), "address=1.2.3.4; rm -rf /\n").unwrap();
+        b.admit("5");
+        assert_eq!(b.ufw_calls(), "", "a malformed value never reaches ufw");
+        assert_eq!(
+            std::fs::read_to_string(b.admitted()).unwrap(),
+            "refused=malformed\nat=5\n"
+        );
+        std::fs::write(b.source(), "address=203.0.113.7\n").unwrap();
+        b.admit("6");
+        assert_eq!(b.ufw_calls(), "", "the refusal is final");
+    }
+
+    /// A failing ufw leaves the admission unrecorded, so the next pass retries.
+    #[cfg(unix)]
+    #[test]
+    fn test_door_pass_retries_after_ufw_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let b = DoorBox::new("ufwfail", true);
+        let ufw = b.dir.join("bin/ufw");
+        std::fs::write(&ufw, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&ufw, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(b.source(), "address=203.0.113.7\n").unwrap();
+        let (ok, _) = run_door_fns(&format!(
+            "PATH='{bin}':$PATH\nfauna_ssh_door_admit '{src}' '{dropin}' '{adm}' 1",
+            bin = b.dir.join("bin").display(),
+            src = b.source().display(),
+            dropin = b.dir.join("0-fauna-door.conf").display(),
+            adm = b.admitted().display(),
+        ));
+        assert!(!ok, "a failing ufw fails the pass");
+        assert!(!b.admitted().exists(), "nothing recorded, so it retries");
     }
 }

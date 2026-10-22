@@ -34,14 +34,14 @@ use fauna_core::scoring::CompositionEntry;
 use fauna_protocol::{
     RpcError, decode_strict as decode,
     feed::{
-        FeedCompositionEntry, FeedContributor, FeedContributorGrantReply,
-        FeedContributorGrantRequest, FeedContributorRevokeReply, FeedContributorRevokeRequest,
-        FeedContributorsListReply, FeedContributorsListRequest, FeedCreateReply, FeedCreateRequest,
-        FeedDeleteReply, FeedDeleteRequest, FeedFactorsGetReply, FeedFactorsGetRequest,
-        FeedFactorsSetReply, FeedFactorsSetRequest, FeedGetReply, FeedGetRequest, FeedListReply,
-        FeedListRequest, FeedLocalPostsReply, FeedLocalPostsRequest, FeedPostItem, FeedPostsReply,
-        FeedPostsRequest, FeedSummary, FeedTrendingPostsReply, FeedTrendingPostsRequest,
-        FeedUpdateReply, FeedUpdateRequest,
+        FeedAuthorPostsReply, FeedAuthorPostsRequest, FeedCompositionEntry, FeedContributor,
+        FeedContributorGrantReply, FeedContributorGrantRequest, FeedContributorRevokeReply,
+        FeedContributorRevokeRequest, FeedContributorsListReply, FeedContributorsListRequest,
+        FeedCreateReply, FeedCreateRequest, FeedDeleteReply, FeedDeleteRequest,
+        FeedFactorsGetReply, FeedFactorsGetRequest, FeedFactorsSetReply, FeedFactorsSetRequest,
+        FeedGetReply, FeedGetRequest, FeedListReply, FeedListRequest, FeedLocalPostsReply,
+        FeedLocalPostsRequest, FeedPostItem, FeedPostsReply, FeedPostsRequest, FeedSummary,
+        FeedTrendingPostsReply, FeedTrendingPostsRequest, FeedUpdateReply, FeedUpdateRequest,
     },
 };
 
@@ -49,8 +49,8 @@ use crate::api_error::ApiError;
 use crate::db::ScoreCursor;
 use crate::feed_routes::{
     FeedPostOut, FeedReader, add_contributor_core, create_feed_core, delete_feed_core,
-    get_feed_core, list_contributors_core, query_feed_core, query_local_feed_core,
-    query_trending_feed_core, remove_contributor_core, update_feed_core,
+    get_feed_core, list_contributors_core, query_author_feed_core, query_feed_core,
+    query_local_feed_core, query_trending_feed_core, remove_contributor_core, update_feed_core,
 };
 use crate::rpc_router::{RpcHandler, RpcKindMeta, RpcRouterBuilder};
 
@@ -185,6 +185,11 @@ fn post_item(p: &FeedPostOut) -> FeedPostItem {
         // `bridge_authors` (`bridges.md` § Unified feed ingestion → *Bridged
         // authors*). Additive + `None`-default on the wire.
         author_display: p.author_display.clone(),
+        // The home of a row indexed from another nest — a federated follow's
+        // delivered envelope (`federated-follow.md` § Decision 3): the client
+        // fetches the sealed body and media from there. Additive.
+        home_nest_url: p.home_nest_url.clone(),
+        home_nest_actor_id: p.home_nest_actor_id.clone(),
         extra: std::collections::BTreeMap::new(),
     }
 }
@@ -473,6 +478,43 @@ fn feed_local_posts_handler() -> RpcHandler {
     })
 }
 
+// ── fauna.feed.author.posts ────────────────────────────────────
+
+fn feed_author_posts_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.feed.author.posts").await?;
+            let req: FeedAuthorPostsRequest = decode(&payload).map_err(malformed)?;
+            let author = decode_author(&req.author)?;
+
+            let out = query_author_feed_core(
+                &state,
+                FeedReader::Account(actor_id),
+                author,
+                req.cursor,
+                req.limit,
+            )
+            .await
+            .map_err(rpc_error_from_api)?;
+
+            encode_reply(&FeedAuthorPostsReply {
+                posts: out.posts.iter().map(post_item).collect(),
+                cursor: out.cursor,
+                extra: std::collections::BTreeMap::new(),
+            })
+        })
+    })
+}
+
+/// The author read's `author` — a hex-encoded 32-byte actor id; anything
+/// else is the caller's malformed request.
+fn decode_author(hex_author: &str) -> Result<[u8; 32], RpcError> {
+    hex::decode(hex_author)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| invalid_params("author must be a 64-hex actor id"))
+}
+
 // ── fauna.feed.trending.posts ──────────────────────────────────
 
 fn feed_trending_posts_handler() -> RpcHandler {
@@ -508,14 +550,16 @@ fn feed_trending_posts_handler() -> RpcHandler {
 // reads the two public timelines as `FeedReader::Principal` — public posts
 // only under the off-box predicate, and nothing of the account's own state.
 // `fauna:feed:read:account` (§ *The fourth arm*) reads the account's own
-// custom feeds, and refines the two timelines, as
+// custom feeds, and refines the two timelines and the author read, as
 // `FeedReader::PrincipalAccount` — the account's view (block list, factors,
-// viewer state) over the same public posts. The gate (ceiling + scopes) ran
-// in `principal_handlers` before these.
+// viewer state) over the same public posts. `fauna:feed:read:author`
+// (§ *The author arm*) reads one author's public posts. The gate (ceiling +
+// scopes) ran in `principal_handlers` before these.
 
-/// The reader a principal session reads the two public timelines as: the
-/// bare arm is their one arm (`principal_reach`), and the refining account
-/// arm, when the session also holds it, reads them as the account
+/// The reader a principal session reads the two public timelines and the
+/// author read as: the bare arm is the timelines' one arm and the author arm
+/// the author read's (`principal_reach`), and the refining account arm, when
+/// the session also holds it, reads each of them as the account
 /// (`apps/bridges.md` rule (c)'s refinement).
 fn principal_timeline_reader(caller: &crate::principal_handlers::PrincipalCaller) -> FeedReader {
     if fauna_bridge_atproto::fauna_scope::reads_feed_as_account(&caller.scopes) {
@@ -571,6 +615,29 @@ pub(crate) fn principal_feed_local_posts_handler() -> crate::principal_handlers:
             .await
             .map_err(rpc_error_from_api)?;
             encode_reply(&FeedLocalPostsReply {
+                posts: out.posts.iter().map(post_item).collect(),
+                cursor: out.cursor,
+                extra: std::collections::BTreeMap::new(),
+            })
+        })
+    })
+}
+
+pub(crate) fn principal_feed_author_posts_handler() -> crate::principal_handlers::PrincipalHandler {
+    Box::new(|state, caller, payload| {
+        Box::pin(async move {
+            let req: FeedAuthorPostsRequest = decode(&payload).map_err(malformed)?;
+            let author = decode_author(&req.author)?;
+            let out = query_author_feed_core(
+                &state,
+                principal_timeline_reader(&caller),
+                author,
+                req.cursor,
+                req.limit,
+            )
+            .await
+            .map_err(rpc_error_from_api)?;
+            encode_reply(&FeedAuthorPostsReply {
                 posts: out.posts.iter().map(post_item).collect(),
                 cursor: out.cursor,
                 extra: std::collections::BTreeMap::new(),
@@ -755,6 +822,14 @@ pub fn register_feed_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: Duration::from_secs(5),
             handler: feed_local_posts_handler(),
+        },
+    );
+    b.add(
+        "fauna.feed.author.posts",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: Duration::from_secs(5),
+            handler: feed_author_posts_handler(),
         },
     );
     b.add(

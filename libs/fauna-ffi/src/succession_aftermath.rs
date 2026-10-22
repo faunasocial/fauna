@@ -83,6 +83,10 @@ pub enum FfiAftermathLeg {
     MlsReseal,
     /// Leg 4 — the capability-grant re-mint.
     GrantRemint,
+    /// Leg 8 — the subscriber-tier period-key rotation. Its `nest_too_old` line
+    /// reports an exposure that is still open, so an app renders it like any
+    /// other leg's line.
+    PeriodRotation,
     /// Leg 7 — the `__drafts` re-seal.
     DraftsReseal,
     /// Leg 6 — the mail burn.
@@ -408,6 +412,13 @@ impl AftermathSink for ForeignAftermathSink {
     fn grant_remint(&mut self, progress: fauna_client_capabilities::GrantRemintProgress) {
         self.inner
             .progress(FfiAftermathLeg::GrantRemint, progress.status_line());
+    }
+    fn period_rotation(
+        &mut self,
+        progress: fauna_client_subscriptions::orchestration::PeriodRotationProgress,
+    ) {
+        self.inner
+            .progress(FfiAftermathLeg::PeriodRotation, progress.status_line());
     }
     fn drafts_reseal(&mut self, progress: fauna_client_drafts::DraftsResealProgress) {
         self.inner

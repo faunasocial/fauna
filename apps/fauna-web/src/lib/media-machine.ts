@@ -9,7 +9,7 @@
 // serde JSON (snake_case across the serde_json boundary). The sort/filter values
 // ride as their stable wire form ("name"/"size"/"date"; a set name or null for the
 // all-media default), not the localized labels.
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 /** One item in the cross-set all-media browse — the `media-item` component. */
 export interface MediaItemSummary {

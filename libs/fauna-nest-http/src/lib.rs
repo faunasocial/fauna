@@ -98,7 +98,7 @@ mod fake;
 #[cfg(feature = "client")]
 pub use bearer::{BearerSource, MintedIdentity, SelfIdentityWatch, StaticBearer};
 #[cfg(feature = "client")]
-pub use content::{NestContentApi, ReqwestNestContentApi};
+pub use content::{NestContentApi, NoBearer, ReqwestNestContentApi};
 
 #[cfg(feature = "launch-machine")]
 pub use bearer::LaunchMachineBearer;

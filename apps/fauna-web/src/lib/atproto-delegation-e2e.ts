@@ -4,7 +4,7 @@
 // (`fauna_atproto_settings_machine::delegation_clock`).
 //
 // This module exists ONLY in builds made for testing (testing.md § convention
-// 15). Two importers, both gated: `$lib/e2e-automation` (itself behind
+// 15). Two importers, both gated: `#lib/e2e-automation` (itself behind
 // `+layout.svelte`'s `if (__FAUNA_E2E_AUTOMATION__)`) registers the command,
 // and the AT Protocol settings page installs its rehydrate hook inside its own
 // `if (__FAUNA_E2E_AUTOMATION__)` branch — so a production `vite build` folds
@@ -30,8 +30,8 @@
 // lapse would take. (linux's arm nudges `notify_atproto_rehydrate` for exactly
 // this reason; this is the browser shape of the same nudge.)
 
-import { atprotoDelegationSetClockOffsetForTest } from '$lib/wasm-atproto-settings';
-import { registerE2eCommands } from '$lib/e2e-commands';
+import { atprotoDelegationSetClockOffsetForTest } from '#lib/wasm-atproto-settings';
+import { registerE2eCommands } from '#lib/e2e-commands';
 
 /** The AT Protocol page's own refresh-and-repaint callback, installed while the
  *  page is mounted. `null` when the page has never been opened this session. */
@@ -46,7 +46,7 @@ export function setAtprotoDelegationRehydrateHook(hook: (() => Promise<void>) | 
 const ATPROTO_DELEGATION_COMMANDS = ['atproto_delegation_advance_clock'] as const;
 
 /** Register `atproto_delegation_advance_clock`. Called once from
- *  `$lib/e2e-automation`. */
+ *  `#lib/e2e-automation`. */
 export function registerAtprotoDelegationCommands(): void {
   registerE2eCommands(ATPROTO_DELEGATION_COMMANDS, async (_action, p) => {
     // Set the offset FIRST: the rehydrate below is what reads it, so shifting

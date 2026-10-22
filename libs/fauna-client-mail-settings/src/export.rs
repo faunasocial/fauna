@@ -1149,6 +1149,11 @@ pub struct MailExportMachine {
     /// every real build. A field only so the unit tests can drive a run across
     /// many frames without 16 MiB of fixture mail.
     chunk_bytes: usize,
+    /// Bumped on every write of the held session view. [`Self::refresh`]
+    /// reads it before its listing and drops a listing the view moved past
+    /// while it was in flight — a stale read must never paint an older state
+    /// over a newer one (the import twin's guard, `import.rs`).
+    view_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// Pause/Cancel arriving while the drive loop runs (the export twin of
@@ -1261,6 +1266,7 @@ impl MailExportMachine {
             catalogue: Mutex::new(Vec::new()),
             run: Mutex::new(None),
             chunk_bytes: fauna_mail::export::EXPORT_CHUNK_BYTES,
+            view_epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1277,6 +1283,8 @@ impl MailExportMachine {
     /// Record a session: stash its id (for later controls) + project it into the
     /// snapshot's progress/done fields.
     fn store_session(&self, session: ExportSessionView) {
+        self.view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.session.lock().expect("session mutex") = Some(session.clone());
         self.inner
             .lock()
@@ -1296,6 +1304,8 @@ impl MailExportMachine {
 
     /// Clear the active session (cancel / discard) + return the wizard to start.
     fn clear_session(&self) {
+        self.view_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.session.lock().expect("session mutex") = None;
         // `stop` is deliberately left as it is: a Cancel must still read as
         // Cancel to a loop that is finishing its page, or it carries on into
@@ -1311,6 +1321,7 @@ impl MailExportMachine {
     /// the client-side steps still navigate.
     async fn refresh(&self) -> Result<(), DispatchError> {
         self.set_status(ExportStatus::Loading);
+        let epoch = self.view_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let mailboxes = self.nest.list_own_mailboxes().await?;
         let sessions = self.nest.list_export_sessions().await?;
         let shown = session_to_show(sessions);
@@ -1346,7 +1357,19 @@ impl MailExportMachine {
         *self.catalogue.lock().expect("catalogue mutex") = mailboxes;
         let holds_run = self.run.lock().expect("run mutex").is_some()
             || self.driving.load(std::sync::atomic::Ordering::SeqCst);
-        if holds_run {
+        let held = self.session.lock().expect("session mutex").is_some();
+        let walking =
+            !held && self.inner.lock().expect("snapshot mutex").step != ExportStep::Format;
+        if self.view_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            // The held view moved while the listing was on its way — the run
+            // paused it, a control answered — so the listing is older than
+            // what is painted, and the newer state stands.
+        } else if walking {
+            // Part-way through its own walk (Scope, Confirm) the wizard is the
+            // person's: a refresh does not pull it onto another device's
+            // export. They meet that export on their next visit, which opens
+            // on Format and shows it.
+        } else if holds_run {
             // A machine holding a run of the session ignores the nudge (§ A
             // failed export is a record the wizard shows until the user moves
             // on): its own loop is the session view's writer, the export events
@@ -1354,7 +1377,7 @@ impl MailExportMachine {
             // reaches it as `Superseded` or a refused upload on its next call.
         } else if let Some(shown) = shown {
             self.store_session(shown);
-        } else if self.session.lock().expect("session mutex").is_some() {
+        } else if held {
             // The session this machine holds is no longer listed as anything
             // to show — discarded or cancelled from another of the user's
             // devices, or reclaimed by § Expiry. Keeping it would paint a Done
@@ -2550,6 +2573,10 @@ mod tests {
         /// Fail this fetch (after any restart hook ran) — a device-local fault.
         fail_fetch: Option<usize>,
         machine: OnceLock<Weak<MailExportMachine>>,
+        /// Park the next `list_export_sessions` after it has taken its answer:
+        /// the test is told the call is in flight (`entered`), moves the
+        /// machine's view, then lets the older listing out (`release`).
+        list_gate: StdMutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     }
 
     impl FakeNest {
@@ -2578,6 +2605,7 @@ mod tests {
                 restart_after_fetches: None,
                 fail_fetch: None,
                 machine: OnceLock::new(),
+                list_gate: StdMutex::new(None),
             }
         }
 
@@ -2766,11 +2794,19 @@ mod tests {
             Ok(self.listing.clone())
         }
         async fn list_export_sessions(&self) -> Result<Vec<ExportSessionView>, NestError> {
-            let st = self.state.lock().unwrap();
-            if let Some(listing) = &st.listing {
-                return Ok(listing.clone());
+            let answer = {
+                let st = self.state.lock().unwrap();
+                match &st.listing {
+                    Some(listing) => listing.clone(),
+                    None => st.session.clone().into_iter().collect(),
+                }
+            };
+            let gate = self.list_gate.lock().unwrap().take();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
             }
-            Ok(st.session.clone().into_iter().collect())
+            Ok(answer)
         }
         async fn start_export_session(
             &self,
@@ -3225,14 +3261,6 @@ mod tests {
 
     // ── the download-and-open leg (§ Download flow) ────────────────────
 
-    /// The other end of the pipeline: after a finished run, `Download` GETs the
-    /// blob, unwraps the row's key under the account's standing set, opens the
-    /// frames in order and writes out the recovered `.zip.zst` — byte-for-byte
-    /// the archive the run built.
-    ///
-    /// The key deliberately comes from the **row**, not from the run's memory:
-    /// § Download flow's client need not be the one that exported, and the fake
-    /// custody unwraps the stored bytes exactly as a second device would.
     /// A second `Download` while one is mid-save is refused, never
     /// run alongside it — the first still saves the whole, verified archive,
     /// and the guard is released so a later download works.
@@ -3265,6 +3293,14 @@ mod tests {
             .expect("the guard was released");
     }
 
+    /// The other end of the pipeline: after a finished run, `Download` GETs the
+    /// blob, unwraps the row's key under the account's standing set, opens the
+    /// frames in order and writes out the recovered `.zip.zst` — byte-for-byte
+    /// the archive the run built.
+    ///
+    /// The key deliberately comes from the **row**, not from the run's memory:
+    /// § Download flow's client need not be the one that exported, and the fake
+    /// custody unwraps the stored bytes exactly as a second device would.
     #[tokio::test]
     async fn download_saves_the_archive_the_run_built() {
         let corpus = corpus();
@@ -4527,6 +4563,55 @@ mod tests {
         assert_eq!(snap.session_state, Some(ExportSessionState::Running));
         assert_eq!(m.current_session_id().unwrap(), SESSION_ID);
         assert!(m.run.lock().unwrap().is_some(), "the run is kept");
+    }
+
+    /// A wizard part-way through its own walk (Scope, Confirm) is not pulled
+    /// onto another device's export by a refresh (the push re-read): the walk
+    /// in hand is the person's, and they meet the other export on their next
+    /// visit.
+    #[tokio::test]
+    async fn a_refresh_does_not_pull_a_walk_in_progress_onto_another_export() {
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        let m = machine_over(nest.clone());
+        walk_to_confirm(&m).await;
+        assert_eq!(m.snapshot().step, ExportStep::Confirm);
+        nest.state.lock().unwrap().listing =
+            Some(vec![listed("theirs", ExportSessionState::Running, 9_999)]);
+        m.dispatch(MailExportAction::Refresh).await.unwrap();
+        let snap = m.snapshot();
+        assert_eq!(
+            snap.step,
+            ExportStep::Confirm,
+            "the walk stays where it was"
+        );
+        assert_eq!(snap.session_state, None);
+        assert!(m.current_session_id().is_err());
+    }
+
+    /// A listing read before another writer moved the held view is stale: the
+    /// refresh drops it rather than painting the older state over the newer
+    /// one (a progress push's re-read racing the run's own pause).
+    #[tokio::test]
+    async fn a_refresh_whose_listing_went_stale_in_flight_changes_nothing() {
+        let nest = Arc::new(FakeNest::names(&["INBOX"]));
+        nest.state.lock().unwrap().session = Some(listed("sess-1", ExportSessionState::Running, 1));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *nest.list_gate.lock().unwrap() = Some((entered.clone(), release.clone()));
+        let m = machine_over(nest.clone());
+        m.store_session(listed("sess-1", ExportSessionState::Running, 1));
+
+        let refreshing = {
+            let m = Arc::clone(&m);
+            tokio::spawn(async move { m.dispatch(MailExportAction::Refresh).await })
+        };
+        entered.notified().await;
+        // The run paused the session while the listing was on its way.
+        m.store_session(listed("sess-1", ExportSessionState::Paused, 1));
+        release.notify_one();
+        refreshing.await.unwrap().unwrap();
+
+        assert_eq!(m.snapshot().session_state, Some(ExportSessionState::Paused));
     }
 
     // ── export format label ─────────────────────────────────────────────

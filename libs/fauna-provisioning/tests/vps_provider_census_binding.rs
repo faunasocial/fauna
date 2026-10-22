@@ -99,8 +99,10 @@ async fn every_vps_dispatch_variant_delete_is_idempotent_on_404() {
             }
         };
 
+        // `p/x`: OVH's server ids are `<project>/<instance>`; every other
+        // adapter only interpolates the id, and the catch-all 404 answers.
         let result = dispatch
-            .delete_server(&reqwest::Client::new(), &instance("x", "1.2.3.4"))
+            .delete_server(&reqwest::Client::new(), &instance("p/x", "1.2.3.4"))
             .await;
         assert!(
             result.is_ok(),

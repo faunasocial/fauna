@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::domain_hash::{HashField, write_fields};
+use fauna_core::domain_hash::{HashField, write_fields};
 
 use super::{CacheDb, blob_to_array, now_epoch_millis};
 

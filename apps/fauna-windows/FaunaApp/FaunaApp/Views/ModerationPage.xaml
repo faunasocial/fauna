@@ -76,9 +76,21 @@
                                             <Run Text="{Binding ConfidencePercent}" /><Run Text="% " /><Run Text="{loc:Localize Key=moderation/confidence}" />
                                         </TextBlock>
                                     </StackPanel>
-                                    <Button Grid.Column="1" Content="{loc:Localize Key=moderation/correct}"
-                                            Tag="{Binding}" Click="TrainCorrection_Click" VerticalAlignment="Center"
-                                            AutomationProperties.AutomationId="train-correction-button" />
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <!-- appeal-button: the transparency triple's second leg. Painted
+                                             (Visible) only on a nest-issued row — the shared
+                                             `row_is_appealable` rule via ModerationRow.IsAppealable — so a
+                                             collapsed one is uncounted by UIA and the e2e's per-row count
+                                             is exactly the server half of the queue. -->
+                                        <Button Content="{loc:Localize Key=moderation/appeal}"
+                                                Tag="{Binding}" Click="Appeal_Click"
+                                                Visibility="{Binding IsAppealable, Converter={StaticResource BoolToVis}}"
+                                                AutomationProperties.AutomationId="appeal-button" />
+                                        <Button Content="{loc:Localize Key=moderation/correct}"
+                                                Tag="{Binding}" Click="TrainCorrection_Click"
+                                                AutomationProperties.AutomationId="train-correction-button" />
+                                    </StackPanel>
                                 </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
@@ -88,6 +100,39 @@
                                TextAlignment="Center" Visibility="Collapsed"
                                IsHitTestVisible="False" />
                 </Grid>
+
+                <!-- The appeal form (moderation.md § Legal takedown): present ONLY while a
+                     draft is open (absent, not merely disabled), one at a time so its ids
+                     are unindexed. Every gate and sentence is the shared `appeal_form_view`
+                     fold — the submit control stays disabled, with the fold's reason beside
+                     it, until a reason is typed. No offline gate: the kind is OfflineQueued. -->
+                <StackPanel x:Name="AppealForm" Spacing="8" Visibility="Collapsed">
+                    <TextBlock x:Name="AppealSummaryText" TextWrapping="Wrap" />
+                    <TextBox x:Name="AppealReasonInput" AcceptsReturn="True" TextWrapping="Wrap"
+                             MinHeight="80"
+                             AutomationProperties.AutomationId="{x:Bind ids:Ids.AppealReasonInput}"
+                             AutomationProperties.Name="appeal-reason-input"
+                             Header="{loc:Localize Key=moderation/appeal_reason_label}"
+                             TextChanged="AppealReasonInput_TextChanged" />
+                    <TextBlock x:Name="AppealBlockedText" Visibility="Collapsed"
+                               Opacity="0.6" TextWrapping="Wrap" Foreground="Orange" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="AppealSubmitButton" Style="{StaticResource AccentButtonStyle}"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AppealSubmitButton}"
+                                Click="AppealSubmit_Click" />
+                        <Button x:Name="AppealCancelButton"
+                                Content="{loc:Localize Key=moderation/appeal_cancel}"
+                                AutomationProperties.AutomationId="{x:Bind ids:Ids.AppealCancelButton}"
+                                Click="AppealCancel_Click" />
+                    </StackPanel>
+                </StackPanel>
+
+                <!-- appeal-status: the outcome line, present only after an attempt. NOT
+                     error-message — a refused appeal is form feedback that must not blank the
+                     queue the user is reading, and it survives the form closing on success. -->
+                <TextBlock x:Name="AppealStatusText" Visibility="Collapsed"
+                           Opacity="0.7" TextWrapping="Wrap"
+                           AutomationProperties.AutomationId="{x:Bind ids:Ids.AppealStatus}" />
             </StackPanel>
 
             <!-- The reporter's own ledger (`moderation-reports-section`; moderation.md §

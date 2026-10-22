@@ -20,7 +20,7 @@ each other's posts come back, each signed by the person who wrote it.
 
 ## Coverage contract
 
-Stamped 2026-10-09 at 53a1f516a7.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] Run the import from start to finish and your own posts appear in your feed at the dates you first posted them, each marked with the service it came from — `docs/goal/behavior/archive-import.md` § Goal
    - `tests/e2e-unified/tests/test_archive_import.py::test_an_import_walks_to_done_and_the_posts_land_at_their_original_dates`
@@ -115,7 +115,7 @@ Stamped 2026-10-09 at 53a1f516a7.
     - `tests/e2e-unified/tests/test_archive_import.py::test_the_archive_folder_counts_is_backed_up_holds_the_untouched_zip_and_deleting_it_keeps_the_posts`
 43. [app] Each archive you import rests in a folder of its own, so a newer export never overwrites an older one — `docs/goal/behavior/archive-import.md` § Storage — the archive folder
     - `tests/e2e-unified/tests/test_archive_import.py::test_importing_again_adds_only_what_is_new_into_a_folder_of_its_own`
-44. [nest] Your nest cannot read your archive or anything the app worked out from it: it only holds them sealed — `docs/goal/behavior/archive-import.md` § Architectural rules
+44. [nest] Your nest cannot read your archive or anything the app worked out from it: it only holds them encrypted — `docs/goal/behavior/archive-import.md` § Architectural rules
     - `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_the_nest_holds_the_archive_and_what_the_app_worked_out_only_sealed`
 45. [nest] An imported post never links back to the original and carries nothing that identifies it on the other service — `docs/goal/behavior/archive-import.md` § What each category becomes
     - `tests/e2e-unified/tests/api/test_archive_import_nest_promises.py::test_an_imported_post_carries_nothing_that_identifies_it_on_the_other_service`
@@ -149,12 +149,12 @@ Stamped 2026-10-09 at 53a1f516a7.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | |
-| windows | ⚠ partial | |
-| macos | ⚠ partial | |
-| ios | ⚠ partial | |
-| android | ⚠ partial | |
+| web | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| linux | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| android | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | tui | ⚠ partial | 0.1.4-dev+46d105c1.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |

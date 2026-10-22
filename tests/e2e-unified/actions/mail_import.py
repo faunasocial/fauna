@@ -112,6 +112,21 @@ class MailImportActions:
         """Generic/Outlook-fallback only."""
         self.driver.clear_and_type("mail-import-source-password", value)
 
+    def username_value(self) -> str:
+        """The Source step username field's current draft text."""
+        return self.driver.get_text("mail-import-source-username")
+
+    def forget_offered(self) -> bool:
+        """Whether the Source step offers to forget a remembered source
+        (`mail-import-source-forget-button`, § Credential handling). Read as
+        not-absent so `assert not forget_offered()` is exact on every app."""
+        return not self.driver.is_absent("mail-import-source-forget-button")
+
+    def forget_source(self) -> None:
+        """Forget the server, port, connection security and username the
+        account remembers."""
+        self.driver.click("mail-import-source-forget-button")
+
     def connect(self) -> None:
         """Step 1→2: LOGIN + LIST against the source. On success advances to
         Scope; on failure stays on Source with `error_text()` set."""
@@ -170,6 +185,21 @@ class MailImportActions:
         """The Scope step's max-message-size field (MB) as the app shows it."""
         return self.driver.get_text("mail-import-scope-max-size")
 
+    _IMPORT_DUPLICATES = "mail-import-scope-import-duplicates-toggle"
+
+    def import_duplicates_on(self) -> bool:
+        """Whether the advanced "Import duplicates anyway" option is on —
+        read from its ``state`` attribute, the contract every app serves
+        (mailbox-migration.md § Opt-out per session)."""
+        return self.driver.get_attr(self._IMPORT_DUPLICATES, "state") == "on"
+
+    def import_duplicates_label(self) -> str:
+        """The option's own label, which carries its double-storage warning."""
+        return self.driver.get_text(self._IMPORT_DUPLICATES)
+
+    def toggle_import_duplicates(self) -> None:
+        self.driver.click(self._IMPORT_DUPLICATES)
+
     def scope_next(self) -> None:
         """Step 2→3: Scope→Confirm."""
         self.driver.wait_for("wizard-next-button", timeout=10.0)
@@ -224,6 +254,14 @@ class MailImportActions:
     def resume(self) -> None:
         self.driver.click("mail-import-resume-button")
 
+    def restart_offered(self) -> bool:
+        """Whether the progress step offers to restart a mailbox the source
+        rebuilt (mailbox-migration.md § Resume protocol step 4)."""
+        return self.driver.is_visible("mail-import-restart-button")
+
+    def restart(self) -> None:
+        self.driver.click("mail-import-restart-button")
+
     def cancel(self) -> None:
         """Two-click inline confirm → MailImportAction::Cancel (already-
         imported messages are kept)."""
@@ -236,10 +274,30 @@ class MailImportActions:
         confirm in between."""
         self.driver.click("mail-import-cancel-button")
 
+    def dismiss(self) -> None:
+        """A FAILED import's one control on the Progress step — the record
+        goes and the wizard returns to Source (mailbox-migration.md § A failed
+        import is a record the wizard shows until the user moves on)."""
+        self.driver.click("mail-import-dismiss-button")
+
     def cancel_label(self) -> str:
         """The Cancel button's current label: "Cancel", or the confirm
         question once it is armed."""
         return self._text_or_empty("mail-import-cancel-button")
+
+    def quota_notice(self) -> str:
+        """The full-mailbox notice (`mail-import-quota-notice`), or ``""``
+        while the import is not paused on a full mailbox."""
+        return self._text_or_empty("mail-import-quota-notice")
+
+    def skip_rest(self) -> None:
+        """Skip the rest — every message not imported yet is recorded skipped
+        and the import finishes."""
+        self.driver.click("mail-import-quota-skip-rest-button")
+
+    def offers(self, element_id: str) -> bool:
+        """Whether the wizard currently paints ``element_id``."""
+        return self.driver.count(element_id) > 0
 
     def progress_fraction(self) -> float:
         """The progress bar's filled fraction, 0.0–1.0, from its ``fraction``

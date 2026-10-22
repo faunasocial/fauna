@@ -272,6 +272,21 @@ fn force_rotate_session_secret_handler() -> RpcHandler {
     })
 }
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's public sign-in key set (the three rotations are sovereign and absent) — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 1] =
+        [("fauna.oauth.issuer_key_status", issuer_key_status_handler())];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 /// Register the `fauna.oauth.*` kinds with the WS-RPC router.
 pub fn register_oauth_issuer_handlers(b: &mut RpcRouterBuilder) {
     b.add(

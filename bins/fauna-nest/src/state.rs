@@ -147,10 +147,10 @@ pub struct AuthState {
     pub replay_guard: Arc<crate::auth_core::ReplayGuard>,
     /// Single-use nonces for the attested age claim
     /// (`fauna.account.age_nonce` → `age_attest::verify_age_attestation`;
-    /// `family-safety.md` § The account age band). Its own pool, not a fourth
-    /// `ChallengeStore`: the mint is pre-identity (no actor to bind — the
-    /// actor is bound inside the platform-signed payload instead), so the
-    /// entry shape differs.
+    /// `family-safety.md` § The account age band). Its own pool, a fourth
+    /// `ChallengeStore` with the same bounds, every nonce issued unbound: the
+    /// mint is pre-identity (no actor to bind — the actor is bound inside the
+    /// platform-signed payload instead).
     pub age_nonce_store: Arc<crate::age_attest::AgeNonceStore>,
     pub registration: RegistrationConfig,
 }
@@ -467,15 +467,14 @@ pub struct ActivityPubState {
     /// stores a permit when the worker is busy, so nudges coalesce instead of
     /// queueing up.
     pub delivery_nudge: Arc<tokio::sync::Notify>,
-    pub inbox_limiter: Option<
-        Arc<
-            governor::RateLimiter<
-                String,
-                governor::state::keyed::DashMapStateStore<String>,
-                governor::clock::DefaultClock,
-            >,
-        >,
-    >,
+    /// Every inbox POST, keyed by its source (the PROXY-v2-resolved client),
+    /// never by the unverified `actor` it names (`inbox_routes::new_inbox_limiter`).
+    pub inbox_limiter: Option<Arc<crate::rate_limit::IpRateLimiter>>,
+    /// The per-source budget the fetch of an actor this nest holds no usable
+    /// key for is admitted under — the one dial an unverified delivery can
+    /// steer (`inbox_routes::new_actor_fetch_limiter`). Both maps are swept by
+    /// `rate_limit::spawn_retain_sweeper` (`lib.rs`).
+    pub actor_fetch_limiter: Option<Arc<crate::rate_limit::IpRateLimiter>>,
 }
 
 #[cfg(feature = "activitypub")]
@@ -484,6 +483,7 @@ impl Default for ActivityPubState {
         Self {
             delivery_nudge: Arc::new(tokio::sync::Notify::new()),
             inbox_limiter: None,
+            actor_fetch_limiter: None,
         }
     }
 }
@@ -677,6 +677,10 @@ impl crate::routes::AppState {
             std::process::id(),
             FOR_TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
+        // Every dir below sits under one scratch root that drops with the
+        // state, so a test run leaves nothing behind in the temp dir.
+        let test_scratch = TestScratch::new(format!("fauna-test-state-{test_token}"));
+        let scratch = test_scratch.path().to_path_buf();
         let email_state = EmailState::default();
         // Per-test acme dir (same `test_token` the segment dirs use): a fixed
         // `/tmp/test-acme` was shared by every test in the binary, so two
@@ -684,7 +688,7 @@ impl crate::routes::AppState {
         // `fullchain.pem` temp file (ENOENT on the rename). Unique-per-instance
         // removes that contention — store_acme_material is exercised by every
         // ACME-finish / self-signed-cert provisioning path.
-        let acme_dir = std::env::temp_dir().join(format!("fauna-test-acme-{test_token}"));
+        let acme_dir = scratch.join("acme");
         let storage = std::sync::Arc::new(crate::storage::SealedStorage::new(
             db.clone(),
             acme_dir.clone(),
@@ -731,7 +735,6 @@ impl crate::routes::AppState {
                 submission: None,
                 acme: None,
                 email: None,
-                update: Default::default(),
             }),
             nest_identity: cached_test_nest_identity("test_nest"),
             nest_signing_key: None,
@@ -740,15 +743,15 @@ impl crate::routes::AppState {
             relay_cert_changed: tokio::sync::watch::Sender::new(0),
             relay_channels: Default::default(),
             http_client: reqwest::Client::new(),
+            peer_fetch_loopback: Some(reqwest::Client::new()),
             tls_enabled: false,
             cors_origins: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(vec![])),
             web_app_origin: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
                 fauna_protocol::web_app_origin::WebAppOrigin::Bundled,
             )),
-            // No `FAUNA_IMAGE_TAG` in tests ⇒ the Stable seed.
-            update_channel: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Some(
-                fauna_provisioning::cloud_init::UpdateChannel::Stable,
-            ))),
+            // No `FAUNA_IMAGE_TAG` in tests ⇒ a nest the image does not run:
+            // no channel applies (`update_channel::enactable`).
+            update_channel: std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(None)),
             identity_domain: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
             acme_dir,
             backup_service: None,
@@ -757,8 +760,8 @@ impl crate::routes::AppState {
             // Tests get a per-`for_test` tempdir (pid + sequence) so neither
             // concurrent test *runs* nor concurrent tests within one binary
             // collide on `{data-dir}/__mail/{actor}/...`.
-            mail_segments: std::sync::Arc::new(fauna_segment_store::SegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-mail-{test_token}")),
+            mail_segments: std::sync::Arc::new(crate::segments::content_segment_manager(
+                scratch.join("mail"),
                 "mail",
             )),
             // Plan 7 T3: per-process conv SegmentManager (kind = "conv").
@@ -767,37 +770,37 @@ impl crate::routes::AppState {
             // concurrent test *runs* nor concurrent tests within one binary
             // collide on `{data-dir}/__conv/{channel_id}/...`. Bare `pid` alone
             // (the prior shape) was shared by every `for_test` in the binary.
-            conv_segments: std::sync::Arc::new(fauna_segment_store::SegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-conv-{test_token}")),
+            conv_segments: std::sync::Arc::new(crate::segments::content_segment_manager(
+                scratch.join("conv"),
                 "conv",
             )),
             // Track C posts: per-process post SegmentManager (kind = "post").
             // Per-`for_test` tempdir (same `test_token`) so concurrent test
             // runs/tests in one binary don't collide on `__post/{author}/...`.
-            post_segments: std::sync::Arc::new(fauna_segment_store::SegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-post-{test_token}")),
+            post_segments: std::sync::Arc::new(crate::segments::content_segment_manager(
+                scratch.join("post"),
                 "post",
             )),
             // S6.4: per-process calendar CONTENT SegmentManager (kind =
             // "calendar"). Per-`for_test` tempdir (same `test_token`) so
             // concurrent runs don't collide on `__calendar/{actor}/...`.
-            cal_segments: std::sync::Arc::new(fauna_segment_store::SegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-calendar-{test_token}")),
+            cal_segments: std::sync::Arc::new(crate::segments::content_segment_manager(
+                scratch.join("calendar"),
                 "calendar",
             )),
             // S6.5: per-process card CONTENT SegmentManager (kind = "card").
-            card_segments: std::sync::Arc::new(fauna_segment_store::SegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-card-{test_token}")),
+            card_segments: std::sync::Arc::new(crate::segments::content_segment_manager(
+                scratch.join("card"),
                 "card",
             )),
             mail_placement: std::sync::Arc::new(crate::segments::MailPlacementSegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-mail-placement-{test_token}")),
+                scratch.join("mail-placement"),
             )),
             cal_placement: std::sync::Arc::new(crate::segments::CalPlacementSegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-cal-placement-{test_token}")),
+                scratch.join("cal-placement"),
             )),
             card_placement: std::sync::Arc::new(crate::segments::CardPlacementSegmentManager::new(
-                std::env::temp_dir().join(format!("fauna-test-card-placement-{test_token}")),
+                scratch.join("card-placement"),
             )),
             security_notifier: std::sync::Arc::new(crate::security_notify::SecurityNotifier::new(
                 db.clone(),
@@ -821,8 +824,7 @@ impl crate::routes::AppState {
             host_resolver: None,
             web_serve_holder: None,
             push_service: None,
-            services_json_path: std::env::temp_dir()
-                .join(format!("test_services_{}.json", std::process::id())),
+            services_json_path: scratch.join("services.json"),
             custody_hosting_root: None,
             sidecar_tokens: std::collections::HashMap::new(),
             bridge_rate_limit: std::sync::Arc::new(crate::bridge_rate_limit::Limiter::new()),
@@ -845,6 +847,16 @@ impl crate::routes::AppState {
                 fauna_conn_limit::DEFAULT_MAX_CONNS_PER_IP,
             ),
             federation_rate_limit: std::sync::Arc::new(crate::bridge_rate_limit::Limiter::new()),
+            keypackage_fetch_target_limit: std::sync::Arc::new(
+                crate::bridge_rate_limit::Limiter::with_config(
+                    crate::bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG,
+                ),
+            ),
+            federation_target_budget: std::sync::Arc::new(
+                crate::bridge_rate_limit::Limiter::with_config(
+                    crate::bridge_rate_limit::FEDERATION_TARGET_LIMITER_CONFIG,
+                ),
+            ),
             handler_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(
                 crate::dispatch_core::MAX_INFLIGHT_HANDLERS,
             )),
@@ -894,6 +906,10 @@ impl crate::routes::AppState {
             // the private-axis branches set it via `for_test_with_node_mode` and
             // the runtime readers consult `node_mode`, not `config.nest.mode`.
             node_mode: std::sync::Arc::new(tokio::sync::RwLock::new(mode)),
+            // No hatch on a test nest; a test of the no-scanners refusal
+            // seeds `Absent` on the field.
+            content_scanners: fauna_core::mail_availability::ContentScanners::Unknown,
+            dav_direct_listener: None,
             // Tier quotas OFF by default: the 200-odd `for_test` callers create
             // actors and push inbox items freely without seeding a tier row. A test
             // exercising the quota ladder sets the field explicitly. (Production:
@@ -1005,7 +1021,48 @@ impl crate::routes::AppState {
             rpc_hold: std::sync::Arc::new(crate::rpc_hold_test_hook::RpcHoldRegistry::default()),
             #[cfg(feature = "test-hooks")]
             region_status_registry_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            test_scratch: Some(test_scratch),
         }
+    }
+
+    /// A path under this test state's scratch root, for a fixture a test
+    /// builds beside [`Self::for_test`] (a backup store, a plugin data dir)
+    /// that should vanish with the state. Panics on a production state, which
+    /// has no scratch root.
+    pub fn test_scratch_path(&self, name: &str) -> std::path::PathBuf {
+        self.test_scratch
+            .as_ref()
+            .expect("test_scratch_path on a state not built by AppState::for_test")
+            .path()
+            .join(name)
+    }
+}
+
+/// A uniquely named dir under the OS temp dir, removed recursively on drop —
+/// the scratch root of an [`AppState::for_test`] state (`testing.md` § Test
+/// temp-dir hygiene). Lives in the library rather than behind `tempfile`
+/// because `for_test` is a public constructor the integration tests call, and
+/// `tempfile` is only a dev-dependency of this crate.
+pub struct TestScratch(std::path::PathBuf);
+
+impl TestScratch {
+    /// The root is created eagerly so a fixture can write into it at once;
+    /// the components that own subdirs create their own on first write.
+    pub fn new(name: impl AsRef<std::path::Path>) -> Self {
+        let root = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        Self(root)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TestScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
@@ -1687,6 +1744,39 @@ mod tests {
                 .await
                 .is_ok(),
             "generation tasks survived the teardown"
+        );
+    }
+
+    /// A `for_test` state leaves nothing in the temp dir: every segment, acme
+    /// and services path sits under its scratch root, and the root is gone
+    /// once the state drops (`testing.md` § Test temp-dir hygiene). The
+    /// beside-control (the root exists while the state lives, and a written
+    /// file lands inside it) keeps the drop half from passing vacuously.
+    #[test]
+    fn for_test_scratch_root_is_removed_with_the_state() {
+        let db = std::sync::Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
+        let state = crate::routes::AppState::for_test(db);
+        let root = state
+            .test_scratch
+            .as_ref()
+            .expect("for_test sets a scratch root")
+            .path()
+            .to_path_buf();
+        assert!(root.starts_with(std::env::temp_dir()));
+        assert!(state.acme_dir.starts_with(&root));
+        assert!(state.services_json_path.starts_with(&root));
+        let fixture = state.test_scratch_path("fixture");
+        std::fs::create_dir_all(&fixture).unwrap();
+        std::fs::write(fixture.join("blob"), b"x").unwrap();
+        assert!(
+            root.is_dir(),
+            "the scratch root exists while the state lives"
+        );
+        drop(state);
+        assert!(
+            !root.exists(),
+            "the scratch root outlived its state: {}",
+            root.display()
         );
     }
 }

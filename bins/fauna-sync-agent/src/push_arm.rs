@@ -272,7 +272,7 @@ impl NotificationSink for DesktopSink {
 /// as-is. The nest's frames carry web paths today (`/app/contacts`), so a tap
 /// opens the app at its start page.
 #[cfg(target_os = "linux")]
-mod tap {
+pub(crate) mod tap {
     use std::path::{Path, PathBuf};
 
     use fauna_core::app_route::AppRoute;
@@ -296,7 +296,7 @@ mod tap {
     /// The launch a tap runs, or `None` for no action. `which` finds a
     /// command (an absolute path) and `entry` the desktop entry file — the
     /// host's answers, passed in so the mapping is asserted headlessly.
-    pub(super) fn launch_argv(
+    pub(crate) fn launch_argv(
         app: Option<&str>,
         url: &str,
         which: &dyn Fn(&str) -> Option<PathBuf>,
@@ -329,7 +329,7 @@ mod tap {
 
     /// The host's `which`: `fauna-tui` beside the agent's own binary first,
     /// then every command on `PATH`.
-    pub(super) fn which(command: &str) -> Option<PathBuf> {
+    pub(crate) fn which(command: &str) -> Option<PathBuf> {
         let beside = (command == TUI_BINARY)
             .then(|| std::env::current_exe().ok())
             .flatten()
@@ -348,7 +348,7 @@ mod tap {
 
     /// The installed desktop entry file, searched the XDG way
     /// (`$XDG_DATA_HOME`, then `$XDG_DATA_DIRS`, each under `applications/`).
-    pub(super) fn desktop_entry() -> Option<PathBuf> {
+    pub(crate) fn desktop_entry() -> Option<PathBuf> {
         let home = std::env::var_os("XDG_DATA_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
@@ -365,9 +365,24 @@ mod tap {
             .find(|file| file.is_file())
     }
 
+    /// Open the linux app at `route` the way a tap does — the second caller
+    /// is the `--share-target --open` helper KDE Dolphin's service menu runs
+    /// (`apps/linux.md` § The file manager's Share entry (GNOME Files) → *The
+    /// KDE Dolphin leg*): one opener for both. `false` when the host has no
+    /// launcher.
+    pub(crate) fn open_linux_app(route: &str) -> bool {
+        match launch_argv(Some("linux"), route, &which, &desktop_entry) {
+            Some(argv) => {
+                launch(&argv);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Run a tap's launch, detached from the agent: the launched app outlives
     /// it, and the child is reaped on this (the tap's own) thread.
-    pub(super) fn launch(argv: &[String]) {
+    pub(crate) fn launch(argv: &[String]) {
         let Some((program, args)) = argv.split_first() else {
             return;
         };

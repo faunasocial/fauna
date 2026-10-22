@@ -407,6 +407,41 @@ pub async fn store_post_with_expiry(
     Ok(())
 }
 
+/// [`store_post`] for a post envelope a **federated follow delivered** from
+/// its author's home `home_url`, whose verified identity is `home_nest_id`
+/// (`federated-follow.md` § Decision 3): the body
+/// goes to the author's `__post` segment exactly as any stored post's, so every
+/// single-post read resolves it; the projection is
+/// [`CacheDb::put_delivered_post_index_only`] — marked, and never in the Search
+/// corpus. Idempotent like [`store_post`].
+pub async fn store_delivered_post(
+    mgr: &SegmentManager,
+    cache_db: &CacheDb,
+    post_id: &[u8; 32],
+    body: &[u8],
+    home_url: &str,
+    home_nest_id: &[u8; 32],
+) -> Result<()> {
+    if let Some(schema) = cache_db
+        .content_schema(post_id)
+        .await?
+        .filter(|s| !crate::db::content::is_post_schema(s))
+    {
+        anyhow::bail!(
+            "post id {} already holds a `{schema}` row",
+            hex::encode(post_id)
+        );
+    }
+    let Some(post) = crate::db::posts::decode_stored_post(body) else {
+        anyhow::bail!("delivered post {} does not decode", hex::encode(post_id));
+    };
+    let created_at_ms = (post.created_at.0 / 1000) as i64;
+    ensure_in_segment(mgr, cache_db, &post.author.0, body, created_at_ms).await?;
+    cache_db
+        .put_delivered_post_index_only(post_id, body, home_url, home_nest_id)
+        .await
+}
+
 /// Resolve a post's author scope + segment id from its 32-byte digest — the
 /// delete path's ownership lookup (`feed.md` § State & data shape → *Post
 /// deletion*). `None` = the post has no segment record (an inline row, or gone).
@@ -1170,6 +1205,19 @@ mod tests {
                 "reads only the candidates `query_feed` / `query_feed_for_authors` \
                  return (MODERATION_SERVABLE); the peer receives the references \
                  extracted from each body",
+            ),
+        ),
+        (
+            "follow_delivery.rs",
+            "backfill_new_home",
+            Use::Serve(
+                Gate::Via {
+                    hops: &[("db/remote_follows.rs", "author_backfill_post_ids")],
+                    gates: &["MODERATION_SERVABLE"],
+                },
+                "queues to a newly approved subscriber's home nest only the ids \
+                 `author_backfill_post_ids` returns (MODERATION_SERVABLE, this nest's own \
+                 undelivered posts) — `federated-follow.md` § Decision 1's backfill",
             ),
         ),
         // The serving read is the INNER `render_published_posts_now`, not the

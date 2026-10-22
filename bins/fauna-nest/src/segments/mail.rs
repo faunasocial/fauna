@@ -2068,6 +2068,53 @@ mod tests {
         );
     }
 
+    /// **The running total** — distinct parts
+    /// whose bytes pass the head's declared total are refused at the part that
+    /// passes it, not read in full and compared after. Observed by what comes
+    /// after it: the head's last digest names a part that is not stored, so a
+    /// join that kept reading would answer "missing from the mirror" instead.
+    #[tokio::test]
+    async fn a_continuation_head_whose_parts_pass_its_total_is_refused_at_that_part() {
+        let (_tmp, manager, cache_db) = setup();
+        let actor = [0x4eu8; 32];
+
+        let mut digests = Vec::new();
+        for part in [b"first-ciphertext-range".as_slice(), b"second-range"] {
+            let mut part_floor = floor(1_715_000_000_000);
+            part_floor.continuation_role = CONTINUATION_ROLE_PART;
+            digests.push(
+                append_sealed_record(&manager, &cache_db, &actor, part, part_floor)
+                    .await
+                    .expect("relay stores the peer's part verbatim")
+                    .cid
+                    .digest(),
+            );
+        }
+        digests.push([0xeeu8; 32]); // never stored
+        let head = MailContinuationHead::new(
+            digests,
+            b"first-ciphertext-range".len() as u64 + 1,
+            b"hint".to_vec(),
+        );
+        let head_bytes = head.encode().expect("encode v3 head");
+        let mut head_floor = floor(1_715_000_000_000);
+        head_floor.continuation_role = CONTINUATION_ROLE_HEAD;
+        let record_id = append_sealed_record(&manager, &cache_db, &actor, &head_bytes, head_floor)
+            .await
+            .expect("relay stores the peer's head verbatim")
+            .cid
+            .digest();
+        manager.flush(&actor).await.expect("flush");
+
+        let err = read_sealed_body_with_floor(&manager, &cache_db, &actor, &record_id)
+            .await
+            .expect_err("parts past the declared total must be refused");
+        assert!(
+            err.to_string().contains("passed the head's declared"),
+            "expected the running-total refusal, got: {err}"
+        );
+    }
+
     /// A continuation family relays as **frame-sized parts + head** and the
     /// destination serves the body byte-for-byte — the deployment-critical
     /// property (a >2 MiB body can now cross the 2 MiB federation frame). Models

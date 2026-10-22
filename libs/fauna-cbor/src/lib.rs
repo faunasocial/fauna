@@ -33,3 +33,6 @@ pub use error::{DecodeError, EncodeError, VerifyError};
 /// `Value`; `Value` carries the kind *payload*, which is always a string-keyed
 /// dag-cbor structure.
 pub use ipld_core::ipld::Ipld as Value;
+
+#[cfg(test)]
+mod proptests;

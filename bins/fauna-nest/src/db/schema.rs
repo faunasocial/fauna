@@ -46,7 +46,19 @@ pub const SCHEMA_CONTENT: &str = "
         -- sources()`), which this column's split-out makes possible: before
         -- it existed, the discovery poller had to overload `source` with the
         -- fetch URL itself to keep referral-chain resolution working.
-        origin_nest_url TEXT
+        origin_nest_url TEXT,
+        -- 1 = an envelope a federated follow delivered from its author's home
+        -- (`federated-follow.md` § Decision 3): one local reader's, listed
+        -- only to the readers who follow its author (`db::feeds::
+        -- FeedLocality`) and excluded from every nest-wide read. Such a row
+        -- also carries `origin_nest_url` (the delivering home).
+        follow_delivered INTEGER NOT NULL DEFAULT 0,
+        -- The delivering home's verified `origin_nest_id` (the federation
+        -- channel's dial-proven identity, never the peer's word) for a row a
+        -- federated follow delivered: the root the reader's byte plane
+        -- graduates its pin against (`transport-trust.md` § The post arm).
+        -- NULL for every other row.
+        origin_nest_id BLOB
     );
     CREATE INDEX IF NOT EXISTS idx_content_schema ON content(schema, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_content_author ON content(author, created_at DESC);
@@ -119,12 +131,18 @@ pub const SCHEMA_CONTENT_META: &str = "
         quarantined INTEGER NOT NULL DEFAULT 0,
         suppressed INTEGER NOT NULL DEFAULT 0,
         legal_takedown_ref TEXT,
+        admin_block_report_id TEXT,
         like_count INTEGER NOT NULL DEFAULT 0,
         reply_count INTEGER NOT NULL DEFAULT 0,
         repost_count INTEGER NOT NULL DEFAULT 0,
         preview    TEXT
     );
 ";
+// `admin_block_report_id` (nullable, additive 2026-10-16): the admin's block of
+// one reported item (`moderation.md` § Admin block of a reported item) — the
+// second withhold flag beside `legal_takedown_ref`, the value being the
+// `abuse_reports.id` the block cites (the report's reason is the notice's
+// explanation). NULL = not blocked. Folded into `MODERATION_SERVABLE`.
 // `preview` (nullable, additive 2026-09-29): the list-card text — the first
 // 500 characters of `Post::body_text()`, exactly the string a native post's
 // FTS row indexes (`ui/feed.md` § The read model → *The list-card preview*).
@@ -182,6 +200,11 @@ pub const SCHEMA_CONTENT_FTS: &str = "
     );
     CREATE INDEX IF NOT EXISTS idx_content_fts_map_created
         ON content_fts_map(created_at DESC);
+    -- Every search arm joins `m.fts_rowid = f.rowid` from the FTS side; without
+    -- this index SQLite scans the whole map once per matched row, so a query at
+    -- `MAX_OFFSET` costs MAX_OFFSET x corpus row visits under the DB lock.
+    CREATE INDEX IF NOT EXISTS idx_content_fts_map_rowid
+        ON content_fts_map(fts_rowid);
 ";
 
 /// The two per-bridge Search-corpus choices, one row per (actor, bridge) —
@@ -284,6 +307,13 @@ pub const SCHEMA_NEST_PAIRINGS: &str = "
 /// anchor of the re-arm's throttle (`outbox_retry_now_for_author`), which makes
 /// an entry due no sooner than a fixed gap after its last attempt. NULL until a
 /// send has failed.
+///
+/// `peer_nest_id` names the one nest a **follow-family** entry goes to — a
+/// `follow_state` push to a remote subscriber's home nest
+/// (`federated-follow.md` § Decision 2), resolved to a URL from
+/// `nest_addresses` at send time, proven address first. NULL on a forward
+/// entry, whose targets are its author's pairing rows; it is also what keeps a
+/// follow entry out of the author's own forward-queue views.
 pub const SCHEMA_OUTBOX: &str = "
     CREATE TABLE IF NOT EXISTS outbox (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,7 +324,8 @@ pub const SCHEMA_OUTBOX: &str = "
         next_retry      INTEGER NOT NULL DEFAULT 0,
         author_id       BLOB NOT NULL,
         last_error      TEXT,
-        last_attempt_at INTEGER
+        last_attempt_at INTEGER,
+        peer_nest_id    BLOB
     );
 ";
 

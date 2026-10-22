@@ -11,7 +11,9 @@ import com.fauna.app.ui.util.getStringFmt
 import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.util.resolveLocalizedNested
 import com.fauna.ffi.FfiAdminRegionView
+import com.fauna.ffi.FfiAdminUpdateChannelView
 import com.fauna.ffi.FfiAdminWebAppOriginView
+import com.fauna.ffi.provisioning.UpdateChannel
 import com.fauna.ffi.FfiIssuerForcedArm
 import com.fauna.ffi.FfiIssuerForcedConfirmView
 import com.fauna.ffi.FfiIssuerKeyView
@@ -98,10 +100,12 @@ class AdminNestVM @Inject constructor(
      * the same `fauna.setup.status` fetch the serving port uses. `osSecurityUpdates`
      * backs the `nest-os-updates-count` badge (rendered only when `> 0`);
      * `osRebootPending` backs the `nest-os-restart-now-button` (rendered only when
-     * true). Both feed the always-present status line through the shared
-     * `os_maintenance_status_label`. Defaults 0/false → "OS up to date" on a nest
-     * with no host maintenance channel (dev/desktop nest), no false alarm.
+     * true). With `osHostStatusPresent` they feed the always-present status line
+     * through the shared `os_maintenance_status_label`. A nest with no host channel
+     * (a hand-built box, dev, desktop) reads `osHostStatusPresent` false → "OS status
+     * not reported by this host", never "OS up to date".
      */
+    val osHostStatusPresent = MutableStateFlow(false)
     val osSecurityUpdates = MutableStateFlow(0)
     val osRebootPending = MutableStateFlow(false)
 
@@ -146,6 +150,22 @@ class AdminNestVM @Inject constructor(
 
     /** Disables the radios + save mid-dispatch (re-tap guard). */
     val webAppOriginWorking = MutableStateFlow(false)
+
+    /**
+     * Update channel (`admin-nest-update-channel-*`,
+     * `fauna.admin.update_channel.{get,set}`; nest/update-channel.md § The UI).
+     * Every sentence, the radios' labels and descriptions and the `canSet`
+     * verdict are the shared `FfiAdminUpdateChannelView` fold (tui's
+     * `admin/nest.rs`, the reference leg) — this VM decides nothing. `null`
+     * until the read lands: the radios stay unmarked and disabled meanwhile.
+     */
+    val updateChannelView = MutableStateFlow<FfiAdminUpdateChannelView?>(null)
+
+    /** The marked radio — the local selection the save commits. */
+    val updateChannelDraft = MutableStateFlow<UpdateChannel?>(null)
+
+    /** Disables the radios + save mid-dispatch (re-tap guard). */
+    val updateChannelWorking = MutableStateFlow(false)
 
     /**
      * Shared admin NAT-mode control (admin.md § Nest → NAT-mode control) — the
@@ -368,6 +388,102 @@ class AdminNestVM @Inject constructor(
         }
     }
 
+    // ── Admin block of a reported item (`admin-nest-report-block-*`,
+    // `admin-nest-blocked-*`; moderation.md § Admin block of a reported item) ──
+    // Paint-only state: the verb's gate, the armed summary (verb + item + reason),
+    // the verdict and the blocked list's rows are all the shared `block` fold.
+
+    /** The armed Block / Unblock confirm: the target report, the verb, and the
+     *  summary folded ONCE at arm time over the row the admin is looking at. */
+    data class ArmedBlock(
+        val reportId: String,
+        val restore: Boolean,
+        val summary: String,
+        val confirmLabel: String,
+    )
+
+    /** [rows] is the blocked list; [loaded] is the bit its empty line paints off;
+     *  [armed] the open confirm; [status] the last verdict line (never `error-message`). */
+    data class BlockedState(
+        val rows: List<com.fauna.ffi.FfiBlockedRow> = emptyList(),
+        val loaded: Boolean = false,
+        val armed: ArmedBlock? = null,
+        val status: String? = null,
+    )
+
+    val blocked = MutableStateFlow(BlockedState())
+
+    /** Read the blocked list (`fauna.moderation.admin_block.list`). */
+    fun loadBlocked() {
+        viewModelScope.launch {
+            try {
+                val rows = api.adminBlockList()
+                blocked.update { it.copy(rows = rows, loaded = true) }
+            } catch (e: Exception) {
+                // List not available — the empty line stays off.
+            }
+        }
+    }
+
+    /** `admin-nest-report-block-button` — arm the confirm for a queue row. */
+    fun armBlock(row: com.fauna.ffi.FfiReportQueueRow) {
+        val form = com.fauna.ffi.reportBlockFormView(row.subject, false)
+        if (!form.canSubmit) return
+        val summary = com.fauna.ffi.reportBlockConfirmSummary(row.subject, row.reasonToken, false)
+        blocked.update {
+            it.copy(
+                armed = ArmedBlock(
+                    reportId = row.reportId,
+                    restore = false,
+                    summary = resolveLocalizedNested(appContext, summary).orEmpty(),
+                    confirmLabel = resolveLocalized(appContext, form.confirmLabel).orEmpty(),
+                ),
+                status = null,
+            )
+        }
+    }
+
+    /** `admin-nest-blocked-unblock-button` — arm the same confirm for a blocked row. */
+    fun armUnblock(row: com.fauna.ffi.FfiBlockedRow) {
+        if (!row.unblock.canSubmit) return
+        val summary = com.fauna.ffi.reportBlockConfirmSummary(row.subject, row.reasonToken, true)
+        blocked.update {
+            it.copy(
+                armed = ArmedBlock(
+                    reportId = row.reportId,
+                    restore = true,
+                    summary = resolveLocalizedNested(appContext, summary).orEmpty(),
+                    confirmLabel = resolveLocalized(appContext, row.unblock.confirmLabel).orEmpty(),
+                ),
+                status = null,
+            )
+        }
+    }
+
+    /** `admin-nest-report-block-cancel-button` — disarm, touching nothing. */
+    fun cancelBlock() {
+        blocked.update { it.copy(armed = null) }
+    }
+
+    /** `admin-nest-report-block-confirm-button` — dispatch `fauna.moderation.admin_block`
+     *  (disarm-before-dispatch: a double tap must not repeat the act), word the
+     *  verdict, and re-read both lists. */
+    fun confirmBlock() {
+        val armed = blocked.value.armed ?: return
+        blocked.update { it.copy(armed = null) }
+        viewModelScope.launch {
+            val verdict = try {
+                api.adminBlock(armed.reportId, armed.restore)
+                com.fauna.ffi.reportBlockVerdict(armed.restore, null)
+            } catch (e: Exception) {
+                com.fauna.ffi.reportBlockVerdict(armed.restore, e.message ?: e.toString())
+            }
+            blocked.update { it.copy(status = resolveLocalized(appContext, verdict)) }
+            loadReports()
+            loadBlocked()
+        }
+    }
+
     /** `admin-nest-report-open-takedown-button` — pre-fill the legal-takedown console
      *  from the row's subject (`reportTakedownPrefill`). */
     fun openReportTakedown(row: com.fauna.ffi.FfiReportQueueRow) {
@@ -399,8 +515,10 @@ class AdminNestVM @Inject constructor(
         hydrateRegion()
         featureLimits.refresh()
         hydrateWebAppOrigin()
+        hydrateUpdateChannel()
         hydrateOauthKeys()
         loadReports()
+        loadBlocked()
     }
 
     /** Re-render the three NAT StateFlows from the machine's current snapshot
@@ -455,6 +573,7 @@ class AdminNestVM @Inject constructor(
                     val status = api.nestSetupStatus()
                     servingPort.value = status.servingPort.toInt()
                     frontedByRouter.value = status.frontedByRouter
+                    osHostStatusPresent.value = status.osHostStatusPresent
                     osSecurityUpdates.value = status.osSecurityUpdatesPending.toInt()
                     osRebootPending.value = status.osRebootPending
                 }
@@ -577,6 +696,44 @@ class AdminNestVM @Inject constructor(
         }
     }
 
+    /** Page load: read `fauna.admin.update_channel.get`, folded through the
+     *  shared `admin_update_channel_view`. Best-effort like [hydrateWebAppOrigin]:
+     *  a failure leaves the section unloaded (radios disabled) rather than
+     *  failing the page. */
+    private fun hydrateUpdateChannel() {
+        viewModelScope.launch {
+            runCatching { api.adminUpdateChannelStatus() }.onSuccess { paintUpdateChannel(it) }
+        }
+    }
+
+    private fun paintUpdateChannel(view: FfiAdminUpdateChannelView) {
+        updateChannelView.value = view
+        updateChannelDraft.value = view.selected
+    }
+
+    /** A radio pick is local — it only arms the save. */
+    fun selectUpdateChannel(channel: UpdateChannel) {
+        if (updateChannelView.value?.canSet == true) updateChannelDraft.value = channel
+    }
+
+    /** `admin-nest-update-channel-save-button` — `fauna.admin.update_channel.set`
+     *  with the marked radio's channel; the section repaints from a fresh read. */
+    fun saveUpdateChannel() {
+        val channel = updateChannelDraft.value ?: return
+        if (updateChannelView.value?.canSet != true) return
+        viewModelScope.launch {
+            updateChannelWorking.value = true
+            try {
+                paintUpdateChannel(api.adminSetUpdateChannel(channel))
+                error.value = null
+            } catch (e: Exception) {
+                error.value = e.message
+            } finally {
+                updateChannelWorking.value = false
+            }
+        }
+    }
+
     /** Expedite the host's idle-gated reboot over `fauna.admin.request_host_restart`
      *  (the "restart now" affordance), then re-read `setup.status` so the indicator
      *  reflects any change. Rejected (`no_host`) on a nest with no maintenance mount
@@ -589,6 +746,7 @@ class AdminNestVM @Inject constructor(
             try {
                 api.adminRequestHostRestart()
                 val status = api.nestSetupStatus()
+                osHostStatusPresent.value = status.osHostStatusPresent
                 osSecurityUpdates.value = status.osSecurityUpdatesPending.toInt()
                 osRebootPending.value = status.osRebootPending
             } catch (e: Exception) {
@@ -892,6 +1050,25 @@ class AdminNestVM @Inject constructor(
          * reads this text on every app). [resolve] maps a shared [LocalizedText] to the
          * user's words.
          */
+        /**
+         * One blocked-list row's line — `reason · kind id · when`, worded from the
+         * shared `blocked_row_view` fields (tui's `blocked_elements`, web's blocked
+         * section: the e2e reads this text on every app).
+         */
+        fun blockedLine(row: com.fauna.ffi.FfiBlockedRow, resolve: (LocalizedText) -> String): String {
+            val (kind, id) = when (val s = row.subject) {
+                is com.fauna.ffi.FfiReportSubject.Post -> "post" to s.cid
+                is com.fauna.ffi.FfiReportSubject.Message -> "message" to s.recordCid
+                is com.fauna.ffi.FfiReportSubject.Actor -> "actor" to s.actorId
+                is com.fauna.ffi.FfiReportSubject.Unknown -> "unknown" to ""
+            }
+            // `blocked_at` is microseconds since the epoch.
+            val whenText = java.text.DateFormat
+                .getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+                .format(java.util.Date(row.blockedAt / 1_000))
+            return "${resolve(row.reason)} · $kind $id · $whenText"
+        }
+
         fun reportLine(row: com.fauna.ffi.FfiReportQueueRow, resolve: (LocalizedText) -> String): String {
             val (kind, id) = when (val s = row.subject) {
                 is com.fauna.ffi.FfiReportSubject.Post -> "post" to s.cid

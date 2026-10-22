@@ -47,7 +47,8 @@ internal static class PostSummaryFixture
         UnlockOfferView? unlockOffer = null,
         string? legalTakedownRef = null,
         TipView? tips = null,
-        bool unlockPurchasePending = false) =>
+        bool unlockPurchasePending = false,
+        string? homeNestUrl = null) =>
         new PostSummary(
             postId: postId,
             author: author,
@@ -79,7 +80,8 @@ internal static class PostSummaryFixture
             unlockOffer: unlockOffer,
             legalTakedownRef: legalTakedownRef,
             tips: tips,
-            unlockPurchasePending: unlockPurchasePending);
+            unlockPurchasePending: unlockPurchasePending,
+            homeNestUrl: homeNestUrl);
 
     private static RenderDocument EmptyDocument() =>
         new RenderDocument(System.Array.Empty<RenderBlock>());

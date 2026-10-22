@@ -76,3 +76,49 @@ private func user(
     // A suspended user's handle no longer resolves via the option list either.
     #expect(vm.guardianActorId(forLabel: "bao77") == nil)
 }
+
+// Pending admin actions section (admin.md § Pending admin actions). Mirrors
+// android's `AdminUsersVMTest.refreshLoadsPendingAdminActions` /
+// `approveAndCancelCallTheKindsThenRelist`; `APIClient` is concrete here, so
+// the list narrowing is pinned as a pure rule and the act paths through the
+// unconfigured-VM error surface.
+
+private func pendingAction(id: Int64, status: String) -> FfiAdminPendingAction {
+    FfiAdminPendingAction(
+        id: id,
+        actorId: Data([0x01]),
+        actorShort: "01",
+        actionType: "admin.add",
+        target: nil,
+        description: "Grant the admin role",
+        status: status,
+        isPending: status == "pending",
+        createdAt: 0,
+        executeAfter: 0,
+        requiresQuorum: 1,
+        approvals: []
+    )
+}
+
+@Test @MainActor func pendingSectionKeepsOnlyStillPendingActions() {
+    let live = pendingAction(id: 3, status: "pending")
+    let done = pendingAction(id: 4, status: "executed")
+    let called = pendingAction(id: 5, status: "cancelled")
+
+    #expect(AdminVM.stillPending([live, done, called]).map(\.id) == [3])
+    #expect(AdminVM.stillPending([]).isEmpty)
+}
+
+@Test @MainActor func approveAndCancelSurfaceTheErrorOnTheHubLine() async {
+    let vm = AdminVM()
+    vm.pendingActions = [pendingAction(id: 3, status: "pending")]
+
+    await vm.approvePendingAction(id: 3)
+    #expect(vm.actionError != nil)
+
+    vm.actionError = nil
+    await vm.cancelPendingAction(id: 3)
+    #expect(vm.actionError != nil)
+    // A failed act never invents or drops rows: the list is the last good read.
+    #expect(vm.pendingActions.map(\.id) == [3])
+}

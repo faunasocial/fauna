@@ -249,10 +249,12 @@ async fn run_no_dns_provision(mock: &MockServer, caller_labels: &[(String, Strin
         claim_code: "claim".into(),
         enable_mail: false,
         deployment_seed: None,
+        ssh_door: None,
     };
     let state = Mutex::new(ProvisioningSnapshot::idle());
     provision_nest_no_dns(
         &client,
+        None,
         &hetzner,
         "x.com",
         "box-1",

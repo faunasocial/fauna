@@ -59,6 +59,8 @@ pub struct ApFollowRecord {
     pub state: String,
     pub follow_activity_id: Option<String>,
     pub created_at: i64,
+    /// The user's nickname for an outbound follow; `None` when none was given.
+    pub petname: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +328,27 @@ pub fn create_follow(
     Ok(())
 }
 
+/// Record the user's own outbound follow of `remote_actor_uri`, with the
+/// nickname they gave it (`bridges.md` § Follows). Following again keeps the
+/// edge's state and replaces the nickname — a blank or absent one clears it.
+pub fn create_outbound_follow(
+    conn: &Connection,
+    local_actor_id: &str,
+    remote_actor_uri: &str,
+    petname: Option<&str>,
+) -> Result<()> {
+    let petname = petname.map(str::trim).filter(|p| !p.is_empty());
+    conn.execute(
+        "INSERT INTO ap_follows
+         (local_actor_id, remote_actor_uri, direction, state, created_at, petname)
+         VALUES (?1, ?2, 'outbound', 'pending', ?3, ?4)
+         ON CONFLICT(local_actor_id, remote_actor_uri, direction)
+         DO UPDATE SET petname = excluded.petname",
+        rusqlite::params![local_actor_id, remote_actor_uri, now_secs(), petname],
+    )?;
+    Ok(())
+}
+
 pub fn accept_follow(
     conn: &Connection,
     local_actor_id: &str,
@@ -357,7 +380,7 @@ pub fn delete_follow(
 /// List remote actors that follow the local actor (inbound follows).
 pub fn list_followers(conn: &Connection, local_actor_id: &str) -> Result<Vec<ApFollowRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at
+        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at, petname
          FROM ap_follows WHERE local_actor_id = ?1 AND direction = 'inbound'
          ORDER BY created_at DESC",
     )?;
@@ -376,7 +399,7 @@ pub fn list_pending_inbound_follows(
     local_actor_id: &str,
 ) -> Result<Vec<ApFollowRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at
+        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at, petname
          FROM ap_follows
          WHERE local_actor_id = ?1 AND direction = 'inbound' AND state = 'pending'
          ORDER BY created_at DESC, id DESC",
@@ -395,7 +418,7 @@ pub fn get_pending_inbound_follow(
     remote_actor_uri: &str,
 ) -> Result<Option<ApFollowRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at
+        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at, petname
          FROM ap_follows
          WHERE local_actor_id = ?1 AND remote_actor_uri = ?2
            AND direction = 'inbound' AND state = 'pending'",
@@ -482,7 +505,7 @@ pub fn list_outbound_follows(
     local_actor_id: &str,
 ) -> Result<Vec<ApFollowRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at
+        "SELECT id, local_actor_id, remote_actor_uri, direction, state, follow_activity_id, created_at, petname
          FROM ap_follows WHERE local_actor_id = ?1 AND direction = 'outbound'
          ORDER BY created_at DESC",
     )?;
@@ -782,6 +805,7 @@ fn row_to_follow(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApFollowRecord> {
         state: row.get(4)?,
         follow_activity_id: row.get(5)?,
         created_at: row.get(6)?,
+        petname: row.get(7)?,
     })
 }
 
@@ -1019,6 +1043,41 @@ mod tests {
         conn.execute_batch(fauna_bridge_activitypub::db::CREATE_TABLES_SQL)
             .unwrap();
         conn
+    }
+
+    /// The nickname the user gives an outbound follow is stored and read back
+    /// (`bridges.md` § Follows); following again replaces it without touching
+    /// the edge's state, and a blank one clears it.
+    #[test]
+    fn outbound_follow_keeps_its_nickname() {
+        let conn = test_conn();
+        let remote = "https://remote.example/users/alice";
+        create_outbound_follow(&conn, "actor1", remote, Some("Alice")).unwrap();
+        let rows = list_outbound_follows(&conn, "actor1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].petname.as_deref(), Some("Alice"));
+        assert_eq!(rows[0].state, "pending");
+
+        accept_follow(&conn, "actor1", remote, "outbound").unwrap();
+        create_outbound_follow(&conn, "actor1", remote, Some("Al")).unwrap();
+        let rows = list_outbound_follows(&conn, "actor1").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].petname.as_deref(), Some("Al"));
+        assert_eq!(rows[0].state, "accepted");
+
+        create_outbound_follow(&conn, "actor1", remote, Some("  ")).unwrap();
+        assert_eq!(
+            list_outbound_follows(&conn, "actor1").unwrap()[0].petname,
+            None
+        );
+
+        // An inbound row never carries one.
+        create_follow(&conn, "actor1", remote, "inbound", None).unwrap();
+        assert!(
+            list_followers(&conn, "actor1").unwrap()[0]
+                .petname
+                .is_none()
+        );
     }
 
     /// Seed a `post/text` row for `author`, optionally paywalled at `tier`.

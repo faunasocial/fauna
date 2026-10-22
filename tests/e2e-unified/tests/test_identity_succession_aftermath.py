@@ -91,6 +91,7 @@ others join as their legs land.
 """
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 
@@ -100,10 +101,15 @@ from common.auth import register_user
 from helpers.diagnostics import account_plane_log_lines as _account_plane_log
 from helpers.diagnostics import aftermath_log_lines as _aftermath_log
 from helpers.diagnostics import row_judge_log_lines as _row_judge_log
+from helpers.diagnostics import take_over_log_lines as _take_over_log
 from helpers.diagnostics import mail_burn_line as _mail_burn_line
 from helpers.diagnostics import remint_line as _remint_line
 from helpers.diagnostics import backup_regrant_line as _backup_regrant_line
-from helpers.inherited_corpus import CORPUS_READ_S, seed_an_image_under_this_identity
+from helpers.inherited_corpus import (
+    CORPUS_READ_S,
+    FIXTURE_IMAGE,
+    seed_an_image_in_a_bound_set,
+)
 from helpers.succession_ceremony import (
     require_stolen_gate,
     settled_actor_id,
@@ -823,7 +829,7 @@ def test_the_successor_is_asked_about_the_destination_it_inherited(
     # `diagnose` runs once, after the budget is spent, so a bare
     # `destination_count()` there reports whatever THAT last tick happened to
     # see — and the first mount after a ceremony legitimately sees zero (the
-    # aftermath is a head start, not a barrier: `+layout.svelte` says so, and
+    # aftermath is a head start, not a barrier: `RootShell.svelte` says so, and
     # account-plane readers self-heal on the nav edge). Twice that arbitrary `0`
     # was read as "the successor's list came back empty", once into the
     # tracker and once into `succession-aftermath.md` as fact;
@@ -1616,6 +1622,28 @@ def test_the_successors_conversations_unlock_without_a_user_command(
     )
 
 
+def _item_versions(app, name: str) -> list[tuple[str, str]]:
+    """The ``(author, timestamp)`` of every version of the Media item ``name``,
+    read from a fresh visit's item detail — ``[]`` while the item is not
+    listed. The detail's list loads asynchronously, so an empty read is
+    re-tried briefly before it counts as empty."""
+    app.media.navigate()
+    names = app.media.item_names()
+    if name not in names:
+        return []
+    app.media.open_item_detail(names.index(name))
+    try:
+        deadline = time.monotonic() + 10.0
+        while app.media.version_count() < 1 and time.monotonic() < deadline:
+            time.sleep(0.3)
+        return [
+            (app.media.version_author(i), app.media.version_timestamp(i))
+            for i in range(app.media.version_count())
+        ]
+    finally:
+        app.media.close_detail()
+
+
 @pytest.mark.feature("take-your-account-back")
 # The production launch composition on the native apps: what this journey
 # reads after the ceremony is decided by the successor's launch reconcile (the
@@ -1629,7 +1657,45 @@ def test_the_successors_conversations_unlock_without_a_user_command(
 def test_the_successor_can_read_the_corpus_it_inherited(
     ungranted_app, nest_instance, tmp_path
 ):
-    """upload an image → succeed → the successor's NAMES render, its BYTES open.
+    """bind a folder, drop an image in → succeed → the take-over re-records it:
+    the successor's NAMES render, its BYTES open, and the version its
+    predecessor sealed restores.
+
+    **Seeded into a set an engine runs on, since 2026-10-21.** After the succession cut
+    (``succession-cut.md`` ruling (11)), a head the predecessor signed under
+    the retired nonce judges *history*, and only the take-over (11)(d) brings
+    it back. The take-over runs only in a sync engine on the owner's own host,
+    for the paths that device holds. A set no engine runs on stays history
+    until the user restores it, one version at a time (residual (j)(6)). The
+    journey used to upload through the Media page into a wizard-made set, so
+    it was red by design after the cut, or green by reading the list before
+    the cut landed. It now binds a local folder to the set and lets the app's
+    own engine upload the image (``seed_an_image_in_a_bound_set``), which is
+    the shape (11)(d) promises carries over. Its names assertion waits for the
+    version the take-over records as the successor, so no read can land
+    before the cut. The engine-less leg (j)(6) is not asserted: its restore
+    has no UI door while the item is absent from the listing, because
+    ``file-version-history`` opens only from a listed item's detail. That is
+    recorded as a product finding, not asserted around. **Expected
+    state on tui: green** since 2026-10-22 (``--strict-app``, three runs alone
+    and three after the module's other tests): the cut re-mints
+    (``reminted: 1``), the agent carries the predecessor's per-actor scope so
+    the bound set's engine starts under the successor, and the take-over
+    re-records the head (``rerecorded=1``).
+
+    **The predecessor-sealed leg, since 2026-10-22.** On the bound
+    seed the take-over re-seals the bytes under the successor's root and
+    re-records the item as the successor, so the names and the thumbnail read
+    nothing predecessor-sealed. The one thing still sealed under the retired
+    root is the predecessor's own version row, which the take-over leaves
+    beside its own (``succession-cut.md`` ruling (11)(f)). The last leg
+    restores that row from the item's version history: a restore of a version
+    another identity signed first OPENS its bytes under the roots that
+    signature may reach and re-seals them under the current one
+    (``writer-signed-change-records.md`` ruling (8)(d),
+    ``MediaMachine::restore_version`` → ``reseal_inherited_version``, the
+    chunk plane through ``FileDownloadKeys``). The download after it checks the
+    re-sealed bytes are the seeded image's.
 
     § Re-key scope's ``BackupKey`` corpus row names *media, folders and
     backups*, and ``identity-succession.md`` § Implementation status today
@@ -1657,36 +1723,28 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     stake: *"a successor that opened its bytes but not its names would render an
     empty file list over a corpus it can read"*.
 
-    ⚠ **But they share one feed, and the ORDER of these assertions is what that
-    buys.** Severing tui's single injection — the one post-auth walk shared by
-    the agent, Settings and the ``__mls`` barrier — does **not** produce "names
-    without bytes". The *names* go first: every item's path label degrades to
-    ``SealedLabelRender::Omit``, so ``fauna.media.list`` renders **empty** and
-    the byte plane is never reached at all. So the name assertion is this
-    journey's tripwire and the paint assertion is strictly downstream of it —
-    reversing them would report a dark corpus as a thumbnail bug.
+    **Mutation-verified 2026-10-22 on tui, on the bound seed** (each reverted
+    after; the record is here so no later session pays for it twice):
 
-    **Mutation-verified 2026-08-11, three severances, and the matrix is the
-    point** (each reverted after; the record is here so no later session pays
-    for it twice):
+    ==================================================  ====  =====  =======
+    severance                                           name  paint  restore
+    ==================================================  ====  =====  =======
+    none (baseline, three runs in a row)                pass  pass   pass
+    ``take_over_history_heads`` → ``Ok(0)``             RED   n/r    n/r
+    tui's injection (``media/mod.rs``: the bare keys    pass  pass   RED
+    and the paired chain)
+    ==================================================  ====  =====  =======
 
-    ==================================================  ========  ====  =====
-    severance                                           folder  name  paint
-    ==================================================  ========  ====  =====
-    none (baseline)                                     pass      pass  pass
-    tui's shared injection (``media/mod.rs``)           pass      RED   n/r
-    ``open_library_blob``'s retired-root loop only      pass      pass  RED
-    the shared resolver (``session.rs``) → empty        pass      RED   n/r
-    ==================================================  ========  ====  =====
-
-    Row 2 is what makes the paint assertion non-vacuous: it is the one severance
-    that reaches *only* the byte plane, and it reds *only* that assertion — so
-    the paint is doing its own work rather than riding the name's. Rows 1 and 3
-    show why the folder assertion is documented at its own site as **not** a
-    read-fallback pin: it survives even total removal of the retired roots.
+    Row 3 is what makes the restore leg non-vacuous, and it reds there with
+    ``media.error_restore`` (*"recorded under a previous identity of this
+    account and does not open under any key that identity held"*). It also
+    shows what this journey no longer proves: the paint stays green with no
+    retired root offered, so the raw-AEAD Library plane
+    (``open_library_blob``) has no end-to-end evidence on this seed. The
+    2026-08-11 matrix measured on the Media-page seed is in git history.
 
     ⚠ **The thumbnail paint is the sharp assertion, and it is the reason this
-    test uploads an image rather than any file.** A painted ``media-thumbnail``
+    test seeds an image rather than any file.** A painted ``media-thumbnail``
     on tui is half-block art — the picture *is* the element's characters — so
     counting a painted tile is a direct read of *fetch → decrypt → render*
     having succeeded on a blob sealed under a key the successor does not hold.
@@ -1703,15 +1761,23 @@ def test_the_successor_can_read_the_corpus_it_inherited(
     describing an empty corpus. Asserting the item listed **and painted** before
     the ceremony is what makes their absence afterwards mean something.
 
-    Convention 8 throughout: the set is created through the real wizard and the
-    file uploaded through the real picker — the corpus under test is a user's.
+    Convention 8 throughout: the set is created through the real wizard, the
+    folder bound through the row's binding form, and the file dropped on disk
+    where the engine watches. The corpus under test is a user's.
     """
     app = ungranted_app
 
-    # ── Precondition: a set holding a real image, sealed under THIS
-    # identity's BackupKey, listed AND painted before the ceremony — the
-    # docstring's non-vacuity bullet, kept once in the shared helper.
-    _, inherited_file = seed_an_image_under_this_identity(app, tmp_path)
+    # ── Precondition: a BOUND set holding a real image the app's own engine
+    # uploaded, sealed under THIS identity, listed AND painted before the
+    # ceremony — the docstring's non-vacuity bullet, kept once in the shared
+    # helper. Bound, because the take-over runs only in an engine (11)(d).
+    _, inherited_file = seed_an_image_in_a_bound_set(app, tmp_path)
+    before = _item_versions(app, inherited_file)
+    assert before, (
+        "the inherited item must show its predecessor-recorded version before "
+        "the ceremony, or the take-over below has nothing to be told apart "
+        f"from; versions={before!r} error={app.error_text()!r}"
+    )
 
     # ── The ceremony ────────────────────────────────────────────────────────
     _run_succession(app)
@@ -1753,23 +1819,49 @@ def test_the_successor_can_read_the_corpus_it_inherited(
         ),
     )
 
-    # ── The NAMES half: the label plane came across ─────────────────────────
+    # ── The NAMES half: the take-over re-recorded the head ──────────────────
+    # The item must list AND carry a version the take-over recorded beside the
+    # predecessor's — never the name alone. The launch reconcile's cut lands
+    # some time after the actor switch, and until it does the predecessor's
+    # head is still the admitted head, so "the name lists" alone passed by
+    # reading ahead of the cut (measured 2026-10-21: one green run in 23 s).
+    # The take-over's own version exists only after the cut, so this poll can
+    # be satisfied by nothing earlier (convention 14).
+    # Authors and the count only: a version's timestamp is relative text
+    # ("just now" → "1 min ago") and changes with no new version at all.
+    before_authors = {author for author, _ in before}
 
-    app.media.navigate()
+    def _taken_over() -> bool:
+        versions = _item_versions(app, inherited_file)
+        return bool(versions) and (
+            len(versions) > len(before)
+            or any(author not in before_authors for author, _ in versions)
+        )
+
     wait_until(
-        lambda: inherited_file in app.media.item_names(),
+        _taken_over,
         _CORPUS_READ_S,
         diagnose=lambda: (
-            "the successor must render the NAME of the media it inherited, but "
-            f"lists {app.media.item_names()!r} (expected {inherited_file!r}); "
-            f"error={app.error_text()!r}. An empty list over a corpus the nest "
-            "re-pointed to this owner is the dark-corpus break: ownership moved, "
-            "the seal did not, and no retired root was offered at the open — "
-            "UNLESS the row judge refused the predecessor-signed rows, which "
-            "empties the list before any label is opened: row-judge log "
-            f"{_row_judge_log(app)}"
+            "the successor must list the media it inherited with the version "
+            "the take-over recorded as itself (succession-cut.md ruling "
+            f"(11)(d)), but lists {app.media.item_names()!r} (expected "
+            f"{inherited_file!r}), versions {_item_versions(app, inherited_file)!r} "
+            f"against {before!r} before the ceremony; error={app.error_text()!r}. "
+            "Absent from the list: the cut made the head history and no "
+            "take-over re-recorded it (the engine never ran for the set, or "
+            "did not hold the path), or no retired root opened its label — "
+            "UNLESS the row judge refused the predecessor-signed rows: row-judge "
+            f"log {_row_judge_log(app)}. Listed with only the predecessor's "
+            "version: the cut has not landed yet, or landed and the take-over "
+            "has not run. Cut and take-over log: "
+            f"{_take_over_log(app)}"
         ),
     )
+    print(
+        f"[corpus] versions before {before!r} → after "
+        f"{_item_versions(app, inherited_file)!r}\n  {_take_over_log(app)}"
+    )
+    app.media.navigate()
 
     # ── The BYTES half: the raw-AEAD Library plane opened ───────────────────
     # This is the assertion that cannot be satisfied by a name that travelled in
@@ -1787,6 +1879,199 @@ def test_the_successor_can_read_the_corpus_it_inherited(
             "is precisely the half-broken state the two planes are asserted "
             "separately to catch: the successor can see what it owns and cannot "
             "read any of it."
+        )
+
+    # ── The PREDECESSOR-SEALED half: restore the retired root's own version ──
+    # Everything above reads what the take-over re-sealed under the successor's
+    # root, so it stays green with no retired root offered at all. The
+    # predecessor's own version row is the one thing still sealed under the
+    # retired root: the take-over records beside it and supersedes nothing
+    # (succession-cut.md ruling (11)(d)/(f)). Restoring it is the read: a
+    # version another signature recorded, whose bytes rest under an owner root,
+    # is restored only once its bytes have OPENED under a root that signature
+    # may reach and been re-sealed under the current one
+    # (writer-signed-change-records.md ruling (8)(d),
+    # `MediaMachine::restore_version` → `reseal_inherited_version`). With no
+    # retired root offered the open fails and the restore records nothing,
+    # setting `media.error_restore` instead. The download after it then proves
+    # the re-seal carried the predecessor's bytes, not merely some bytes.
+    #
+    # Picked by POSITION, never by author: the successor keeps the account's
+    # name, so both rows read the same `Edited by …` (measured 2026-10-22).
+    # Rows are oldest→newest and the take-over records after the ceremony, so
+    # the predecessor's newest version is the last of the `before` rows.
+    after = _item_versions(app, inherited_file)
+    assert len(after) > len(before), (
+        "the predecessor's own version must still be listed beside the "
+        "take-over's (succession-cut.md ruling (11)(f): the take-over "
+        f"supersedes nothing), but versions {after!r} against {before!r} "
+        "before the ceremony"
+    )
+    predecessor_row = len(before) - 1
+    app.media.navigate()
+    app.media.open_item_detail(app.media.item_names().index(inherited_file))
+    try:
+        app.media.wait_for_version_count(len(after))
+        app.media.restore_version(predecessor_row)
+        # Read in the OPEN detail, which re-lists its rows once the restore
+        # settles: the restore's own version is what makes the head the
+        # re-sealed predecessor bytes (convention 14: wait for the row, not a
+        # time), and its error banner is read here because a later visit's
+        # refresh clears it (measured 2026-10-22: `error=''` after a revisit).
+        wait_until(
+            lambda: app.media.version_count() > len(after) or bool(app.error_text()),
+            _CORPUS_READ_S,
+            diagnose=lambda: (
+                "restoring the predecessor's version must record a new version "
+                f"(file-sync.md § Restore) or report why; {app.media.version_count()} "
+                f"rows against {len(after)} before the restore"
+            ),
+        )
+        restore_error = app.error_text()
+        assert not restore_error and app.media.version_count() > len(after), (
+            "the successor must open the version its predecessor sealed "
+            "(identity-succession.md § Implementation status today — a "
+            "successor READS its predecessor-sealed corpus): restoring it "
+            "opens its bytes under a retired root before re-sealing them "
+            "(writer-signed-change-records.md ruling (8)(d)), but the restore recorded "
+            f"{app.media.version_count() - len(after)} new version(s) and "
+            f"reported {restore_error!r}. A `media.error_restore` here with "
+            "the take-over's version listed is the dark-history state: the "
+            "successor reads what the take-over re-sealed and cannot open "
+            "what its predecessor left."
+        )
+        try:
+            downloaded = app.media.download_open_item(timeout=_CORPUS_READ_S)
+        except AssertionError as exc:
+            raise AssertionError(
+                "the restored predecessor version must download (the head now "
+                f"names its re-sealed bytes), but it never saved: {exc}; "
+                f"error={app.error_text()!r}"
+            ) from exc
+    finally:
+        app.media.close_detail()
+    expected = hashlib.sha256(FIXTURE_IMAGE.read_bytes()).hexdigest()
+    got = hashlib.sha256(downloaded).hexdigest()
+    assert got == expected, (
+        "the restored predecessor version must carry the bytes its "
+        "predecessor sealed (the re-seal moves them under the current root "
+        f"verbatim), but the download of the restored version "
+        f"hashed {got} ({len(downloaded)} bytes) against the seeded image's "
+        f"{expected}; error={app.error_text()!r}"
+    )
+
+
+@pytest.mark.feature("take-your-account-back")
+# Same launch composition as the corpus journey above: the cut and the
+# take-over run inside the real conversations receive loop on a native seat.
+@pytest.mark.real_conversations
+def test_the_successor_paints_the_thumbnail_its_predecessor_sealed(
+    ungranted_app, nest_instance, tmp_path
+):
+    """enable mail, serve a bound folder over WebDAV, drop an image in →
+    succeed → the successor's Media page paints the thumbnail that still rests
+    under the predecessor's bare ``BackupKey``.
+
+    **The raw-AEAD Library plane's end-to-end evidence, since 2026-10-22.** The corpus journey above
+    lost it when it moved to an owner-only bound seed: there the take-over
+    re-seals the item and moves its thumbnail onto the successor's root
+    (``take_over_history_heads`` → ``thumbnail_hash_for_reseal``), so no paint
+    reads a retired root. A set served over WebDAV is content-keyed, and two
+    things follow on it. The engine still seals the thumbnail under the
+    owner's bare ``BackupKey`` (``maybe_upload_thumbnail``, ``Audience::Library``).
+    And the take-over's content-key arm re-signs the head over the SAME
+    manifest and carries the SAME thumbnail pointer, while the owner-root
+    re-seal pass (``reseal_predecessor_sealed``) skips a set with no owner
+    root. So after the take-over the listed head, now signed as the successor,
+    names a thumbnail only a retired root opens, and the paint is
+    ``MediaMachine::open_library_blob`` trying the current key, failing, and
+    opening it under a retired root.
+
+    **The names wait for the take-over's version**, as in the corpus journey:
+    before the cut the predecessor's head is still admitted, and a paint read
+    then would be a read under the predecessor's signature, never the
+    successor's. Waiting for a version the take-over recorded makes the paint
+    the successor-signed head's (convention 14).
+
+    **Mutation-verified 2026-10-22 on tui** (reverted after):
+
+    ===================================================  ====  =====
+    severance                                            name  paint
+    ===================================================  ====  =====
+    none (baseline, three runs in a row)                 pass  pass
+    ``open_library_blob``'s retired-root loop skipped    pass  RED
+    ===================================================  ====  =====
+
+    The take-over logs ``rerecorded=1`` in both rows, so the red is the open,
+    not a missing item.
+
+    ⚠ **The witness rests on the engine recording a thumbnail for a
+    content-keyed set**, which ``media.md`` § Encryption at rest → *Content-keyed
+    sets* says it does not; the Media page records none there. If that drift is
+    settled by the engine recording none too, this journey loses its witness
+    and the retired-root read on this plane needs another (the
+    ``succession-aftermath.md`` status bullet names the open decision).
+    """
+    app = ungranted_app
+
+    # ── Precondition: mail, so the folder can be served (the MSEK) ──────────
+    app.mail_settings.navigate()
+    _require_mail_settings(app)
+    app.mail_settings.ensure_mail_enabled()
+
+    # ── A served, bound set holding a real image, listed and painted ────────
+    _, inherited_file = seed_an_image_in_a_bound_set(
+        app, tmp_path, serve_over_webdav=True
+    )
+    before = _item_versions(app, inherited_file)
+    assert before, (
+        "the inherited item must show its predecessor-recorded version before "
+        f"the ceremony; versions={before!r} error={app.error_text()!r}"
+    )
+
+    # ── The ceremony ────────────────────────────────────────────────────────
+    _run_succession(app)
+
+    # ── The take-over re-recorded the head as the successor ─────────────────
+    before_authors = {author for author, _ in before}
+
+    def _taken_over() -> bool:
+        versions = _item_versions(app, inherited_file)
+        return bool(versions) and (
+            len(versions) > len(before)
+            or any(author not in before_authors for author, _ in versions)
+        )
+
+    wait_until(
+        _taken_over,
+        _CORPUS_READ_S,
+        diagnose=lambda: (
+            "the successor must list the served set's image with the version "
+            "the take-over recorded as itself (succession-cut.md ruling "
+            f"(11)(d), its content-key arm), but lists {app.media.item_names()!r} "
+            f"(expected {inherited_file!r}), versions "
+            f"{_item_versions(app, inherited_file)!r} against {before!r}; "
+            f"error={app.error_text()!r}. Row-judge log {_row_judge_log(app)}. "
+            f"Cut and take-over log: {_take_over_log(app)}"
+        ),
+    )
+    print(
+        f"[served corpus] versions before {before!r} → after "
+        f"{_item_versions(app, inherited_file)!r}\n  {_take_over_log(app)}"
+    )
+    app.media.navigate()
+
+    # ── The BYTES: a bare-key blob under a retired root opens ───────────────
+    painted = app.media.wait_for_painted_thumbnails(1, timeout=_CORPUS_READ_S)
+    if painted is not None:
+        assert painted == 1, (
+            "the successor must OPEN the thumbnail its predecessor sealed "
+            "under the bare BackupKey (succession-aftermath.md § Implementation "
+            "status today — `MediaMachine::open_library_blob` offers each "
+            f"retired root after the current key), but {painted} of 1 "
+            f"thumbnails painted; error={app.error_text()!r}. The name listed "
+            "and the tile a placeholder is the retired root never offered at "
+            "the opening site."
         )
 
 

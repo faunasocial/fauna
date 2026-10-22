@@ -27,7 +27,7 @@ reads the page directly.
 
 Scoped to the apps whose test agent implements `enable_caldav_mailbox`
 (`helpers/mail_dedicated_nest.py::mint_caldav_mailbox`): linux, macos, tui,
-web (`$lib/mail-caldav-e2e`), windows — and **ios, which joined 2026-09-21**.
+web (`#lib/mail-caldav-e2e`), windows — and **ios, which joined 2026-09-21**.
 iOS was never short of anything here: its shell dispatches the very same shared
 `CaldavMailboxTestCommand` macOS does (`Fauna-iOS/App/FaunaApp.swift`), and the
 page under test is the shared FaunaKit `MailSettingsView`, so both apple targets

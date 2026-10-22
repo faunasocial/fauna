@@ -35,14 +35,22 @@ import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
 import uniffi.fauna_client_mail_settings.BaselinePublishView
 import uniffi.fauna_client_mail_settings.BaselineStateView
+import uniffi.fauna_client_mail_settings.DmarcPolicyView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
 import uniffi.fauna_client_mail_settings.MailHealthView
+import uniffi.fauna_client_mail_settings.MailPolicyConfirm
 import uniffi.fauna_client_mail_settings.MailPolicyStatus
+import uniffi.fauna_client_mail_settings.MicrosoftRegistrationView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
+import uniffi.fauna_client_mail_settings.SecretRotationView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
+import uniffi.fauna_client_mail_settings.dmarcForensicModeOptions
+import uniffi.fauna_client_mail_settings.dmarcForensicRetentionWarns
 import uniffi.fauna_client_mail_settings.fcrdnsModeOptions
 import uniffi.fauna_client_mail_settings.imapDeleteNonemptyOptions
+import uniffi.fauna_client_mail_settings.secretRotationText
+import uniffi.fauna_client_mail_settings.senderDashboardLinks
 import uniffi.fauna_core.LocalizedText
 import social.fauna.generated.Ids
 
@@ -77,17 +85,22 @@ fun AdminMailScreen(
 
     AdminMailContent(
         mailEnabled = snapshot.mailEnabled,
+        mailUnavailableHere = snapshot.mailUnavailableHere,
         spam = snapshot.spam,
         auth = snapshot.auth,
         submission = snapshot.submission,
         imap = snapshot.imap,
         outbound = snapshot.outbound,
         alias = snapshot.alias,
+        dmarc = snapshot.dmarc,
+        microsoft = snapshot.microsoftRegistration,
         baselinePublishResult = snapshot.baselinePublishResult,
         baselineState = snapshot.baselineState,
         health = snapshot.health,
         onRecheckHealth = vm::recheckHealth,
-        onResetWarmup = vm::resetWarmup,
+        armed = snapshot.armed,
+        secretRotation = snapshot.secretRotation,
+        onPress = vm::press,
         working = snapshot.status == MailPolicyStatus.WORKING,
         onBack = { navController.exitAdminToPrimary() },
         onSetMailEnabled = vm::setMailEnabled,
@@ -97,7 +110,8 @@ fun AdminMailScreen(
         onSaveImap = vm::saveImap,
         onSaveOutbound = vm::saveOutbound,
         onSaveAlias = vm::saveAlias,
-        onPublishBaseline = vm::publishSpamBaseline,
+        onSaveDmarc = vm::saveDmarc,
+        onSaveMicrosoft = vm::saveMicrosoftRegistration,
         onSetBaselineStanding = vm::setBaselineStandingPublish,
     )
 }
@@ -106,12 +120,18 @@ fun AdminMailScreen(
 @Composable
 fun AdminMailContent(
     mailEnabled: Boolean,
+    // `MailPolicySnapshot.mailUnavailableHere` — read, never re-derived: while mail
+    // is off the master toggle is disabled with state `unavailable`, the notice
+    // beneath it (admin.md § 6 Mail).
+    mailUnavailableHere: Boolean = false,
     spam: SpamPolicyView,
     auth: AuthPolicyView,
     submission: SubmissionPolicyView,
     imap: ImapPolicyView,
     outbound: OutboundPolicyView,
     alias: AliasPolicyView,
+    dmarc: DmarcPolicyView,
+    microsoft: MicrosoftRegistrationView,
     working: Boolean,
     onBack: () -> Unit,
     onSetMailEnabled: (Boolean) -> Unit,
@@ -121,10 +141,12 @@ fun AdminMailContent(
     onSaveImap: (ImapPolicyView) -> Unit,
     onSaveOutbound: (OutboundPolicyView) -> Unit,
     onSaveAlias: (AliasPolicyView) -> Unit,
+    onSaveDmarc: (DmarcPolicyView) -> Unit,
+    onSaveMicrosoft: (clientId: String, tenant: String) -> Unit,
     // Outcome of the last PublishSpamBaseline action (null until published). A
-    // default keeps the Compose test-harness call site unchanged.
+    // default keeps the Compose test-harness call site unchanged. The publish button
+    // is a same-button two-press through `onPress` / `armed`, like the other confirms.
     baselinePublishResult: BaselinePublishView? = null,
-    onPublishBaseline: () -> Unit = {},
     // The served baseline's state (null = blank text) and the standing-publish
     // toggle's own gesture — `SetBaselineStandingPublish`, never a Spam-group draft.
     baselineState: BaselineStateView? = null,
@@ -137,7 +159,13 @@ fun AdminMailContent(
     // Defaults keep the Compose test-harness call site unchanged.
     health: MailHealthView? = null,
     onRecheckHealth: () -> Unit = {},
-    onResetWarmup: () -> Unit = {},
+    // The same-button two-click confirms (warm-up reset, the two secret
+    // rotations) are one shared `Press`: the machine holds the arm
+    // (`snapshot.armed`) and the page keeps none; `secretRotation` is the last
+    // rotation's outcome, worded by the shared `secretRotationText`.
+    armed: MailPolicyConfirm? = null,
+    secretRotation: SecretRotationView? = null,
+    onPress: (MailPolicyConfirm) -> Unit = {},
     // Mail-knob validation via the shared `fauna_core::format::parse_count`
     // (`u32`) and `parse_count_u64` (`u64`, the IMAP storage ceiling): trim +
     // parse; a `null` return ⇒ keep the persisted value (a full-PUT save never
@@ -146,6 +174,10 @@ fun AdminMailContent(
     // value-formatting.md § Mail-knob validation.
     parseCount: (String) -> UInt? = { com.fauna.ffi.parseCount(it) },
     parseCountU64: (String) -> ULong? = { com.fauna.ffi.parseCountU64(it) },
+    // Whether a forensic-report retention earns the page's PII warning — the
+    // shared `dmarc_forensic_retention_warns`, injected FFI-free like the parse
+    // lambdas so the Compose test stays off the native path.
+    dmarcRetentionWarns: (UInt) -> Boolean = { dmarcForensicRetentionWarns(it) },
 ) {
     Scaffold(
         topBar = {
@@ -191,20 +223,31 @@ fun AdminMailContent(
             // able to edit with no nest. Same one-composable-two-roles split the
             // admin-users `TierDropdown` records.
             val mailEnabledGate = faunaGate("fauna.bridges.set_mail_enabled", enabled = !working)
+            // A mailbox already on keeps its live toggle so it can still be turned off.
+            val mailUnavailable = !mailEnabled && mailUnavailableHere
             ToggleRow(
                 label = stringResource(R.string.admin_mail_page_enabled_label),
-                subtitle = stringResource(R.string.admin_mail_page_enabled_subtitle),
+                subtitle = if (mailUnavailable) null else stringResource(R.string.admin_mail_page_enabled_subtitle),
                 checked = mailEnabled,
-                enabled = mailEnabledGate.enabled,
+                enabled = mailEnabledGate.enabled && !mailUnavailable,
                 onChange = onSetMailEnabled,
                 testTag = Ids.ADMIN_MAIL_ENABLED_TOGGLE,
+                state = if (mailEnabled) "on" else if (mailUnavailable) "unavailable" else "off",
             )
+            if (mailUnavailable) {
+                Text(
+                    stringResource(R.string.mail_settings_unavailable_notice),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.ADMIN_MAIL_UNAVAILABLE_NOTICE),
+                )
+            }
             DisabledControlReasonText(mailEnabledGate.reason)
 
-            health?.let { HealthGroup(it, working, onRecheckHealth, onResetWarmup) }
+            health?.let { HealthGroup(it, working, armed, onRecheckHealth, onPress) }
 
             SpamGroup(
-                spam, working, onSaveSpam, parseCount, baselinePublishResult, onPublishBaseline,
+                spam, working, onSaveSpam, parseCount, baselinePublishResult, armed, onPress,
                 baselineState, onSetBaselineStanding, formatDate,
             )
             AuthGroup(auth, working, onSaveAuth, parseCount)
@@ -212,6 +255,9 @@ fun AdminMailContent(
             ImapGroup(imap, working, onSaveImap, parseCount, parseCountU64)
             OutboundGroup(outbound, working, onSaveOutbound, parseCount)
             AliasGroup(alias, working, onSaveAlias, parseCount)
+            DmarcGroup(dmarc, working, onSaveDmarc, parseCount, dmarcRetentionWarns)
+            MicrosoftGroup(microsoft, working, onSaveMicrosoft)
+            SecretsGroup(working, armed, secretRotation, onPress)
         }
     }
 }
@@ -225,18 +271,19 @@ fun AdminMailContent(
  * Every sentence is shared Rust (`mailHealthStateLabel` / `mailHealthCheckStateLabel`
  * / `mailHealthHeartbeatLabel`) or the nest's own row detail; rows 5 and 6 are the
  * heartbeats, whose empty detail the stamp fills. The warm-up reset is a
- * same-button two-click confirm; any new readout (a mail re-read) disarms it.
+ * same-button two-click confirm the shared machine holds (`armed`); the button
+ * only relabels and presses.
  */
 @Composable
 private fun HealthGroup(
     health: MailHealthView,
     working: Boolean,
+    armed: MailPolicyConfirm?,
     onRecheck: () -> Unit,
-    onResetWarmup: () -> Unit,
+    onPress: (MailPolicyConfirm) -> Unit,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
-    var warmupArmed by remember(health) { mutableStateOf(false) }
     val nowMs = System.currentTimeMillis()
     fun heartbeat(atSecs: Long?): String =
         ValueFormat.render(context, com.fauna.ffi.mailHealthHeartbeatLabel(atSecs, nowMs), nowMs)
@@ -294,32 +341,116 @@ private fun HealthGroup(
         }
         val recheckGate = faunaGate("fauna.bridges.blocklist_self_check_run", enabled = !working)
         OutlinedButton(
-            onClick = {
-                // Any mail re-read disarms the warm-up reset's confirm — an
-                // unchanged readout would not re-key the `remember` above.
-                warmupArmed = false
-                onRecheck()
-            },
+            onClick = onRecheck,
             enabled = recheckGate.enabled,
             modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_RECHECK_BUTTON),
         ) { Text(stringResource(R.string.admin_mail_page_health_recheck)) }
         DisabledControlReasonText(recheckGate.reason)
         val resetGate = faunaGate("fauna.bridges.outbound_warmup_reset", enabled = !working)
         OutlinedButton(
-            onClick = {
-                if (warmupArmed) onResetWarmup() else warmupArmed = true
-            },
+            onClick = { onPress(MailPolicyConfirm.RESET_WARMUP) },
             enabled = resetGate.enabled,
             modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON),
         ) {
             Text(
                 stringResource(
-                    if (warmupArmed) R.string.admin_mail_page_health_warmup_reset_confirm
+                    if (armed == MailPolicyConfirm.RESET_WARMUP) R.string.admin_mail_page_health_warmup_reset_confirm
                     else R.string.admin_mail_page_health_warmup_reset,
                 ),
             )
         }
         DisabledControlReasonText(resetGate.reason)
+        // The sender-dashboard note (static help) and its two links, one per
+        // receiver in the shared order; each link publishes its URL as its
+        // `href` (stateDescription), as the delist link does.
+        Text(
+            stringResource(R.string.admin_mail_page_health_sender_dashboards_note),
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_SENDER_DASHBOARDS_NOTE),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        for (link in remember { senderDashboardLinks() }) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(link.url) },
+                modifier = Modifier.testTag(Ids.ADMIN_MAIL_HEALTH_SENDER_DASHBOARD_LINK)
+                    .semantics { stateDescription = link.url },
+            ) {
+                Text(
+                    stringResource(
+                        if (link.key == "gmail") R.string.admin_mail_page_health_sender_dashboard_gmail
+                        else R.string.admin_mail_page_health_sender_dashboard_outlook,
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The Secrets group (`mail-mass-mailing.md` § Secret rotation,
+ * `mail-forwarding.md` § SRS scheme): the two rotate buttons, each the
+ * same-button two-click the shared machine holds — an armed button relabels to
+ * its confirm sentence — then the last rotation's outcome through the shared
+ * `secretRotationText`.
+ */
+@Composable
+private fun SecretsGroup(
+    working: Boolean,
+    armed: MailPolicyConfirm?,
+    secretRotation: SecretRotationView?,
+    onPress: (MailPolicyConfirm) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            stringResource(R.string.admin_mail_page_secrets_group_title),
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Text(
+            stringResource(R.string.admin_mail_page_secrets_group_desc),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        val unsubscribeGate =
+            faunaGate("fauna.bridges.rotate_list_unsubscribe_secret", enabled = !working)
+        OutlinedButton(
+            onClick = { onPress(MailPolicyConfirm.ROTATE_LIST_UNSUBSCRIBE_SECRET) },
+            enabled = unsubscribeGate.enabled,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON),
+        ) {
+            Text(
+                stringResource(
+                    if (armed == MailPolicyConfirm.ROTATE_LIST_UNSUBSCRIBE_SECRET) {
+                        R.string.admin_mail_page_list_unsubscribe_secret_rotate_confirm
+                    } else {
+                        R.string.admin_mail_page_list_unsubscribe_secret_rotate
+                    },
+                ),
+            )
+        }
+        DisabledControlReasonText(unsubscribeGate.reason)
+        val srsGate = faunaGate("fauna.bridges.rotate_srs_secret", enabled = !working)
+        OutlinedButton(
+            onClick = { onPress(MailPolicyConfirm.ROTATE_SRS_SECRET) },
+            enabled = srsGate.enabled,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON),
+        ) {
+            Text(
+                stringResource(
+                    if (armed == MailPolicyConfirm.ROTATE_SRS_SECRET) {
+                        R.string.admin_mail_page_forward_srs_secret_rotate_confirm
+                    } else {
+                        R.string.admin_mail_page_forward_srs_secret_rotate
+                    },
+                ),
+            )
+        }
+        DisabledControlReasonText(srsGate.reason)
+        secretRotation?.let {
+            Text(
+                localized(secretRotationText(it)) ?: "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 
@@ -330,7 +461,8 @@ private fun SpamGroup(
     onSave: (SpamPolicyView) -> Unit,
     parseCount: (String) -> UInt?,
     baselineResult: BaselinePublishView?,
-    onPublishBaseline: () -> Unit,
+    armed: MailPolicyConfirm?,
+    onPress: (MailPolicyConfirm) -> Unit,
     baselineState: BaselineStateView?,
     onSetBaselineStanding: (Boolean) -> Unit,
     formatDate: (Long) -> String,
@@ -410,10 +542,20 @@ private fun SpamGroup(
         // ── Deployment baseline (admin opt-in aggregate; publish_spam_baseline) ──
         val baselineGate = faunaGate("fauna.bridges.publish_spam_baseline", enabled = !working)
         Button(
-            onClick = onPublishBaseline,
+            onClick = { onPress(MailPolicyConfirm.PUBLISH_SPAM_BASELINE) },
             enabled = baselineGate.enabled,
             modifier = Modifier.fillMaxWidth().testTag(Ids.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON),
-        ) { Text(stringResource(R.string.admin_mail_page_publish_spam_baseline_button)) }
+        ) {
+            Text(
+                stringResource(
+                    if (armed == MailPolicyConfirm.PUBLISH_SPAM_BASELINE) {
+                        R.string.admin_mail_page_publish_spam_baseline_confirm
+                    } else {
+                        R.string.admin_mail_page_publish_spam_baseline_button
+                    },
+                ),
+            )
+        }
         DisabledControlReasonText(baselineGate.reason)
         Text(
             stringResource(R.string.admin_mail_page_publish_spam_baseline_subtitle),
@@ -675,6 +817,113 @@ private fun AliasGroup(initial: AliasPolicyView, working: Boolean, onSave: (Alia
     }
 }
 
+/**
+ * The DMARC-reports group (`dmarc-reporting.md` § Forensic-report receive): four
+ * edited fields over the persisted catalog; every other record tag (`p`, `sp`,
+ * `pct`, `adkim`, `aspf`, `rua`, the `ruf` destination, `ri`) rides through
+ * `copy`. A retention past its ceiling is sent as typed — the nest refuses it
+ * onto the error banner, never clamped here.
+ */
+@Composable
+private fun DmarcGroup(
+    initial: DmarcPolicyView,
+    working: Boolean,
+    onSave: (DmarcPolicyView) -> Unit,
+    parseCount: (String) -> UInt?,
+    retentionWarns: (UInt) -> Boolean,
+) {
+    var rufPublish by remember(initial) { mutableStateOf(initial.rufPublish) }
+    var foMode by remember(initial) { mutableStateOf(initial.foMode) }
+    var aggregateRetention by remember(initial) { mutableStateOf(initial.aggregateRetentionDays.toString()) }
+    var forensicRetention by remember(initial) { mutableStateOf(initial.forensicRetentionDays.toString()) }
+
+    GroupCard(
+        stringResource(R.string.admin_mail_page_dmarc_group_title),
+        stringResource(R.string.admin_mail_page_dmarc_group_desc),
+    ) {
+        ToggleRow(stringResource(R.string.admin_mail_page_dmarc_ruf_publish_label), null, rufPublish, !working, { rufPublish = it }, Ids.ADMIN_MAIL_DMARC_RUF_PUBLISH_TOGGLE)
+        Text(
+            stringResource(R.string.admin_mail_page_dmarc_ruf_warning),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.testTag(Ids.ADMIN_MAIL_DMARC_RUF_WARNING),
+        )
+        SelectField(
+            stringResource(R.string.admin_mail_page_dmarc_fo_mode_label),
+            remember { dmarcForensicModeOptions() }.map { it.value to (localized(it.label) ?: it.value) },
+            foMode, { foMode = it }, Ids.ADMIN_MAIL_DMARC_FO_MODE_SELECT,
+        )
+        NumField(stringResource(R.string.admin_mail_page_dmarc_aggregate_retention_label), null, aggregateRetention, { aggregateRetention = it }, Ids.ADMIN_MAIL_DMARC_AGGREGATE_RETENTION_INPUT)
+        NumField(stringResource(R.string.admin_mail_page_dmarc_forensic_retention_label), null, forensicRetention, { forensicRetention = it }, Ids.ADMIN_MAIL_DMARC_FORENSIC_RETENTION_INPUT)
+        if (parseCount(forensicRetention)?.let(retentionWarns) == true) {
+            Text(
+                stringResource(R.string.admin_mail_page_dmarc_forensic_retention_warning),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        SaveButton(
+            Ids.ADMIN_MAIL_DMARC_SAVE_BUTTON,
+            stringResource(R.string.admin_mail_page_dmarc_save),
+            faunaGate("fauna.bridges.put_dmarc_policy", enabled = !working),
+        ) {
+            onSave(
+                initial.copy(
+                    rufPublish = rufPublish,
+                    foMode = foMode,
+                    aggregateRetentionDays = parseCount(aggregateRetention) ?: initial.aggregateRetentionDays,
+                    forensicRetentionDays = parseCount(forensicRetention) ?: initial.forensicRetentionDays,
+                ),
+            )
+        }
+    }
+}
+
+/**
+ * The deployment's own Microsoft app registration for the Outlook import
+ * (`mailbox-migration.md` § Microsoft sign-in, *An admin-supplied
+ * registration*). The two drafts go out as typed; the shared machine checks
+ * them (both blank clears) and refuses a bad pair onto the error banner before
+ * any round trip.
+ */
+@Composable
+private fun MicrosoftGroup(
+    initial: MicrosoftRegistrationView,
+    working: Boolean,
+    onSave: (clientId: String, tenant: String) -> Unit,
+) {
+    var clientId by remember(initial) { mutableStateOf(initial.clientId) }
+    var tenant by remember(initial) { mutableStateOf(initial.tenant) }
+
+    GroupCard(
+        stringResource(R.string.admin_mail_page_microsoft_group_title),
+        stringResource(R.string.admin_mail_page_microsoft_group_desc),
+    ) {
+        Text(
+            stringResource(R.string.admin_mail_page_microsoft_requirements),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            stringResource(
+                if (initial.isDefault) R.string.admin_mail_page_microsoft_using_default
+                else R.string.admin_mail_page_microsoft_using_own,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        PlainField(stringResource(R.string.admin_mail_page_microsoft_client_id_label), null, clientId, { clientId = it }, Ids.ADMIN_MAIL_MICROSOFT_CLIENT_ID_INPUT)
+        PlainField(stringResource(R.string.admin_mail_page_microsoft_tenant_label), stringResource(R.string.admin_mail_page_microsoft_tenant_subtitle), tenant, { tenant = it }, Ids.ADMIN_MAIL_MICROSOFT_TENANT_INPUT)
+        SaveButton(
+            Ids.ADMIN_MAIL_MICROSOFT_SAVE_BUTTON,
+            stringResource(R.string.admin_mail_page_microsoft_save),
+            faunaGate("fauna.bridges.set_microsoft_registration", enabled = !working),
+        ) {
+            onSave(clientId, tenant)
+        }
+    }
+}
+
 // ── Shared widget helpers ───────────────────────────────────────────────────
 
 /** Split a multiline field into trimmed, non-empty lines (full-replace list). */
@@ -711,6 +960,18 @@ private fun NumField(label: String, subtitle: String?, value: String, onChange: 
 }
 
 @Composable
+private fun PlainField(label: String, subtitle: String?, value: String, onChange: (String) -> Unit, testTag: String) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onChange,
+        label = { Text(label) },
+        singleLine = true,
+        supportingText = subtitle?.let { { Text(it) } },
+        modifier = Modifier.fillMaxWidth().testTag(testTag),
+    )
+}
+
+@Composable
 private fun MultilineField(label: String, subtitle: String?, value: String, onChange: (String) -> Unit, testTag: String) {
     OutlinedTextField(
         value = value,
@@ -723,7 +984,7 @@ private fun MultilineField(label: String, subtitle: String?, value: String, onCh
 }
 
 @Composable
-private fun ToggleRow(label: String, subtitle: String?, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit, testTag: String) {
+private fun ToggleRow(label: String, subtitle: String?, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit, testTag: String, state: String? = null) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -735,13 +996,20 @@ private fun ToggleRow(label: String, subtitle: String?, checked: Boolean, enable
                 Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled, modifier = Modifier.testTag(testTag))
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            enabled = enabled,
+            modifier = Modifier.testTag(testTag).let { m ->
+                if (state != null) m.semantics { stateDescription = state } else m
+            },
+        )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SelectField(label: String, options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit, testTag: String) {
+internal fun SelectField(label: String, options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit, testTag: String) {
     var expanded by remember { mutableStateOf(false) }
     val selectedLabel = options.firstOrNull { it.first == selected }?.second ?: selected
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {

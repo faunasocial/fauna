@@ -59,10 +59,14 @@ function appComponentSupported() {
     </choice>
     <!-- The terminal app: default SELECTED, mirroring the Windows "Fauna Terminal
          App" feature (default ON). The same fauna-tui binary the per-OS release
-         archive carries, here Developer ID-signed and notarized with the rest, so
-         the Keychain identity it shares with the desktop app is stable across
-         updates (installers/tui.md § The ratified channel, user ruling 2026-09-26).
-         Installs to /usr/local/bin beside the sync component's agent. -->
+         archive carries — and fauna-cli beside it, the cli app's device shell and
+         the archive's third member (installers/tui.md § Decisions, decision 4) —
+         here Developer ID-signed and notarized with the rest, so the Keychain
+         identity they share with the desktop app is stable across updates
+         (installers/tui.md § The ratified channel, user ruling 2026-09-26).
+         Installs to /usr/local/bin beside the sync component's agent. The
+         choice's description is the installer's user-facing text; naming
+         fauna-cli there is a public-texts request, not this comment's. -->
     <choice id="social.fauna.tui"
             title="Fauna Terminal App"
             description="The terminal (text-mode) Fauna app, usable over SSH. Installs fauna-tui to /usr/local/bin.">

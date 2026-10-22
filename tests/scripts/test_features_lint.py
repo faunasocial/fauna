@@ -39,7 +39,7 @@ Text.
 
 
 def build(tmp_path, *, contract, absences="", what="Your feed shows posts.",
-          tests_py=None, slug="feed-read", section="everyday", extra_section=""):
+          tests_py=None, slug="feed-read", section="everyday", extra_section="", ui_pages=""):
     """A complete fixture world; returns (features dir, e2e dir, repo root)."""
     repo = tmp_path
     (repo / "docs" / "goal" / "ui").mkdir(parents=True, exist_ok=True)
@@ -58,6 +58,7 @@ def build(tmp_path, *, contract, absences="", what="Your feed shows posts.",
         "goal: docs/goal/ui/feed.md § Reading\n"
         "guide: docs/guides/app-tour.md § Feed\n"
         f"{absence_block}"
+        f"{'ui-pages: ' + ui_pages + chr(10) if ui_pages else ''}"
         "---\n\n"
         "## What a user gets\n\n"
         f"{what}\n\n"
@@ -135,6 +136,24 @@ def test_rule_1_flags_an_absence_that_is_not_a_citation(tmp_path):
         tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED,
         absences="  android: not a citation at all")
     assert any("absences[android]" in p for p in run(features, e2e, repo))
+
+
+def test_rule_1_accepts_ui_pages_naming_real_ui_yaml_pages(tmp_path):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED,
+                                ui_pages="feed, compose")
+    (e2e / "ui.yaml").write_text("pages:\n  feed:\n    a: 1\n  compose:\n    b: 2\n",
+                                 encoding="utf-8")
+    assert run(features, e2e, repo) == []
+
+
+def test_rule_1_flags_a_ui_page_key_ui_yaml_does_not_have(tmp_path):
+    features, e2e, repo = build(tmp_path, contract=CONTRACT_ONE, tests_py=TAGGED,
+                                ui_pages="feed, nowhere")
+    (e2e / "ui.yaml").write_text("pages:\n  feed:\n    a: 1\nelements:\n  nowhere:\n    b: 2\n",
+                                 encoding="utf-8")
+    problems = run(features, e2e, repo)
+    assert any("ui-pages: `nowhere`" in p for p in problems)
+    assert not any("`feed`" in p for p in problems)
 
 
 # ── rule 2 ──────────────────────────────────────────────────────────────────

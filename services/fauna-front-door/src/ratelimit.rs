@@ -14,6 +14,11 @@ use std::time::Instant;
 pub const PROXY_RATE_CAPACITY: f64 = 30.0;
 /// Sustained requests/second per peer.
 pub const PROXY_RATE_REFILL_PER_SEC: f64 = 5.0;
+/// Burst capacity per peer on port 80 (ACME challenge + HTTPS redirect) — a
+/// validator's few fetches, or a browser following a redirect, never need more.
+pub const PORT80_RATE_CAPACITY: f64 = 30.0;
+/// Sustained requests/second per peer on port 80.
+pub const PORT80_RATE_REFILL_PER_SEC: f64 = 5.0;
 /// Bucket-map bound; when exceeded, full (idle) buckets are pruned.
 const MAX_TRACKED_BUCKETS: usize = 10_000;
 

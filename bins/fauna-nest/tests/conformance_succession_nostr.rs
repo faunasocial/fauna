@@ -172,7 +172,10 @@ async fn every_bunker_connection_is_revoked_by_the_succession() {
         )
         .unwrap();
     assert_eq!(owner, hex_of(NEW));
-    assert_eq!(status, "revoked");
+    // `burned`, not `revoked`: a user's own revoke stays `revoked` and hidden,
+    // while a succession's stamp is listed to the successor as an app that held
+    // authority (the mail-credentials precedent, `ui/connected-apps.md`).
+    assert_eq!(status, "burned");
     assert_eq!(secret, None, "the connection secret is cleared, not kept");
 }
 
@@ -213,8 +216,8 @@ async fn a_pending_bunker_invite_does_not_survive_the_succession() {
         "the row moves to the successor, not left behind"
     );
     assert_eq!(
-        status, "revoked",
-        "a pending invite is revoked exactly like a connected one"
+        status, "burned",
+        "a pending invite is burned exactly like a connected one"
     );
     assert_eq!(secret, None, "the redeemable secret is cleared, not kept");
 

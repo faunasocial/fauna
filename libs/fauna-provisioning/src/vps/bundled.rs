@@ -135,6 +135,9 @@ impl VpsProvider for BundledVps {
         &self,
         client: &reqwest::Client,
         _curated_ids: &[&str],
+        // The intermediary's `GET /v1/server_types` is its own curated list,
+        // the same in every location it offers (`bundled-provider-api.md`).
+        _location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         let resp = self.api.get(client, "/server_types", &[]).await?;
         let r: ServerTypesResponse = resp.json().await?;

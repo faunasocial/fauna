@@ -131,6 +131,17 @@ pub struct ClaimAdminReply {
     /// so the wire is unchanged — full bidirectional compat (`version-compatibility.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_seed: Option<SecretString>,
+    /// The claimant's source address the nest handed the host for the SSH
+    /// door at this claim (`installers/vps.md` § The SSH door → *One
+    /// address*) — the one address a door box will admit, echoed so the
+    /// wizard can name it at once (`onboarding-provisioning.md` § 5), before
+    /// the host's door pass has run. It is the caller's own address, so it
+    /// crosses no boundary. `None` when nothing was written: no maintenance
+    /// mount (dev, desktop, bare-metal), no recorded peer, or a failed write.
+    /// Whether the host carries a door at all is the host's (a door-less host
+    /// ignores the file); the wizard shows it only for a door it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_door_source: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -227,6 +238,7 @@ mod tests {
             domain: "nest.example".into(),
             handle: "admin".into(),
             deployment_seed: Some("ab".repeat(32).into()),
+            ssh_door_source: Some("2001:db8::7".into()),
             extra: BTreeMap::new(),
         };
         let bytes1 = encode_canonical(&reply).unwrap();
@@ -236,6 +248,7 @@ mod tests {
             decoded.deployment_seed.as_deref(),
             Some(&"ab".repeat(32)[..])
         );
+        assert_eq!(decoded.ssh_door_source.as_deref(), Some("2001:db8::7"));
         // Canonical re-encode is stable.
         let bytes2 = encode_canonical(&decoded).unwrap();
         assert_eq!(bytes1, bytes2);
@@ -252,13 +265,15 @@ mod tests {
             domain: "nest.example".into(),
             handle: "admin".into(),
             deployment_seed: None,
+            ssh_door_source: None,
             extra: BTreeMap::new(),
         };
         let bytes = encode_canonical(&reply).unwrap();
         let decoded: ClaimAdminReply = decode(&bytes).unwrap();
         assert_eq!(reply, decoded);
         assert!(decoded.deployment_seed.is_none());
-        // The absent field must not leak into `extra` as a null.
+        // The absent fields must not leak into `extra` as a null.
         assert!(!decoded.extra.contains_key("deployment_seed"));
+        assert!(!decoded.extra.contains_key("ssh_door_source"));
     }
 }

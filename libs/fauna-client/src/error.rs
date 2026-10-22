@@ -113,6 +113,13 @@ impl fauna_protocol::RpcErrorClass for NestClientError {
     fn is_subprotocol_mismatch(&self) -> bool {
         matches!(self, NestClientError::SubprotocolMismatch)
     }
+
+    fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            NestClientError::RpcDisconnected { .. } | NestClientError::WebSocket(_)
+        )
+    }
 }
 
 /// A verdict a signed-in session cannot survive — each one routed by the apps

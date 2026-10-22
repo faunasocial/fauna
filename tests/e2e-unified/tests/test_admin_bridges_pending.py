@@ -230,3 +230,72 @@ def test_pending_card_shows_when_it_first_asked(bridges_pending_admin_app, bridg
         f"the pending card must say when the helper first asked (YYYY-MM-DD HH:MM, "
         f"near {made:%Y-%m-%d %H:%M}), got {first_seen!r}"
     )
+
+
+#: Apps whose reject button asks first (`admin-bridges-reject-confirm`): tui is
+#: the lead app; windows and apple follow in their batched trickle-down.
+_REJECT_CONFIRM_BUILT_APPS = {"tui", "linux", "web", "android"}
+
+
+@pytest.mark.feature("admin-bridges")
+def test_rejecting_a_pending_bridge_asks_first(bridges_pending_admin_app, bridges_pending_nest):
+    """Reject opens a confirm that says the bridge will not connect again until
+    an admin re-approves a fresh keypair (`mail-bridge-lifecycle.md` § Pending
+    approval, the rejection flow). Cancel closes it with the bridge still
+    pending; only the confirm rejects. Ground truth is the bridge's own
+    enrollment poll (`request_enrollment` → its row's status), never the UI
+    alone."""
+    from helpers.app_surface import app_name, skip_unbuilt
+    from helpers.waiting import wait_until
+
+    admin_app = bridges_pending_admin_app
+    if app_name(admin_app.driver) not in _REJECT_CONFIRM_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-bridges-reject-confirm",
+            detail="the reject confirm is built on tui first",
+            tracked="the six-app trickle-down of the admin-bridges reject confirm",
+        )
+    pubkey_hex, bridge_id = _seed_pending_bridge(bridges_pending_nest, "mta")
+
+    def status() -> str:
+        return enroll_bridge(
+            bridges_pending_nest["url"], bytes.fromhex(pubkey_hex), "mta", bridge_id
+        )
+
+    def card() -> int | None:
+        return _find_card(admin_app, pubkey_hex)[0]
+
+    def error() -> str:
+        return f"error: {admin_app.error_text()!r}"
+
+    admin_app.admin.navigate_bridges_pending()
+    wait_until(lambda: card() is not None, 15.0, diagnose=error)
+
+    admin_app.driver.click("admin-bridges-pending-reject-button", index=card())
+    assert admin_app.driver.is_visible("admin-bridges-reject-warning-text"), (
+        f"the reject click opened no confirm. {error()}"
+    )
+    warning = admin_app.driver.get_text("admin-bridges-reject-warning-text") or ""
+    assert warning == S.admin.bridges_reject.warning, f"reject warning reads {warning!r}"
+    assert status() == "pending", "the reject click rejected without a confirm"
+
+    admin_app.driver.click("admin-bridges-reject-cancel-button")
+    assert admin_app.driver.is_absent("admin-bridges-reject-warning-text"), (
+        "cancel left the reject confirm open"
+    )
+    assert status() == "pending", "cancel rejected the bridge"
+    assert card() is not None, "the cancelled bridge left the pending feed"
+
+    admin_app.driver.click("admin-bridges-pending-reject-button", index=card())
+    assert admin_app.driver.is_visible("admin-bridges-reject-confirm-button"), error()
+    admin_app.driver.click("admin-bridges-reject-confirm-button")
+    wait_until(
+        lambda: status() == "revoked",
+        15.0,
+        diagnose=lambda: f"status {status()!r}, {error()}",
+    )
+    wait_until(lambda: card() is None, 15.0, diagnose=error)
+    assert admin_app.driver.is_absent("admin-bridges-reject-warning-text"), (
+        "the confirm left the dialog open"
+    )

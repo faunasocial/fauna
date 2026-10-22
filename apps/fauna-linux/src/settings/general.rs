@@ -203,6 +203,13 @@ pub fn build_general_page(rt: tokio::runtime::Handle) -> (gtk::Box, impl Fn() + 
     crate::testid::set_test_id(&version_row, ids::SETTINGS_APP_VERSION);
     about_group.add(&version_row);
 
+    // The terms and content guidelines link, beside the version
+    // (`terms-and-content-guidelines.md` § The decisions, item 4 (b)): opens
+    // `fauna_core::TERMS_URL` in the browser.
+    let terms_link = crate::views::onboarding::widgets::terms_link_button(ids::SETTINGS_TERMS_LINK);
+    terms_link.set_halign(gtk::Align::Start);
+    about_group.add(&terms_link);
+
     let update_button = gtk::Button::builder()
         .label(settings::CHECK_FOR_UPDATES)
         .halign(gtk::Align::Start)

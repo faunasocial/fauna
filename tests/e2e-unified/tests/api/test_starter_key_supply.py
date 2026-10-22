@@ -261,10 +261,14 @@ def test_a_signed_in_neighbour_learns_only_whether_you_can_be_reached(nest_insta
 # ── 13: never anonymous, and throttled per nest ──────────────────────────────
 
 
-#: Keys planted for the drain; well above the per-nest budget
-#: (`bridge_rate_limit::LimiterConfig::default`, 30 a minute) so the throttle,
-#: not an empty supply, is what stops it.
+#: Keys planted for the drain; well above the per-target budget so the
+#: budget, not an empty supply, is what stops it.
 DRAIN_SUPPLY = 100
+#: At most this many one-time keys leave one user's pool through the cross-nest
+#: fetch per hour, summed over every originating nest and source
+#: (`bridge_rate_limit::KEYPACKAGE_FETCH_TARGET_LIMITER_CONFIG`, ruled
+#: 2026-10-17); every fetch past it is served the last-resort key instead.
+TARGET_BUDGET = 10
 
 
 @pytest.mark.feature("encryption-settings")
@@ -272,12 +276,14 @@ def test_nobody_takes_starter_keys_anonymously_and_another_nest_cannot_drain_the
     two_nodes,
 ):
     """encryption-settings 13 (`federation.md` § Key packages — privacy &
-    exhaustion: per-originating-nest throttling and the nest-signature gate —
-    fetch is never anonymous).
+    exhaustion: the nest-signature gate — fetch is never anonymous — and the
+    per-TARGET budget, the one bound a stranger's fresh keypairs cannot
+    multiply: past it a fetch is served the reusable last-resort key and
+    consumes nothing, so the target stays reachable and the pool stands).
 
-    Its own two nests (``two_nodes``): the drain fills the home nest's
-    per-source throttle bucket for the cross-nest fetch kind for a minute,
-    which must never reach a sibling test's fetch on the shared nest."""
+    Its own two nests (``two_nodes``): the drain spends the owner's budget for
+    an hour and may fill the home nest's per-source throttle for the kind,
+    neither of which may reach a sibling test's fetch on the shared nest."""
     home, other = two_nodes["nest_a"], two_nodes["nest_b"]
     owner = _fresh_actor(home)
     assert _upload(home, owner, _mint(owner, DRAIN_SUPPLY)) == DRAIN_SUPPLY
@@ -297,8 +303,18 @@ def test_nobody_takes_starter_keys_anonymously_and_another_nest_cannot_drain_the
             )
     assert _count(home, owner) == DRAIN_SUPPLY, "the anonymous attempts took nothing"
 
+    # The owner's reusable last-resort key — what every fetch past the
+    # per-target budget is served. It is not part of the one-time count.
+    last_resort = _mint(owner, 1)[0]
+    assert _upload(home, owner, [last_resort], last_resort=True) == 1
+    assert _count(home, owner) == DRAIN_SUPPLY, "the count is the one-time pool alone"
+
     # Another nest, over the signed federation channel, as fast as it can.
-    taken, throttled = 0, None
+    # Every fetch is answered — the target stays reachable — but once the
+    # owner's budget is spent the answer is the last-resort key, consuming
+    # nothing. The channel's own per-source throttle may cut the run short
+    # first; that too leaves the supply standing.
+    taken, served_last_resort, throttled = 0, 0, None
     with FederationChannelClient(initiator=other, target=home) as fed:
         for _ in range(DRAIN_SUPPLY):
             try:
@@ -306,16 +322,25 @@ def test_nobody_takes_starter_keys_anonymously_and_another_nest_cannot_drain_the
             except RpcCallError as refused:
                 throttled = refused
                 break
-            assert reply.get("key_package") is not None, "a key was served"
-            taken += 1
-    assert throttled is not None, (
-        f"another nest took {taken} keys in a row and was never slowed: the "
-        "per-nest throttle must stop a drain long before the supply is gone"
+            key = reply.get("key_package")
+            assert key is not None, "every fetch serves a key — the target stays reachable"
+            if bytes(key) == bytes(last_resort):
+                served_last_resort += 1
+            else:
+                taken += 1
+    if throttled is not None:
+        assert throttled.code == "fauna.protocol.rate_limited", throttled
+    assert 0 < taken <= TARGET_BUDGET, (
+        f"another nest took {taken} one-time keys: the per-target budget of "
+        f"{TARGET_BUDGET} must stop a drain long before the supply is gone"
     )
-    assert throttled.code == "fauna.protocol.rate_limited", throttled
+    assert served_last_resort > 0 or throttled is not None, (
+        f"another nest took {taken} keys in a row and was never slowed: past the "
+        "budget every fetch is served the last-resort key"
+    )
     left = _count(home, owner)
     assert left == DRAIN_SUPPLY - taken and left > 0, (
-        f"the throttle must leave the supply standing: {taken} taken, {left} left"
+        f"the budget must leave the supply standing: {taken} taken, {left} left"
     )
 
 

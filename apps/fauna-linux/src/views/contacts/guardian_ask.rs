@@ -208,7 +208,7 @@ mod tests {
             assert_eq!(pressed.get(), 1, "the ask button must issue the ask");
 
             // The nest's re-read lands (via the durable store).
-            crate::ward_asks::set_from_status(true, Vec::new(), Vec::new());
+            crate::ward_asks::set_from_status(true, None, Vec::new(), Vec::new());
             a.ask_landed(vec![ask(0xcd)]);
             assert_eq!(counts(&root), (0, 1));
             assert!(crate::ward_asks::contact_ask_pending(&peer));
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn an_outstanding_ask_renders_pending_without_a_refusal() {
         crate::testid::run_on_gtk_thread(|| {
-            crate::ward_asks::set_from_status(true, vec![ask(0xcd)], Vec::new());
+            crate::ward_asks::set_from_status(true, None, vec![ask(0xcd)], Vec::new());
             let mine = GuardianAsk::new(&"cd".repeat(32));
             assert_eq!(counts(&mount(&mine)), (0, 1));
             let other = GuardianAsk::new(&"ef".repeat(32));

@@ -621,6 +621,54 @@ async fn challenge_then_verify(
     .await
 }
 
+/// `first_sign_in` (`login.md` § Direct Auth → the verify reply): the actor's
+/// first own session mint answers `true`, every later one `false`.
+#[tokio::test]
+async fn verify_reports_the_first_sign_in_once() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db.clone()));
+    let r = router();
+    let kp = ActorKeypair::generate();
+    db.create_user(&kp.actor_id().0, "free", "gail")
+        .await
+        .unwrap();
+
+    let first: VerifyReply =
+        decode(&challenge_then_verify(&r, &state, &kp).await.unwrap()).unwrap();
+    assert!(
+        first.first_sign_in,
+        "the account's first own mint is its first sign-in"
+    );
+    let second: VerifyReply =
+        decode(&challenge_then_verify(&r, &state, &kp).await.unwrap()).unwrap();
+    assert!(!second.first_sign_in, "a later mint is not");
+}
+
+/// The handshake is an actor-own mint too: it sets the first-session mark, so
+/// a verify after it is not the first sign-in.
+#[tokio::test]
+async fn a_handshake_sets_the_first_session_mark() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db.clone()));
+    let r = router();
+    let kp = ActorKeypair::generate();
+    db.create_user(&kp.actor_id().0, "free", "hank")
+        .await
+        .unwrap();
+
+    dispatch(
+        &r,
+        state.clone(),
+        "fauna.auth.handshake",
+        handshake_payload(&state, &kp, now_ms()),
+    )
+    .await
+    .expect("handshake ok");
+    let after: VerifyReply =
+        decode(&challenge_then_verify(&r, &state, &kp).await.unwrap()).unwrap();
+    assert!(!after.first_sign_in, "the handshake was the first sign-in");
+}
+
 /// Verify enforces the account lock (`login.md` § Silent Challenge, ruled
 /// 2026-09-25): a locked actor is refused with `fauna.auth.account_locked`
 /// naming `locked_until`, and no bearer is minted.

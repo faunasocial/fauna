@@ -95,3 +95,6 @@ fauna-archive = { path = "../fauna-archive", features = ["test-helpers"] }
 # Self-dev-dependency: turns `test-helpers` on for this package's own test
 # targets, so `nest::fakes` is available to integration tests too.
 fauna-archive-import-machine = { path = ".", features = ["test-helpers"] }
+# rpc-glue tests: the scripted `RpcRequester` the licensed archive read is
+# driven over (`rpc_glue`'s licence tests).
+fauna-client-testkit = { path = "../fauna-client-testkit" }

@@ -81,6 +81,61 @@ struct ContactOverlaySlot {
 /// `MAX_VERIFIED_CHAIN_LEN` bounds a real line far below this).
 const MAX_FOLD_HOPS: usize = 64;
 
+/// The open room-search strip — [`ConversationsManager::room_search`]'s
+/// state, held as the nest's raw hits and resolved into rows at read time.
+struct RoomSearchState {
+    thread_id: ThreadId,
+    query: String,
+    status: crate::room::RoomSearchStatus,
+    /// The answer, once `status` is `Done`.
+    answer: Option<crate::backend::RoomSearchAnswer>,
+    /// Each post hit's envelope, by hex post id, as the post-read seam
+    /// answered it after the search did. A hit absent here paints no words.
+    posts: HashMap<String, crate::backend::RoomSearchPostEnvelope>,
+}
+
+impl RoomSearchState {
+    fn idle(thread_id: ThreadId) -> Self {
+        Self {
+            thread_id,
+            query: String::new(),
+            status: crate::room::RoomSearchStatus::Idle,
+            answer: None,
+            posts: HashMap::new(),
+        }
+    }
+}
+
+/// The name a room search's post row gives its author: the bridged face the
+/// nest served, else the name this room already shows them by — a
+/// participant, or the sender of a message this device holds — else the
+/// account display label of the bare actor id.
+fn room_post_author_display(
+    d: &ThreadDetail,
+    envelope: &crate::backend::RoomSearchPostEnvelope,
+) -> String {
+    if let Some(face) = envelope.author_display.as_deref().map(str::trim)
+        && !face.is_empty()
+    {
+        return face.to_string();
+    }
+    let is_author = |a: &crate::address::TypedAddress| {
+        matches!(a, crate::address::TypedAddress::Fauna { actor_id, .. }
+            if actor_id.to_hex() == envelope.author_actor_hex)
+    };
+    if let Some(m) = d
+        .messages
+        .iter()
+        .find(|m| is_author(&m.sender) && !m.sender_display.is_empty())
+    {
+        return m.sender_display.clone();
+    }
+    if let Some(p) = d.participants.iter().find(|p| is_author(p)) {
+        return p.display();
+    }
+    fauna_core::format::account_display_label(None, &envelope.author_actor_hex)
+}
+
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct ConversationsManager {
     backends: RwLock<HashMap<Rail, Arc<dyn RailBackend>>>,
@@ -119,6 +174,13 @@ pub struct ConversationsManager {
     new_thread_active: RwLock<bool>,
     sort: RwLock<SortOrder>,
     search: RwLock<Option<String>>,
+    /// The community room's search strip, while open — view state on one
+    /// thread's detail, never a draft (`room-search.md` § The surface).
+    /// [`Self::thread_detail`] projects it onto `ThreadDetail.room.search` on
+    /// every emit, resolving each hit against the thread's live window, so a
+    /// message hit lights up by itself once the message arrives. Cleared by
+    /// every selection path that leaves the thread, and by opening a hit.
+    room_search: RwLock<Option<RoomSearchState>>,
     /// Per-message remote-image reveal set (render-model.md § D3). The single
     /// source of truth for "the user opted into loading this message's remote
     /// images": [`thread_detail`](Self::thread_detail) projects it onto each
@@ -187,6 +249,11 @@ pub struct ConversationsManager {
     /// nest and the flag-change cursor ([`crate::mail_read`]). Written by the
     /// read chokepoint ([`Self::notify`]) and the receive loop's mail sweep.
     mail_read: Mutex<MailReadSync>,
+    /// The fresh-IP warm-up's hold on the user's own sent mail, by message id,
+    /// as the latest `Sent` read of each message said
+    /// ([`crate::backend::InboundMailRecord::warmup_hold`]); projected onto
+    /// [`MessageSnapshot::warmup_hold`] by [`Self::project_room`].
+    warmup_holds: RwLock<HashMap<MessageId, crate::backend::MailWarmupHold>>,
     /// Sends the owed `\Seen` writes now rather than at the next sweep —
     /// installed by the native `ConversationsSession`, the read twin of
     /// [`Self::attachment_refill_poke`]. `None` on web and on test managers,
@@ -210,6 +277,44 @@ pub struct ConversationsManager {
     /// the thread), so it is never cleared. **In-memory only** (no-persistence posture
     /// unchanged).
     resolved_previews: RwLock<HashMap<String, PreviewState>>,
+    /// The nest's 32-byte segment-record id of each message this account
+    /// **received** into `INBOX`, by message id — the key
+    /// `fauna.bridges.get_message_scan_result` takes, which the snapshot does
+    /// not carry (a mail message's id is its RFC 5322 `Message-ID`). Filled at
+    /// ingest ([`Self::ingest_inbound_identified`]); in-memory, like the
+    /// thread store it sits beside, so a relaunch's re-drain refills it.
+    received_mail_records: RwLock<HashMap<MessageId, Vec<u8>>>,
+    /// The scan-verdict lines read for a received message
+    /// ([`Self::refresh_message_scan_results`]), projected onto
+    /// [`MessageSnapshot::scan_result_lines`] by
+    /// [`thread_detail`](Self::thread_detail). An empty entry is an answered
+    /// read with nothing to show (the nest holds no scan row for it), kept so
+    /// a re-open does not ask again; a failed read leaves no entry.
+    scan_results: RwLock<HashMap<MessageId, Vec<LocalizedText>>>,
+    /// The account's `mail.account.scan_result_visible` switch is off
+    /// (`mail-content-scanning.md` § Per-account opt-out for visible scan
+    /// details), as [`Self::refresh_message_scan_results`] last read it:
+    /// [`thread_detail`](Self::thread_detail) then projects no
+    /// [`MessageSnapshot::scan_result_lines`] at all, and no verdict is read.
+    /// The verdicts already read stay, so turning the switch back on paints
+    /// them without asking again. `false` — the catalog default — until read.
+    scan_results_hidden: std::sync::atomic::AtomicBool,
+    /// The delivery stamps of each message this account **received** into
+    /// `INBOX`, by message id — the header section
+    /// [`fauna_mail::aliases::delivered::delivery_stamps`] kept at ingest,
+    /// which the "Delivered to" tag resolves from (`mail-aliases.md` § Label).
+    /// In-memory beside [`Self::received_mail_records`], refilled the same way.
+    delivery_stamps: RwLock<HashMap<MessageId, Vec<u8>>>,
+    /// The account's own alias rows as
+    /// [`Self::refresh_delivered_aliases`] last read them; `None` until a
+    /// read answered. Projected with [`Self::delivery_stamps`] onto
+    /// [`MessageSnapshot::delivered_to`] by [`thread_detail`](Self::thread_detail).
+    alias_labels: RwLock<Option<Vec<crate::backend::AliasLabelRow>>>,
+    /// The account's own withheld conversation records, by record digest, as
+    /// [`Self::refresh_withheld_messages`] last read them (the newest queue
+    /// row per record); `None` until a read answered. Projected onto
+    /// [`MessageSnapshot::withheld`] by [`thread_detail`](Self::thread_detail).
+    withheld_records: RwLock<Option<HashMap<String, crate::message::WithheldRecord>>>,
     /// The home-nest link-preview seam ([`LinkPreviewRpc`]), wired alongside the FaunaMls
     /// backend's [`ConversationsRpc`](crate::backend::ConversationsRpc) by the native + wasm
     /// glue. `None` on the receive-only / SMTP-only constructors — `resolve_link_preview`
@@ -426,9 +531,10 @@ impl ConversationsManager {
 
     /// Re-list the community-room invitations standing for this account — the
     /// receive loop's step, beside the inbox drain whose kind they ride
-    /// (`ConversationsSession::start_receive_loop`). Quiet by contract: a rail
-    /// that cannot list them (no room-ceremony seam — web's declared absence)
-    /// or a nest that did not answer leaves the list as it was, and nothing is
+    /// (`ConversationsSession::start_receive_loop`; on web the JS receive
+    /// tick, through `refreshRoomInvitations`). Quiet by contract: a rail
+    /// that cannot list them (no room-ceremony seam) or a nest that did not
+    /// answer leaves the list as it was, and nothing is
     /// surfaced from a background pass. Notifies only when the list moved.
     pub async fn refresh_room_invitations(&self) {
         let Some(backend) = self.backends.read().unwrap().get(&Rail::FaunaMls).cloned() else {
@@ -721,6 +827,7 @@ impl ConversationsManager {
             new_thread_active: RwLock::new(false),
             sort: RwLock::new(SortOrder::default()),
             search: RwLock::new(None),
+            room_search: RwLock::new(None),
             revealed_remote: RwLock::new(HashSet::new()),
             policy_anchor_wants: RwLock::new(HashMap::new()),
             parked_floor_deletes: RwLock::new(HashMap::new()),
@@ -731,10 +838,17 @@ impl ConversationsManager {
             attachments: RwLock::new(AttachmentStore::new()),
             attachment_refill_poke: RwLock::new(None),
             mail_read: Mutex::new(MailReadSync::default()),
+            warmup_holds: RwLock::new(HashMap::new()),
             mail_read_poke: RwLock::new(None),
             contact_roster: RwLock::new(None),
             contact_roster_poke: RwLock::new(None),
             resolved_previews: RwLock::new(HashMap::new()),
+            received_mail_records: RwLock::new(HashMap::new()),
+            scan_results: RwLock::new(HashMap::new()),
+            scan_results_hidden: std::sync::atomic::AtomicBool::new(false),
+            delivery_stamps: RwLock::new(HashMap::new()),
+            alias_labels: RwLock::new(None),
+            withheld_records: RwLock::new(None),
             link_preview_rpc: RwLock::new(None),
             local_detections: RwLock::new(None),
             index_observer: RwLock::new(None),
@@ -984,6 +1098,66 @@ impl ConversationsManager {
             // dictionary — decides whether a message's `RemoteImage`s AND its Resolved
             // link-preview og:image render fetched; `reveal_remote_images` flips it and
             // re-emits. A no-op walk when nothing is revealed (the common case).
+            // The scan verdict of each received mail message
+            // (`mail-content-scanning.md` § User sees their own message's
+            // row), read when the thread opened
+            // ([`Self::refresh_message_scan_results`]) — none at all while
+            // the account's switch hides the row.
+            let scans = self.scan_results.read().unwrap();
+            if !scans.is_empty()
+                && !self
+                    .scan_results_hidden
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                for m in &mut d.messages {
+                    if let Some(lines) = scans.get(&m.message_id) {
+                        m.scan_result_lines = lines.clone();
+                    }
+                }
+            }
+            // The "Delivered to" tag of each received mail message
+            // (`mail-aliases.md` § Label): its kept stamps resolved against
+            // the alias rows read when the thread opened
+            // ([`Self::refresh_delivered_aliases`]) — read-time, so a label
+            // edited on the aliases page repaints on the next read.
+            if let Some(rows) = self.alias_labels.read().unwrap().as_deref() {
+                let stamps = self.delivery_stamps.read().unwrap();
+                if !stamps.is_empty() {
+                    for m in &mut d.messages {
+                        if let Some(kept) = stamps.get(&m.message_id) {
+                            m.delivered_to = crate::message::delivered_to_text(kept, rows);
+                        }
+                    }
+                }
+            }
+            // The nest's withholding of each own message, matched to the
+            // author's queue row by record digest (`moderation.md` § Legal
+            // takedown → *App render*), read when the thread opened
+            // ([`Self::refresh_withheld_messages`]). Only a copy whose body is
+            // in view: a tombstoned or notice-only bubble already says it.
+            if let Some(records) = self.withheld_records.read().unwrap().as_ref()
+                && !records.is_empty()
+            {
+                for m in &mut d.messages {
+                    if !m.is_own
+                        || m.deleted
+                        || m.legal_takedown_ref.is_some()
+                        || m.admin_block_in_place()
+                    {
+                        continue;
+                    }
+                    if let Some(record) = m
+                        .plane_ref
+                        .as_ref()
+                        .and_then(|plane| records.get(&plane.record_digest))
+                    {
+                        m.withheld = Some(crate::message::WithheldOwnMessage::new(
+                            record,
+                            m.admin_block_reason.as_deref(),
+                        ));
+                    }
+                }
+            }
             let revealed = self.revealed_remote.read().unwrap();
             if !revealed.is_empty() {
                 for m in &mut d.messages {
@@ -1019,6 +1193,7 @@ impl ConversationsManager {
                 .clone()
                 .filter(|id| d.messages.iter().any(|m| &m.message_id == id));
             self.project_room(&mut d);
+            self.project_room_search(&mut d);
             // The delete affordance, per message (`MessageSnapshot::can_delete`):
             // after the room, because who governs is the room's answer.
             let deletes_any = d.room.as_ref().is_some_and(|r| r.viewer_deletes_any());
@@ -1077,6 +1252,92 @@ impl ConversationsManager {
             d.glyph = bridge.glyph;
         }
         d.guardian_state = backend.guardian_state(&d.participants);
+        // Assigned on every message, never only raised, like `can_delete`.
+        let holds = self.warmup_holds.read().unwrap();
+        for m in &mut d.messages {
+            m.undelivered = m.is_own && backend.message_undelivered(&m.message_id);
+            m.warmup_hold = holds.get(&m.message_id).copied().filter(|_| m.is_own);
+        }
+    }
+
+    /// The room's open search strip, onto `d.room.search`
+    /// (`room-search.md` § The surface). Each hit becomes a row from what this
+    /// device holds: a message hit is the message at that log position —
+    /// sender, time and first line — or, while this device has not received
+    /// it, a time-less *not on this device yet* row that still opens. A post
+    /// hit paints the author, time and teaser its envelope carried through the
+    /// post-read seam — the author named as this room knows them when they sit
+    /// in it — or no words while that read is outstanding or failed; it opens
+    /// through its typed target either way.
+    fn project_room_search(&self, d: &mut ThreadDetail) {
+        use crate::backend::RoomSearchHitRef;
+        use crate::room::{
+            RoomSearchNav, RoomSearchResultKind, RoomSearchResultSnapshot, RoomSearchSnapshot,
+        };
+        if d.room.is_none() {
+            return;
+        }
+        let guard = self.room_search.read().unwrap();
+        let Some(state) = guard.as_ref().filter(|s| s.thread_id == d.thread_id) else {
+            return;
+        };
+        let results = state
+            .answer
+            .iter()
+            .flat_map(|answer| answer.hits.iter().map(move |hit| (answer, hit)))
+            .map(|(answer, hit)| match hit {
+                RoomSearchHitRef::Message { seq } => {
+                    let message_id = MessageId(format!("conv:{}:{seq}", answer.channel_hex));
+                    let held = d.messages.iter().find(|m| m.message_id == message_id);
+                    RoomSearchResultSnapshot {
+                        kind: RoomSearchResultKind::Message,
+                        sender_display: held.map(|m| {
+                            if m.sender_display.is_empty() {
+                                m.sender.display()
+                            } else {
+                                m.sender_display.clone()
+                            }
+                        }),
+                        sent_at_ms: held.map(|m| m.timestamp_ms),
+                        text: match held {
+                            Some(m) => m.body.lines().next().unwrap_or_default().to_string(),
+                            None => {
+                                fauna_i18n::strings::conversations::unified::ROOM_SEARCH_HIT_PENDING
+                                    .to_string()
+                            }
+                        },
+                        pending: held.is_none(),
+                        navigation: RoomSearchNav::Message {
+                            thread_id: d.thread_id.clone(),
+                            message_id,
+                        },
+                    }
+                }
+                RoomSearchHitRef::Post { post_id_hex } => {
+                    let envelope = state.posts.get(post_id_hex);
+                    RoomSearchResultSnapshot {
+                        kind: RoomSearchResultKind::Post,
+                        sender_display: envelope.map(|e| room_post_author_display(d, e)),
+                        sent_at_ms: envelope.map(|e| e.created_at_ms),
+                        text: envelope
+                            .map(|e| e.teaser.lines().next().unwrap_or_default().to_string())
+                            .unwrap_or_default(),
+                        pending: false,
+                        navigation: RoomSearchNav::Post {
+                            post_id: post_id_hex.clone(),
+                            home_nest_url: answer.home_nest_url.clone(),
+                        },
+                    }
+                }
+            })
+            .collect();
+        if let Some(room) = d.room.as_mut() {
+            room.search = Some(RoomSearchSnapshot {
+                query: state.query.clone(),
+                status: state.status,
+                results,
+            });
+        }
     }
 
     /// The bridges serving this account, by declared identity and ordered by
@@ -1449,10 +1710,18 @@ impl ConversationsManager {
         self.refused_changes.clear();
         self.contacts.replace(Default::default());
         self.threads.clear();
+        self.received_mail_records.write().unwrap().clear();
+        self.scan_results.write().unwrap().clear();
+        self.scan_results_hidden
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.delivery_stamps.write().unwrap().clear();
+        *self.alias_labels.write().unwrap() = None;
+        *self.withheld_records.write().unwrap() = None;
         self.drafts.clear_all();
         *self.selected.write().unwrap() = None;
         *self.selected_message.write().unwrap() = None;
         *self.search.write().unwrap() = None;
+        *self.room_search.write().unwrap() = None;
         *self.sort.write().unwrap() = SortOrder::default();
         *self.add_participant.write().unwrap() = None;
         // A page error left standing would make the next identity (or the next
@@ -1477,6 +1746,12 @@ impl ConversationsManager {
         // drafts likewise persist (the DraftStore keeps them keyed by thread id),
         // so each conversation keeps its own half-written reply across switches.
         *self.new_thread_active.write().unwrap() = false;
+        // The room's search strip is the thread's own view state: switching
+        // threads clears it (`room-search.md` § The surface).
+        self.room_search
+            .write()
+            .unwrap()
+            .take_if(|s| s.thread_id != id);
         *self.selected.write().unwrap() = Some(id);
         // A plain thread selection carries no message selection. Clearing here
         // (rather than only on the way out) is what keeps the marker from
@@ -1501,12 +1776,17 @@ impl ConversationsManager {
     /// every emit instead, which also makes a late arrival light up by itself.
     pub fn select_thread_and_message(&self, thread_id: ThreadId, message_id: MessageId) {
         *self.new_thread_active.write().unwrap() = false;
+        // Opening a room-search hit closes the strip and returns the stream
+        // (`room-search.md` § The surface → *Opening a hit*); so does
+        // arriving from anywhere else.
+        *self.room_search.write().unwrap() = None;
         *self.selected.write().unwrap() = Some(thread_id);
         *self.selected_message.write().unwrap() = Some(message_id);
         self.notify();
     }
 
     pub fn clear_selection(&self) {
+        *self.room_search.write().unwrap() = None;
         *self.selected.write().unwrap() = None;
         *self.selected_message.write().unwrap() = None;
         self.notify();
@@ -2201,7 +2481,25 @@ impl ConversationsManager {
     /// the Sent copy ingests normally and the sent message reloads — the durability
     /// the server-side copy exists for. Idempotent across overlapping re-polls too.
     pub fn ingest_inbound(&self, msg: RailInboundMessage) -> Result<(), BackendError> {
-        self.ingest_inbound_identified(msg, None, None)
+        self.ingest_inbound_identified(msg, None, None, None)
+    }
+}
+
+impl ConversationsManager {
+    /// Record what a `Sent` read said about the warm-up's hold on `id`
+    /// (`None` = not held, or no longer). `true` when that changed what the
+    /// thread shows.
+    fn note_warmup_hold(
+        &self,
+        id: &MessageId,
+        hold: Option<crate::backend::MailWarmupHold>,
+    ) -> bool {
+        let mut holds = self.warmup_holds.write().unwrap();
+        let before = match hold {
+            Some(hold) => holds.insert(id.clone(), hold),
+            None => holds.remove(id),
+        };
+        before != hold
     }
 }
 
@@ -2224,11 +2522,16 @@ impl ConversationsManager {
     /// signal — plus its UID and `\Seen` flag, which decide whether the
     /// message is unread and name it for the flag's write
     /// (`conversation-read-state.md` § Mail: `\Seen` is the marker).
+    ///
+    /// `delivery_stamps` is the record's kept stamp headers
+    /// ([`fauna_mail::aliases::delivered::delivery_stamps`]), held for the
+    /// "Delivered to" tag of a received message (`mail-aliases.md` § Label).
     pub fn ingest_inbound_identified(
         &self,
         msg: RailInboundMessage,
         nest_message_id: Option<&[u8]>,
         mail: Option<crate::store::threads::MailArrival>,
+        delivery_stamps: Option<Vec<u8>>,
     ) -> Result<(), BackendError> {
         let mailbox = mail.map(|m| m.mailbox);
         let backend = self
@@ -2248,6 +2551,15 @@ impl ConversationsManager {
             body_format: msg.body_format,
         };
         let bucket = backend.bucket_inbound(msg, mailbox)?;
+        // A `Sent` read says whether the warm-up still holds this message — and
+        // it says so whichever way the dedup below goes, since the copy it
+        // speaks of is usually this device's own send echo, already held. Its
+        // absence is news too: the hold lifted.
+        if let Some(arrival) = mail.filter(|m| m.mailbox == MailFeed::Sent)
+            && self.note_warmup_hold(&bucket.message.message_id, arrival.warmup_hold)
+        {
+            self.notify();
+        }
         // Dedup by message id before any thread create/append (see the doc note
         // above) — we already hold this exact message (local echo / earlier poll).
         if self
@@ -2419,6 +2731,30 @@ impl ConversationsManager {
             bucket.subject.as_deref(),
             nest_message_id,
         );
+        // A message this account received keeps its nest record id, the key
+        // its scan verdict is read by (`Self::refresh_message_scan_results`).
+        // Only an `INBOX` arrival that is not the account's own: the scanner
+        // runs on inbound mail, never on a Sent copy.
+        if let Some(record_id) = nest_message_id
+            && mailbox == Some(MailFeed::Inbox)
+            && !msg.is_own
+        {
+            self.received_mail_records
+                .write()
+                .unwrap()
+                .insert(msg.message_id.clone(), record_id.to_vec());
+        }
+        // Its delivery stamps too, for the "Delivered to" tag — on the same
+        // condition: only a copy the resolver delivered to this account.
+        if let Some(kept) = delivery_stamps
+            && mailbox == Some(MailFeed::Inbox)
+            && !msg.is_own
+        {
+            self.delivery_stamps
+                .write()
+                .unwrap()
+                .insert(msg.message_id.clone(), kept);
+        }
         self.threads
             .append_inbound_message(&thread_id, msg, facts, mail);
         self.notify();
@@ -3785,6 +4121,177 @@ impl ConversationsManager {
         }
     }
 
+    /// Read the scan verdict of every received mail message in thread `id`
+    /// that has none yet (`mail-content-scanning.md` § User sees their own
+    /// message's row) — `fauna.bridges.get_message_scan_result` through the
+    /// thread's rail, one read per message — and notify when any came back
+    /// with lines, so the next [`thread_detail`](Self::thread_detail) paints
+    /// each bubble's `dm-message-scan-result`. Apps call it when a thread
+    /// opens, beside [`Self::refresh_list_send`]. A message already answered
+    /// is not asked again, so a repeat call is a no-op with no notify; a read
+    /// that failed is asked again on the next call. A no-op on every thread
+    /// with no received mail.
+    ///
+    /// First it reads the account's `mail.account.scan_result_visible`
+    /// switch (`mail-content-scanning.md` § Per-account opt-out for visible
+    /// scan details): off, it reads no verdict and the projection paints no
+    /// row — so no app decides it — notifying when that hides rows already
+    /// painted; back on, the kept verdicts reappear. A failed switch read
+    /// keeps the last one known.
+    pub async fn refresh_message_scan_results(&self, id: ThreadId) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let Some(detail) = self.threads.get(&id) else {
+            return;
+        };
+        let (received, wanted): (bool, Vec<(MessageId, Vec<u8>)>) = {
+            let records = self.received_mail_records.read().unwrap();
+            let answered = self.scan_results.read().unwrap();
+            let received = detail
+                .messages
+                .iter()
+                .any(|m| records.contains_key(&m.message_id));
+            let wanted = detail
+                .messages
+                .iter()
+                .filter(|m| !answered.contains_key(&m.message_id))
+                .filter_map(|m| {
+                    records
+                        .get(&m.message_id)
+                        .map(|record| (m.message_id.clone(), record.clone()))
+                })
+                .collect();
+            (received, wanted)
+        };
+        if !received {
+            return;
+        }
+        let Some(backend) = self.backends.read().unwrap().get(&detail.rail).cloned() else {
+            return;
+        };
+        match backend.scan_result_visible().await {
+            Ok(visible) => {
+                let was_hidden = self.scan_results_hidden.swap(!visible, SeqCst);
+                if was_hidden == visible {
+                    // The switch moved: rows already read appear or go.
+                    if !self.scan_results.read().unwrap().is_empty() {
+                        self.notify();
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("reading the account's scan-result switch failed: {e}"),
+        }
+        if self.scan_results_hidden.load(SeqCst) || wanted.is_empty() {
+            return;
+        }
+        let mut painted = false;
+        for (message_id, record) in wanted {
+            match backend.message_scan_result(record).await {
+                Ok(lines) => {
+                    let lines = lines.unwrap_or_default();
+                    painted |= !lines.is_empty();
+                    self.scan_results.write().unwrap().insert(message_id, lines);
+                }
+                Err(e) => tracing::warn!("reading a received message's scan verdict failed: {e}"),
+            }
+        }
+        if painted {
+            self.notify();
+        }
+    }
+
+    /// Read the account's alias rows for the "Delivered to" tag of every
+    /// received mail message in thread `id` (`mail-aliases.md` § Label) —
+    /// `fauna.bridges.list_account_aliases` through the thread's rail — and
+    /// notify when they changed, so the next [`thread_detail`](Self::thread_detail)
+    /// paints each bubble's `dm-message-delivered-to-alias`. Apps call it when
+    /// a thread opens, beside [`Self::refresh_message_scan_results`]. Read on
+    /// every open, not once: a label edited on the aliases page must reach the
+    /// tag. A no-op on every thread with no stamped received message; a failed
+    /// read keeps what the last one said.
+    pub async fn refresh_delivered_aliases(&self, id: ThreadId) {
+        let Some(detail) = self.threads.get(&id) else {
+            return;
+        };
+        let stamped = {
+            let stamps = self.delivery_stamps.read().unwrap();
+            detail
+                .messages
+                .iter()
+                .any(|m| stamps.contains_key(&m.message_id))
+        };
+        if !stamped {
+            return;
+        }
+        let Some(backend) = self.backends.read().unwrap().get(&detail.rail).cloned() else {
+            return;
+        };
+        match backend.account_alias_labels().await {
+            Ok(rows) => {
+                let changed = {
+                    let mut slot = self.alias_labels.write().unwrap();
+                    let changed = slot.as_ref() != Some(&rows);
+                    *slot = Some(rows);
+                    changed
+                };
+                if changed {
+                    self.notify();
+                }
+            }
+            Err(e) => {
+                tracing::warn!("reading the account's aliases for the delivered-to tag failed: {e}")
+            }
+        }
+    }
+
+    /// Read the account's own queue rows for the withheld-message badge of
+    /// every own fauna-native message in thread `id` (`moderation.md` § Legal
+    /// takedown → *App render*) — `fauna.moderation.actions` through the
+    /// thread's rail — and notify when they changed, so the next
+    /// [`thread_detail`](Self::thread_detail) paints each matched bubble's
+    /// `dm-message-withheld-badge`. Apps call it when a thread opens, beside
+    /// [`Self::refresh_delivered_aliases`]. Read on every open, not once: a
+    /// takedown or a block lands while no app is looking. A no-op on every
+    /// thread with no own record on the plane; a failed read keeps what the
+    /// last one said.
+    pub async fn refresh_withheld_messages(&self, id: ThreadId) {
+        let Some(detail) = self.threads.get(&id) else {
+            return;
+        };
+        if !detail
+            .messages
+            .iter()
+            .any(|m| m.is_own && m.plane_ref.is_some())
+        {
+            return;
+        }
+        let Some(backend) = self.backends.read().unwrap().get(&detail.rail).cloned() else {
+            return;
+        };
+        match backend.own_withheld_records().await {
+            Ok(rows) => {
+                let mut records: HashMap<String, crate::message::WithheldRecord> = HashMap::new();
+                for row in rows {
+                    match records.get(&row.content_id) {
+                        Some(kept) if kept.timestamp >= row.timestamp => {}
+                        _ => {
+                            records.insert(row.content_id.clone(), row);
+                        }
+                    }
+                }
+                let changed = {
+                    let mut slot = self.withheld_records.write().unwrap();
+                    let changed = slot.as_ref() != Some(&records);
+                    *slot = Some(records);
+                    changed
+                };
+                if changed {
+                    self.notify();
+                }
+            }
+            Err(e) => tracing::warn!("reading the account's withheld messages failed: {e}"),
+        }
+    }
+
     /// Re-derive [`ComposeState::list_send`] for a compose — the thread `id`'s,
     /// or the new-thread compose's when `None` — from the nest's current
     /// figures (`mail-mass-mailing.md` § Composing a list message): set when
@@ -3856,147 +4363,8 @@ impl ConversationsManager {
         // never mask this send's own `send_state` failure on a client that
         // renders one `error-message` for both).
         self.clear_page_error();
-        let Some(detail) = self.thread_detail(id.clone()) else {
-            return Err(BackendError::Internal("no such thread".to_string()));
-        };
-        let backend = self
-            .backends
-            .read()
-            .unwrap()
-            .get(&detail.rail)
-            .cloned()
-            .ok_or(BackendError::NotSupported)?;
         let compose = self.drafts.get(&id);
-        // Resolve the light attachment drafts to bytes from the store, for the
-        // backend to put on the wire (SMTP inlines them as MIME parts). A draft
-        // whose bytes this device does not hold refuses here, before anything
-        // reaches the backend, into the same failure slot a backend rejection
-        // takes.
-        let attachments = match self.resolve_attachments(&compose) {
-            Ok(attachments) => attachments,
-            Err(e) => {
-                tracing::warn!("send refused before the backend: {e:?}");
-                self.set_send_state(&id, SendState::failed(e.user_detail()));
-                return Err(e);
-            }
-        };
-
-        self.set_send_state(&id, SendState::Sending);
-
-        match backend.send(&detail, &compose, &attachments).await {
-            Ok(outcome) => {
-                // The sender's own "Sent" copy must render like the peers'
-                // received copy: on a markdown-capable rail (FaunaMls and —
-                // since html-mail.md — SMTP) the body is markdown, so flag it
-                // `Markdown` and the bubble renders `**bold**` formatted
-                // instead of as raw source (`conversations.md` § Layout —
-                // `dm-message-text` rendered per `body_format`). Non-markdown
-                // rails (a bridge) stay PlainText.
-                let body_format = if detail.capabilities.supports_markdown {
-                    BodyFormat::Markdown
-                } else {
-                    BodyFormat::PlainText
-                };
-                // The sender's own copy renders the attachments it just sent —
-                // the resolved set the backend received, so echo and wire agree;
-                // the bubble loads the real file via `attachment_bytes`.
-                let attachments = Self::sent_echo_attachments(&attachments);
-                let msg = MessageSnapshot {
-                    message_id: outcome.message_id,
-                    sender: outcome.sender,
-                    sender_display: String::new(),
-                    body: compose.body_draft.clone(),
-                    // The complete render document the shells paint (body +
-                    // attachment blocks), produced once here from the same
-                    // body+format+attachments (render-model.md § D1/D2).
-                    document: crate::message::document_for_message(
-                        &compose.body_draft,
-                        body_format,
-                        &attachments,
-                    ),
-                    timestamp_ms: outcome.timestamp_ms,
-                    subject_line: None,
-                    badges: MessageBadges::default(),
-                    reply_to: compose.reply_to.clone(),
-                    reactions: vec![],
-                    deleted: false,
-                    is_own: true,
-                    // A message the local user just sent is never taken down.
-                    legal_takedown_ref: None,
-                    // Own content is never classified as received-spam (mirrors
-                    // `observe_local_detection`'s is_own skip).
-                    labels: vec![],
-                    // Carried from the backend's outcome. A `conv` scope is a
-                    // member scope, so an own message on it is browse content
-                    // under T1 exactly like a received one — and this echo is
-                    // the only copy that will ever carry the ref.
-                    plane_ref: outcome.plane_ref,
-                    can_delete: false,
-                };
-                // The own copy reaches the content index NOW — the receive poll
-                // never re-presents a sender's own record on the device that
-                // sent it, so without this a sent message stayed unsearchable
-                // until the next launch's store walk (`content-index-ingest.md`
-                // § Ingest triggers, v1 → the own-send ruling). Offered exactly
-                // as that walk would (no subject, no record id), so its re-offer
-                // next launch is dropped by the builder's guard. Mail waits for
-                // its Sent copy instead, which carries the record id a mail doc
-                // is identified by (the `AlreadyOwn` arm of
-                // `ingest_inbound_identified`).
-                if detail.rail != Rail::Smtp {
-                    self.observe_for_index(index_kind_for_rail(detail.rail), &id, &msg, None, None);
-                }
-                self.threads.append_message(&id, msg);
-                // Where the attachments just sent rest (FaunaMls: the sealed
-                // blobs on the room's home nest). No receive loop will ever
-                // tell this device — a sender never walks its own record back
-                // (`SendOutcome::attachment_coordinates`) — so without this an
-                // own attachment the budget evicts renders declared, and the
-                // Rule-3 flush below writes the `history/<ch>` slice without
-                // them (`conversations.md` § Attachments → *Retention*).
-                for (blob_hash, coordinates) in outcome.attachment_coordinates {
-                    self.remember_attachment_coordinates(blob_hash, coordinates);
-                }
-                // Sent: clear the draft body/subject/reply, back to Idle.
-                self.drafts.set(
-                    id.clone(),
-                    ComposeState {
-                        send_state: SendState::Idle,
-                        ..Default::default()
-                    },
-                );
-                // Sender-side channel-keying: once a FaunaMls group has
-                // bootstrapped and bound its channel, re-key the thread from the
-                // participant key `send_new_thread` created to channel-keyed,
-                // matching the receiver (`materialize_conv_thread`). Two
-                // sender-initiated groups with identical membership then stay
-                // distinct instead of colliding on the participant key.
-                if detail.rail == Rail::FaunaMls
-                    && let Some(channel_hex) = backend.channel_binding_hex(&id)
-                {
-                    self.threads.rekey_to_channel(&id, channel_hex);
-                }
-                self.notify();
-                // Rule 3 (durable-before-done): the send action completes only
-                // once the just-appended own message — which a sender can never
-                // MLS-decrypt off the log — is durably persisted.
-                self.persist_thread_history(&id).await;
-                // A list send's progress and today's meter moved with it.
-                self.refresh_list_send(Some(id)).await;
-                Ok(())
-            }
-            Err(e) => {
-                // The slot renders only product statements (`user_detail`, the
-                // send-slot taxonomy — conversations.md § Errors & edge cases);
-                // the raw error, diagnostics included, goes to the log here.
-                tracing::warn!("send failed: {e:?}");
-                self.set_send_state(&id, SendState::failed(e.user_detail()));
-                // An over-limit list send is explained beside the send it
-                // refused (`mail-mass-mailing.md` § The per-day per-account cap).
-                self.refresh_list_send(Some(id)).await;
-                Err(e)
-            }
-        }
+        self.send_compose(id, compose, true).await.map(|_| ())
     }
 
     /// Materialize the new-thread compose into a real thread, then send it
@@ -4533,6 +4901,127 @@ impl ConversationsManager {
                     e.user_detail(),
                 ));
             }
+        }
+    }
+
+    /// `room-search-button` — open the community room's search strip on
+    /// thread `id`, with nothing submitted (`room-search.md` § The surface).
+    /// A strip already open on this thread is left as it stands. Only a
+    /// thread whose `capabilities.can_search_room` holds paints the button.
+    pub fn open_room_search(&self, id: ThreadId) {
+        {
+            let mut slot = self.room_search.write().unwrap();
+            if slot.as_ref().is_some_and(|s| s.thread_id == id) {
+                return;
+            }
+            *slot = Some(RoomSearchState::idle(id));
+        }
+        self.notify();
+    }
+
+    /// Esc, or `room-search-button` again — close the strip on thread `id`,
+    /// dropping its query and results; the message stream returns.
+    pub fn close_room_search(&self, id: ThreadId) {
+        let closed = self
+            .room_search
+            .write()
+            .unwrap()
+            .take_if(|s| s.thread_id == id)
+            .is_some();
+        if closed {
+            self.notify();
+        }
+    }
+
+    /// Enter in `room-search-field`, or `room-search-submit-button` — search
+    /// the community room thread `id` is, through its home nest
+    /// (`room-search.md` § Where logic lives). Submit-driven: a blank query is
+    /// dropped here with no round-trip. The leg is the channel's recorded
+    /// home's — the same-nest `room.search` or the `room.search_remote` relay
+    /// — and the manager always asks for the room's posts and one default
+    /// page. The results replace the stream until the strip closes; a refusal
+    /// lands on the page's `error-message` and the result region stays blank.
+    ///
+    /// A reply that arrives after the strip was closed, or after another query
+    /// was submitted, is dropped: the strip shows only what it last asked.
+    ///
+    /// Once the hits paint, each post hit's envelope is read through the
+    /// post-read seam, one read per post, and its row repaints with the words;
+    /// a read that fails leaves that row word-less and the search standing.
+    pub async fn room_search(&self, id: ThreadId, query: String) {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let Some(backend) = self.backends.read().unwrap().get(&Rail::FaunaMls).cloned() else {
+            return;
+        };
+        self.clear_page_error();
+        *self.room_search.write().unwrap() = Some(RoomSearchState {
+            status: crate::room::RoomSearchStatus::Searching,
+            query: query.clone(),
+            ..RoomSearchState::idle(id.clone())
+        });
+        self.notify();
+        let answer = backend.room_search(id.clone(), query.clone()).await;
+        let mut post_reads = Vec::new();
+        let mut home = None;
+        {
+            let mut slot = self.room_search.write().unwrap();
+            let Some(state) = slot
+                .as_mut()
+                .filter(|s| s.thread_id == id && s.query == query)
+            else {
+                return;
+            };
+            match answer {
+                Ok(answer) => {
+                    for hit in &answer.hits {
+                        if let crate::backend::RoomSearchHitRef::Post { post_id_hex } = hit
+                            && !post_reads.contains(post_id_hex)
+                        {
+                            post_reads.push(post_id_hex.clone());
+                        }
+                    }
+                    home.clone_from(&answer.home_nest_url);
+                    state.status = crate::room::RoomSearchStatus::Done;
+                    state.answer = Some(answer);
+                }
+                Err(e) => {
+                    tracing::warn!("searching a room failed: {e:?}");
+                    state.status = crate::room::RoomSearchStatus::Failed;
+                    drop(slot);
+                    self.set_page_error(LocalizedText::key_arg(
+                        "conversations.unified.error_room_search",
+                        "message",
+                        e.user_detail(),
+                    ));
+                }
+            }
+        }
+        self.notify();
+        for post_id_hex in post_reads {
+            let envelope = match backend
+                .read_room_search_post(post_id_hex.clone(), home.clone())
+                .await
+            {
+                Ok(envelope) => envelope,
+                Err(e) => {
+                    tracing::warn!("reading a room search's post failed: {e:?}");
+                    continue;
+                }
+            };
+            {
+                let mut slot = self.room_search.write().unwrap();
+                let Some(state) = slot
+                    .as_mut()
+                    .filter(|s| s.thread_id == id && s.query == query)
+                else {
+                    return;
+                };
+                state.posts.insert(post_id_hex, envelope);
+            }
+            self.notify();
         }
     }
 
@@ -5561,6 +6050,13 @@ impl ConversationsManager {
     /// addresses, the picker's chips, `members_of`'s current members, blocked
     /// contacts and addresses with no rail; capped at
     /// [`RECIPIENT_SUGGESTION_CAP`]. Empty input suggests nothing.
+    ///
+    /// **The match gate** (§ *Matching*, ruled 2026-10-15): a correspondent seat's actor id is the dialed nest's bare
+    /// claim until the thread's bound group has proven it
+    /// ([`Self::proven_roster`], the paint gate's own source), so an unproven
+    /// seat is a spelling and nothing more — it matches on its spelling and
+    /// stored display alone, never on the overlay or the hex of the id it
+    /// claims, and ranks and dedupes as a spelling ([`SuggestionCandidate`]).
     fn recipient_suggestions(
         &self,
         picker: &RecipientPickerState,
@@ -5583,45 +6079,75 @@ impl ConversationsManager {
         {
             excluded.extend(detail.participants);
         }
-        let contacts = self.contacts.people_matching(query);
-        let mut correspondents = Vec::new();
+        let contacts = self
+            .contacts
+            .people_matching(query)
+            .into_iter()
+            .map(|(address, label)| SuggestionCandidate {
+                address,
+                label,
+                trusted_id: true,
+            });
+        let mut trusted = Vec::new();
+        let mut unproven = Vec::new();
         for (thread_id, participants, displays) in self.threads.correspondents() {
             let proven = self.proven_roster(&thread_id);
             for (participant, display) in participants.iter().zip(displays.iter()) {
-                if !self.correspondent_matches(query, participant, display) {
+                // A non-Fauna address has no id to claim; a Fauna seat's id is
+                // trusted only as a verified leaf of the thread's bound group.
+                let trusted_id = participant
+                    .person_actor_id()
+                    .is_none_or(|id| proven.as_deref().is_some_and(|r| r.contains(&id)));
+                if !self.correspondent_matches(query, participant, display, trusted_id) {
                     continue;
                 }
                 let painted = self
                     .gated_nickname_label(proven.as_deref(), participant, display)
                     .unwrap_or_else(|| display.clone());
-                correspondents.push((participant.clone(), painted));
+                let candidate = SuggestionCandidate {
+                    address: participant.clone(),
+                    label: painted,
+                    trusted_id,
+                };
+                if trusted_id {
+                    trusted.push(candidate);
+                } else {
+                    unproven.push(candidate);
+                }
             }
         }
         let blocked = |a: &TypedAddress| {
             a.person_actor_id()
                 .is_some_and(|id| self.contacts.is_blocked(&id.to_hex()))
         };
-        rank_recipient_suggestions(contacts, correspondents, &excluded, blocked)
+        rank_recipient_suggestions(
+            contacts.chain(trusted).chain(unproven).collect(),
+            &excluded,
+            blocked,
+        )
     }
 
     /// Whether `query` completes to the correspondent `participant` — the
-    /// roster filter over a Fauna person's handle, actor id, nickname and
-    /// labels, and the address spelling and stored display on every rail.
+    /// address spelling and stored display on every rail, and, only when the
+    /// seat's id is `trusted` (§ *Matching*'s match gate), the roster filter
+    /// over the Fauna person's handle, actor id, nickname and labels.
     fn correspondent_matches(
         &self,
         query: &str,
         participant: &TypedAddress,
         display: &str,
+        trusted: bool,
     ) -> bool {
         let q = query.to_lowercase();
         if participant.display().to_lowercase().contains(&q) || display.to_lowercase().contains(&q)
         {
             return true;
         }
-        participant.person_actor_id().is_some_and(|id| {
-            self.contacts
-                .matches_filter(query, participant.person_handle(), None, &id.to_hex())
-        })
+        trusted
+            && participant.person_actor_id().is_some_and(|id| {
+                self.contacts
+                    .matches_filter(query, participant.person_handle(), None, &id.to_hex())
+            })
     }
 
     /// A picker as the snapshot shows it: its derived suggestions filled in.
@@ -6022,36 +6548,66 @@ fn suggestion_spelling(addr: &TypedAddress) -> String {
     }
 }
 
+/// One row offered to [`rank_recipient_suggestions`]: the address, the label
+/// the picker shows, and whether the row's actor id is trusted — a contact's,
+/// a non-Fauna address (nothing to claim), or a Fauna seat the thread's bound
+/// group has proven. An untrusted id is the dialed nest's bare claim and
+/// counts for nothing in the dedupe (`conversations.md` § Recipient
+/// suggestions → *Matching*).
+struct SuggestionCandidate {
+    address: TypedAddress,
+    label: String,
+    trusted_id: bool,
+}
+
+impl SuggestionCandidate {
+    /// The dedupe predicate: [`TypedAddress::same_participant`] (actor id)
+    /// between two trusted-id rows, [`TypedAddress::same_address`] (spelling)
+    /// wherever either row's id is a bare claim — so a newer unproven seat
+    /// never shadows a proven seat or a contact of the id it claims.
+    fn same_known_participant(&self, other: &TypedAddress, other_trusted: bool) -> bool {
+        if self.trusted_id && other_trusted {
+            self.address.same_participant(other)
+        } else {
+            self.address.same_address(other)
+        }
+    }
+}
+
 /// Rank and trim the picker's completion (`conversations.md` § Where logic
-/// lives → *Recipient suggestions*): `contacts` (already ordered confirmed
-/// before accepted) ahead of `correspondents` (already newest thread first),
-/// the first of each person kept ([`TypedAddress::same_participant`]), every
+/// lives → *Recipient suggestions*): `candidates` already in trust-tier order
+/// — contacts (confirmed before accepted), then trusted-id correspondents,
+/// then unproven seats, newest thread first within a tier — the first of each
+/// person kept ([`SuggestionCandidate::same_known_participant`]), every
 /// address in `excluded`, every `blocked` one and every rail-less one dropped,
 /// at most [`RECIPIENT_SUGGESTION_CAP`] rows. Returns the addresses and their
-/// index-parallel labels.
+/// index-parallel labels. The exclusions compare by
+/// [`TypedAddress::same_participant`] as a chip's id is what its probe
+/// answered: a bare claim can hide a suggestion here, never surface one (the
+/// accepted residual § *Matching* names).
 fn rank_recipient_suggestions(
-    contacts: Vec<(TypedAddress, String)>,
-    correspondents: Vec<(TypedAddress, String)>,
+    candidates: Vec<SuggestionCandidate>,
     excluded: &[TypedAddress],
     blocked: impl Fn(&TypedAddress) -> bool,
 ) -> (Vec<TypedAddress>, Vec<String>) {
-    let mut addrs: Vec<TypedAddress> = Vec::new();
-    let mut labels = Vec::new();
-    for (addr, label) in contacts.into_iter().chain(correspondents) {
-        if addrs.len() >= RECIPIENT_SUGGESTION_CAP {
+    let mut kept: Vec<SuggestionCandidate> = Vec::new();
+    for candidate in candidates {
+        if kept.len() >= RECIPIENT_SUGGESTION_CAP {
             break;
         }
+        let addr = &candidate.address;
         if addr.rail().is_none()
-            || blocked(&addr)
-            || excluded.iter().any(|e| e.same_participant(&addr))
-            || addrs.iter().any(|a| a.same_participant(&addr))
+            || blocked(addr)
+            || excluded.iter().any(|e| e.same_participant(addr))
+            || kept
+                .iter()
+                .any(|k| k.same_known_participant(addr, candidate.trusted_id))
         {
             continue;
         }
-        addrs.push(addr);
-        labels.push(label);
+        kept.push(candidate);
     }
-    (addrs, labels)
+    kept.into_iter().map(|c| (c.address, c.label)).unzip()
 }
 
 /// The Fauna actor id of a message's sender, or None for a non-Fauna sender.
@@ -6708,6 +7264,12 @@ impl ConversationsManager {
                 .get("legal_takedown_ref")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            // …and `Some(reason)` the admin-block notice bubble, the same way
+            // (`moderation.md` § Admin block of a reported item).
+            admin_block_reason: p
+                .get("admin_block_reason")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             // The record's account-data-plane identity, which production derives
             // in `poll_inbound_conv` from the sealed envelope this synthetic seam
             // never has (`account-data-plane.md` § The replica boundary → T1).
@@ -6848,6 +7410,232 @@ fn fold_reply_quotes(messages: &mut [MessageSnapshot]) {
                     snippet: snippet.clone(),
                 },
             );
+        }
+    }
+}
+
+/// The verbs the conversations oracle's custodian performs through
+/// (`conversations-oracle.md` § The two classes) — and the one send path the
+/// page's own [`ConversationsManager::send`] shares. Deliberately outside the
+/// FFI-exported block: no app calls them; the custodian crate does.
+impl ConversationsManager {
+    /// Send `body` as a text message into an existing thread **without
+    /// touching its compose draft** — the conversations oracle's
+    /// `conversation.send` (`conversations-oracle.md` § The two classes, and
+    /// § Don't do these: *a half-written draft under the user's cursor survives
+    /// an LLM send*). The page's own send for the thread's rail, gated as the
+    /// page gates its reply bar (`ThreadCapabilities::can_send`); text only,
+    /// never attachments. Returns the sent message's id.
+    pub async fn send_text(&self, id: ThreadId, body: String) -> Result<MessageId, BackendError> {
+        if body.trim().is_empty() {
+            return Err(BackendError::Internal("a message needs a body".to_string()));
+        }
+        let Some(detail) = self.thread_detail(id.clone()) else {
+            return Err(BackendError::Internal("no such thread".to_string()));
+        };
+        // The page's reply bar, and the family gate's outbound rule: a peer the
+        // guardian decided against takes no send (`snapshot::GuardianState`).
+        if !detail.capabilities.can_send
+            || detail.guardian_state == Some(crate::snapshot::GuardianState::Blocked)
+        {
+            return Err(BackendError::NotSupported);
+        }
+        let compose = ComposeState {
+            body_draft: body,
+            ..Default::default()
+        };
+        self.send_compose(id, compose, false).await
+    }
+
+    /// The home nest's answer to a search of the community room `id`, with no
+    /// page state touched — not the strip, not the page's `error-message` —
+    /// for the conversations oracle's `conversation.read`
+    /// (`conversations-oracle.md` § The two classes). The same backend leg
+    /// [`Self::room_search`] takes; a blank query is refused.
+    pub async fn room_search_answer(
+        &self,
+        id: ThreadId,
+        query: String,
+    ) -> Result<crate::backend::RoomSearchAnswer, BackendError> {
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            return Err(BackendError::Internal("a search needs a query".to_string()));
+        }
+        let backend = self
+            .backends
+            .read()
+            .unwrap()
+            .get(&Rail::FaunaMls)
+            .cloned()
+            .ok_or(BackendError::NotSupported)?;
+        backend.room_search(id, query).await
+    }
+
+    /// The one send path behind [`Self::send`] and [`Self::send_text`]:
+    /// `compose` goes out through the thread's rail backend, and the sent copy
+    /// is appended, indexed and persisted. `drafted` is whether `compose` is
+    /// the thread's own draft — only then does the send stamp its
+    /// `send_state` and clear it.
+    async fn send_compose(
+        &self,
+        id: ThreadId,
+        compose: ComposeState,
+        drafted: bool,
+    ) -> Result<MessageId, BackendError> {
+        let Some(detail) = self.thread_detail(id.clone()) else {
+            return Err(BackendError::Internal("no such thread".to_string()));
+        };
+        let backend = self
+            .backends
+            .read()
+            .unwrap()
+            .get(&detail.rail)
+            .cloned()
+            .ok_or(BackendError::NotSupported)?;
+        // Resolve the light attachment drafts to bytes from the store, for the
+        // backend to put on the wire (SMTP inlines them as MIME parts). A draft
+        // whose bytes this device does not hold refuses here, before anything
+        // reaches the backend, into the same failure slot a backend rejection
+        // takes.
+        let attachments = match self.resolve_attachments(&compose) {
+            Ok(attachments) => attachments,
+            Err(e) => {
+                tracing::warn!("send refused before the backend: {e:?}");
+                if drafted {
+                    self.set_send_state(&id, SendState::failed(e.user_detail()));
+                }
+                return Err(e);
+            }
+        };
+
+        if drafted {
+            self.set_send_state(&id, SendState::Sending);
+        }
+
+        match backend.send(&detail, &compose, &attachments).await {
+            Ok(outcome) => {
+                // The sender's own "Sent" copy must render like the peers'
+                // received copy: on a markdown-capable rail (FaunaMls and —
+                // since html-mail.md — SMTP) the body is markdown, so flag it
+                // `Markdown` and the bubble renders `**bold**` formatted
+                // instead of as raw source (`conversations.md` § Layout —
+                // `dm-message-text` rendered per `body_format`). Non-markdown
+                // rails (a bridge) stay PlainText.
+                let body_format = if detail.capabilities.supports_markdown {
+                    BodyFormat::Markdown
+                } else {
+                    BodyFormat::PlainText
+                };
+                // The sender's own copy renders the attachments it just sent —
+                // the resolved set the backend received, so echo and wire agree;
+                // the bubble loads the real file via `attachment_bytes`.
+                let attachments = Self::sent_echo_attachments(&attachments);
+                let sent_id = outcome.message_id.clone();
+                let msg = MessageSnapshot {
+                    message_id: outcome.message_id,
+                    sender: outcome.sender,
+                    sender_display: String::new(),
+                    body: compose.body_draft.clone(),
+                    // The complete render document the shells paint (body +
+                    // attachment blocks), produced once here from the same
+                    // body+format+attachments (render-model.md § D1/D2).
+                    document: crate::message::document_for_message(
+                        &compose.body_draft,
+                        body_format,
+                        &attachments,
+                    ),
+                    timestamp_ms: outcome.timestamp_ms,
+                    subject_line: None,
+                    badges: MessageBadges::default(),
+                    reply_to: compose.reply_to.clone(),
+                    reactions: vec![],
+                    deleted: false,
+                    is_own: true,
+                    // A message the local user just sent is never taken down.
+                    legal_takedown_ref: None,
+                    admin_block_reason: None,
+                    // Own content is never classified as received-spam (mirrors
+                    // `observe_local_detection`'s is_own skip).
+                    labels: vec![],
+                    // Carried from the backend's outcome. A `conv` scope is a
+                    // member scope, so an own message on it is browse content
+                    // under T1 exactly like a received one — and this echo is
+                    // the only copy that will ever carry the ref.
+                    plane_ref: outcome.plane_ref,
+                    can_delete: false,
+                    undelivered: false,
+                    warmup_hold: None,
+                    scan_result_lines: Vec::new(),
+                    delivered_to: None,
+                    withheld: None,
+                };
+                // The own copy reaches the content index NOW — the receive poll
+                // never re-presents a sender's own record on the device that
+                // sent it, so without this a sent message stayed unsearchable
+                // until the next launch's store walk (`content-index-ingest.md`
+                // § Ingest triggers, v1 → the own-send ruling). Offered exactly
+                // as that walk would (no subject, no record id), so its re-offer
+                // next launch is dropped by the builder's guard. Mail waits for
+                // its Sent copy instead, which carries the record id a mail doc
+                // is identified by (the `AlreadyOwn` arm of
+                // `ingest_inbound_identified`).
+                if detail.rail != Rail::Smtp {
+                    self.observe_for_index(index_kind_for_rail(detail.rail), &id, &msg, None, None);
+                }
+                self.threads.append_message(&id, msg);
+                // Where the attachments just sent rest (FaunaMls: the sealed
+                // blobs on the room's home nest). No receive loop will ever
+                // tell this device — a sender never walks its own record back
+                // (`SendOutcome::attachment_coordinates`) — so without this an
+                // own attachment the budget evicts renders declared, and the
+                // Rule-3 flush below writes the `history/<ch>` slice without
+                // them (`conversations.md` § Attachments → *Retention*).
+                for (blob_hash, coordinates) in outcome.attachment_coordinates {
+                    self.remember_attachment_coordinates(blob_hash, coordinates);
+                }
+                // Sent: clear the draft body/subject/reply, back to Idle.
+                if drafted {
+                    self.drafts.set(
+                        id.clone(),
+                        ComposeState {
+                            send_state: SendState::Idle,
+                            ..Default::default()
+                        },
+                    );
+                }
+                // Sender-side channel-keying: once a FaunaMls group has
+                // bootstrapped and bound its channel, re-key the thread from the
+                // participant key `send_new_thread` created to channel-keyed,
+                // matching the receiver (`materialize_conv_thread`). Two
+                // sender-initiated groups with identical membership then stay
+                // distinct instead of colliding on the participant key.
+                if detail.rail == Rail::FaunaMls
+                    && let Some(channel_hex) = backend.channel_binding_hex(&id)
+                {
+                    self.threads.rekey_to_channel(&id, channel_hex);
+                }
+                self.notify();
+                // Rule 3 (durable-before-done): the send action completes only
+                // once the just-appended own message — which a sender can never
+                // MLS-decrypt off the log — is durably persisted.
+                self.persist_thread_history(&id).await;
+                // A list send's progress and today's meter moved with it.
+                self.refresh_list_send(Some(id)).await;
+                Ok(sent_id)
+            }
+            Err(e) => {
+                // The slot renders only product statements (`user_detail`, the
+                // send-slot taxonomy — conversations.md § Errors & edge cases);
+                // the raw error, diagnostics included, goes to the log here.
+                tracing::warn!("send failed: {e:?}");
+                if drafted {
+                    self.set_send_state(&id, SendState::failed(e.user_detail()));
+                }
+                // An over-limit list send is explained beside the send it
+                // refused (`mail-mass-mailing.md` § The per-day per-account cap).
+                self.refresh_list_send(Some(id)).await;
+                Err(e)
+            }
         }
     }
 }

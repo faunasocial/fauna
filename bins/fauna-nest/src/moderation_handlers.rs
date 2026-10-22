@@ -25,6 +25,10 @@ use fauna_protocol::moderation::{
     AbuseReportWithdrawRequest, MAX_ABUSE_REPORT_EXCERPT_BYTES, MAX_ABUSE_REPORT_NOTE_BYTES,
 };
 use fauna_protocol::moderation::{
+    AdminBlockEntry, ModerationAdminBlockListReply, ModerationAdminBlockListRequest,
+    ModerationAdminBlockReply, ModerationAdminBlockRequest,
+};
+use fauna_protocol::moderation::{
     LabelStat, ModerationActionsReply, ModerationActionsRequest, ModerationAppealReply,
     ModerationAppealRequest, ModerationLegalTakedownReply, ModerationLegalTakedownRequest,
     ModerationReportShareSetReply, ModerationReportShareSetRequest,
@@ -38,6 +42,7 @@ use fauna_protocol::moderation::{
 use fauna_protocol::spam::probability_to_per_mille;
 use fauna_protocol::{LocalizedText, RpcError, Value, decode_strict as decode};
 
+use crate::db::admin_block::{AdminBlockTarget, AdminBlockWrite, AdminUnblockWrite};
 use crate::db::moderation::{
     AbuseReportInsert, AbuseReportResolve, AbuseReportRow, AbuseReportWithdraw, AppealRecord,
     AppealSubject, NewAbuseReport,
@@ -116,9 +121,15 @@ fn actions_handler() -> RpcHandler {
                     tracing::error!("get_obligation_actions_for_author error: {e}");
                     internal("storage error")
                 })?;
-            let actions = rows
-                .into_iter()
-                .map(|a| ObligationAction {
+            let mut actions = Vec::with_capacity(rows.len());
+            for a in rows {
+                // A row another nest delivered names where it was decided —
+                // the issuer's verified id resolved to the host it answers at.
+                let issuer_nest = match a.issuer_nest_id.as_deref() {
+                    Some(issuer) => crate::moderation_federation::issuer_host(&state, issuer).await,
+                    None => None,
+                };
+                actions.push(ObligationAction {
                     id: a.id,
                     content_type: a.content_type,
                     content_id: a.content_id,
@@ -126,9 +137,10 @@ fn actions_handler() -> RpcHandler {
                     confidence_per_mille: probability_to_per_mille(a.confidence),
                     action: a.action_taken,
                     timestamp: a.timestamp,
+                    issuer_nest,
                     extra: BTreeMap::new(),
-                })
-                .collect();
+                });
+            }
             encode_reply(&ModerationActionsReply {
                 actions,
                 extra: BTreeMap::new(),
@@ -147,15 +159,7 @@ fn appeal_handler() -> RpcHandler {
             if req.content_id.is_empty() {
                 return Err(invalid_params("content_id required"));
             }
-            if req.reason.is_empty() {
-                return Err(invalid_params("reason required"));
-            }
-            // The appeal lands on the permanent, un-prunable audit chain, so its
-            // free text is bounded by the constant the shared client guard
-            // renders too — refused before any read or write.
-            if req.reason.len() > MAX_APPEAL_REASON_BYTES {
-                return Err(invalid_params("reason too long"));
-            }
+            check_appeal_reason(&req.reason)?;
             // One spelling per record: a 32-byte hex id is keyed lowercase, so a
             // case-varied repeat is the same (appellant, content_id) pair to the
             // pending bound below, and matches the takedown's own obligation
@@ -173,8 +177,10 @@ fn appeal_handler() -> RpcHandler {
             // `appeal_subject` owns what counts (post obligation row,
             // `content_meta` flag, the post-delete floor row, or a conv
             // record's `segment_records.legal_takedown_ref`) and whose appeal it
-            // is: a post-side record names its author, and only they appeal; a
-            // conv record persists no sender, so any caller holding its id does.
+            // is: a record whose author a source names — a post's, or a conv
+            // record's attested author through its queue row — is theirs alone
+            // to appeal; a conv record no attestation names, any caller holding
+            // its id.
             let subject = state
                 .db
                 .appeal_subject(&content_id)
@@ -184,35 +190,88 @@ fn appeal_handler() -> RpcHandler {
                     internal("storage error")
                 })?
                 .ok_or_else(|| not_found("no enforcement record for this content"))?;
-            if let AppealSubject::Author(author) = subject
-                && author != actor_id
-            {
-                return Err(permission_denied(
-                    "only the author may appeal this decision",
-                ));
-            }
-            // At most one pending appeal per (caller, content): a repeat before
-            // the next decision collapses onto the recorded one and writes
-            // nothing — idempotent for a retry, and no chain growth per call.
-            let recorded = state
-                .db
-                .record_appeal(&content_id, &actor_id, &req.reason)
-                .await
-                .map_err(|e| {
-                    tracing::error!("record_appeal error: {e}");
-                    internal("storage error")
-                })?;
-            let status = match recorded {
-                AppealRecord::Recorded => "appeal_recorded",
-                AppealRecord::AlreadyPending => "appeal_already_recorded",
+            let status = match subject {
+                AppealSubject::Author(author) | AppealSubject::Delivered { author, .. }
+                    if author != actor_id =>
+                {
+                    return Err(permission_denied(
+                        "only the author may appeal this decision",
+                    ));
+                }
+                // Another nest decided: its admin reviews the appeal and its
+                // chain bounds it, so this nest relays and keeps no pending
+                // state (`moderation.md` § Legal takedown → *The author homed
+                // on another nest*).
+                AppealSubject::Delivered {
+                    issuer_nest_id,
+                    issuer_ref,
+                    ..
+                } => {
+                    crate::moderation_federation::relay_appeal(
+                        &state,
+                        &actor_id,
+                        &content_id,
+                        &issuer_nest_id,
+                        &issuer_ref,
+                        &req.reason,
+                    )
+                    .await?
+                }
+                AppealSubject::Author(_) | AppealSubject::Unattributed => {
+                    record_appeal_for(&state, &actor_id, &content_id, &req.reason).await?
+                }
             };
             encode_reply(&ModerationAppealReply {
-                status: status.into(),
+                status,
                 content_id: req.content_id,
                 extra: BTreeMap::new(),
             })
         })
     })
+}
+
+/// The bounds every appeal reason meets, local or relayed. The appeal lands on
+/// the permanent, un-prunable audit chain, so its free text is bounded by the
+/// constant the shared client guard renders too — refused before any read or
+/// write.
+pub(crate) fn check_appeal_reason(reason: &str) -> Result<(), RpcError> {
+    if reason.is_empty() {
+        return Err(invalid_params("reason required"));
+    }
+    if reason.len() > MAX_APPEAL_REASON_BYTES {
+        return Err(invalid_params("reason too long"));
+    }
+    Ok(())
+}
+
+/// Record `appellant`'s appeal of `content_id` on this nest's chain — the one
+/// body a local author's appeal and an appeal a foreign author's home relayed
+/// here both run (`moderation.md` § Errors & edge cases, the appeal bullet):
+/// the reason bounds, then at most one pending appeal per (appellant,
+/// content) — a repeat before the next decision collapses onto the recorded
+/// one and writes nothing, idempotent for a retry and no chain growth per call
+/// — and the `moderation:appeal` row with the appellant as its actor. The
+/// caller has already gated who may appeal. Returns the reply's `status`.
+pub(crate) async fn record_appeal_for(
+    state: &AppState,
+    appellant: &[u8; 32],
+    content_id: &str,
+    reason: &str,
+) -> Result<String, RpcError> {
+    check_appeal_reason(reason)?;
+    let recorded = state
+        .db
+        .record_appeal(content_id, appellant, reason)
+        .await
+        .map_err(|e| {
+            tracing::error!("record_appeal error: {e}");
+            internal("storage error")
+        })?;
+    Ok(match recorded {
+        AppealRecord::Recorded => "appeal_recorded",
+        AppealRecord::AlreadyPending => "appeal_already_recorded",
+    }
+    .into())
 }
 
 // ── fauna.moderation.train ─────────────────────────────────────────────
@@ -257,8 +316,13 @@ fn train_handler() -> RpcHandler {
             // absent post, so a quarantined post leaks no existence signal and
             // a withheld one captures no report.
             match crate::routes::get_post_core(&state, Some(actor_id), post_id_bytes).await {
-                crate::routes::GetPostOutcome::Found(_) => {}
+                // The author's own read of a post an admin blocked keeps its
+                // body, so the author may still train on it; anyone else's is
+                // withheld like a takedown.
+                crate::routes::GetPostOutcome::Found(_)
+                | crate::routes::GetPostOutcome::AdminBlocked { body: Some(_), .. } => {}
                 crate::routes::GetPostOutcome::LegalTakedown { .. }
+                | crate::routes::GetPostOutcome::AdminBlocked { body: None, .. }
                 | crate::routes::GetPostOutcome::NotFound => {
                     return Err(not_found("post not found"));
                 }
@@ -333,13 +397,14 @@ fn train_handler() -> RpcHandler {
 ///   sealed under the client's own `BackupKey` — the nest cannot surgically
 ///   remove one message from an aggregate blob it cannot read).
 ///
-/// **No obligation-queue row** (unlike the post path): conv records persist no
-/// sender (`segment_records_insert_conv`), so the nest cannot attribute a stored
-/// sealed message to an author post-hoc and there is no author to key
-/// `obligation_action_records` to. The **in-thread tombstone** (every member
-/// sees it on `channel.fetch`) is the member-visible transparency surface, and
-/// `fauna.moderation.appeal` accepts the `content_id` from any member, so the
-/// required transparency triple (tombstone, appeal, audit) holds. Structural
+/// **The author's obligation-queue row, as for a post** (`moderation.md`
+/// § Legal takedown → *Conversations*): the nest cannot read the record, but
+/// it attested its sender on `channel.send` (`conv_record_authors`), so a
+/// takedown of an attested record writes the author's `TakenDown` row — the
+/// author's one signal, since their own devices never receive the tombstone —
+/// and the appeal is theirs alone. A record no attestation names writes no
+/// row, and `fauna.moderation.appeal` admits any holder of its id. The triple
+/// is the in-thread tombstone, the appeal handle and the audit row. Structural
 /// guards otherwise mirror the post path: takedown demands a non-empty
 /// `legal_reference`; `restore` overturns (tombstone-not-delete — the record
 /// survives and re-serves); a permanent audit row records who and why.
@@ -373,6 +438,7 @@ async fn conversation_legal_takedown(
         .ok_or_else(|| not_found("conversation message not found"))?;
     let channel_hex = hex::encode(channel);
     let admin_hex = hex::encode(actor_id);
+    let now_us = fauna_core::data::Timestamp::now_or_zero().as_i64();
 
     if req.restore {
         // Overturn: clear the flag (the message re-serves) + audit, atomically
@@ -385,10 +451,12 @@ async fn conversation_legal_takedown(
                 &record_cid,
                 &content_id_hex,
                 None,
+                actor_id.as_slice(),
                 &format!(
                     "admin={admin_hex} channel={channel_hex} kind=conversation reason={}",
                     req.legal_reference
                 ),
+                now_us,
             )
             .await
             .map_err(|e| {
@@ -411,27 +479,34 @@ async fn conversation_legal_takedown(
     }
 
     // Withhold the sealed record from future relay fetches + carry the
-    // tombstone, and write the permanent audit row (who, which channel, the
-    // legal reference) — atomically, in one transaction: `"taken_down"` is
-    // never replied or audited unless the flag write actually matched the
-    // record, and a withheld record always has its audit row (§§ F1/F4). No
-    // obligation-action row — see the fn doc (E2E sender-unattributable).
-    state
+    // tombstone, queue the attested author's row, and write the permanent
+    // audit row (who, which channel, the legal reference) — atomically, in one
+    // transaction: `"taken_down"` is never replied or audited unless the flag
+    // write actually matched the record, and a withheld record always has its
+    // transparency rows (§§ F1/F4).
+    let queued = state
         .db
         .conv_legal_takedown_txn(
             &record_cid,
             &content_id_hex,
             Some(&req.legal_reference),
+            actor_id.as_slice(),
             &format!(
                 "admin={admin_hex} channel={channel_hex} kind=conversation reference={}",
                 req.legal_reference
             ),
+            now_us,
         )
         .await
         .map_err(|e| {
             tracing::error!("conv legal-takedown txn error: {e}");
             internal("storage error")
         })?;
+    // A foreign member reads their queue on their own home: the attested
+    // author's row goes there.
+    if let Some(row_id) = queued {
+        crate::moderation_federation::deliver_obligation(state, row_id).await;
+    }
 
     encode_reply(&ModerationLegalTakedownReply {
         status: "taken_down".into(),
@@ -584,7 +659,7 @@ async fn legal_takedown_core(
     //    classifier emission; `obligation_id` records the issuing
     //    admin; confidence 1.0 = a definitive legal action),
     // 3) the permanent transparent audit row (who, what, reference).
-    state
+    let queued = state
         .db
         .post_legal_takedown_txn(
             &post_id,
@@ -614,11 +689,28 @@ async fn legal_takedown_core(
         tracing::warn!("nostr kind-5 takedown propagation: {e}");
     }
 
+    // Bluesky write-through delete — the author's delete leg on its second
+    // trigger: a copy cross-posted through the member's linked account must
+    // not outlive the post's servable life (`takedown-and-block.md` § Legal
+    // takedown → *The linked Bluesky account's cross-post*; same leg as
+    // `delete_post_core`'s step 5). Fire-and-forget + non-fatal, a clean no-op
+    // for a post never cross-posted; a failure keeps the mapping for the
+    // `post_delete_redrive` sweep. The restore arm above re-creates nothing.
+    #[cfg(feature = "bluesky")]
+    crate::bluesky::spawn_write_through_delete(state.clone(), author, post_id);
+
     // The author's web site: the render's enumeration now skips the post, but
     // pages already rendered keep serving it until something re-renders — and
     // nothing periodic does. So re-render here, before the reply, the way the
     // blob withhold is rebuilt before it: "taken_down" means the site is shut.
     rerender_web_site_after_flag_change(&state, &author, &post_id).await;
+
+    // A projected foreign post's author reads their queue on their own home:
+    // the row goes there (`moderation.md` § Legal takedown → *The author homed
+    // on another nest*).
+    if let Some(row_id) = queued {
+        crate::moderation_federation::deliver_obligation(&state, row_id).await;
+    }
 
     encode_reply(&ModerationLegalTakedownReply {
         status: "taken_down".into(),
@@ -756,7 +848,7 @@ async fn legal_takedown_of_deleted_post(
     // to write it to), no second ATProto retraction witness, no Nostr
     // kind-5, no web re-render (`moderation.md` § Legal takedown →
     // *Posts*).
-    state
+    let queued = state
         .db
         .post_legal_takedown_of_deleted_post_txn(
             post_id,
@@ -777,6 +869,7 @@ async fn legal_takedown_of_deleted_post(
             tracing::error!("post legal-takedown-of-deleted-post txn error: {e}");
             internal("storage error")
         })?;
+    crate::moderation_federation::deliver_obligation(state, queued).await;
 
     encode_reply(&ModerationLegalTakedownReply {
         status: "taken_down".into(),
@@ -819,6 +912,265 @@ async fn rerender_web_site_after_flag_change(
     if let Err(e) = wcs.rerender_after_moderation_change(author).await {
         tracing::error!("web re-render after a legal-takedown flag change: {e:#}");
     }
+}
+
+// ── fauna.moderation.admin_block{,.list} ───────────────────────────────
+
+/// The admin's block of one reported item (`moderation.md` § Admin block of a
+/// reported item). The flag moves in one direction or the other on every
+/// successful call, so — exactly as [`legal_takedown_handler`] — the derived
+/// blob-serve withhold is rebuilt before the reply: "blocked" means the
+/// attachment door is already shut. Non-fatal for the same reason as there.
+fn admin_block_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            let reply = admin_block_core(&state, actor_id, payload).await?;
+            if let Err(e) = crate::moderation_withhold::recompute(
+                &state.db,
+                crate::backup::gc::PostBodySource {
+                    segments: &state.post_segments,
+                },
+            )
+            .await
+            {
+                tracing::error!(
+                    "rebuilding the blob withhold after an admin-block flag change: {e}"
+                );
+            }
+            Ok(reply)
+        })
+    })
+}
+
+/// Resolve a report's subject to the item a block withholds: a post this nest
+/// stores or projects (a forwarded copy's subject counts — the block binds this
+/// nest's serving only), or a conversation record it relays. An `actor`
+/// subject is refused: a block is of one item, and the account levers are
+/// `admin.md`'s. Returns the target, the item's id in its one spelling, and
+/// its `content_type` word.
+async fn admin_block_target(
+    state: &AppState,
+    report: &AbuseReportRow,
+) -> Result<(AdminBlockTarget, String, &'static str), RpcError> {
+    match report.subject_kind.as_str() {
+        "post" => {
+            let post_id = fauna_core::hex32::decode(&report.subject_id)
+                .map_err(|_| invalid_params("the reported post id is not a 32-byte hex id"))?;
+            let author = state
+                .db
+                .get_content_author(&post_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("get_content_author error: {e}");
+                    internal("storage error")
+                })?
+                .ok_or_else(|| not_found("this nest holds no such post"))?;
+            Ok((
+                AdminBlockTarget::Post { post_id, author },
+                hex::encode(post_id),
+                "post",
+            ))
+        }
+        "message" => {
+            // The record digest the report carries is the legal takedown's
+            // conversation `content_id`; the mirror keys on its dag-cbor Cid.
+            let record_id = fauna_core::hex32::decode(&report.subject_id).map_err(|_| {
+                invalid_params("the reported message's record id is not a 32-byte hex id")
+            })?;
+            let record_cid = fauna_cbor::Cid::from_digest_dag_cbor(record_id);
+            state
+                .db
+                .conv_record_scope_and_takedown(&record_cid)
+                .await
+                .map_err(|e| {
+                    tracing::error!("conv_record_scope_and_takedown error: {e}");
+                    internal("storage error")
+                })?
+                .ok_or_else(|| not_found("this nest holds no such conversation message"))?;
+            Ok((
+                AdminBlockTarget::Conversation { record_cid },
+                hex::encode(record_id),
+                "conversation",
+            ))
+        }
+        "actor" => Err(invalid_params(
+            "a block is of one item — an account report has the account levers",
+        )),
+        _ => Err(invalid_params(
+            "the report's subject is not one this nest can block",
+        )),
+    }
+}
+
+/// The block/unblock act itself — everything that must land with the flag,
+/// split out so [`admin_block_handler`] rebuilds the blob withhold once.
+///
+/// What it deliberately does NOT do (`moderation.md` § Admin block of a
+/// reported item → decision 5 and *What a block is not*): no off-box
+/// retraction — no `tombstone/post` witness, no Nostr kind-5, no ATProto
+/// `deleteRecord`; the one predicate family withholds from now on and that is
+/// all — and nothing beyond the existing outcome reaches the reporter, nothing
+/// but the notice and the appeal reaches the author.
+async fn admin_block_core(
+    state: &Arc<AppState>,
+    actor_id: [u8; 32],
+    payload: Bytes,
+) -> Result<Bytes, RpcError> {
+    require_permission(state, &actor_id, "fauna.moderation.admin_block").await?;
+    let req: ModerationAdminBlockRequest = decode(&payload).map_err(malformed)?;
+    if req.report_id.is_empty() {
+        return Err(invalid_params("report_id required"));
+    }
+    let report = state
+        .db
+        .get_abuse_report(&req.report_id)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| not_found("no such report"))?;
+    let (target, content_id_hex, content_type) = admin_block_target(state, &report).await?;
+    let admin_hex = hex::encode(actor_id);
+    let reply = |status: &str| {
+        encode_reply(&ModerationAdminBlockReply {
+            status: status.into(),
+            content_id: content_id_hex.clone(),
+            content_type: content_type.into(),
+            extra: BTreeMap::new(),
+        })
+    };
+
+    if req.restore {
+        match state
+            .db
+            .admin_unblock_txn(
+                &target,
+                &content_id_hex,
+                &report.id,
+                &format!(
+                    "admin={admin_hex} report={} reason={} kind={content_type}",
+                    report.id, report.reason
+                ),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("admin-unblock txn error: {e}");
+                internal("storage error")
+            })? {
+            AdminUnblockWrite::Restored | AdminUnblockWrite::AlreadyRestored => {}
+            AdminUnblockWrite::NotBlockedByThisReport => {
+                return Err(crate::rpc_errors::conflict_ns(
+                    "moderation",
+                    "the item is not blocked under this report",
+                ));
+            }
+        }
+        // The author's web site re-serves the post at once, as after a
+        // takedown's overturn.
+        if let AdminBlockTarget::Post { post_id, author } = &target {
+            rerender_web_site_after_flag_change(state, author, post_id).await;
+        }
+        return reply("restored");
+    }
+
+    let now = fauna_core::data::Timestamp::now_or_zero().as_i64();
+    let author_note = match &target {
+        AdminBlockTarget::Post { author, .. } => format!(" author={}", hex::encode(author)),
+        AdminBlockTarget::Conversation { .. } => String::new(),
+    };
+    match state
+        .db
+        .admin_block_txn(
+            &target,
+            &content_id_hex,
+            &report.id,
+            &report.reason,
+            &actor_id,
+            &format!(
+                "admin={admin_hex}{author_note} report={} reason={} kind={content_type}",
+                report.id, report.reason
+            ),
+            now,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("admin-block txn error: {e}");
+            internal("storage error")
+        })? {
+        AdminBlockWrite::Blocked {
+            report: row,
+            obligation_row,
+        } => {
+            // A foreign author's queue row goes to their home, as a
+            // takedown's does.
+            if let Some(row_id) = obligation_row {
+                crate::moderation_federation::deliver_obligation(state, row_id).await;
+            }
+            // The report is resolved *acted* — the reporter learns exactly
+            // what `abuse_report.resolve` would tell them, nothing more.
+            if row.origin_nest_id.is_some()
+                && let Err(e) = crate::abuse_report_federation::return_outcome(
+                    state,
+                    &row,
+                    AbuseReportOutcome::Acted,
+                )
+                .await
+            {
+                tracing::error!("abuse report outcome forward after a block: {e:#}");
+            }
+            if let Some(reporter) = row
+                .reporter_actor
+                .as_deref()
+                .and_then(|r| <[u8; 32]>::try_from(r).ok())
+                && let Err(e) =
+                    notify_abuse_reporter(state, &reporter, &row.id, AbuseReportOutcome::Acted)
+                        .await
+            {
+                tracing::error!(
+                    "abuse report outcome notification after a block: {}",
+                    e.code
+                );
+            }
+        }
+        AdminBlockWrite::AlreadyBlocked => {}
+        AdminBlockWrite::ReportNotOpen => {
+            return Err(crate::rpc_errors::conflict_ns(
+                "moderation",
+                "the report is no longer open",
+            ));
+        }
+    }
+    // The author's web site: the render's enumeration now skips the post
+    // (`MODERATION_SERVABLE`), but pages already rendered keep serving it
+    // until something re-renders — so re-render now, as after a takedown.
+    if let AdminBlockTarget::Post { post_id, author } = &target {
+        rerender_web_site_after_flag_change(state, author, post_id).await;
+    }
+    reply("blocked")
+}
+
+/// `fauna.moderation.admin_block.list` — every item an admin block currently
+/// withholds, newest first, keyed by the report each block cites.
+fn admin_block_list_handler() -> RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_permission(&state, &actor_id, "fauna.moderation.admin_block.list").await?;
+            let _req: ModerationAdminBlockListRequest = decode(&payload).map_err(malformed)?;
+            let rows = state.db.list_admin_blocks().await.map_err(internal)?;
+            let items = rows
+                .into_iter()
+                .map(|row| AdminBlockEntry {
+                    report_id: row.report.id.clone(),
+                    subject: abuse_subject_of(&row.report),
+                    reason: AbuseReportReason::from_token(&row.report.reason),
+                    blocked_at: row.report.resolved_at.unwrap_or(row.report.created_at),
+                    extra: BTreeMap::new(),
+                })
+                .collect();
+            encode_reply(&ModerationAdminBlockListReply {
+                items,
+                extra: BTreeMap::new(),
+            })
+        })
+    })
 }
 
 // ── fauna.moderation.report_share.set ──────────────────────────────────
@@ -1562,6 +1914,34 @@ fn abuse_report_resolve_handler() -> RpcHandler {
 
 // ── registration entry point ───────────────────────────────────────────
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's reports queue and blocked list (the legal takedown is sovereign and absent) — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 4] = [
+        (
+            "fauna.moderation.abuse_report.queue",
+            abuse_report_queue_handler(),
+        ),
+        (
+            "fauna.moderation.abuse_report.resolve",
+            abuse_report_resolve_handler(),
+        ),
+        ("fauna.moderation.admin_block", admin_block_handler()),
+        (
+            "fauna.moderation.admin_block.list",
+            admin_block_list_handler(),
+        ),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 pub fn register_moderation_handlers(b: &mut RpcRouterBuilder) {
     let quick = || Duration::from_secs(5);
     let heavy = || Duration::from_secs(10);
@@ -1676,6 +2056,18 @@ pub fn register_moderation_handlers(b: &mut RpcRouterBuilder) {
             "fauna.moderation.abuse_report.resolve",
             heavy(),
             abuse_report_resolve_handler(),
+        ),
+        // The admin's block of a reported item (mirrors
+        // `KindRegistry::register_moderation_kinds`).
+        (
+            "fauna.moderation.admin_block",
+            heavy(),
+            admin_block_handler(),
+        ),
+        (
+            "fauna.moderation.admin_block.list",
+            quick(),
+            admin_block_list_handler(),
         ),
     ] {
         b.add(

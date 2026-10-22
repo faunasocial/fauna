@@ -91,9 +91,9 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | app | `tests/e2e-unified/tests/test_signed_in_relaunch_stays_ready.py::test_a_signed_in_app_relaunches_reset_ready` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_onboarding_logged_in_terminal_web.py::test_web_logged_in_terminal_survives_a_page_reload` | web (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_resilience` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
-| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_feed_rehydrate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): failed, tui (macos): passed |
+| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_nest_flip_feed_rehydrate` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (macos): passed |
 | 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_page_machines_open_no_socket_of_their_own` | web (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_a_folders_gesture_lands_the_moment_the_app_reads_online_after_a_flip` | web (linux): passed, linux (linux): failed, tui (linux): failed |
+| 6 | app | `tests/e2e-unified/tests/test_nest_flip_resilience.py::test_a_folders_gesture_lands_the_moment_the_app_reads_online_after_a_flip` | web (linux): passed, linux (linux): failed, tui (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_api_helpers.py::test_auth_token` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/api/test_onboarding.py::test_alice_self_service_onboarding` | nest (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_reach_hint_dial_journey.py::test_the_hint_opens_a_connected_app_and_the_domains_first_answer_drops_it` | web (linux): skipped, linux (linux): skipped, windows (windows): failed, tui (linux): passed |

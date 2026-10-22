@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.fauna.app.core.ApiClient
 import com.fauna.app.ui.util.firstListingRefusal
 import uniffi.fauna_client_config.MutedWordsSnapshot
+import uniffi.fauna_core.MutedKeywordLevel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +39,11 @@ class MutedWordsVM @Inject constructor(
     val page = MutableStateFlow(MutedWordsSnapshot(keywords = emptyList(), loaded = false))
     val isLoading = MutableStateFlow(false)
     val errorMessage = MutableStateFlow<String?>(null)
+
+    /** A mutation's round trip is in flight: the add/remove buttons and every
+     *  level picker wait for the returned record
+     *  (`ui/settings.md` § Muted words — the level picker). */
+    val busy = MutableStateFlow(false)
 
     init {
         load()
@@ -89,23 +95,32 @@ class MutedWordsVM @Inject constructor(
     fun add(term: String) {
         val t = term.trim()
         if (t.isEmpty()) return
-        viewModelScope.launch {
-            try {
-                page.value = api.mutedKeywordsAdd(t)
-            } catch (e: Exception) {
-                errorMessage.value = e.message
-            }
-        }
+        mutate { page.value = api.mutedKeywordsAdd(t) }
     }
 
     /** Remove a term — add's inverse on the same delta seam; removing a term
      *  already gone is a success no-op (convergence, not an error). */
     fun remove(term: String) {
+        mutate { page.value = api.mutedKeywordsRemove(term) }
+    }
+
+    /** Set a term's level — a delta on the same seam; the row repaints from the
+     *  returned record, never from the picked value. */
+    fun setLevel(term: String, level: MutedKeywordLevel) {
+        mutate { page.value = api.mutedKeywordsSetLevel(term, level) }
+    }
+
+    /** One mutation's round trip: [busy] for its duration, its failure on
+     *  [errorMessage]. */
+    private fun mutate(call: suspend () -> Unit) {
         viewModelScope.launch {
+            busy.value = true
             try {
-                page.value = api.mutedKeywordsRemove(term)
+                call()
             } catch (e: Exception) {
                 errorMessage.value = e.message
+            } finally {
+                busy.value = false
             }
         }
     }

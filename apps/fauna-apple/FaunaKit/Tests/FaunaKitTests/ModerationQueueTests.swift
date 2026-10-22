@@ -99,3 +99,19 @@ import Foundation
     #expect(rows[0].source == .server)
     #expect(rows[0].action == 1)
 }
+
+// MARK: - Queue row badge facts (moderation.md § Element IDs → Queue row facts)
+
+@Test func badgeFactsCarryCategoryConfidenceAndTheResolvedAction() {
+    let facts = ModerationQueueVM.badgeFacts(category: "spam", confidencePerMille: 1000, action: 1)
+    #expect(facts["category"] == "spam")
+    #expect(facts["confidence"] == "100%")
+    #expect(facts["action"] == "Quarantined")
+}
+
+@Test func badgeFactsOfALocalDetectionHaveNoAction() {
+    let facts = ModerationQueueVM.badgeFacts(category: "spam", confidencePerMille: 875, action: nil)
+    #expect(facts["action"] == nil)
+    #expect(facts["confidence"] == "88%")
+    #expect(facts["category"] == "spam")
+}

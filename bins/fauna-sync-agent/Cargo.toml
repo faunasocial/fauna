@@ -168,6 +168,9 @@ fauna-client.workspace = true
 # than hand-rolling kinds or the restore record. Path dep (not a root workspace
 # alias), matching fauna-nest-http.
 fauna-client-sync = { path = "../../libs/fauna-client-sync" }
+# The Share leaf's label the `--share-target` mode prints — the same
+# `file_context_menu.*` catalog strings Explorer's leaf resolves.
+fauna-i18n = { path = "../../libs/fauna-i18n" }
 # The shared `fauna.folders.*` call surface + the `rescan_interval_for` cadence
 # resolver (priority #2/#3 — the same nest-authoritative `rescan_interval_secs`
 # every device honors; linux's engine loop reads it through the same helper). No
@@ -259,6 +262,10 @@ tempfile.workspace = true
 # (mirroring the `fauna-account-store` entry below); this only turns its
 # test-only module on for this crate's own test build.
 fauna-sync-engine = { workspace = true, features = ["account-runtime", "test-helpers"] }
+# `fauna_core::log_redact_scan` — the source scanner `log_redaction_test.rs`
+# shares with the engine's own pin. Already a normal dependency; this only
+# turns its test-only module on for this crate's own test build.
+fauna-core = { workspace = true, features = ["test-helpers"] }
 # `locks::EngineLock` — the W5.1 election's own primitive, used by
 # `agent_process_tier3` as the EXTERNAL observable that the agent process
 # mounted the shared account store (a held `flock` is a causal fact no timing

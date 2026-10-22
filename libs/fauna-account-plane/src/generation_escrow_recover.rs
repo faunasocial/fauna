@@ -487,6 +487,84 @@ where
     }
 }
 
+/// The plane arm ALONE — key every live generation, and every predecessor
+/// mint the fleet walk declined, from the merged `fauna.state.escrow-wrap`
+/// rows, asking no door. Returns how many keys it recorded into the fleet
+/// plane's custody (`0` with none attached). The custodian restore gesture's
+/// opener (`account-replica-posture.md` § *Escrow custody*, rulings (2) and
+/// (6)): it runs between the gesture's state-plane walk and its content walk
+/// over the custodian's session, which serves no escrow door — so the door
+/// half of [`ensure_recovered`], and its receipt and memo bounds, have no
+/// place there, and the pump's own pass still asks the door for what this
+/// leaves unkeyed.
+///
+/// # Errors
+/// Store I/O only.
+pub async fn open_plane_wraps<B, R>(
+    store: &AccountStore<B>,
+    fleet: &AccountStatePlane<'_, B, R>,
+    trust: &GenerationTrust,
+    writer_key: &SigningKey,
+    identity_seed: &[u8; 32],
+    predecessors: &[ActorKeypair],
+) -> Result<usize>
+where
+    B: StoreBackend,
+    R: RpcRequester + Clone,
+{
+    let Some(custody) = fleet.generation_custody() else {
+        return Ok(0);
+    };
+    let view = crate::fleet_removal::fleet_view(store, trust).await?;
+    let opener = EscrowOpener::new(identity_seed, &trust.root);
+    let predecessor_openers: Vec<EscrowOpener<'_>> = predecessors
+        .iter()
+        .map(|kp| EscrowOpener::new(kp.secret_bytes(), &kp.actor_id()))
+        .collect();
+    let mut candidates = Vec::new();
+    for entry in live_rows(store, KIND_GENERATION_MINT).await? {
+        if let Some(minted) = minted_core(&entry) {
+            candidates.push(minted);
+        }
+    }
+    candidates.extend(
+        fleet
+            .unkeyed_predecessor_mints()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.generation_id, c.core)),
+    );
+    let mut recovered = 0usize;
+    for (generation_id, core) in candidates {
+        crate::pass_breath::pass_breath().await;
+        if generation_tip::generation_key_for(
+            store,
+            &generation_id,
+            writer_key,
+            Some(custody),
+            Some(&view),
+        )
+        .await?
+        .is_some()
+        {
+            continue;
+        }
+        if let Some(key) =
+            open_from_plane(store, &opener, &predecessor_openers, &generation_id, &core).await?
+        {
+            custody.record_generation_key(&generation_id, &key);
+            recovered += 1;
+        }
+    }
+    if recovered > 0 {
+        tracing::info!(
+            recovered,
+            "generation escrow recovery: keys opened from the plane"
+        );
+    }
+    Ok(recovered)
+}
+
 /// The first of `opener`'s and then each of `predecessors`' merged
 /// `fauna.state.escrow-wrap` rows for `generation_id` that opens to `core`'s
 /// committed key — the plane-first step of the recovery pass.

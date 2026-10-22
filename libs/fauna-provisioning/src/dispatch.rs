@@ -320,14 +320,15 @@ impl VpsProvider for VpsDispatch {
         &self,
         client: &reqwest::Client,
         curated_ids: &[&str],
+        location: &str,
     ) -> Result<Vec<ServerTypeInfo>, ProvisionError> {
         match self {
-            Self::Hetzner(p) => p.list_server_types(client, curated_ids).await,
-            Self::Digitalocean(p) => p.list_server_types(client, curated_ids).await,
-            Self::Vultr(p) => p.list_server_types(client, curated_ids).await,
-            Self::Ovh(p) => p.list_server_types(client, curated_ids).await,
-            Self::Linode(p) => p.list_server_types(client, curated_ids).await,
-            Self::Bundled(p) => p.list_server_types(client, curated_ids).await,
+            Self::Hetzner(p) => p.list_server_types(client, curated_ids, location).await,
+            Self::Digitalocean(p) => p.list_server_types(client, curated_ids, location).await,
+            Self::Vultr(p) => p.list_server_types(client, curated_ids, location).await,
+            Self::Ovh(p) => p.list_server_types(client, curated_ids, location).await,
+            Self::Linode(p) => p.list_server_types(client, curated_ids, location).await,
+            Self::Bundled(p) => p.list_server_types(client, curated_ids, location).await,
         }
     }
 

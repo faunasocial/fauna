@@ -25,19 +25,25 @@ class MutedWordsContentTest {
 
     private fun render(
         words: List<String> = emptyList(),
+        levels: Map<String, String> = emptyMap(),
         loaded: Boolean = true,
+        busy: Boolean = false,
         error: String? = null,
         onAdd: (String) -> Unit = {},
         onRemove: (String) -> Unit = {},
+        onSetLevel: (String, String) -> Unit = { _, _ -> },
     ) {
         composeTestRule.setContent {
             MutedWordsContent(
-                words = words,
+                rows = words.map { MutedWordRowState(it, levels[it] ?: "hide") },
+                levelOptions = listOf("hide" to "Hide", "show-less" to "Show less"),
                 loaded = loaded,
+                busy = busy,
                 error = error,
                 onBack = {},
                 onAdd = onAdd,
                 onRemove = onRemove,
+                onSetLevel = onSetLevel,
             )
         }
     }
@@ -97,6 +103,38 @@ class MutedWordsContentTest {
         render(words = listOf("spam"), onRemove = { removed = it })
         composeTestRule.onNodeWithTag("muted-word-remove-button").performClick()
         assertEquals("spam", removed)
+    }
+
+    /** Each row paints its level picker from the row's level token (the whole
+     *  difference a soft row shows), and picking the other option reports the
+     *  TOKEN, never the label. */
+    @Test
+    fun levelPickerPaintsTheRowsLevelAndReportsThePickedToken() {
+        var picked: Pair<String, String>? = null
+        render(
+            words = listOf("spam", "lottery"),
+            levels = mapOf("lottery" to "show-less"),
+            onSetLevel = { term, token -> picked = term to token },
+        )
+        composeTestRule.onAllNodesWithTag("muted-word-level-select").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("muted-word-level-select")[0].assertTextEquals("Hide")
+        composeTestRule.onAllNodesWithTag("muted-word-level-select")[1].assertTextEquals("Show less")
+        composeTestRule.onAllNodesWithTag("muted-word-level-select")[0].performClick()
+        // The menu's option, not the second row's own picker, which paints
+        // "Show less" too.
+        composeTestRule.onNode(hasText("Show less") and hasAnyAncestor(isPopup()))
+            .performClick()
+        assertEquals("spam" to "show-less", picked)
+    }
+
+    /** A round trip in flight desensitizes the picker, the remove button and
+     *  the add button together. */
+    @Test
+    fun theRowControlsWaitWhileARoundTripIsInFlight() {
+        render(words = listOf("spam"), busy = true)
+        composeTestRule.onNodeWithTag("muted-word-level-select").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("muted-word-remove-button").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("muted-word-add-button").assertIsNotEnabled()
     }
 
     @Test

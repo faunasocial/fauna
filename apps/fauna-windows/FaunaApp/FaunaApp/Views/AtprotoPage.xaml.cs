@@ -542,7 +542,7 @@ public sealed partial class AtprotoPage : Page, IAsyncLoadedPage
     private async void Mint_Click(object sender, RoutedEventArgs e)
     {
         if (_applying || _vm is null) return;
-        await _vm.MintCredentialAsync(Strings.Get("atproto_settings/default_credential_label"));
+        await _vm.MintCredentialAsync(Strings.Get("atproto_settings/default_credential_label"), MintDmAccess.IsChecked == true);
         ApplyVm();
     }
 

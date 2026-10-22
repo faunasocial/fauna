@@ -231,6 +231,75 @@ pub(crate) async fn connect_authed(
     Ok(AnonWsAdapter::new(ws_stream))
 }
 
+/// The path of the principal session (`transport-connection.md` § Connection
+/// lifecycle → *The principal session*): one endpoint for every principal, no
+/// `{actor_id}` segment — the token names the principal.
+pub const PRINCIPAL_WS_PATH: &str = "/api/v1/principal/ws";
+
+/// One refused principal-session upgrade, read off the nest's answer.
+pub(crate) enum PrincipalDialRefusal {
+    /// `401` naming `use_dpop_nonce`, with the nonce the retry must bind.
+    NonceRequired(String),
+    /// Any other failure, already mapped.
+    Other(AnonClientError),
+}
+
+/// Dial the principal session at `nest_url` with a DPoP-bound access token:
+/// `Sec-WebSocket-Protocol: fauna.v1, dpop.<token>, dpop-proof.<proof>`. The
+/// proof is the caller's (it holds the key); this dial only carries it and
+/// reads a `use_dpop_nonce` refusal back so the caller can re-prove once.
+/// TLS is the strict WebPKI-or-graduated-pin dial [`connect_authed`] uses.
+pub(crate) async fn connect_principal(
+    nest_url: &str,
+    token: &str,
+    proof: &str,
+) -> Result<AnonWsAdapter, PrincipalDialRefusal> {
+    let base = fauna_core::web::http_to_ws(nest_url.trim_end_matches('/'));
+    let url = format!("{base}{PRINCIPAL_WS_PATH}");
+    let mut request: Request = url.into_client_request().map_err(|e| {
+        PrincipalDialRefusal::Other(AnonClientError::WebSocket(format!("invalid ws url: {e}")))
+    })?;
+    let protocols = HeaderValue::from_str(&format!("fauna.v1, dpop.{token}, dpop-proof.{proof}"))
+        .map_err(|e| {
+        PrincipalDialRefusal::Other(AnonClientError::WebSocket(format!(
+            "bad principal subprotocol header: {e}"
+        )))
+    })?;
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", protocols);
+    let pin = crate::tls_dial::resolve_graduated_pin(&request);
+    match crate::tls_dial::dial_ws_trusted(request, fauna_ws_substrate::rpc_ws_config(), pin).await
+    {
+        Ok((ws_stream, _resp)) => Ok(AnonWsAdapter::new(ws_stream)),
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp))
+            if resp.status().as_u16() == 401
+                && resp
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.contains("use_dpop_nonce")) =>
+        {
+            match resp
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|v| v.to_str().ok())
+            {
+                Some(nonce) => Err(PrincipalDialRefusal::NonceRequired(nonce.to_string())),
+                None => Err(PrincipalDialRefusal::Other(AnonClientError::WebSocket(
+                    "principal session refused: use_dpop_nonce without a DPoP-Nonce".into(),
+                ))),
+            }
+        }
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) if resp.status().as_u16() != 426 => {
+            Err(PrincipalDialRefusal::Other(AnonClientError::WebSocket(
+                format!("principal session refused: HTTP {}", resp.status().as_u16()),
+            )))
+        }
+        Err(e) => Err(PrincipalDialRefusal::Other(map_ws_connect_err(e))),
+    }
+}
+
 /// Map a WS-upgrade failure to an [`AnonClientError`]: a nest answering HTTP
 /// `426` refused this app's subprotocol before any socket opened, which is
 /// [`AnonClientError::SubprotocolMismatch`] — the app is too old for the nest,

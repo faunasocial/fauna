@@ -269,6 +269,10 @@ pub enum Action {
     /// Mail-vs-social mode, decided here because cloud-init needs mail-intent
     /// *and* the RAM tier before the box boots (`onboarding.md:231`).
     SetProvisionMailMode(bool),
+    /// The `vps-config-ssh-door-toggle` (default off): a key-only sshd for the
+    /// admin, decided here because it is written into the box's cloud-init
+    /// (`onboarding-provisioning.md` § 5).
+    SetProvisionSshDoor(bool),
     /// Which builds the box's updater follows — a
     /// `vps-config-update-channel-row[<channel>]` pick, decided here for the
     /// same reason as the mail mode: it is written into the box's cloud-init.
@@ -289,6 +293,12 @@ pub enum Action {
     /// surface's own line-per-record text, this one the machine's pre-rendered
     /// markdown table (`dns_post_instructions()`).
     CopyDnsPostInstructions,
+
+    // --- the terms notice (`terms-and-content-guidelines.md` § The decisions, item 3) ---
+    /// `onboarding-terms-link` — client-local like [`Action::CopySecret`]: a
+    /// terminal cannot open a browser, so the link shows `fauna_core::TERMS_URL`
+    /// and copies it (OSC 52).
+    CopyTermsUrl,
 
     // --- box recovery, step 4 (`box-recovery.md` § Recovery UI (step 4)) ---
     /// `recover-lost-box-button` on `identity_choice` — the fresh-client recovery
@@ -394,6 +404,12 @@ impl Wizard {
         // NAT step's exits through the one-tap trust offer. The other six apps
         // leave it undeclared and keep exiting straight to `Done`.
         machine.set_renders_trust_prompt(true);
+        // A desktop app keeps a door key where SSH keys live: the run writes
+        // it to `~/.ssh` with a `Host` entry (`installers/vps.md` § The SSH
+        // door → *The key*).
+        if let Some(home) = std::env::home_dir() {
+            machine.set_ssh_door_key_dir(Some(home.join(".ssh").display().to_string()));
+        }
         Wizard {
             machine,
             inputs: HashMap::new(),
@@ -801,7 +817,7 @@ pub async fn run_action(
     // The confirm arms below are the *only* readers; every other action leaves
     // the sink untouched.
     let commit = |secret: &str| {
-        crate::session::persist_confirmed_identity(&confirm_sink, secret);
+        crate::session::persist_confirmed_identity(&confirm_sink, &machine, secret);
     };
     match action {
         BeginCreateIdentity => machine.begin_create_identity(),
@@ -953,6 +969,7 @@ pub async fn run_action(
             }
         }
         SetProvisionMailMode(on) => machine.set_provision_mail_mode(on),
+        SetProvisionSshDoor(on) => machine.set_provision_ssh_door(on),
         SetProvisionUpdateChannel(channel) => machine.set_provision_update_channel(channel),
         VerifyVps => {
             let _ = machine.verify_vps().await;
@@ -1010,7 +1027,40 @@ pub async fn run_action(
             }
         }
         ExitRecovery => machine.reset(),
+        CopyTermsUrl => copy_to_clipboard(fauna_core::TERMS_URL),
     }
+}
+
+/// The text of both terms links — `settings-terms-link` and the notice's
+/// `onboarding-terms-link`: the label and the URL it copies, so a terminal
+/// that ignores OSC 52 still shows where the terms are.
+pub(crate) fn terms_link_label() -> String {
+    format!(
+        "{}: {}",
+        fauna_i18n::strings::settings::TERMS_LINK,
+        fauna_core::TERMS_URL
+    )
+}
+
+/// The by-continuing terms notice, painted just above a page's bottom row on
+/// `invite_request`, `claim_code` and `nest_provisioning` always, and on
+/// `handle_entry` while the snapshot's `terms_notice_visible` says Continue
+/// signs in (`terms-and-content-guidelines.md` § The decisions, item 3; § Element
+/// IDs). One builder for the four pages, so they cannot drift.
+pub(crate) fn terms_notice() -> [Element; 2] {
+    [
+        Element::label(
+            fauna_ui_ids::ONBOARDING_TERMS_NOTICE,
+            fauna_i18n::strings::onboarding::terms::NOTICE,
+        ),
+        Element::button(
+            fauna_ui_ids::ONBOARDING_TERMS_LINK,
+            terms_link_label(),
+            true,
+            Action::CopyTermsUrl,
+        )
+        .attr("href", fauna_core::TERMS_URL),
+    ]
 }
 
 /// Put `text` on the terminal's clipboard with OSC 52. The sequence is

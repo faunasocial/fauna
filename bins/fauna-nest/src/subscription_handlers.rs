@@ -92,7 +92,7 @@ pub(crate) fn permission_denied(reason: &str) -> RpcError {
 
 pub(crate) use crate::rpc_errors::internal;
 
-fn not_subscribed(reason: &str) -> RpcError {
+pub(crate) fn not_subscribed(reason: &str) -> RpcError {
     let mut e = RpcError::new(
         "fauna.subscriptions.not_subscribed",
         "error.subscriptions.not_subscribed",
@@ -101,7 +101,7 @@ fn not_subscribed(reason: &str) -> RpcError {
     e
 }
 
-fn key_blob_not_found(reason: &str) -> RpcError {
+pub(crate) fn key_blob_not_found(reason: &str) -> RpcError {
     let mut e = RpcError::new(
         "fauna.subscriptions.key_blob_not_found",
         "error.subscriptions.key_blob_not_found",
@@ -110,7 +110,7 @@ fn key_blob_not_found(reason: &str) -> RpcError {
     e
 }
 
-fn tier_not_found(reason: &str) -> RpcError {
+pub(crate) fn tier_not_found(reason: &str) -> RpcError {
     crate::rpc_errors::tier_not_found_ns("subscriptions", reason)
 }
 
@@ -468,6 +468,18 @@ fn status_get_handler() -> RpcHandler {
             let req: StatusGetRequest = decode(&payload).map_err(malformed_upload)?;
             let author_id = req.author_id.0;
 
+            // A follow of an author homed on another nest reads this nest's
+            // `remote_follows` record — what the home last told it
+            // (`federated-follow.md` § Decision 2, the state leg).
+            let remote = state
+                .db
+                .remote_follows_of(&subscriber_id, &author_id)
+                .await
+                .map_err(internal)?;
+            if !remote.is_empty() {
+                return encode_reply(&remote_status(&remote));
+            }
+
             let subscribed = state
                 .db
                 .get_subscribed_tiers(&author_id, &subscriber_id)
@@ -544,6 +556,33 @@ fn status_get_handler() -> RpcHandler {
     })
 }
 
+/// `status.get` for an author homed on another nest, from the follower's own
+/// `remote_follows` rows: the tier reported is an approved paid one when there
+/// is one, else the approved `followers` tier (this nest holds no ranks for a
+/// foreign author's tiers); `follow_pending` is the `followers` row still
+/// waiting on the author.
+fn remote_status(rows: &[crate::db::remote_follows::RemoteFollowRow]) -> StatusGetReply {
+    use crate::db::remote_follows::RemoteFollowState;
+    let approved = || {
+        rows.iter()
+            .filter(|r| r.state == RemoteFollowState::Approved)
+    };
+    let tier = approved()
+        .find(|r| r.tier != FOLLOWERS_TIER)
+        .or_else(|| approved().next())
+        .map(|r| r.tier.clone());
+    let follow_pending = rows
+        .iter()
+        .any(|r| r.tier == FOLLOWERS_TIER && r.state == RemoteFollowState::Pending);
+    StatusGetReply {
+        tier,
+        expires_at: None,
+        auto_approve: false,
+        follow_pending,
+        extra: Default::default(),
+    }
+}
+
 /// Is a follow asked and waiting — a `subscribe` request for the `followers`
 /// tier pending while the tier is not held (`StatusGetReply::follow_pending`)?
 async fn follow_pending(
@@ -595,6 +634,7 @@ fn requests_list_handler() -> RpcHandler {
                     // on the `subscribe_requests` row at enqueue time).
                     mlkem_encaps_key: r.mlkem_encaps_key.map(ByteBuf::from),
                     payment_entitled: r.payment_entitled,
+                    home: r.home_nest_url,
                     extra: Default::default(),
                 });
             }
@@ -822,9 +862,38 @@ fn mine_list_handler() -> RpcHandler {
                     handle,
                     // MySubscriptionRow.since is epoch seconds; Timestamp is micros.
                     since: Timestamp((r.since as u64).saturating_mul(1_000_000)),
+                    home_nest_url: None,
                     extra: Default::default(),
                 });
             }
+
+            // Follows of authors homed on other nests (`federated-follow.md`
+            // § Decision 2): an approved one is active, a waiting one pending;
+            // a refused or ended one is no subscription.
+            for f in state
+                .db
+                .remote_follows_for_subscriber(&subscriber_id)
+                .await
+                .map_err(internal)?
+            {
+                use crate::db::remote_follows::RemoteFollowState;
+                let status = match f.state {
+                    RemoteFollowState::Approved => "active",
+                    RemoteFollowState::Pending => "pending",
+                    RemoteFollowState::Rejected | RemoteFollowState::Removed => continue,
+                };
+                subscriptions.push(MineSubscription {
+                    author_id: ActorId(f.author_id),
+                    tier: f.tier,
+                    status: status.to_string(),
+                    handle: None,
+                    since: Timestamp((f.updated_at as u64).saturating_mul(1_000_000)),
+                    home_nest_url: Some(f.home_nest_url),
+                    extra: Default::default(),
+                });
+            }
+            // Active rows first, as the local list already orders them.
+            subscriptions.sort_by_key(|s| s.status != "active");
 
             encode_reply(&MineListReply {
                 subscriptions,
@@ -853,6 +922,19 @@ fn key_blob_get_handler() -> RpcHandler {
                     .await
                     .map_err(internal)?;
                 if !subscribed {
+                    // The remote arm (`federated-follow.md` § Decision 3): an
+                    // approved follow of an author homed elsewhere reads the
+                    // blob from the home, relayed — never cached here.
+                    if let Some(reply) = crate::follow_federation::remote_key_blob(
+                        &state,
+                        &subscriber_id,
+                        &author_id,
+                        &req.tier_name,
+                    )
+                    .await?
+                    {
+                        return encode_reply(&reply);
+                    }
                     return Err(not_subscribed("not subscribed to this tier"));
                 }
             }
@@ -1499,7 +1581,7 @@ fn requests_reject_handler() -> RpcHandler {
         Box::pin(async move {
             let req: RejectRequestRequest = decode(&payload).map_err(malformed_upload)?;
 
-            let (req_author, _req_subscriber, _tier_name, _kind, _ek) = state
+            let (req_author, req_subscriber, tier_name, kind, _ek) = state
                 .db
                 .get_subscribe_request(req.request_id)
                 .await
@@ -1514,9 +1596,32 @@ fn requests_reject_handler() -> RpcHandler {
                 return Err(permission_denied("request belongs to another author"));
             }
 
+            let subscriber_home = state
+                .db
+                .subscribe_request_home(req.request_id)
+                .await
+                .map_err(internal)?;
+
             // HTTP twin ignores the delete result (best-effort cleanup); we
             // do the same — the auth check is the load-bearing step.
             let _ = state.db.delete_subscribe_request(req.request_id).await;
+
+            // The state leg: a remote subscriber's refused follow is told so.
+            // A rejected leave changes no follow, so it pushes nothing.
+            if kind == "subscribe"
+                && let Some(home) = subscriber_home
+                && let Ok(subscriber) = <[u8; 32]>::try_from(req_subscriber.as_slice())
+            {
+                crate::follow_federation::enqueue_follow_state(
+                    &state,
+                    &author_id,
+                    &subscriber,
+                    &tier_name,
+                    &home,
+                    crate::db::remote_follows::RemoteFollowState::Rejected,
+                )
+                .await;
+            }
 
             encode_reply(&RejectRequestReply {
                 rejected: true,
@@ -1703,6 +1808,30 @@ async fn subscribe_core(
     subscriber_id: [u8; 32],
     req: &SubscribeRequest,
 ) -> Result<SubscribeReply, RpcError> {
+    subscribe_core_from(state, subscriber_id, req, None).await
+}
+
+/// A subscriber's home nest when it is not this one — the verified origin
+/// that carried the federated follow's intent, and the URL resolved from it
+/// (`federated-follow.md` § Decision 2). Stamped on every request row the
+/// twin writes, and copied onto the roster row at approval.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SubscriberHome<'a> {
+    pub nest_id: &'a [u8; 32],
+    pub url: Option<&'a str>,
+}
+
+/// [`subscribe_core`] for a subscriber who may live on another nest: `home` is
+/// `Some` exactly when the federated follow's twin
+/// (`follow_federation`, on this — the author's — nest) runs it for a remote
+/// subscriber, and `None` at the bearer and principal doors, where a request
+/// naming an author homed elsewhere takes the remote arm instead.
+pub(crate) async fn subscribe_core_from(
+    state: &Arc<AppState>,
+    subscriber_id: [u8; 32],
+    req: &SubscribeRequest,
+    home: Option<SubscriberHome<'_>>,
+) -> Result<SubscribeReply, RpcError> {
     let author_id = req.author_id.0;
 
     // The client half already refuses an author subscribing to
@@ -1728,6 +1857,26 @@ async fn subscribe_core(
         return Err(malformed_upload(
             "mlkem_encaps_key must be 1184 bytes (ML-KEM-768)",
         ));
+    }
+
+    // The remote arm (`federated-follow.md` § Decision 2): an author NOT
+    // hosted here whose home the caller names is followed there, through the
+    // caller's own signed intent — any tier, a paid one included (the home
+    // refuses that as it refuses a local one). Checked before the followers
+    // provision below, which is for a hosted author only. An author hosted
+    // here is a local follow whatever home the caller names; an unhosted one
+    // with no home named falls through to today's `tier_not_found`.
+    if home.is_none()
+        && let Some(home_url) = req.home_nest_url.as_deref()
+        && state
+            .db
+            .get_user(&author_id)
+            .await
+            .map_err(internal)?
+            .is_none()
+    {
+        return crate::follow_federation::remote_subscribe(state, subscriber_id, req, home_url)
+            .await;
     }
 
     // Follow = subscribe to the free "followers" tier. The nest
@@ -1849,6 +1998,7 @@ async fn subscribe_core(
             })
             .map(|r| r.id)
             .ok_or_else(|| internal("has_pending says yes but list_requests is empty"))?;
+        stamp_request_home(state, existing_id, home).await?;
         return Ok(SubscribeReply::Queued {
             request_id: existing_id,
         });
@@ -1860,7 +2010,90 @@ async fn subscribe_core(
         .insert_subscribe_request(&author_id, &subscriber_id, &req.tier, "subscribe", mlkem_ek)
         .await
         .map_err(internal)?;
+    stamp_request_home(state, request_id, home).await?;
     Ok(SubscribeReply::Queued { request_id })
+}
+
+/// Carry a remote subscriber's home onto a request row (a no-op for a local
+/// subscriber's).
+async fn stamp_request_home(
+    state: &Arc<AppState>,
+    request_id: i64,
+    home: Option<SubscriberHome<'_>>,
+) -> Result<(), RpcError> {
+    if let Some(home) = home {
+        state
+            .db
+            .set_subscribe_request_home(request_id, home.nest_id, home.url)
+            .await
+            .map_err(internal)?;
+    }
+    Ok(())
+}
+
+/// What a subscribe would be answered with, read and never written — the
+/// federated twin's answer to an intent older than one it has already acted on
+/// (`federated-follow.md` § Decision 2, the monotonic rule). `None` when the
+/// subscriber neither holds the tier nor has it pending.
+pub(crate) async fn subscribe_state(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+    tier: &str,
+) -> Result<Option<SubscribeReply>, RpcError> {
+    if state
+        .db
+        .is_subscriber(author_id, subscriber_id, tier)
+        .await
+        .map_err(internal)?
+    {
+        return Ok(Some(SubscribeReply::Approved {
+            tier: tier.to_string(),
+            expires_at: None,
+        }));
+    }
+    let pending = pending_request_id(state, author_id, subscriber_id, tier, "subscribe").await?;
+    Ok(pending.map(|request_id| SubscribeReply::Queued { request_id }))
+}
+
+/// [`subscribe_state`]'s twin for a leave: the first queued unsubscribe row,
+/// or `None` when no leave is pending.
+pub(crate) async fn unsubscribe_state(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+) -> Result<Option<UnsubscribeReply>, RpcError> {
+    let rows = state
+        .db
+        .list_subscribe_requests(author_id)
+        .await
+        .map_err(internal)?;
+    Ok(rows
+        .into_iter()
+        .find(|r| r.kind == "unsubscribe" && r.subscriber_id.as_slice() == subscriber_id.as_slice())
+        .map(|r| UnsubscribeReply::Queued { request_id: r.id }))
+}
+
+async fn pending_request_id(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+    tier: &str,
+    kind: &str,
+) -> Result<Option<i64>, RpcError> {
+    let rows = state
+        .db
+        .list_subscribe_requests(author_id)
+        .await
+        .map_err(internal)?;
+    Ok(rows
+        .into_iter()
+        .find(|r| {
+            r.kind == kind
+                && r.tier_name == tier
+                && r.subscriber_id.as_slice() == subscriber_id.as_slice()
+        })
+        .map(|r| r.id))
 }
 
 /// `fauna.subscriptions.encaps_key.publish` — the caller's subscriber
@@ -1917,54 +2150,88 @@ fn unsubscribe_handler() -> RpcHandler {
             let req: UnsubscribeRequest = decode(&payload).map_err(malformed_upload)?;
             let author_id = req.author_id.0;
 
-            // Held tiers, narrowed to rank >= 1 (the scope note above).
-            let held = state
-                .db
-                .get_subscribed_tiers(&author_id, &subscriber_id)
-                .await
-                .map_err(internal)?;
-            let mut tiers: Vec<String> = Vec::new();
-            for name in held {
-                let rank = state
+            // The remote arm, as at `subscribe` (`federated-follow.md`
+            // § Decision 2): an author not hosted here whose home is named.
+            if let Some(home_url) = req.home_nest_url.as_deref()
+                && state
                     .db
-                    .get_subscription_tier(&author_id, &name)
+                    .get_user(&author_id)
                     .await
                     .map_err(internal)?
-                    .map(|t| t.rank)
-                    .unwrap_or(FOLLOWERS_TIER_RANK);
-                if rank >= 1 {
-                    tiers.push(name);
-                }
-            }
-            if tiers.is_empty() {
-                return Err(not_subscribed(
-                    "no active subscription under this author to unsubscribe from",
-                ));
-            }
-
-            let mut first_queued: Option<i64> = None;
-            for tier_name in &tiers {
-                // The author's client owns the removal rotation.
-                let id = state
-                    .db
-                    .insert_subscribe_request(
-                        &author_id,
-                        &subscriber_id,
-                        tier_name,
-                        "unsubscribe",
-                        None, // unsubscribe carries no published ek
-                    )
-                    .await
-                    .map_err(internal)?;
-                first_queued.get_or_insert(id);
+                    .is_none()
+            {
+                let reply = crate::follow_federation::remote_unsubscribe(
+                    &state,
+                    subscriber_id,
+                    &req,
+                    home_url,
+                )
+                .await?;
+                return encode_reply(&reply);
             }
 
-            // `tiers` is non-empty (checked above), so a row was enqueued.
-            let request_id =
-                first_queued.ok_or_else(|| internal("unsubscribe enqueued no request"))?;
-            encode_reply(&UnsubscribeReply::Queued { request_id })
+            let (reply, _tiers) =
+                unsubscribe_core(&state, &author_id, &subscriber_id, None).await?;
+            encode_reply(&reply)
         })
     })
+}
+
+/// The unsubscribe door's body, shared with the federated twin (which passes
+/// the remote subscriber's `home`). Returns the reply and the tiers a leave
+/// was queued for.
+pub(crate) async fn unsubscribe_core(
+    state: &Arc<AppState>,
+    author_id: &[u8; 32],
+    subscriber_id: &[u8; 32],
+    home: Option<SubscriberHome<'_>>,
+) -> Result<(UnsubscribeReply, Vec<String>), RpcError> {
+    // Held tiers, narrowed to rank >= 1 (the scope note above).
+    let held = state
+        .db
+        .get_subscribed_tiers(author_id, subscriber_id)
+        .await
+        .map_err(internal)?;
+    let mut tiers: Vec<String> = Vec::new();
+    for name in held {
+        let rank = state
+            .db
+            .get_subscription_tier(author_id, &name)
+            .await
+            .map_err(internal)?
+            .map(|t| t.rank)
+            .unwrap_or(FOLLOWERS_TIER_RANK);
+        if rank >= 1 {
+            tiers.push(name);
+        }
+    }
+    if tiers.is_empty() {
+        return Err(not_subscribed(
+            "no active subscription under this author to unsubscribe from",
+        ));
+    }
+
+    let mut first_queued: Option<i64> = None;
+    for tier_name in &tiers {
+        // The author's client owns the removal rotation.
+        let id = state
+            .db
+            .insert_subscribe_request(
+                author_id,
+                subscriber_id,
+                tier_name,
+                "unsubscribe",
+                None, // unsubscribe carries no published ek
+            )
+            .await
+            .map_err(internal)?;
+        stamp_request_home(state, id, home).await?;
+        first_queued.get_or_insert(id);
+    }
+
+    // `tiers` is non-empty (checked above), so a row was enqueued.
+    let request_id = first_queued.ok_or_else(|| internal("unsubscribe enqueued no request"))?;
+    Ok((UnsubscribeReply::Queued { request_id }, tiers))
 }
 
 // ── requests.approve / subscribers.remove ──────────────────────
@@ -2002,6 +2269,14 @@ async fn encrypted_approve(
     state
         .db
         .add_subscriber(author_id, subscriber_id, tier_name, mlkem_encaps_key)
+        .await
+        .map_err(internal)?;
+    // A remote subscriber's home rides from the request onto the roster row
+    // (`federated-follow.md` § Decision 2) — what the key-blob relay binds
+    // to and what the state leg is addressed by.
+    state
+        .db
+        .copy_subscribe_request_home(request_id, author_id, subscriber_id, tier_name)
         .await
         .map_err(internal)?;
     store_uploaded_blob(state, author_id, tier_name, upload, checked.next_version).await?;
@@ -2093,6 +2368,11 @@ fn requests_approve_handler() -> RpcHandler {
             }
 
             let upload = req.encrypted_upload.ok_or_else(missing_upload)?;
+            let subscriber_home = state
+                .db
+                .subscribe_request_home(req.request_id)
+                .await
+                .map_err(internal)?;
             let reply = encrypted_approve(
                 &state,
                 &author_id,
@@ -2128,6 +2408,19 @@ fn requests_approve_handler() -> RpcHandler {
                 .await
             {
                 tracing::error!("requests.approve: unlock fan-out enqueue({tier_name}): {e}");
+            }
+            // The state leg (`federated-follow.md` § Decision 2): a subscriber
+            // homed on another nest hears of the approval through its nest.
+            if let Some(home) = subscriber_home {
+                crate::follow_federation::enqueue_follow_state(
+                    &state,
+                    &author_id,
+                    &subscriber_id,
+                    &tier_name,
+                    &home,
+                    crate::db::remote_follows::RemoteFollowState::Approved,
+                )
+                .await;
             }
             Ok(reply)
         })
@@ -2183,7 +2476,27 @@ fn subscribers_remove_handler() -> RpcHandler {
             let tier_name = req.tier_name;
 
             let upload = req.encrypted_upload.ok_or_else(missing_upload)?;
-            encrypted_remove(&state, &author_id, &subscriber_id, &tier_name, &upload).await
+            let subscriber_home = state
+                .db
+                .subscriber_home(&author_id, &subscriber_id, &tier_name)
+                .await
+                .map_err(internal)?;
+            let reply =
+                encrypted_remove(&state, &author_id, &subscriber_id, &tier_name, &upload).await?;
+            // The state leg: the author's removal and the drain's committed
+            // leave both land here, and both end a remote follow.
+            if let Some(home) = subscriber_home {
+                crate::follow_federation::enqueue_follow_state(
+                    &state,
+                    &author_id,
+                    &subscriber_id,
+                    &tier_name,
+                    &home,
+                    crate::db::remote_follows::RemoteFollowState::Removed,
+                )
+                .await;
+            }
+            Ok(reply)
         })
     })
 }
@@ -3268,6 +3581,8 @@ mod tests {
             .expect("tiers.create ok");
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: fauna_core::subscription::OWNER_ONLY_TIER.into(),
             mlkem_encaps_key: None,
@@ -3302,6 +3617,8 @@ mod tests {
         let author = actor_from_seed(0x37);
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: FOLLOWERS_TIER.into(),
             mlkem_encaps_key: None,
@@ -3339,6 +3656,177 @@ mod tests {
         );
     }
 
+    // ── The federated follow's remote arm (`federated-follow.md` § Decision 2) ──
+
+    /// A signed follow intent from `reader` to `author`, naming `home`.
+    fn follow_intent(
+        reader: &ActorKeypair,
+        author: [u8; 32],
+        kind: fauna_core::subscription::types::FollowIntentKind,
+        home: [u8; 32],
+    ) -> fauna_core::encoding::EmbedAsBytes {
+        let intent = fauna_core::subscription::types::FollowIntent {
+            subscriber: reader.actor_id(),
+            author: ActorId(author),
+            tier: FOLLOWERS_TIER.into(),
+            kind,
+            home_nest_id: home,
+            created_at: Timestamp(Timestamp::now().0 - 5_000_000),
+        };
+        let (bytes, env) = fauna_core::encoding::sign_envelope(reader, &intent).unwrap();
+        fauna_core::encoding::EmbedAsBytes::from_signed(bytes, env)
+    }
+
+    /// An author this nest does not host, with no home named, is still
+    /// nobody this nest can reach — today's `tier_not_found`, even when the
+    /// caller hands over a signed intent, and no follow is recorded.
+    #[tokio::test]
+    async fn a_remote_subscribe_naming_no_home_is_tier_not_found() {
+        use fauna_core::subscription::types::FollowIntentKind;
+        let state = fixture_state().await;
+        let reader = ActorKeypair::generate();
+        let author = actor_from_seed(0x51);
+        let own_nest = state.nest_identity.public_key_bytes();
+        let req = SubscribeRequest {
+            author_id: ActorId(author),
+            tier: FOLLOWERS_TIER.into(),
+            mlkem_encaps_key: None,
+            home_nest_url: None,
+            intent: Some(follow_intent(
+                &reader,
+                author,
+                FollowIntentKind::Subscribe,
+                own_nest,
+            )),
+            extra: Default::default(),
+        };
+        let err = subscribe_handler()(state.clone(), reader.actor_id().0, encode_req(&req))
+            .await
+            .expect_err("an unhosted author with no home named is refused");
+        assert_eq!(err.code, tier_not_found("").code);
+        assert!(
+            state
+                .db
+                .remote_follows_of(&reader.actor_id().0, &author)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The follower's nest relays only its own user's intent, and only one
+    /// that names this nest as the subscriber's home — refused before any
+    /// dial, so nothing is recorded.
+    #[tokio::test]
+    async fn a_remote_subscribe_relays_only_the_callers_intent_naming_this_nest() {
+        use fauna_core::subscription::types::FollowIntentKind;
+        let state = fixture_state().await;
+        let reader = ActorKeypair::generate();
+        let someone_else = ActorKeypair::generate();
+        let author = actor_from_seed(0x52);
+        let own_nest = state.nest_identity.public_key_bytes();
+        let ask = |intent| SubscribeRequest {
+            author_id: ActorId(author),
+            tier: FOLLOWERS_TIER.into(),
+            mlkem_encaps_key: None,
+            home_nest_url: Some("https://b.example".into()),
+            intent: Some(intent),
+            extra: Default::default(),
+        };
+        for (what, intent) in [
+            (
+                "another user's intent",
+                follow_intent(&someone_else, author, FollowIntentKind::Subscribe, own_nest),
+            ),
+            (
+                "an intent naming another nest as home",
+                follow_intent(&reader, author, FollowIntentKind::Subscribe, [0xEE; 32]),
+            ),
+        ] {
+            let err =
+                subscribe_handler()(state.clone(), reader.actor_id().0, encode_req(&ask(intent)))
+                    .await
+                    .expect_err(what);
+            assert_eq!(err.code, "fauna.subscriptions.forbidden", "{what}");
+        }
+        let no_intent = SubscribeRequest {
+            intent: None,
+            ..ask(follow_intent(
+                &reader,
+                author,
+                FollowIntentKind::Subscribe,
+                own_nest,
+            ))
+        };
+        let err = subscribe_handler()(state.clone(), reader.actor_id().0, encode_req(&no_intent))
+            .await
+            .expect_err("a remote follow without the subscriber's intent");
+        assert_eq!(err.code, "fauna.subscriptions.malformed_upload");
+        assert!(
+            state
+                .db
+                .remote_follows_of(&reader.actor_id().0, &author)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `key_blob.get` relays to the author's home only for an `approved`
+    /// remote follow: a pending one is `not_subscribed` with no dial, an
+    /// approved one goes to its home (here an address nothing answers, so the
+    /// relay's own failure, never `not_subscribed`).
+    #[tokio::test]
+    async fn key_blob_get_relays_only_for_an_approved_remote_follow() {
+        use crate::db::remote_follows::RemoteFollowState;
+        let state = fixture_state().await;
+        let reader = actor_from_seed(0x53);
+        let author = actor_from_seed(0x54);
+        let record = |follow_state| {
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .upsert_remote_follow(
+                        &reader,
+                        &author,
+                        FOLLOWERS_TIER,
+                        &[0xA1; 32],
+                        "https://127.0.0.1:9",
+                        follow_state,
+                        None,
+                        1,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let get = || {
+            key_blob_get_handler()(
+                state.clone(),
+                reader,
+                encode_req(&KeyBlobGetRequest {
+                    author_id: ActorId(author),
+                    tier_name: FOLLOWERS_TIER.into(),
+                    extra: Default::default(),
+                }),
+            )
+        };
+
+        record(RemoteFollowState::Pending).await;
+        let err = get().await.expect_err("a pending follow reads no blob");
+        assert_eq!(err.code, "fauna.subscriptions.not_subscribed");
+
+        record(RemoteFollowState::Approved).await;
+        let err = get()
+            .await
+            .expect_err("the relay's home is unreachable in this test");
+        assert_ne!(
+            err.code, "fauna.subscriptions.not_subscribed",
+            "an approved remote follow is relayed to its home"
+        );
+    }
+
     /// Following an author this nest does not host must not lazily
     /// mint a `FOLLOWERS_TIER` for them — the caller names any 32-byte
     /// `author_id`, and a loop over fresh ids would otherwise grow
@@ -3357,6 +3845,8 @@ mod tests {
             .unwrap();
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(stranger),
             tier: FOLLOWERS_TIER.into(),
             mlkem_encaps_key: None,
@@ -3406,6 +3896,8 @@ mod tests {
             .expect("tiers.create ok");
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: "post-unlock-abc123".into(),
             mlkem_encaps_key: None,
@@ -4413,6 +4905,8 @@ mod tests {
             .unwrap();
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: "gold".into(),
             mlkem_encaps_key: None,
@@ -4465,6 +4959,8 @@ mod tests {
             .unwrap();
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: "gold".into(),
             mlkem_encaps_key: None,
@@ -4517,6 +5013,8 @@ mod tests {
             .unwrap();
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: "gold".into(),
             mlkem_encaps_key: None,
@@ -4539,6 +5037,8 @@ mod tests {
         let subscriber = actor_from_seed(0x49);
 
         let req = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: "ghost".into(),
             mlkem_encaps_key: None,
@@ -4595,6 +5095,8 @@ mod tests {
         }
 
         let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             extra: Default::default(),
         };
@@ -4645,6 +5147,8 @@ mod tests {
             .unwrap();
 
         let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             extra: Default::default(),
         };
@@ -4709,6 +5213,8 @@ mod tests {
             .unwrap();
 
         let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             extra: Default::default(),
         };
@@ -4761,6 +5267,8 @@ mod tests {
 
         // No tiers, no subscriptions.
         let req = UnsubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             extra: Default::default(),
         };
@@ -5111,6 +5619,8 @@ mod tests {
         // The positive control: a first follow provisions `followers` with no
         // blob, and its approval lands the tier's first blob at version 1.
         let follow = SubscribeRequest {
+            home_nest_url: None,
+            intent: None,
             author_id: ActorId(author),
             tier: FOLLOWERS_TIER.into(),
             mlkem_encaps_key: None,

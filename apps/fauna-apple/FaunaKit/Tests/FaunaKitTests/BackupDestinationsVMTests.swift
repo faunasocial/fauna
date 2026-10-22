@@ -160,6 +160,24 @@ private func status(_ id: String, lastUpload: UInt64?, backlog: UInt32) -> FfiBa
         == L.backups.backupDestinationBacklog(count: "5"))
 }
 
+@Test @MainActor func aRefusedWriterReadsRefusedNeverQueued() {
+    // `backup-destinations.md` § Per-destination status read → a refused writer is a
+    // state, never a lag: the shared label replaces the count whatever the backlog.
+    let refused = FfiBackupDestinationStatus(
+        destinationId: "a", lastUploadTime: nil, backlogCount: 5,
+        heldBytes: nil, capState: nil, auditState: nil, lastAuditPassedAt: nil,
+        writerState: "refused")
+    #expect(BackupDestinationsVM.backlogText(refused) == L.backups.backupDestinationWriterRefused)
+}
+
+@Test @MainActor func aSeatHeldAddErrorSurfacesTheSharedText() {
+    // `fauna.backup.writer_seat_held` reaches the app as the FFI error string (the
+    // shared WRITER_SEAT_HELD text); the add dialog shows `mapError` unchanged.
+    let vm = BackupDestinationsVM()
+    let err = FfiError.General(msg: L.error.backup.writerSeatHeld)
+    #expect(vm.mapError(err) == L.error.backup.writerSeatHeld)
+}
+
 @Test @MainActor func perRowHelpersBaselineWhenNoStatusLoaded() {
     // With no statuses map populated (fresh VM, read not yet done), the per-row
     // helpers fall back to the baseline — the rows never show a blank/scary value.
@@ -270,6 +288,13 @@ private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: U
     var calls: [String] = []
     /// The `ownCustodian` argument of each audit pass, in order.
     var auditOwnCustodians: [FfiOwnCustodianStore?] = []
+    /// What the recovery face answers with, and whether it throws instead.
+    var recoverResult = FfiRecoveryResult(whole: true, lines: [])
+    var recoverThrows = false
+    /// The VM under test, so the recovery call can record `recoverRunning` as it
+    /// stood mid-run — the disarm witness.
+    weak var vm: BackupDestinationsVM?
+    var recoverRunningDuringCall: [Bool] = []
 }
 
 @MainActor private final class RecordingCustodian: CustodianStoreAccess {
@@ -301,6 +326,11 @@ private func auditStatus(_ id: String, auditState: String?, lastAuditPassedAt: U
         log.calls.append("reseed")
         return reseedResult
     }
+
+    func recoverCustodianStore() async throws -> FfiRecoveryResult {
+        log.calls.append("recover-own")
+        return log.recoverResult
+    }
 }
 
 /// Stands in for the one nest call `confirmRemove` makes. Subclassed rather than
@@ -324,6 +354,20 @@ private final class RecordingAPI: APIClient {
     ) async throws -> [FfiDestinationAuditRow] {
         await MainActor.run { log.auditOwnCustodians.append(ownCustodian) }
         return []
+    }
+
+    /// The recovery gesture's network leg — recorded with the destination and
+    /// device it ran for, and answering what the test staged.
+    override func backupRecoverFromDestination(
+        destinationId: String, deviceIdHex: String, statePath: String
+    ) async throws -> FfiRecoveryResult {
+        let (result, fails) = await MainActor.run {
+            log.calls.append("recover:\(destinationId):\(deviceIdHex)")
+            log.recoverRunningDuringCall.append(log.vm?.recoverRunning ?? false)
+            return (log.recoverResult, log.recoverThrows)
+        }
+        if fails { throw APIError.ffiError("transport fault") }
+        return result
     }
 
     /// The page's re-list after a landed restore — recorded, and empty, so a
@@ -721,4 +765,151 @@ private func alertLabel(_ reason: BackupAuditAlertReason) -> String {
 
     #expect(log.auditOwnCustodians.count == 3)
     #expect(log.auditOwnCustodians.allSatisfy { $0 == nil })
+}
+
+// MARK: - The recovery gesture on the fifth audit-alert reason
+// (`ui/backups.md` § Audit-alert surface → *The recovery gesture*). Mirrors
+// tui's fifth-reason banner tests (`apps/fauna-tui/src/backups.rs`); the shared
+// `recover_offered` rule itself is pinned shared-Rust side — these pin only
+// which banner paints the button here, and the gesture's wiring. This device's
+// own custodian row carries none until its store leg is lifted.
+
+private let regressionReason = BackupAuditAlertReason.sourceRegressed(leftSecs: 3 * 86_400)
+private let overdueReason = BackupAuditAlertReason.overdue(sinceSecs: 9 * 86_400)
+
+private func recoverRow(
+    _ id: String, reasons: [BackupAuditAlertReason], offered: Bool
+) -> FfiDestinationAuditRow {
+    FfiDestinationAuditRow(
+        destinationId: id, lastPassedAt: nil, alertReason: reasons.first, alertReasons: reasons,
+        recoverOffered: offered)
+}
+
+@MainActor private func banners(
+    _ destinations: [FfiBackupDestinationView], _ rows: [FfiDestinationAuditRow]
+) -> [BackupDestinationsVM.AuditBanner] {
+    BackupDestinationsVM.auditBanners(
+        destinations: destinations,
+        auditRows: Dictionary(uniqueKeysWithValues: rows.map { ($0.destinationId, $0) }),
+        statuses: [:]
+    ) { $0.displayName ?? $0.destinationNestUrl }
+}
+
+@Test @MainActor func aNestsRegressionBannerCarriesTheRecoverButtonInsideItself() {
+    // With a standing verdict's banner ahead of it, the button is on banner [1];
+    // the verdict's banner carries none.
+    let result = banners(
+        [dest("d1", "https://a.example", "Attic")],
+        [recoverRow("d1", reasons: [overdueReason, regressionReason], offered: true)])
+    #expect(result.count == 2)
+    #expect(result[0].recoverDestinationId == nil)
+    #expect(result[1].recoverDestinationId == "d1")
+}
+
+@Test @MainActor func aRegressionBannerThePassDoesNotOfferCarriesNoButton() {
+    // The offered answer is the shared rule's, taken whole: a window with
+    // `recoverOffered` false (nothing left to recover) paints text only.
+    let result = banners(
+        [dest("d1", "https://a.example", "Attic")],
+        [recoverRow("d1", reasons: [regressionReason], offered: false)])
+    #expect(result.count == 1)
+    #expect(result[0].recoverDestinationId == nil)
+}
+
+@Test @MainActor func aStandingVerdictAloneNeverCarriesTheButton() {
+    // Even a row the rule offers: only the fifth reason's own banner holds it.
+    let result = banners(
+        [dest("d1", "https://a.example", "Attic")],
+        [recoverRow("d1", reasons: [overdueReason], offered: true)])
+    #expect(result.count == 1)
+    #expect(result[0].recoverDestinationId == nil)
+}
+
+@Test @MainActor func thisDevicesOwnCustodianRowCarriesTheRecoverButton() {
+    // The shared rule offers the button here too (`recover_offered` takes this
+    // device's sync id), taken whole; the confirm runs the own-store leg.
+    let mine = clientDest("d2", deviceId: "dev-1")
+    let result = banners([mine], [recoverRow("d2", reasons: [regressionReason], offered: true)])
+    #expect(result.count == 1)
+    #expect(result[0].recoverDestinationId == "d2")
+}
+
+@Test @MainActor func theRecoverConfirmArmsOnlyOverAPaintedButtonAndCancelsCleanly() {
+    let log = CallLog()
+    let vm = wired(log, custodian: nil)
+    vm.seedDestinationsForTest([dest("d1", "https://a.example", "Attic"), clientDest("d2", deviceId: "dev-1")])
+
+    // No notice stands: nothing to confirm.
+    vm.armRecover(destinationId: "d1")
+    #expect(vm.recoverConfirmingId == nil)
+
+    vm.seedAuditRowsForTest([
+        recoverRow("d1", reasons: [regressionReason], offered: true),
+        recoverRow("d2", reasons: [regressionReason], offered: true),
+    ])
+    vm.armRecover(destinationId: "d1")
+    #expect(vm.recoverConfirmingId == "d1")
+    vm.cancelRecover()
+    #expect(vm.recoverConfirmingId == nil)
+    #expect(log.calls.isEmpty, "cancelling runs nothing")
+}
+
+@Test @MainActor func aConfirmedRecoveryRunsOnceDisarmsAndPaintsTheSharedLines() async {
+    let log = CallLog()
+    log.recoverResult = FfiRecoveryResult(
+        whole: true, lines: ["Everything your nest lost is back.", "Mail: 7 recovered"])
+    let vm = wired(log, custodian: nil)
+    log.vm = vm
+    vm.seedDestinationsForTest([dest("d1", "https://a.example", "Attic")])
+    vm.seedAuditRowsForTest([recoverRow("d1", reasons: [regressionReason], offered: true)])
+
+    vm.armRecover(destinationId: "d1")
+    await vm.confirmRecover()
+
+    #expect(log.calls.filter { $0.hasPrefix("recover:") } == ["recover:d1:dev-1"])
+    #expect(log.recoverRunningDuringCall == [true], "every recover button is disarmed mid-run")
+    #expect(!vm.recoverRunning)
+    #expect(vm.recoverConfirmingId == nil)
+    #expect(vm.recoverResultText == "Everything your nest lost is back.\nMail: 7 recovered")
+    #expect(vm.errorMessage == nil)
+    #expect(log.auditOwnCustodians.count == 1, "the page's audit pass re-reads after the run")
+
+    // Confirming again with no armed confirm runs nothing twice.
+    await vm.confirmRecover()
+    #expect(log.calls.filter { $0.hasPrefix("recover:") }.count == 1)
+}
+
+@Test @MainActor func aRecoveryOnThisDevicesOwnRowRunsTheOwnStoreLegNotTheNetworkFace() async {
+    let log = CallLog()
+    log.recoverResult = FfiRecoveryResult(whole: true, lines: ["Everything your nest lost is back."])
+    let vm = wired(log, custodian: RecordingCustodian(log: log))
+    log.vm = vm
+    vm.seedDestinationsForTest([clientDest("d2", deviceId: "dev-1")])
+    vm.seedAuditRowsForTest([recoverRow("d2", reasons: [regressionReason], offered: true)])
+
+    vm.armRecover(destinationId: "d2")
+    #expect(vm.recoverConfirmingId == "d2")
+    await vm.confirmRecover()
+
+    #expect(log.calls.contains("recover-own"))
+    #expect(log.calls.filter { $0.hasPrefix("recover:") }.isEmpty, "the nest face is not called")
+    #expect(vm.recoverResultText == "Everything your nest lost is back.")
+    #expect(vm.errorMessage == nil)
+    #expect(!vm.recoverRunning)
+    #expect(log.auditOwnCustodians.count == 1, "the page's audit pass re-reads after the run")
+}
+
+@Test @MainActor func aStoppedRecoveryRendersOnTheErrorAndLeavesNoResult() async {
+    let log = CallLog()
+    log.recoverThrows = true
+    let vm = wired(log, custodian: nil)
+    vm.seedDestinationsForTest([dest("d1", "https://a.example", "Attic")])
+    vm.seedAuditRowsForTest([recoverRow("d1", reasons: [regressionReason], offered: true)])
+
+    vm.armRecover(destinationId: "d1")
+    await vm.confirmRecover()
+
+    #expect(vm.recoverResultText == nil)
+    #expect(vm.errorMessage?.contains("transport fault") == true)
+    #expect(!vm.recoverRunning, "a failed run hands the button back")
 }

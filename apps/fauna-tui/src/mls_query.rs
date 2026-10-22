@@ -24,10 +24,16 @@
 //! rebuilds both. Derives the set's `ChannelId` the SAME way the nest does
 //! (`ChannelId::from_group_id_hex` — openMLS group ids are variable length, so
 //! NOT `hex32`; the same derivation `settings::folders` uses).
+//!
+//! The same object is the member-row declassification anchor
+//! ([`fauna_devices_machine::FolderChannelOwners`]): the channel's
+//! MLS-recorded folder owner, which Media's seam verifies a member row's
+//! audience attestation under (`encryption-at-rest.md` § Readable classes →
+//! *The declassification is owner-ATTESTED*).
 
 use std::sync::Arc;
 
-use fauna_devices_machine::MlsQuery;
+use fauna_devices_machine::{FolderChannelOwners, MlsQuery};
 
 pub(crate) struct TuiMlsQuery {
     session: Arc<fauna_conversations::ConversationsSession>,
@@ -38,6 +44,14 @@ impl TuiMlsQuery {
         Arc::new(Self {
             session: Arc::clone(session),
         })
+    }
+}
+
+impl FolderChannelOwners for TuiMlsQuery {
+    fn folder_channel_owner(&self, channel_id: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        self.session
+            .engine()
+            .folder_channel_owner(&fauna_mls::types::ChannelId(*channel_id))
     }
 }
 

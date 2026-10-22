@@ -856,6 +856,36 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         ),
         export: Export::Verbatim,
     },
+    // The oracle's profile class (TP11, `profile_author_oracle.rs`): one row
+    // per (account, third-party principal) the profile was edited for — the
+    // audit counters and the rate ceiling's window, never the authority.
+    // Burned at succession for the posting class's reason.
+    ActorTable {
+        table: "profile_author_principals",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "an oracle principal's standing window to edit the profile AS the actor — a \
+             principal minted under the thief's authority keeps editing for the user after the \
+             ceremony",
+        ),
+        export: Export::Verbatim,
+    },
+    // The profile class's per-operation record: which fields were set, when.
+    // Burned with its principal rows; the owner's own audit trail, so it
+    // rides the export.
+    ActorTable {
+        table: "profile_author_ops",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the operation record of a burned oracle principal — rows naming a window that no \
+             longer exists",
+        ),
+        export: Export::Verbatim,
+    },
     // The oracle's ATProto class (TP11, `atproto_oracle.rs`): one row per
     // (account, third-party principal) a service token was minted for — the
     // audit counters and the rate ceiling's window, never the authority.
@@ -887,6 +917,34 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         succession: Succession::Burn(
             "the operation record of a burned oracle principal — rows naming a window that no \
              longer exists",
+        ),
+        export: Export::Verbatim,
+    },
+    // A device custodian's record (`conversations-oracle.md` § The
+    // per-operation record): the signed-in app hosting the conversations
+    // engine submits it over `fauna.principals.ops.record`. A lifetime count
+    // per principal, never the authority; burned at succession with every
+    // oracle principal's rows, and the owner's own audit trail, so it rides
+    // the export.
+    ActorTable {
+        table: "device_oracle_principals",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the record of a burned oracle principal — a principal minted under the thief's \
+             authority must not keep its standing on the account",
+        ),
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "device_oracle_ops",
+        column: "actor_id",
+        key: ActorKey::Hex,
+        policy: Policy::Purge,
+        succession: Succession::Burn(
+            "the operation record of a burned oracle principal — rows naming a principal that \
+             no longer exists",
         ),
         export: Export::Verbatim,
     },
@@ -2441,10 +2499,18 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         )),
         export: Export::Shaped {
             domain: "contacts.json",
-            covers: &["peer_id", "status", "accepted_at", "created_at"],
+            covers: &[
+                "peer_id",
+                "status",
+                "accepted_at",
+                "created_at",
+                "peer_nest_id",
+            ],
             reason: "full coverage verified 2026-08-15, and machine-checked \
                      since 2026-08-16: `ContactExport` carries every column \
-                     except actor_id, which is the exporter themselves. No row \
+                     except actor_id, which is the exporter themselves -- \
+                     `peer_nest_id` (schema 152) included, as hex, since the \
+                     contacts list answers it as the peer's home nest. No row \
                      filter — `list_contacts_full` reads every row",
         },
     },
@@ -6301,6 +6367,51 @@ pub const ACTOR_TABLES: &[ActorTable] = &[
         export: Export::Verbatim,
     },
     ActorTable {
+        table: "remote_follows",
+        column: "subscriber_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        // The follower-side record of THIS nest's reader following an author
+        // homed elsewhere (`federated-follow.md` § Decision 2): the reader's own
+        // follows, keyed on them. A deleted reader's follows go with them — the
+        // home's roster row is the home's, and its own purge or the author's
+        // removal ends it there. `author_id` names the foreign author and is
+        // ruled in `SUCCESSION_REFERENCES`.
+        //
+        // SUCCESSION: § Decision 5 rules it ("A's own succession re-points
+        // `remote_follows.subscriber_id` as it re-points every local plane").
+        // The plain move is the whole local leg; the home's roster follows by
+        // A's succession push (`succession_push_targets` reaches the follow's
+        // home, and the home's `record_peer_succession` moves the homed roster
+        // rows).
+        succession: Succession::Move(MoveShape::Plain),
+        // EXPORT RULING: the reader's own list of whom they follow on other
+        // nests — what `mine.list` shows them — with each author's home.
+        export: Export::Verbatim,
+    },
+    ActorTable {
+        table: "follow_intents_seen",
+        column: "author_id",
+        key: ActorKey::Blob,
+        policy: Policy::Purge,
+        // On the AUTHOR's nest: the newest follow intent seen per remote
+        // subscriber and tier — the monotonic rule's bookkeeping
+        // (`federated-follow.md` § Decision 2), keyed on the local author. It
+        // goes with the author's account; `subscriber_id` names the remote
+        // subscriber and is ruled in `SUCCESSION_REFERENCES`.
+        //
+        // SUCCESSION: moves with the roster it guards. Left behind, the
+        // successor's roster (which moves) would lose its replay floor, and a
+        // subscribe intent its subscriber signed before a leave could be
+        // replayed to re-enter the successor's queue.
+        succession: Succession::Move(MoveShape::Plain),
+        export: Export::WithheldOperational(
+            "replay bookkeeping -- the newest `created_at` seen per remote subscriber's \
+             intent, which tells the author nothing their roster and request queue \
+             (both exported) do not; it exists so an old intent cannot undo a newer one",
+        ),
+    },
+    ActorTable {
         table: "subscription_tiers",
         column: "author_id",
         key: ActorKey::Blob,
@@ -7775,11 +7886,46 @@ pub const SUCCESSION_REFERENCES: &[(&str, &str, Succession)] = &[
     // ⚠ **Reachability bounds all three** (the finding): a subscriber's rows
     // live on the AUTHOR's nest, and a ceremony runs only where the succeeding
     // identity is locally registered — `record_succession` needs a local chain,
-    // and `record_peer_succession` refuses `OldIsLocal` and runs no move legs at
-    // all. So this closes the LOCAL reader (subscribed to an author hosted on
-    // the same nest) and leaves the cross-nest reader as the same residual the
-    // `bridge_*` plane inherits. Ruled as if reachable, and said here so a later
-    // session does not read the ruling wider than it is.
+    // and `record_peer_succession` refuses `OldIsLocal`. The ceremony closes the
+    // LOCAL reader (subscribed to an author hosted on the same nest). The
+    // cross-nest reader is a federated follower (`federated-follow.md`
+    // § Decision 5): its rows carry a `home_nest_id`, and `record_peer_succession`
+    // runs the same one leg over exactly those rows when the reader's
+    // succession arrives by push (`ReaderScope::RemoteHomed` in
+    // `db/successions.rs`), so all three still move together. A reader whose
+    // rows carry no home and who is no longer hosted here stays the declared
+    // residual: no door supersedes them.
+    (
+        "remote_follows",
+        "author_id",
+        // A FOREIGN author a local reader follows (`federated-follow.md`
+        // § Decision 2): the author is homed on another nest by construction —
+        // the subscribe door takes the remote arm only for an author it does
+        // not host — so the local ceremony never meets this column. The
+        // author's own succession reaches it through the peer path, which
+        // § Decision 5 rules re-points it — `record_peer_succession` does so,
+        // beside `channel_foreign_members`, on the peer path rather than through
+        // this registry.
+        Succession::Stay(
+            "names an author homed on ANOTHER nest -- the remote arm is taken only for an \
+             author this nest does not host -- so no local ceremony is ever this actor's; \
+             the author's succession arrives by the peer path, which re-points it there",
+        ),
+    ),
+    (
+        "follow_intents_seen",
+        "subscriber_id",
+        // A REMOTE subscriber's intent stamp on the author's nest. The
+        // subscriber is homed on another nest, so the local ceremony never
+        // meets them; and when they succeed, the successor signs fresh intents
+        // under its own id, whose stamps start clean — the predecessor's floor
+        // guards intents only the predecessor could sign.
+        Succession::Stay(
+            "a remote subscriber's replay floor: the subscriber is homed elsewhere, and a \
+             successor signs its intents under its own id, so the predecessor's stamp only \
+             ever guards the predecessor's own intents",
+        ),
+    ),
     (
         "subscribers",
         "subscriber_id",
@@ -9068,6 +9214,20 @@ mod tests {
                 "the third-party principal a post was authored or retracted for -- the \
                  same roster handle as `post_author_principals.principal_id`",
             ),
+            // The oracle's profile class, the same way.
+            (
+                "profile_author_principals",
+                "principal_id",
+                "the third-party principal the profile custodian served -- a roster \
+                 handle (`third_party_principals.principal_id`) -- an app, never an \
+                 account; the row is the account's and goes with its `actor_id`",
+            ),
+            (
+                "profile_author_ops",
+                "principal_id",
+                "the third-party principal a profile edit was signed for -- the same \
+                 roster handle as `profile_author_principals.principal_id`",
+            ),
             // The oracle's ATProto class, the same way.
             (
                 "atproto_oracle_principals",
@@ -9078,6 +9238,20 @@ mod tests {
             ),
             (
                 "atproto_oracle_ops",
+                "principal_id",
+                "the third-party principal an operation was performed for -- the same \
+                 roster handle, an app, never an account",
+            ),
+            // A device custodian's record, the same way.
+            (
+                "device_oracle_principals",
+                "principal_id",
+                "the third-party principal a device custodian served -- its roster handle \
+                 (`third_party_principals.principal_id`), an app, never an account; deleted \
+                 with the principal's revoke",
+            ),
+            (
+                "device_oracle_ops",
                 "principal_id",
                 "the third-party principal an operation was performed for -- the same \
                  roster handle, an app, never an account",
@@ -9132,6 +9306,20 @@ mod tests {
                  same reason as peer_content_reports.peer_nest_id above",
             ),
             (
+                "outbox",
+                "peer_nest_id",
+                "the one peer NEST a follow-family entry is sent to (a remote subscriber's \
+                 home, `federated-follow.md` § Decision 2) -- a deployment key, not an \
+                 account; the row's person is `author_id`, registered",
+            ),
+            (
+                "contacts",
+                "peer_nest_id",
+                "the verified origin NEST of the federation knock that formed the edge \
+                 (`contacts.md` § State & data shape) -- a deployment key, not an \
+                 account; the edge's person is `peer_id`, registered",
+            ),
+            (
                 "guardian_policies",
                 "unknown_peer_dm",
                 "a policy KNOB (a closed enum: what the bridge-DM gate does with a peer \
@@ -9155,6 +9343,24 @@ mod tests {
                 "admin_tier",
                 "a quota-tier NAME (`tiers.name`) the designation grants, not a person -- \
                  the row's person is `admin_id`, registered",
+            ),
+            // Added 2026-10-17 with the admin block of a reported item
+            // (`moderation.md` § Admin block of a reported item): two more
+            // false positives of the `admin` root.
+            (
+                "content_meta",
+                "admin_block_report_id",
+                "the `abuse_reports.id` an admin's block of this post cites -- a \
+                 report id, not a person; the withhold flag beside \
+                 `legal_takedown_ref`. The reporter and the reported author live on \
+                 the `abuse_reports` row, which carries their rulings",
+            ),
+            (
+                "segment_records",
+                "admin_block_report_id",
+                "the `abuse_reports.id` an admin's block of this conversation record \
+                 cites -- a report id, not a person; same flag and reason as \
+                 content_meta.admin_block_report_id above",
             ),
             // Added 2026-09-20 with `export_sessions`. A vocabulary FALSE
             // POSITIVE of the `authority_name` class: the column holds a

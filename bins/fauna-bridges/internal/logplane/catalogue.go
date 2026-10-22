@@ -8,21 +8,27 @@ import (
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/confinement"
 )
 
-// This file is the mail bridge's **compile-time event catalogue** for the
-// sidecar log plane — the complete set of events this binary may report to
-// nest's admin Logs surface, auditable in one read. The queue/flush/disable
-// machinery is in logplane.go; this file is only the catalogue and its message
-// templates.
+// This file is the **shared part of the bridges' compile-time event
+// catalogue** for the sidecar log plane: the events every enrolled Go bridge
+// role may report to nest's admin Logs surface. Each binary's own events live
+// beside it, one file per binary — catalogue_mail.go (the MTA/MDA) and
+// catalogue_atproto.go (the PDS) — so a binary's complete reportable set is
+// this file plus its own, auditable in two reads. The queue/flush/disable
+// machinery is in logplane.go; these files are only catalogues and their
+// message templates. Nest attributes each event to its source from the
+// caller's authenticated class (`mta:`, `mda:`, `atproto:`), never from the
+// payload, so a shared event id needs no role prefix.
 //
-// # Why these five
+// # Why these
 //
 // They are the events an admin *acts on*: the bridge is up or it is not, it
 // can serve TLS or it cannot, it got its ports or something else holds them,
-// its link to nest is stable or flapping, and it cut live sessions on the way
-// down. Per-transaction SMTP/IMAP chatter is deliberately absent — a delivery
-// verdict is `mail-observability.md`'s (separate, unbuilt) surface, not this
-// one, and routing it here would both flood the ring and drag recipient
-// addresses toward a page that must never carry them.
+// its link to nest is stable or flapping, it cut live sessions on the way
+// down, and it is confined as the artifact intends or it is not. Per-request
+// protocol chatter is deliberately absent — a mail delivery verdict is
+// `mail-observability.md`'s (separate, unbuilt) surface, not this one, and
+// routing it here would both flood the ring and drag addresses toward a page
+// that must never carry them.
 //
 // # Deliverability — the rule that decides what may be catalogued at all
 //
@@ -62,11 +68,10 @@ import (
 // page. The full error still goes to the bridge's own slog stream at the same
 // site — losing nothing, leaking nothing.
 
-// CatalogueEventIDs is every event id this binary may emit. It exists so the
-// tests can sweep the catalogue for admission-charset and message-length
-// violations; keep it in step when adding an event (the sweep test fails if you
-// do not).
-var CatalogueEventIDs = []string{
+// sharedEventIDs is every event id this file defines. Keep it, and each
+// per-binary file's list, in step when adding an event (the sweep test fails
+// if you do not).
+var sharedEventIDs = []string{
 	"ready",
 	"tls_cert_fetch_failed",
 	"listener_bind_failed",
@@ -74,6 +79,15 @@ var CatalogueEventIDs = []string{
 	"shutdown_forced",
 	"confinement_degraded",
 }
+
+// CatalogueEventIDs is every event id any bridge binary may emit — the shared
+// set plus each binary's own. It exists so the tests can sweep the whole
+// catalogue for admission-charset and message-length violations.
+var CatalogueEventIDs = func() []string {
+	ids := append([]string{}, sharedEventIDs...)
+	ids = append(ids, mailEventIDs...)
+	return append(ids, atprotoEventIDs...)
+}()
 
 // knownConfinementStates is the closed set of confinement tokens that may be
 // interpolated — same bounded-class discipline as knownRoles/knownListeners.
@@ -104,22 +118,41 @@ func safeConfinementState(s string) string {
 // arrives from nest's whoami reply, so it is not remote-controlled — but
 // pinning it to a literal set is what makes the bounded-class claim structural
 // instead of a trust assumption, and costs nothing.
-var knownRoles = map[string]bool{"mta": true, "mda": true}
+//
+// The value is the bridge kind the role belongs to, which is what [Ready] names
+// — so a new role cannot be added without saying which binary serves it.
+var knownRoles = map[string]string{
+	"mta":         "mail bridge",
+	"mda":         "mail bridge",
+	"atproto.pds": "atproto bridge",
+}
 
 // safeRole renders a role for interpolation, collapsing anything unexpected to
 // a constant rather than passing it through.
 func safeRole(role string) string {
-	if knownRoles[role] {
+	if _, ok := knownRoles[role]; ok {
 		return role
 	}
 	return "unknown"
 }
 
+// bridgeKind names the binary a role belongs to, or a neutral "bridge" for a
+// role outside the known set.
+func bridgeKind(role string) string {
+	if kind, ok := knownRoles[role]; ok {
+		return kind
+	}
+	return "bridge"
+}
+
 // knownListeners is the closed set of listener component names, same rationale
-// as knownRoles. These are the binds the bridge actually makes.
+// as knownRoles. These are the binds the bridges actually make: the mail
+// bridge's protocol listeners and metrics endpoint, and the atproto bridge's
+// PDS (XRPC) listener.
 var knownListeners = map[string]bool{
 	"smtp": true, "submission": true, "imaps": true,
 	"imap": true, "caldav": true, "metrics": true,
+	"pds": true,
 }
 
 func safeListener(name string) string {
@@ -151,15 +184,17 @@ func PortOf(addr string) uint16 {
 
 // Ready — the bridge finished enrolling and its role listeners are up. The
 // "it came back" signal after a restart, and the only routine info-level event
-// in the catalogue.
+// in the catalogue. The message names the bridge kind from the role, so an
+// atproto bridge never announces itself as a mail bridge.
 func Ready(role string) {
-	Emit(LevelInfo, "ready", fmt.Sprintf("mail bridge ready (role %s)", safeRole(role)))
+	Emit(LevelInfo, "ready", fmt.Sprintf("%s ready (role %s)", bridgeKind(role), safeRole(role)))
 }
 
 // TLSCertFetchFailed — a cert fetch or refresh from nest failed. The bridge
 // keeps retrying on its backoff schedule, so this is the early warning for a
 // silent outage: a listener that cannot serve TLS is a mailbox no MUA can
-// reach.
+// reach, or a PDS no relay or app can. Shared because both binaries terminate
+// their own TLS through the same internal/tls provider.
 func TLSCertFetchFailed() {
 	Emit(LevelWarn, "tls_cert_fetch_failed",
 		"TLS cert fetch from nest failed; retrying on the backoff schedule")
@@ -187,8 +222,9 @@ func NestReconnected(count int64) {
 }
 
 // ShutdownForced — the graceful drain window expired with transactions still
-// in flight, so the bridge force-closed them. Means someone's mail session was
-// cut; if it recurs, the grace window is too short for this deployment.
+// in flight, so the bridge force-closed them. Means someone's mail session or
+// PDS request was cut; if it recurs, the grace window is too short for this
+// deployment.
 func ShutdownForced() {
 	Emit(LevelWarn, "shutdown_forced",
 		"force-closed in-flight connections (drain grace window expired)")

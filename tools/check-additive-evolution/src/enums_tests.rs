@@ -320,6 +320,23 @@ fn revived_ratified_variant_is_red() {
     );
 }
 
+/// A revival is the LIST's invariant, so `main` feeds `enum_revivals` to the
+/// always-refused violations and only `diff_enum_breaks` to the window-softened
+/// breaks: the split must put the finding in the first and not the second.
+#[test]
+fn a_revival_belongs_to_the_revivals_half_not_the_window_softened_breaks() {
+    let allow = parse_ratified_breaks("rust c::Color::Green removed 2026-10-02 (ruled)").unwrap();
+    let skip = ledger("skip c::Color  # x");
+    let (base, head) = (scan(RED_ONLY), scan(COLOR));
+    let revivals = messages(enum_revivals(&head, &skip, &skip, &allow));
+    assert!(
+        revivals.len() == 1 && revivals[0].contains("revives variant `Green`"),
+        "{revivals:?}"
+    );
+    let breaks = messages(diff_enum_breaks(&base, &head, &skip, &skip, &allow));
+    assert!(breaks.is_empty(), "{breaks:?}");
+}
+
 #[test]
 fn added_variant_on_a_closed_enum_is_red_unless_its_line_changed() {
     let blue = r#"

@@ -59,6 +59,7 @@ pub fn project_from_loaded(loaded: &[PostSummary], quoted_post_id: &str) -> Opti
             legal_takedown_ref: None,
             // It is in the loaded page, so it is there.
             not_found: false,
+            admin_block_reason: None,
         })
 }
 
@@ -86,6 +87,33 @@ pub fn project_taken_down(post_id: &str, reference: String) -> QuotedPostView {
         legal_takedown_ref: Some(reference),
         // Withheld is not gone: the post exists, the nest may not serve it.
         not_found: false,
+        admin_block_reason: None,
+    }
+}
+
+/// Project the embedded quoted-post card for a quote whose post this nest's admin
+/// **blocked** after a report, as any viewer but its author reads it
+/// (`moderation.md` § Admin block of a reported item): the nest withheld the
+/// body ([`PostGetReply::admin_block`] `= Some`, `body` empty), so — as for
+/// [`project_taken_down`] — the card carries only the report reason's token, from
+/// which the client renders the shared notice
+/// (`fauna_core::obligation::admin_block_notice`) in place of the quoted
+/// content. The author's own read keeps the body: that arm decodes through
+/// [`project_decoded`] and carries the reason beside it.
+///
+/// [`PostGetReply::admin_block`]: fauna_protocol::posts::PostGetReply
+pub fn project_blocked(post_id: &str, reason_token: &str) -> QuotedPostView {
+    QuotedPostView {
+        post_id: post_id.to_string(),
+        author: String::new(),
+        body: String::new(),
+        // Nothing was decoded, so neither question has an answer.
+        verification: VerificationStatus::Unchecked,
+        authoring_origin: AuthoringOriginStatus::Unknown,
+        legal_takedown_ref: None,
+        // Withheld is not gone.
+        not_found: false,
+        admin_block_reason: Some(reason_token.to_string()),
     }
 }
 
@@ -110,6 +138,7 @@ pub fn project_not_found(post_id: &str) -> QuotedPostView {
         authoring_origin: AuthoringOriginStatus::Unknown,
         legal_takedown_ref: None,
         not_found: true,
+        admin_block_reason: None,
     }
 }
 
@@ -138,6 +167,7 @@ pub fn project_decoded(
         legal_takedown_ref: None,
         // It decoded, so it is there.
         not_found: false,
+        admin_block_reason: None,
     }
 }
 

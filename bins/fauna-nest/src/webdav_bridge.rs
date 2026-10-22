@@ -37,6 +37,9 @@ use crate::well_known_dav::{DavProtocol, well_known_dav_gate};
 ///   explicit toggle: the apex must not `503` while the MDA serves. (This gate
 ///   was once the only one of the three that got that right; the CalDAV and
 ///   CardDAV apexes were aligned to it on 2026-07-12.)
-pub async fn wellknown_webdav(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    well_known_dav_gate(&state, DavProtocol::WebDav).await
+pub async fn wellknown_webdav(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    well_known_dav_gate(&state, DavProtocol::WebDav, &headers).await
 }

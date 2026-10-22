@@ -139,7 +139,7 @@
 //! member's side is the durable **folder-owner marker** every seat holds
 //! (`MlsEngine::folder_channel_owner`): it admits the owner's roster commits
 //! and anchors the owner-attested declassification, and it must follow the
-//! succession too (`federation.md` § Cross-nest shared folders + channel append
+//! succession too (`federation-shared-folders.md` § Cross-nest shared folders + channel append
 //! → *The marker follows the owner's verified succession*). The members' seats
 //! re-stamp it from the in-group statement this sweep posts between its two
 //! commits; the successor's own seat is stamped **here**, at its join
@@ -657,7 +657,7 @@ where
 
 /// Carry the predecessor's **folder-owner marker** for `channel_id` onto the
 /// successor's fresh seat — the successor's own half of *The marker follows the
-/// owner's verified succession* (`federation.md` § Cross-nest shared folders +
+/// owner's verified succession* (`federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append). An in-process `join_from_welcome` stamps nothing (the
 /// folder-Welcome join's stamp belongs to the conversations rail), so a
 /// channel the old engine held a marker for would otherwise leave the

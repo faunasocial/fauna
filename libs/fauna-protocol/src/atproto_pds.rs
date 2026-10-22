@@ -1271,6 +1271,15 @@ pub struct ConsentInstallInfo {
     /// [`crate::plugins::DEVELOPMENT_PLUGIN_NAME`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub development: bool,
+    /// This section rides a user's **bind** card (`fauna.plugins.bind`,
+    /// `third-party.md` § The principal model → *Hosted principals*), rebuilt
+    /// from the installed rows, rather than an admin's install card. The two
+    /// cards differ in what their approve does: an install card's grants
+    /// nothing over any user's data, a bind card's approve mints the
+    /// account's consent-time grant to the plugin's holder key like every
+    /// consent — so the approving app reads this, never infers it. Additive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bind: bool,
     /// The whole names the nest would terminate for it — each `sni` label
     /// the manifest claims, under this nest's apex (`matrix.nest.example`),
     /// so the card shows the name as it will resolve.

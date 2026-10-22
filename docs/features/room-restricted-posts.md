@@ -27,7 +27,7 @@ Stamped 2026-10-13 at f8d0f9ac76.
 4. [app] A room post's photos open for the room's members together with its words, and for nobody else — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
    - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member`
 5. [app] A room post is an ordinary post of yours — it appears on your profile and in your followers' feeds, not as a message inside the room — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
-   - (none)
+   - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_post_appears_on_the_authors_profile_for_a_member_and_locked_for_an_outsider`
 6. [app] Someone who joins a room that does not share its history cannot read the room posts written before they joined, and someone removed from a room reads none written after — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
    - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_newcomer_to_a_room_that_shares_no_history_opens_no_earlier_room_post`
    - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_opens_no_room_post_written_after`
@@ -60,7 +60,7 @@ Stamped 2026-10-13 at f8d0f9ac76.
 20. [nest] While a moderation flag withholds a room post, the room's search does not find it and its labels are not served — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
     - `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_a_moderation_flag_withholds_a_room_posts_search_hit_and_labels`
 21. [app] A room member whose account is on another nest sees the room's labels on a room post too — `docs/goal/behavior/restricted-posts.md` § Encryption at rest
-    - (none)
+    - `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay`
 22. [app] A room post's photo is sealed before it is uploaded, so no readable copy of it reaches any nest — `docs/goal/ui/media.md` § Encryption at rest
     - `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member`
 23. [app] Attaching a photo and choosing the room afterwards still seals the photo for the room — the audience in force when you post decides its seal, never the one selected when the file was picked — so a member opens the picture and an outsider cannot — `docs/goal/ui/media.md` § Encryption at rest
@@ -75,29 +75,29 @@ Stamped 2026-10-13 at f8d0f9ac76.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+d1096e50.dirty standalone |
 | windows |  no run recorded | |
-| macos |  no run recorded | |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.4-dev+899b58ab.dirty standalone |
+| tui | ✅ full | 0.1.4-dev+899b58ab.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
-| 1 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | linux (linux): passed, tui (linux): passed |
-| 2 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | linux (linux): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | linux (linux): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member` | linux (linux): skipped, tui (linux): passed |
-| 5 | app | (none) | — |
-| 6 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_newcomer_to_a_room_that_shares_no_history_opens_no_earlier_room_post` | tui (linux): passed |
-| 6 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_opens_no_room_post_written_after` | tui (linux): passed |
-| 7 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only` | tui (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_post_is_never_a_message_in_the_room_and_reaches_a_member_like_any_post` | tui (linux): passed |
-| 9 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | linux (linux): passed, tui (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | linux (linux): skipped, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | linux (linux): skipped, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | linux (linux): skipped, tui (linux): passed |
+| 1 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 2 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_post_appears_on_the_authors_profile_for_a_member_and_locked_for_an_outsider` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_newcomer_to_a_room_that_shares_no_history_opens_no_earlier_room_post` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 6 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_opens_no_room_post_written_after` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 7 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only` | web (linux): passed, linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_post_is_never_a_message_in_the_room_and_reaches_a_member_like_any_post` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 9 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_member_removed_from_the_room_keeps_its_earlier_posts_and_loses_the_room` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
 | 13 | nest | `tests/e2e-unified/tests/api/test_trending_federation.py::test_a_room_post_never_trends_nor_crosses_the_exchange` | nest (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_room_post_is_never_published_to_nostr` | nest (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_no_door_serves_a_room_posts_words_in_the_clear` | nest (linux): passed |
@@ -106,9 +106,9 @@ Stamped 2026-10-13 at f8d0f9ac76.
 | 18 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_deleting_a_room_post_takes_it_out_of_the_rooms_search_and_drops_its_labels` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_taking_back_the_nests_read_ends_the_rooms_search_and_labels_for_its_posts` | nest (linux): passed |
 | 20 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_a_moderation_flag_withholds_a_room_posts_search_hit_and_labels` | nest (linux): passed |
-| 21 | app | (none) | — |
-| 22 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member` | linux (linux): skipped, tui (linux): passed |
-| 23 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_photo_attached_before_the_room_is_chosen_is_still_sealed_for_the_room` | tui (linux): passed |
+| 21 | app | `tests/e2e-unified/tests/test_conversation_room_community_cross_nest.py::test_a_member_of_another_nest_searches_the_room_and_opens_a_room_post_through_the_relay` | web (linux): skipped, macos (macos): passed, tui (linux): passed |
+| 22 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_room_posts_photo_rests_sealed_and_opens_for_a_member` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
+| 23 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_photo_attached_before_the_room_is_chosen_is_still_sealed_for_the_room` | web (linux): skipped, linux (linux): skipped, tui (linux): passed |
 | 24 | app | `tests/e2e-unified/tests/test_room_restricted_post.py::test_a_repost_of_a_room_post_shows_an_outsider_the_teaser_and_the_lock` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 25 | nest | `tests/e2e-unified/tests/api/test_room_post_nest_promises.py::test_a_joiner_without_the_rooms_history_never_finds_an_earlier_room_post` | nest (linux): passed |
 <!-- features-render:end -->

@@ -26,25 +26,25 @@ Stamped 2026-10-11 at e663c0077a.
 3. [nest] No report ever reaches a mailbox — `docs/goal/behavior/smtp-server.md` § abuse@ / postmaster@ role-address routing
    - `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_stored_and_listed_never_delivered`
 4. [nest] Reports older than 90 days are removed — `docs/goal/behavior/smtp-server.md` § TLSRPT inbound report listener (RFC 8460)
-   - (none)
+   - `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_kept_inside_ninety_days_and_pruned_past_them`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| windows | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| macos | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| ios | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| android | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
-| tui | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| linux | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| windows | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| macos | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| ios | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| android | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
+| tui | ✅ full | 0.1.5-dev+5fa1147b.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
 | 1 | nest | `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
 | 3 | nest | `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_stored_and_listed_never_delivered` | nest (linux): passed |
-| 4 | nest | (none) | — |
+| 4 | nest | `tests/e2e-unified/tests/test_mail_tlsrpt_reports.py::test_tlsrpt_report_is_kept_inside_ninety_days_and_pruned_past_them` | nest (linux): passed |
 <!-- features-render:end -->

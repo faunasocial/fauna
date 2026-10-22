@@ -225,7 +225,7 @@ def test_follow_auto_grants_in_encrypted_mode(app, subs_nest):
     (`monetization.md` § Pillar 1 table, "Author pump run-wiring" row). linux
     (lead, `apps/fauna-linux/src/subscriptions_author.rs`), windows
     (`SubscriptionsAuthorPump`), web (`apps/fauna-web/src/lib/subscriptionsAuthor.ts`,
-    started from `+layout.svelte`), android (`ApiClient.startSubscriptionsAuthorPump`,
+    started from `RootShell.svelte`), android (`ApiClient.startSubscriptionsAuthorPump`,
     started from the `ensureNestConnected` connect chokepoint), and macos/ios
     (`SubscriptionsAuthorCadence`, shared FaunaKit, closed 2026-08-21) are all
     wired to the single shared tick (`subscriptions_reconcile_once`). NOTE:

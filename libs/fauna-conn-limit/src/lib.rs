@@ -48,13 +48,15 @@
 //! D-items call for: one abusive source can hold at most `max_per_ip`
 //! concurrent connections instead of the entire global cap.
 //!
-//! Two callers share this crate (priority #2 — one shape, not a copy per
+//! Three callers share this crate (priority #2 — one shape, not a copy per
 //! binary):
 //! - **`fauna-nest`**'s one shared accept loop (`serve_tls` and `serve_plain`
 //!   — every listener the nest binds), keyed on the **real client IP** the
 //!   PROXY-v2 fix resolves (`source_addr`), not the fronting router's loopback.
 //! - **`fauna-sni-router`**, keyed on the TCP peer it accepts directly (the
 //!   router is the front-most hop, so the peer *is* the real client).
+//! - **`fauna-front-door`**'s one accept loop for its TLS and port-80
+//!   listeners, keyed on the TCP peer it accepts directly.
 //!
 //! **Loopback is bounded by its own ceiling, not by the admin's cap.** The
 //! in-container mail bridge dials nest's loopback directly (headerless — its
@@ -107,6 +109,20 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// is deliberately unhurried so a brief network blip never costs a live client
 /// its connection.
 pub const KEEPALIVE_RETRIES: u32 = 4;
+
+/// How long an admitted connection may dawdle before sending its complete
+/// request head — the slow-header (Slowloris) guard every HTTP accept loop
+/// hands to hyper's `header_read_timeout`, so a trickle of header bytes cannot
+/// hold a connection (and its [`PerIpPermit`]) open indefinitely. One value for
+/// the nest's shared loop and the front door's: a WS-RPC upgrade or an ACME
+/// challenge fetch sends its head promptly, so 20 s never bites a real client.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long a TLS accept loop gives a peer to finish its handshake before the
+/// connection (and its [`PerIpPermit`]) is dropped — the handshake half of the
+/// same slow-peer defence as [`HEADER_READ_TIMEOUT`]. A real handshake completes
+/// in well under a second.
+pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Arm TCP keepalive on an accepted connection so a peer that vanishes without
 /// a clean close is detected and its [`PerIpPermit`] released.

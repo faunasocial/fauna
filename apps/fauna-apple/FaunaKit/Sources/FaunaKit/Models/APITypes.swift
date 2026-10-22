@@ -3,7 +3,7 @@ import Foundation
 // The `NodeInfo`/`NodeRegistration`/`RegistrationResponse` decodes lived here
 // for `APIClient`'s `GET /api/v1/{node-info,register}` calls. Both routes are
 // gone nest-side (WS-RPC `fauna.{nest.info,account.register}`), the calls with
-// them; the dashboard's Version card reads `FfiAdminStatus.version` instead.
+// them; the dashboard's Version card comes from `admin_dashboard_snapshot()`.
 
 // MARK: - Blobs
 

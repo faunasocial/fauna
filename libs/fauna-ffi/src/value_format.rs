@@ -487,18 +487,23 @@ pub fn notification_glyph_for_type(
 }
 
 /// `fauna_core::format::os_maintenance_status_label` → a `LocalizedText` for the
-/// `admin-nest` `nest-os-maintenance-status` line (reboot-pending / updates-pending /
-/// up-to-date, from the `os_*` fields on `fauna.setup.status`). Lifts the state→key
+/// `admin-nest` `nest-os-maintenance-status` line (no-host-data / reboot-pending /
+/// updates-pending / up-to-date, from the `os_*` fields on `fauna.setup.status`). Lifts the state→key
 /// decision all seven apps would otherwise hand-roll onto one source of truth
 /// (priority #2, preventative — like `contact_status_label`). The raw count badge
 /// (`nest-os-updates-count`) renders `os_security_updates_pending` directly. See
 /// `installers/vps.md` § Host OS Maintenance § 4.
 #[uniffi::export]
 pub fn os_maintenance_status_label(
+    host_status_present: bool,
     security_updates_pending: u32,
     reboot_pending: bool,
 ) -> LocalizedText {
-    fauna_core::format::os_maintenance_status_label(security_updates_pending, reboot_pending)
+    fauna_core::format::os_maintenance_status_label(
+        host_status_present,
+        security_updates_pending,
+        reboot_pending,
+    )
 }
 
 /// `fauna_core::format::mail_health_state_label` → a `LocalizedText` for the

@@ -690,12 +690,27 @@ impl ShareServer {
     ) -> Result<Value, RpcError> {
         let req: PeerShareManifestsGetRequest = from_value(&payload)?;
         let set = self.admitted_for_set(peer, slot, &req.set)?;
+        // One page of hashes per request: each is a store read, and the caller
+        // is another user's set member. The share client asks for one at a time.
+        if req.manifest_hashes.len() > MAX_ROWS_PER_PAGE as usize {
+            return Err(unsupported(
+                "a manifests request names at most one page of hashes",
+            ));
+        }
         let mut reply = PeerShareManifestsGetReply::default();
         let mut budget = MAX_BODY_BYTES_PER_REPLY;
+        // The reply is full once the budget is gone or a manifest has been
+        // turned away for exceeding what was left: the rest is `deferred`
+        // unread, so reads are bounded by the reply, not by the request.
+        let mut full = false;
         for wanted in &req.manifest_hashes {
             let Ok(hash) = <[u8; 32]>::try_from(wanted.as_ref()) else {
                 return Err(unsupported("a manifest hash must be exactly 32 bytes"));
             };
+            if full || budget == 0 {
+                reply.deferred.push(wanted.clone());
+                continue;
+            }
             match self
                 .store
                 .manifest_bytes(&set, &hash)
@@ -708,6 +723,7 @@ impl ShareServer {
                         // Held, but over this reply's budget. Distinct from
                         // `missing` so a puller re-asks instead of concluding
                         // no member holds it.
+                        full = true;
                         reply.deferred.push(wanted.clone());
                         continue;
                     }
@@ -1349,6 +1365,211 @@ mod tests {
             "over-budget is DEFERRED, never missing — a puller must re-ask, not \
              conclude no member holds it"
         );
+    }
+
+    /// A store that counts `manifest_bytes` reads and answers every hash with a
+    /// full-budget manifest, so a pin can tell reads bounded by the reply from
+    /// reads bounded by the request.
+    struct CountingManifestStore(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl ShareStore for CountingManifestStore {
+        async fn changes_since(
+            &self,
+            _set: &[u8; 32],
+            _since: i64,
+            _max_rows: u32,
+        ) -> anyhow::Result<Vec<LocalShareChange>> {
+            Ok(Vec::new())
+        }
+
+        async fn manifest_bytes(
+            &self,
+            _set: &[u8; 32],
+            _manifest_hash: &[u8; 32],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(vec![0xEE; MAX_BODY_BYTES_PER_REPLY]))
+        }
+
+        async fn chunk_body(
+            &self,
+            _set: &[u8; 32],
+            _store_key: &[u8; 32],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    /// Like [`CountingManifestStore`], but the FIRST read answers a small
+    /// manifest and every later one a full-budget manifest, so the reply is
+    /// stopped by a manifest turned away for size (`full`), never by the
+    /// budget reaching zero.
+    struct SmallThenOversizedStore(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl ShareStore for SmallThenOversizedStore {
+        async fn changes_since(
+            &self,
+            _set: &[u8; 32],
+            _since: i64,
+            _max_rows: u32,
+        ) -> anyhow::Result<Vec<LocalShareChange>> {
+            Ok(Vec::new())
+        }
+
+        async fn manifest_bytes(
+            &self,
+            _set: &[u8; 32],
+            _manifest_hash: &[u8; 32],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            let nth = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let len = if nth == 0 {
+                8
+            } else {
+                MAX_BODY_BYTES_PER_REPLY
+            };
+            Ok(Some(vec![0xEE; len]))
+        }
+
+        async fn chunk_body(
+            &self,
+            _set: &[u8; 32],
+            _store_key: &[u8; 32],
+        ) -> anyhow::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    fn manifest_hashes(n: usize) -> Vec<ByteBuf> {
+        (0..n)
+            .map(|i| {
+                let mut h = [0u8; 32];
+                h[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                ByteBuf::from(h.to_vec())
+            })
+            .collect()
+    }
+
+    /// The reads are bounded by the reply, not the request: once one manifest
+    /// has spent the whole budget, the rest are `deferred` unread.
+    #[tokio::test]
+    async fn the_manifest_door_stops_reading_once_the_reply_budget_is_spent() {
+        let store = Arc::new(CountingManifestStore(Default::default()));
+        let roster = FakeRoster(HashSet::from([(SET_A, SPOUSE)]));
+        let server = Arc::new(ShareServer::new(
+            ShareServerConfig {
+                display_name: "test".into(),
+                own_actor: US,
+                quotas: QuotaConfig::default(),
+                now: Arc::new(|| 1_000),
+            },
+            Arc::new(roster),
+            store.clone(),
+        ));
+        let peer = EndpointKey::from_bytes(SPOUSE);
+        let s = admitted_slot(&server, &peer, &[SET_A]).await;
+        let want = manifest_hashes(50);
+        let reply: PeerShareManifestsGetReply = reply_as(
+            server
+                .handle_manifests_get(
+                    &peer,
+                    &s,
+                    value_of(&PeerShareManifestsGetRequest {
+                        set: ByteBuf::from(SET_A.to_vec()),
+                        manifest_hashes: want.clone(),
+                        extra: Default::default(),
+                    }),
+                )
+                .await
+                .expect("serves"),
+        );
+        let reads = store.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            reads <= 2,
+            "a full reply must stop the source reads; got {reads} for 50 hashes"
+        );
+        assert_eq!(reply.manifests.len(), 1);
+        assert_eq!(reply.deferred.len(), 49, "the unread rest is deferred");
+        assert!(reply.missing.is_empty());
+    }
+
+    /// The `full` arm of the stop is witnessed on its own: after one small
+    /// manifest the budget is NOT zero, so only a manifest turned away for
+    /// exceeding what is left can stop the reads. Without that arm one small
+    /// manifest followed by 63 large ones costs 64 reads instead of 2.
+    #[tokio::test]
+    async fn the_manifest_door_stops_reading_at_the_first_oversized_manifest_with_budget_left() {
+        let store = Arc::new(SmallThenOversizedStore(Default::default()));
+        let roster = FakeRoster(HashSet::from([(SET_A, SPOUSE)]));
+        let server = Arc::new(ShareServer::new(
+            ShareServerConfig {
+                display_name: "test".into(),
+                own_actor: US,
+                quotas: QuotaConfig::default(),
+                now: Arc::new(|| 1_000),
+            },
+            Arc::new(roster),
+            store.clone(),
+        ));
+        let peer = EndpointKey::from_bytes(SPOUSE);
+        let s = admitted_slot(&server, &peer, &[SET_A]).await;
+        let n = MAX_ROWS_PER_PAGE as usize;
+        let reply: PeerShareManifestsGetReply = reply_as(
+            server
+                .handle_manifests_get(
+                    &peer,
+                    &s,
+                    value_of(&PeerShareManifestsGetRequest {
+                        set: ByteBuf::from(SET_A.to_vec()),
+                        manifest_hashes: manifest_hashes(n),
+                        extra: Default::default(),
+                    }),
+                )
+                .await
+                .expect("serves"),
+        );
+        let reads = store.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            reads <= 2,
+            "the source is read at most until the first oversized manifest; got {reads} for {n} hashes"
+        );
+        assert_eq!(reply.manifests.len(), 1);
+        assert_eq!(reply.deferred.len(), n - 1, "the unread rest is deferred");
+        assert!(reply.missing.is_empty());
+    }
+
+    /// A request names at most one page of hashes, and an over-cap one is
+    /// refused before the source is touched.
+    #[tokio::test]
+    async fn the_manifest_door_refuses_more_than_a_page_of_hashes_unread() {
+        let store = Arc::new(CountingManifestStore(Default::default()));
+        let roster = FakeRoster(HashSet::from([(SET_A, SPOUSE)]));
+        let server = Arc::new(ShareServer::new(
+            ShareServerConfig {
+                display_name: "test".into(),
+                own_actor: US,
+                quotas: QuotaConfig::default(),
+                now: Arc::new(|| 1_000),
+            },
+            Arc::new(roster),
+            store.clone(),
+        ));
+        let peer = EndpointKey::from_bytes(SPOUSE);
+        let s = admitted_slot(&server, &peer, &[SET_A]).await;
+        let result = server
+            .handle_manifests_get(
+                &peer,
+                &s,
+                value_of(&PeerShareManifestsGetRequest {
+                    set: ByteBuf::from(SET_A.to_vec()),
+                    manifest_hashes: manifest_hashes(MAX_ROWS_PER_PAGE as usize + 1),
+                    extra: Default::default(),
+                }),
+            )
+            .await;
+        assert!(result.is_err(), "cap+1 hashes must be refused");
+        assert_eq!(store.0.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// The chunk door **slices**: a body over one reply's budget comes back as a

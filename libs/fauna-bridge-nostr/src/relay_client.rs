@@ -100,6 +100,25 @@ pub async fn resolve_relay_target(
     Ok(RelayTarget { url: parsed, addrs })
 }
 
+/// The most one [`RelayClient::connect`] may take, end to end — resolve, TCP
+/// connect and the WebSocket/TLS handshake together. A relay URL is
+/// caller-supplied, so a relay that accepts the TCP connection and then never
+/// answers is one any user of a shared nest can list; without a bound the dial
+/// never returns and whoever awaits it — the nest's single Nostr sync worker —
+/// stalls with it. The same 10 s [`RelayClient::publish`] waits for an `OK`.
+/// A Rust constant, not a knob (`nest/network-exposure.md` § Rulings F8).
+pub const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The most one [`RelayClient::send`] may wait for the relay to take a frame
+/// off the socket. A relay that completes the handshake and then
+/// stops reading fills the socket buffers within a few dozen frames, after
+/// which an unbounded write awaits the peer for ever — and every write the
+/// nest makes (`subscribe`, `close_subscription`, `publish`) goes through
+/// `send`. The same 10 s as [`RELAY_CONNECT_TIMEOUT`]: an honest relay drains
+/// a frame of at most [`MAX_WS_MESSAGE_BYTES`] far sooner. A Rust constant,
+/// not a knob (`nest/network-exposure.md` § Rulings F8).
+pub const RELAY_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A WebSocket client for a single external Nostr relay.
 pub struct RelayClient {
     url: String,
@@ -124,8 +143,16 @@ impl RelayClient {
     /// those addresses only — a refused relay costs no socket — and
     /// inbound messages and frames are capped at [`MAX_WS_MESSAGE_BYTES`], since
     /// tungstenite's 64 MiB / 16 MiB default would let the relay pin that much
-    /// memory per connection.
+    /// memory per connection. The whole dial is bounded by
+    /// [`RELAY_CONNECT_TIMEOUT`], so a relay that accepts and never answers
+    /// costs its caller that long and no longer.
     pub async fn connect(url: &str, policy: RelayDialPolicy) -> Result<Self> {
+        tokio::time::timeout(RELAY_CONNECT_TIMEOUT, Self::connect_unbounded(url, policy))
+            .await
+            .map_err(|_| anyhow::anyhow!("connect to relay: timed out"))?
+    }
+
+    async fn connect_unbounded(url: &str, policy: RelayDialPolicy) -> Result<Self> {
         let target = resolve_relay_target(url, policy).await?;
         let tcp = tokio::net::TcpStream::connect(&target.addrs[..])
             .await
@@ -156,13 +183,19 @@ impl RelayClient {
         &self.url
     }
 
-    /// Send a raw client message to the relay.
+    /// Send a raw client message to the relay, bounded by
+    /// [`RELAY_SEND_TIMEOUT`] so a relay that stops reading costs its caller
+    /// that long and no longer. A timed-out send may leave a frame
+    /// half-written, so the caller drops the connection on any error.
     pub async fn send(&mut self, msg: &ClientMessage) -> Result<()> {
         let json = msg.to_json();
-        self.ws_tx
-            .send(tungstenite::Message::Text(json.into()))
-            .await
-            .context("send to relay")?;
+        tokio::time::timeout(
+            RELAY_SEND_TIMEOUT,
+            self.ws_tx.send(tungstenite::Message::Text(json.into())),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("send to relay: timed out"))?
+        .context("send to relay")?;
         Ok(())
     }
 
@@ -411,6 +444,30 @@ mod tests {
         );
     }
 
+    /// A relay that accepts the TCP connection and then never answers the
+    /// upgrade must not hold the dialer: `connect` returns an error
+    /// within [`RELAY_CONNECT_TIMEOUT`]. The probe listener never calls
+    /// `accept`, so the kernel completes the TCP handshake from its backlog and
+    /// the WebSocket upgrade is met with silence — the tarpit shape that
+    /// stalled the nest's Nostr sync worker.
+    #[tokio::test]
+    async fn a_silent_relay_is_given_up_on_within_the_connect_bound() {
+        let probe = ProbeListener::bind().await;
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(
+            RELAY_CONNECT_TIMEOUT + Duration::from_secs(5),
+            RelayClient::connect(&probe.url, RelayDialPolicy::PublicOrLoopback),
+        )
+        .await
+        .expect("connect to a silent relay must not outlive its bound");
+        assert!(got.is_err(), "a silent relay must not yield a client");
+        assert!(
+            started.elapsed() >= RELAY_CONNECT_TIMEOUT - Duration::from_millis(500),
+            "the bound is the constant, not an earlier failure: {:?}",
+            started.elapsed()
+        );
+    }
+
     /// The finding's effect is **blind**: a relay URL that answers
     /// the upgrade with a plain HTTP reply fails the handshake, and nothing of
     /// that reply's body reaches the dialer's error — so even before the guard,
@@ -446,5 +503,53 @@ mod tests {
             !text.contains("a metadata body that must stay unseen"),
             "the reply body must never surface through the dial error: {text}"
         );
+    }
+
+    /// A loopback relay with a 4 KiB receive buffer that completes the
+    /// WebSocket handshake and then never reads another byte; return the
+    /// `ws://` URL to dial.
+    async fn deaf_relay() -> String {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let _ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        format!("ws://{addr}")
+    }
+
+    /// A relay that stops reading must not hold the sender: once
+    /// the socket buffers fill, `send` — and so `subscribe`,
+    /// `close_subscription` and `publish`'s write — returns an error within
+    /// [`RELAY_SEND_TIMEOUT`] instead of awaiting the peer for ever. Each `REQ`
+    /// is about 33 KB, so the buffers fill within a few dozen sends; the outer
+    /// bound is what a hang trips.
+    #[tokio::test]
+    async fn a_relay_that_stops_reading_is_given_up_on_within_the_send_bound() {
+        let url = deaf_relay().await;
+        let mut client = RelayClient::connect(&url, RelayDialPolicy::PublicOrLoopback)
+            .await
+            .unwrap();
+        let authors: Vec<String> = (0..500).map(|i| format!("{i:064x}")).collect();
+        for _ in 0..2000 {
+            let filter = Filter {
+                authors: Some(authors.clone()),
+                ..Default::default()
+            };
+            let sent = tokio::time::timeout(
+                RELAY_SEND_TIMEOUT + Duration::from_secs(5),
+                client.subscribe("deaf", vec![filter]),
+            )
+            .await
+            .expect("a send to a relay that stopped reading must not outlive its bound");
+            if sent.is_err() {
+                return;
+            }
+        }
+        panic!("the relay's buffers never filled — the fixture is not deaf");
     }
 }

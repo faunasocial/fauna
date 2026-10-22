@@ -146,6 +146,14 @@ class CustodyActions:
     def held_owner(self, index: int = 0) -> str:
         return self.driver.get_text("custody-held-owner", index=index)
 
+    def held_restore_address(self, index: int = 0) -> str:
+        """The address the owner's cold device restores from
+        (`custody-held-restore-address`) — rendered for a NEST-form hold only,
+        the accept's URL verbatim inside its copy; `""` when absent."""
+        if self.driver.is_absent("custody-held-restore-address"):
+            return ""
+        return self.driver.get_text("custody-held-restore-address", index=index) or ""
+
     def held_bytes(self, index: int = 0) -> str:
         """The row's metered line — ``Holding ‹held› of ‹cap›`` off this
         device's own latest minted receipt (dashes before the first)."""

@@ -66,6 +66,43 @@ class MailSettingsActions:
                 tracked="mail-settings.md",
             )
 
+    def require_token_refresh_clock_supported(self) -> None:
+        """Skip unless this app runs the shared submission-token refresh AND
+        routes its fake clock — the `mail_token_refresh_advance_clock` agent
+        command over `fauna_client_mail_settings::token_refresh` (e2e
+        convention 7). tui led; linux, web and android followed in one
+        trickle-down lift; windows, macos and ios follow in theirs
+        (`mail-credentials.md` § Trigger taxonomy, the "Submission-token
+        refresh" row)."""
+        if not (
+            self.driver.is_tui()
+            or self.driver.is_linux()
+            or self.driver.is_web()
+            or self.driver.is_android()
+        ):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="the submission-token refresh's fake clock "
+                        "(mail_token_refresh_advance_clock)",
+                detail="the shared refresh and its clock are in place; this "
+                       "app's automation agent does not route the command yet",
+                tracked="mail-credentials.md § Trigger taxonomy",
+            )
+
+    def advance_token_refresh_clock(self, offset_secs: int) -> None:
+        """Move the submission-token refresh's clock (the 7-day re-mint
+        cadence and each re-minted token's `issued_at`; never the bearer
+        clock) by `offset_secs`. The refresh reads it on its next pass — the
+        session's next reconnect. Pass `0` to reset: the offset is
+        process-wide and nothing auto-resets it."""
+        self.driver.call_command(
+            "mail_token_refresh_advance_clock",
+            {"now_offset_secs": offset_secs},
+            timeout=30,
+        )
+
     def navigate(self) -> None:
         """Navigate to the mail-settings page by the two-element nav patch
         ``{"view":"settings"},{"view":"settings","id":"mail-settings"}`` —
@@ -309,6 +346,21 @@ class MailSettingsActions:
         """
         self.driver.wait_for("mail-settings-add-credential-button", timeout=10.0)
         self.driver.click("mail-settings-add-credential-button")
+        self.driver.wait_for("mail-add-credential-name-input", timeout=10.0)
+        self.driver.clear_and_type("mail-add-credential-name-input", display_name)
+        if self.driver.is_tui():
+            self.driver.press_key("mail-add-credential-submit-button", "Enter")
+        else:
+            self.driver.click("mail-add-credential-submit-button")
+
+    def start_enable_mail(self, display_name: str = "Default") -> None:
+        """Turn mail on (Flow F1) WITHOUT waiting for the first mint to land —
+        :meth:`start_add_credential`'s twin for the first credential, for a
+        caller standing inside the enable (``helpers.rpc_hold`` holding one of
+        its writes). Same activation split: tui presses Enter on the submit
+        button, every other app clicks."""
+        self.driver.wait_for("mail-settings-enabled-toggle", timeout=10.0)
+        self.driver.click("mail-settings-enabled-toggle")
         self.driver.wait_for("mail-add-credential-name-input", timeout=10.0)
         self.driver.clear_and_type("mail-add-credential-name-input", display_name)
         if self.driver.is_tui():
@@ -864,3 +916,54 @@ class MailSettingsActions:
         """The hourly-limit field's current text."""
         self.driver.wait_for(self.FORWARD_PER_HOUR_ID, timeout=10.0)
         return (self.driver.get_text(self.FORWARD_PER_HOUR_ID) or "").strip()
+
+    # ── The per-account switches, the automatic reply and the quota readout
+    # (ui.yaml `mail-settings`; approved 2026-10-16).
+    RECEIVE_ID = "mail-settings-receive-toggle"
+    SEND_ID = "mail-settings-send-toggle"
+    AUTORESPOND_ID = "mail-settings-autorespond-toggle"
+    AUTORESPOND_MESSAGE_ID = "mail-settings-autorespond-message-input"
+    MAILBOX_QUOTA_ID = "mail-settings-mailbox-quota"
+    SUBMISSION_QUOTA_ID = "mail-settings-submission-quota"
+    OVER_QUOTA_NOTICE_ID = "mail-settings-over-quota-notice"
+
+    def toggle_state(self, element_id: str) -> str:
+        """A toggle's on/off as its `state` attr carries it ("" before it paints)."""
+        self.driver.wait_for(element_id, timeout=10.0)
+        return self.driver.get_attr(element_id, "state") or ""
+
+    def click_toggle(self, element_id: str) -> None:
+        """Click a toggle once; the page writes the flipped value and repaints
+        `state` only from the nest's re-read (non-optimistic)."""
+        self.driver.wait_for(element_id, timeout=10.0)
+        self.driver.click(element_id)
+
+    def set_autorespond_message(self, message: str) -> None:
+        """Type the automatic reply's message and commit it with Enter, which
+        also turns the reply on."""
+        self.driver.wait_for(self.AUTORESPOND_MESSAGE_ID, timeout=10.0)
+        self.driver.clear_and_type(self.AUTORESPOND_MESSAGE_ID, message)
+        self.driver.press_key(self.AUTORESPOND_MESSAGE_ID, "Enter")
+
+    def autorespond_message(self) -> str:
+        """The automatic reply's message field text."""
+        self.driver.wait_for(self.AUTORESPOND_MESSAGE_ID, timeout=10.0)
+        return (self.driver.get_text(self.AUTORESPOND_MESSAGE_ID) or "").strip()
+
+    def mailbox_quota_text(self) -> str:
+        """The mailbox quota readout ("" until it paints)."""
+        if not self.driver.is_visible(self.MAILBOX_QUOTA_ID):
+            return ""
+        return (self.driver.get_text(self.MAILBOX_QUOTA_ID) or "").strip()
+
+    def submission_quota_text(self) -> str:
+        """The daily sending allowance readout ("" until it paints)."""
+        if not self.driver.is_visible(self.SUBMISSION_QUOTA_ID):
+            return ""
+        return (self.driver.get_text(self.SUBMISSION_QUOTA_ID) or "").strip()
+
+    def over_quota_notice_text(self) -> str:
+        """The over-quota notice, or "" while no limit has run out."""
+        if not self.driver.is_visible(self.OVER_QUOTA_NOTICE_ID):
+            return ""
+        return (self.driver.get_text(self.OVER_QUOTA_NOTICE_ID) or "").strip()

@@ -22,9 +22,9 @@
 //! `set_renders_trust_prompt(true)`; before that it exited `nat_mode_choice`
 //! straight to `Done`.
 //!
-//! ⚠ The summary copy promises **no renewal**: the blessed-box auto-renew loop
-//! is unbuilt (`ui/nests.md` § Expiry / renewal), so the shared string says
-//! nothing about it and this page must not add its own wording.
+//! ⚠ The summary copy is the shared string alone: it states the renewal the
+//! tap's blessing brings and no fixed limit (`onboarding.md` § 3b-ter, honest
+//! bound (1)), pinned in shared Rust — this page must not add its own wording.
 
 use fauna_ui_ids as ids;
 use std::rc::Rc;

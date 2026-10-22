@@ -41,6 +41,7 @@ from .family import FamilyActions
 from .bridges import BridgesActions
 from .retire import RetireActions
 from .feature_policy_editor import FeaturePolicyEditorActions
+from .rule_editor import RuleEditorActions
 
 if TYPE_CHECKING:
     from drivers.base import PlatformDriver
@@ -108,6 +109,7 @@ class ActionLayer:
         self.bridges = BridgesActions(driver)
         self.retire = RetireActions(driver)
         self.feature_policy_editor = FeaturePolicyEditorActions(driver)
+        self.rule_editor = RuleEditorActions(driver)
 
     # --- Cross-group flows (need more than one action group) ---
 

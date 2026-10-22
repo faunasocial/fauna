@@ -50,7 +50,12 @@ pub(super) fn calendar_elements(state: &AdminState) -> Vec<Element> {
             Field::Admin(AdminField::CaldavPort),
         )
         .labelled(t::calendar_page::CALDAV_PORT_LABEL),
-        Element::chrome(t::calendar_page::CALDAV_PORT_DESC),
+        // Tagged, so a driver can read that the port governs only a nest with
+        // no domain (`admin.md` § 8 Calendar).
+        Element::label(
+            ids::ADMIN_CALENDAR_CALDAV_PORT_HELP_TEXT,
+            t::calendar_page::CALDAV_PORT_DESC,
+        ),
         Element::gesture_button(
             ids::ADMIN_CALENDAR_CALDAV_PORT_SAVE_BUTTON,
             t::calendar_page::CALDAV_PORT_SAVE,
@@ -92,6 +97,7 @@ mod tests {
                 "admin-nav-back",
                 "admin-calendar-enabled-toggle",
                 "admin-calendar-caldav-port-input",
+                "admin-calendar-caldav-port-help-text",
                 "admin-calendar-caldav-port-save-button",
             ]
         );

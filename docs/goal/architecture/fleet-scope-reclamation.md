@@ -520,7 +520,13 @@ Split verbatim out of [`account-data-taxonomy.md`](account-data-taxonomy.md) on 
   `the_builder_hands_the_machine_the_fleet_removal_door` and linux's
   `the_page_machine_carries_the_fleet_removal_door` (built over
   `build_wired_devices_machine`, the fn the page builder takes its machine
-  from). One gap remains open. The
+  from, with the builder's use of that fn held by the type system, not a
+  source guard: `build_wired_devices_machine` returns a `WiredDevicesMachine`
+  whose field is private to its own module (`wired.rs`), and the page
+  builder's wiring (`wire_page_sources`), render loop and the `DevicesFoldersHandles::devices_machine` field handed to `app.rs` take that type, so a
+  builder holding a plain machine — from `build_devices_machine` aliased or
+  not, a dead wired call beside it, a comment naming the wired fn, or a
+  pattern-bound or shadowing rebind — does not compile). One gap remains open. The
   `fauna-ffi` pin can race sibling tests that install a store into the
   process-global host. **And end to
   end (2026-09-20):** the tier_3 kill-between-the-legs journey

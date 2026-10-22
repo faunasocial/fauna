@@ -230,7 +230,7 @@ pub async fn restore_and_wire(
     // **folder** half of that population the member's own `ForeignFolder`
     // record is a durable datum independent of the slice, and this is the read
     // that spends it: one custody read, filling only holes, so a channel
-    // whose slice did carry a home keeps it (`federation.md` § Cross-nest
+    // whose slice did carry a home keeps it (`federation-shared-folders.md` § Cross-nest
     // shared folders + channel append).
     let seeded = backend.seed_channel_homes_from_custody().await;
     if seeded > 0 {
@@ -413,7 +413,11 @@ pub fn bind_restored_slice(
             // three inbound drains fetch from a nest holding none of the
             // channel's records.
             if let Some(home) = &slice.home_nest_url {
-                backend.record_channel_home(channel, home);
+                backend.record_channel_home_with_identity(
+                    channel,
+                    home,
+                    slice.home_nest_actor_id.as_deref(),
+                );
             } else if slice.home_same_nest {
                 // Re-establish the explicit `SameNest` marker (the total
                 // encoding's local half) so a restored local channel is
@@ -505,6 +509,7 @@ pub async fn persist_channel_history(
     // after a relaunch.
     slice.home_nest_url = backend.channel_home_url(&channel);
     slice.home_same_nest = backend.channel_is_same_nest(&channel);
+    slice.home_nest_actor_id = backend.channel_home_actor_id(&channel);
     sync.save_history_if_changed(&slice).await?;
     Ok(true)
 }
@@ -745,6 +750,7 @@ pub fn snapshot_replica(
             // snapshot, so every tick re-sealed and re-PUT it.
             slice.home_nest_url = backend.channel_home_url(&ch);
             slice.home_same_nest = backend.channel_is_same_nest(&ch);
+            slice.home_nest_actor_id = backend.channel_home_actor_id(&ch);
             Some(slice)
         })
         .collect();
@@ -981,9 +987,15 @@ mod tests {
                 deleted: false,
                 is_own: true,
                 legal_takedown_ref: None,
+                admin_block_reason: None,
                 labels: vec![],
                 plane_ref: None,
                 can_delete: false,
+                undelivered: false,
+                warmup_hold: None,
+                scan_result_lines: Vec::new(),
+                delivered_to: None,
+                withheld: None,
             }],
             watermark,
             ..Default::default()
@@ -1120,7 +1132,7 @@ mod tests {
     }
 
     /// **A foreign-homed channel must still route to its home nest after a
-    /// relaunch** (`federation.md` § Cross-nest shared folders + channel append;
+    /// relaunch** (`federation-shared-folders.md` § Cross-nest shared folders + channel append;
     /// `devices.md` § the routed-send precondition).
     ///
     /// `FaunaMlsBackend::channel_home` is the input `send_on_channel` picks
@@ -1232,7 +1244,7 @@ mod tests {
 
     /// **The debounced autosave must stamp the channel's home too — it is the
     /// only writer a Welcome *recipient* runs until their first own mutation**
-    /// (`federation.md` § Cross-nest shared folders + channel append).
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append).
     ///
     /// `history/<ch>` has two writers. [`persist_channel_history`] (the Rule-3
     /// flush) stamped `home_nest_url`; [`snapshot_replica`] did not. Their split
@@ -1330,7 +1342,7 @@ mod tests {
     }
 
     /// **A re-delivered Welcome must re-teach the home of a channel restored
-    /// from a HOME-LESS slice** (`federation.md` § Cross-nest shared folders +
+    /// from a HOME-LESS slice** (`federation-shared-folders.md` § Cross-nest shared folders +
     /// channel append — the "Stated, not closed" paragraph).
     ///
     /// That paragraph named a re-delivered Welcome as the recovery for a
@@ -1409,6 +1421,7 @@ mod tests {
             &channel_hex,
             b"",
             HOME,
+            None,
         ))
         .expect("a re-delivered welcome is idempotent, not an error");
 
@@ -1522,6 +1535,7 @@ mod tests {
             &channel_hex,
             b"",
             "",
+            None,
         ))
         .expect("a re-delivered welcome is idempotent, not an error");
 
@@ -1533,6 +1547,7 @@ mod tests {
             &channel_hex,
             b"",
             REAL_HOME,
+            None,
         ))
         .expect("a re-delivered welcome is idempotent, not an error");
 
@@ -1602,7 +1617,7 @@ mod tests {
 
         // In-session plant attempt: the pre-guard write a re-delivered hostile
         // Welcome performs. The explicit same-nest record must leave no hole.
-        backend_a.record_channel_home_if_absent(channel, EVIL);
+        backend_a.record_channel_home_if_absent(channel, EVIL, None);
         assert_eq!(
             backend_a.channel_home_url(&channel),
             None,
@@ -1631,6 +1646,7 @@ mod tests {
             &channel_hex,
             b"",
             EVIL,
+            None,
         ))
         .expect("a re-delivered welcome is idempotent, not an error");
 
@@ -1691,7 +1707,7 @@ mod tests {
 
     /// **A home-less cross-nest FOLDER channel must recover its home from the
     /// member's own `ForeignFolder` record — no Welcome re-delivery, no init
-    /// key spent** (`federation.md` § Cross-nest shared folders + channel
+    /// key spent** (`federation-shared-folders.md` § Cross-nest shared folders + channel
     /// append — the "Stated, not closed" paragraph, which names this record as
     /// one of the two data durable independently of the slice).
     ///
@@ -1718,7 +1734,7 @@ mod tests {
     /// This is also the **seed-seam trust pin**: the launch spends the at-rest record AS
     /// WRITTEN — the decided semantics for records with no verified origin,
     /// accepted as the inviter-binding TOFU
-    /// residual (`federation.md` § Cross-nest shared folders + channel append,
+    /// residual (`federation-shared-folders.md` § Cross-nest shared folders + channel append,
     /// the declared-residual prose; the seed's own doc comment carries the
     /// grounds). A future change that makes the seed distrust unmarked records
     /// reds this pin — deliberately, since that change deletes the recovery
@@ -1812,6 +1828,56 @@ mod tests {
     /// that ordering the recovery for the home-less population would become a
     /// way to *re-route* a correctly-homed channel — turning a fix for stuck
     /// routing into a source of it.
+    /// The home's identity rides the slice beside its URL: a channel recorded
+    /// with the identity its Welcome carried restores with it after a relaunch,
+    /// so the room-attachment read still graduates its pin against it
+    /// (`transport-trust.md` § The post arm).
+    #[test]
+    fn a_foreign_homes_identity_survives_the_relaunch() {
+        const HOME: &str = "https://room-home.example";
+        let identity = "b0".repeat(32);
+
+        let replica = MemReplica::default();
+        let conv_nest = Arc::new(FakeConvNest::default());
+        let home_nest = Arc::new(FakeConvNest::default());
+        conv_nest.register_peer_nest(HOME, Arc::clone(&home_nest));
+        let bob = Arc::new(MlsEngine::new_in_memory(keypair(2)).unwrap());
+        conv_nest.register_key_package(
+            &bob.identity_actor_id(),
+            bob.generate_key_packages_bytes(1).unwrap().remove(0),
+        );
+
+        let alice = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let (backend_a, manager_a, sync_a, _) = launched_device(&alice, &conv_nest, &replica, 1);
+        let tid = manager_a.restore_channel_slice(&unsent_fauna_thread_slice(
+            alice.identity_actor_id(),
+            bob.identity_actor_id(),
+        ));
+        manager_a.set_compose_body(tid.clone(), "bound".into());
+        block_on(manager_a.send(tid.clone())).expect("send succeeds");
+        let channel = ChannelId::from_hex(&backend_a.channel_binding_hex(&tid).unwrap()).unwrap();
+        backend_a.record_channel_home_with_identity(channel, HOME, Some(&identity));
+        block_on(persist_channel_history(
+            &backend_a, &manager_a, &sync_a, channel,
+        ))
+        .expect("history persist");
+
+        let alice2 = Arc::new(MlsEngine::new_in_memory(keypair(1)).unwrap());
+        let (backend_b, manager_b, sync_b) = device(&alice2, &conv_nest, &replica, 1);
+        block_on(restore_and_wire(
+            Arc::clone(&sync_b),
+            &backend_b,
+            &manager_b,
+        ))
+        .expect("launch restore ok");
+        assert_eq!(backend_b.channel_home_url(&channel).as_deref(), Some(HOME));
+        assert_eq!(
+            backend_b.channel_home_actor_id(&channel).as_deref(),
+            Some(identity.as_str()),
+            "the identity restores beside the URL it was recorded with"
+        );
+    }
+
     #[test]
     fn the_custody_seed_never_overwrites_a_home_the_slice_carried() {
         const SLICE_HOME: &str = "https://slice-home.example";
@@ -3605,6 +3671,7 @@ mod tests {
             &channel.to_string(),
             &welcome_bytes,
             "",
+            None,
         ))
         .expect("the welcome join succeeds");
 
@@ -3651,6 +3718,7 @@ mod tests {
             &channel.to_string(),
             &welcome_bytes,
             "",
+            None,
         ))
         .expect("the welcome join succeeds");
 
@@ -3741,6 +3809,7 @@ mod tests {
             &hex,
             &welcome_bytes,
             "",
+            None,
         ))
         .expect("A joins from the push");
         assert_eq!(backend_a.thread_for_channel(&channel), Some(tid_a));
@@ -3755,6 +3824,7 @@ mod tests {
                 &hex,
                 &welcome_bytes,
                 "",
+                None,
             ))
             .expect_err("D holds no init key for the package this Welcome addresses");
             report_welcome_ingest_failure(&WelcomeChannelKind::Dm, &err);
@@ -3894,6 +3964,7 @@ mod tests {
             &hex,
             &welcome_bytes,
             "",
+            None,
         ))
         .expect("A joins from the push");
         let (tid_b, lines_b) = capture_tracing_at_info(|| {
@@ -3903,6 +3974,7 @@ mod tests {
                 &hex,
                 &welcome_bytes,
                 "",
+                None,
             ))
             .expect("B joins from the same push")
         });
@@ -3955,6 +4027,7 @@ mod tests {
                 &hex,
                 &welcome_bytes,
                 "",
+                None,
             ))
             .expect("C joins from its drain")
         });

@@ -61,6 +61,7 @@ class ApiClientActorGenerationTest {
         Mockito.mock(CriticalAlertsHost::class.java),
         Mockito.mock(OfflineShareHost::class.java),
         Mockito.mock(NotificationHelper::class.java),
+        Mockito.mock(com.fauna.app.core.push.PushHost::class.java),
     )
 
     private fun bearer() = FfiBearerToken("tok", "0123456789abcdef", ULong.MAX_VALUE / 2000uL)

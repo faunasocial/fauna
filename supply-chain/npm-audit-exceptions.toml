@@ -19,12 +19,3 @@
 # package = "name"
 # reason = "..."
 # recorded = "YYYY-MM-DD"
-
-# Temporary: removed by the web app's move to SvelteKit 3, resolvable from
-# 2026-10-08 17:22 UTC under the 7-day minimum release age.
-[[exception]]
-tree = "apps/fauna-web"
-id = "GHSA-pxg6-pf52-xh8x"
-package = "cookie"
-reason = "SvelteKit 2 uses cookie only server-side, to serialize Set-Cookie headers. The web app is a static SPA (adapter-static, index.html fallback): no server ships, and nothing in src/ calls Kit's cookie API, so the serializer only ever runs at build time on our own values, never on input another party controls. Only SvelteKit 3 moves cookie to a fixed version. Owner-approved 2026-10-05."
-recorded = "2026-10-05"

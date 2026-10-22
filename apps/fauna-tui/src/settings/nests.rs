@@ -74,6 +74,17 @@ pub struct NestsState {
     /// shared `classify_link_input` decides which action it drives, so this
     /// layer never parses it. Committed only on `nests-add-submit-button`.
     pub add_input: String,
+    /// Whether the page-level restore form is revealed
+    /// (`nests-custody-restore-button` → input + submit/cancel). Reset on
+    /// every nav into the page; kept open on every failed restore.
+    pub restore_form_open: bool,
+    /// The `nests-custody-restore-input` buffer — the custodian nest's
+    /// address. The runtime command applies the URL policy, so this layer
+    /// never parses it.
+    pub restore_input: String,
+    /// The last restore's state this session (`nests-custody-restore-notice`)
+    /// — `None` until a restore ran.
+    pub restore_notice: Option<RestoreNotice>,
     /// The open mint form, if any (`nests.md` § Mint). `Some` only between
     /// `nest-trust-grant-mint-button` and confirm/re-hydrate.
     pub mint: Option<MintForm>,
@@ -81,6 +92,24 @@ pub struct NestsState {
     /// good re-read retires that one and never a gesture's
     /// (`PageErrors::retire_own`).
     pub read_error: Option<String>,
+}
+
+/// The restore notice's state (`nests.md` § Trust facet — restore from a
+/// custodian nest): *running* while the command is in flight, then the
+/// runtime's outcome — each its own text, never collapsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreNotice {
+    Running,
+    Done(fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome),
+}
+
+impl RestoreNotice {
+    fn text(&self) -> String {
+        match self {
+            RestoreNotice::Running => t::CUSTODY_RESTORE_RUNNING.to_string(),
+            RestoreNotice::Done(outcome) => outcome.notice(),
+        }
+    }
 }
 
 /// The open mint form's local state. Deliberately a single `Option`, not a
@@ -193,6 +222,8 @@ impl NestsState {
     pub fn reset_form(&mut self) {
         self.add_form_open = false;
         self.add_input.clear();
+        self.restore_form_open = false;
+        self.restore_input.clear();
         self.mint = None;
     }
 
@@ -312,6 +343,12 @@ pub(super) fn nests_elements(
         push_forward_queue(&mut els, queue);
     }
 
+    // Restore from a custodian nest (`nests.md` § Trust facet — restore from
+    // a custodian nest): page-level, after the forward queue and before the
+    // rows, on every signed-in visit — the cold device has no custody rows,
+    // and it is who the button is for.
+    push_custody_restore(&mut els, state);
+
     // Home first, then pairings — the order every trust-facet client renders,
     // and the order `LinkedNestsActions.nest_ids()` assumes when it slices the
     // pairing rows off the end.
@@ -352,6 +389,48 @@ pub(super) fn nests_elements(
         .nav_back(),
     );
     els
+}
+
+/// The page-level restore block (`nests-custody-restore-*`): the reveal, the
+/// inline form (the `nests-add-*` shape), and the last outcome's notice.
+fn push_custody_restore(els: &mut Vec<Element>, state: &NestsState) {
+    els.push(Element::gesture_button(
+        ids::NESTS_CUSTODY_RESTORE_BUTTON,
+        t::CUSTODY_RESTORE_BUTTON,
+        true,
+        Gesture::Settings(Action::NestsShowRestoreForm),
+    ));
+    if state.restore_form_open {
+        els.push(
+            Element::input(
+                ids::NESTS_CUSTODY_RESTORE_INPUT,
+                state.restore_input.clone(),
+                Field::Settings(SettingsField::NestsRestoreInput),
+            )
+            .labelled(t::CUSTODY_RESTORE_INPUT_LABEL),
+        );
+        els.push(Element::gesture_button(
+            ids::NESTS_CUSTODY_RESTORE_SUBMIT_BUTTON,
+            t::CUSTODY_RESTORE_SUBMIT,
+            !state.restore_input.trim().is_empty()
+                && state.restore_notice != Some(RestoreNotice::Running),
+            Gesture::Settings(Action::NestsRestoreFromCustodian(
+                state.restore_input.trim().to_string(),
+            )),
+        ));
+        els.push(Element::gesture_button(
+            ids::NESTS_CUSTODY_RESTORE_CANCEL_BUTTON,
+            t::CUSTODY_RESTORE_CANCEL,
+            true,
+            Gesture::Settings(Action::NestsCancelRestore),
+        ));
+    }
+    if let Some(notice) = &state.restore_notice {
+        els.push(Element::label(
+            ids::NESTS_CUSTODY_RESTORE_NOTICE,
+            notice.text(),
+        ));
+    }
 }
 
 /// The page-level forward-queue block (`nests-forward-*`): the count, the
@@ -482,7 +561,27 @@ fn push_trust_facet(els: &mut Vec<Element>, state: &NestsState, row: &LinkedNest
             // directly above "Backs up your messages for you" would state the
             // opposite of the row beneath it. linux shipped that bug and fixed
             // it 2026-07-24 — do not re-derive the condition.
-            if row.trust_grants.is_empty() && row.trust_backups.is_empty() {
+            // A roster that could not be read is not an empty one
+            // (`nests.md:125`): the status says so on the home row, and it
+            // takes `nest-trust-empty`'s place below. Omitted-holder grants
+            // still list through the catch-all.
+            if row.is_home {
+                els.push(
+                    Element::label(
+                        ids::NEST_TRUST_HOLDERS_STATUS,
+                        if row.trust_holders_unreachable {
+                            t::HOLDERS_STATUS_UNREACHABLE
+                        } else {
+                            ""
+                        },
+                    )
+                    .within(ids::NESTS_ITEM, i),
+                );
+            }
+            if row.trust_grants.is_empty()
+                && row.trust_backups.is_empty()
+                && !row.trust_holders_unreachable
+            {
                 els.push(
                     Element::label(ids::NEST_TRUST_EMPTY, t::NOT_TRUSTED)
                         .within(ids::NESTS_ITEM, i),
@@ -649,6 +748,17 @@ fn push_custody_nest_item(
         !row.pending,
         Gesture::Settings(Action::CustodyRevoke(fold_index as u32)),
     )));
+    // The warm explicit restore gesture (`nests.md` § Trust facet — restore
+    // from a custodian nest): the same command as the page-level form, the
+    // row's own address pre-filled.
+    if let Some(url) = &row.custodian_nest_url {
+        els.push(nest(Element::gesture_button(
+            ids::NEST_TRUST_CUSTODY_RESTORE_BUTTON,
+            t::CUSTODY_RESTORE_ROW_BUTTON,
+            true,
+            Gesture::Settings(Action::NestsRestoreFromCustodian(url.clone())),
+        )));
+    }
 }
 
 fn push_grant_item(els: &mut Vec<Element>, grant: &TrustGrantRow, i: usize, j: usize) {
@@ -1244,6 +1354,85 @@ mod tests {
         els.iter().map(|e| e.id.as_str()).collect()
     }
 
+    // ── restore from a custodian nest (`nests.md` § Trust facet — restore
+    // from a custodian nest) ─────────────────────────────────────────────
+
+    /// The affordance renders on every signed-in visit — custody rows or none
+    /// (the cold device has none) — page-level, after the forward queue and
+    /// before the nest rows; the form and the notice only when there is one.
+    #[test]
+    fn the_restore_affordance_renders_without_custody_rows_before_the_nest_rows() {
+        let els = nests_elements(&state_with(home_row()), None);
+        let at = |id| ids(&els).iter().position(|i| *i == id);
+        let button = at("nests-custody-restore-button").expect("always rendered");
+        assert!(button < at("nests-item").unwrap(), "before the nest rows");
+        for id in [
+            "nests-custody-restore-input",
+            "nests-custody-restore-submit-button",
+            "nests-custody-restore-cancel-button",
+            "nests-custody-restore-notice",
+        ] {
+            assert!(
+                !ids(&els).contains(&id),
+                "{id} painted with the form closed"
+            );
+        }
+    }
+
+    /// The open form dispatches the typed address through the one command;
+    /// the notice paints the outcome's own text.
+    #[test]
+    fn the_open_form_dispatches_the_typed_address_and_the_notice_reads_the_outcome() {
+        use fauna_sync_engine::custodian_nest_restore::CustodianRestoreOutcome;
+        let mut state = state_with(home_row());
+        state.restore_form_open = true;
+        state.restore_input = "  https://friend-nest.example  ".into();
+        state.restore_notice = Some(RestoreNotice::Done(CustodianRestoreOutcome::NothingNew));
+        let els = nests_elements(&state, None);
+        let submit = els
+            .iter()
+            .find(|e| e.id == "nests-custody-restore-submit-button")
+            .expect("submit painted");
+        assert!(
+            matches!(
+                &submit.role,
+                crate::element::Role::Button(Gesture::Settings(Action::NestsRestoreFromCustodian(u)))
+                    if u == "https://friend-nest.example"
+            ),
+            "the submit dispatches the trimmed address"
+        );
+        assert_eq!(
+            text_of(&els, "nests-custody-restore-notice"),
+            Some(t::CUSTODY_RESTORE_NOTHING_NEW)
+        );
+        assert!(ids(&els).contains(&"nests-custody-restore-input"));
+        assert!(ids(&els).contains(&"nests-custody-restore-cancel-button"));
+    }
+
+    /// A custodian-NEST row carries the warm gesture with its own address.
+    #[test]
+    fn a_custodian_nest_row_carries_the_restore_gesture_with_its_address() {
+        let facet = super::super::devices::custody_walk_facet();
+        let url = facet
+            .rows
+            .iter()
+            .find_map(|r| r.custodian_nest_url.clone())
+            .expect("the fixture carries a nest-form custody");
+        let els = nests_elements(&state_with(home_row()), Some(&facet));
+        let row_button = els
+            .iter()
+            .find(|e| e.id == "nest-trust-custody-restore-button")
+            .expect("the warm gesture painted");
+        assert!(
+            matches!(
+                &row_button.role,
+                crate::element::Role::Button(Gesture::Settings(Action::NestsRestoreFromCustodian(u)))
+                    if *u == url
+            ),
+            "the row's own address rides the gesture"
+        );
+    }
+
     fn text_of<'a>(els: &'a [Element], id: &str) -> Option<&'a str> {
         els.iter().find(|e| e.id == id).map(|e| e.text.as_str())
     }
@@ -1291,6 +1480,35 @@ mod tests {
         // `Count > 0` visibility, not a combined trust-facet condition).
         assert!(ids(&els).contains(&"nest-trust-backup-list"));
         assert!(!ids(&els).contains(&"nest-trust-generation-list"));
+    }
+
+    /// `nests.md:125` — a roster that could not be read is not an empty one:
+    /// flag true + no grants renders the unreachable status, never
+    /// `nest-trust-empty`.
+    #[test]
+    fn an_unreadable_holder_roster_replaces_the_empty_state() {
+        let mut row = home_row();
+        row.trust_holders_unreachable = true;
+        let els = nests_elements(&state_with(row), None);
+        assert!(!ids(&els).contains(&"nest-trust-empty"));
+        let status = els
+            .iter()
+            .find(|e| e.id == "nest-trust-holders-status")
+            .expect("holders status renders");
+        assert_eq!(status.text, t::HOLDERS_STATUS_UNREACHABLE);
+    }
+
+    /// The listed polarity: roster read fine + no grants is the ordinary empty
+    /// state, and the status element carries no text.
+    #[test]
+    fn a_readable_holder_roster_keeps_the_empty_state() {
+        let els = nests_elements(&state_with(home_row()), None);
+        assert!(ids(&els).contains(&"nest-trust-empty"));
+        let status = els
+            .iter()
+            .find(|e| e.id == "nest-trust-holders-status")
+            .expect("holders status renders");
+        assert!(status.text.is_empty());
     }
 
     // ── generation recovery (`nest-trust-generation-item`) ──────────

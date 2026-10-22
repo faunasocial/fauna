@@ -40,6 +40,18 @@ public struct ModerationQueueView: View {
                     .padding(.bottom, 6)
             }
 
+            // The appeal's outcome line — form feedback, never the page error above
+            // (that would blank the queue the user is reading). Present only after
+            // an attempt; outlives the form closing on success.
+            if let status = vm.appealStatus {
+                Text(status)
+                    .font(.callout)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 6)
+                    .accessibilityIdentifier(Ids.appealStatus)
+                    .automationValue(Ids.appealStatus, text: { status })
+            }
+
             queue
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -97,14 +109,58 @@ public struct ModerationQueueView: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(vm.rows, id: \.contentId) { row in
-                        ModerationQueueRow(row: row) {
+                        ModerationQueueRow(row: row, onCorrect: {
                             await vm.correct(row: row)
+                        }, onAppeal: ModerationQueueVM.isAppealable(row) ? {
+                            vm.openAppeal(row: row)
+                        } : nil)
+                        // The form opens under the row it was opened on — keyed on the
+                        // content id captured at open, never the row's index.
+                        if vm.appealContentId == row.contentId {
+                            appealForm
                         }
                         Divider()
                     }
                 }
             }
         }
+    }
+
+    /// The appeal form (`appeal-reason-input` / `appeal-submit-button` /
+    /// `appeal-cancel-button`) — every guard and word comes from the shared
+    /// `appealFormView` fold; this view paints it and dispatches.
+    private var appealForm: some View {
+        let form = vm.appealForm
+        let reason = Binding(get: { vm.appealReason }, set: { vm.appealReason = $0 })
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(renderLocalizedText(form.summary)).font(.caption)
+            Text(L.moderation.appealReasonLabel).font(.caption).foregroundStyle(.secondary)
+            TextField("", text: reason, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .accessibilityIdentifier(Ids.appealReasonInput)
+                .automationField(Ids.appealReasonInput, text: reason)
+            if let blocked = form.blockedReason {
+                Text(renderLocalizedText(blocked)).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Button(renderLocalizedText(form.submitLabel)) {
+                    Task { await vm.submitAppeal() }
+                }
+                .disabled(!form.canSubmit)
+                .accessibilityIdentifier(Ids.appealSubmitButton)
+                .automationActivate(Ids.appealSubmitButton, isEnabled: { form.canSubmit }) {
+                    Task { await vm.submitAppeal() }
+                }
+                Button(L.moderation.appealCancel) { vm.cancelAppeal() }
+                    .accessibilityIdentifier(Ids.appealCancelButton)
+                    .automationActivate(Ids.appealCancelButton) { vm.cancelAppeal() }
+            }
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// The reporter's own ledger (`moderation-reports-section`;
@@ -164,12 +220,19 @@ public struct ModerationQueueView: View {
 private struct ModerationQueueRow: View {
     let row: QueueRow
     let onCorrect: () async -> Void
+    /// `nil` for a row with no nest-issued decision to appeal (a local detection).
+    let onAppeal: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    ContentLabelBadge(category: row.category)
+                    ContentLabelBadge(
+                        category: row.category,
+                        facts: ModerationQueueVM.badgeFacts(
+                            category: row.category,
+                            confidencePerMille: row.confidencePerMille,
+                            action: row.action))
                     // The enforcement action taken, via the shared discriminant →
                     // label map (co-located with the enum in `fauna_core::obligation`).
                     // `nil` for a local detection — blank action column.
@@ -191,7 +254,16 @@ private struct ModerationQueueRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            correctButton
+            VStack(alignment: .trailing, spacing: 6) {
+                correctButton
+                if let onAppeal {
+                    // No offline gate: `fauna.moderation.appeal` is `OfflineQueued`.
+                    Button(L.moderation.appeal, action: onAppeal)
+                        .controlSize(.small)
+                        .accessibilityIdentifier(Ids.appealButton)
+                        .automationActivate(Ids.appealButton, perform: onAppeal)
+                }
+            }
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 16)
@@ -199,9 +271,9 @@ private struct ModerationQueueRow: View {
 
     /// The correction control, gated only where it actually needs a nest.
     ///
-    /// A **server** row's correction must reach the nest either way — the sealed
-    /// client-write path ends in `fauna.bridges.put_spam_model` and the fallback
-    /// is `fauna.moderation.train`, both `OnlineOnly` — so it declares.
+    /// A **server** row's correction must reach the nest — the shared flow's sealed
+    /// model write ends in `fauna.bridges.put_spam_model` and its nest half is
+    /// `fauna.moderation.train`, both `OnlineOnly` — so it declares.
     ///
     /// A **local** row's does not: its primary effect is
     /// `moderationRemoveLocalDetection`, client-side state that succeeds with no

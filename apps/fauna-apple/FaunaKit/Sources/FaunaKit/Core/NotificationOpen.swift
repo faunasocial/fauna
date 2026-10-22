@@ -33,28 +33,49 @@ import Foundation
 public func notificationDestination(
     for item: NotificationItem, hasFamily: Bool
 ) -> FfiNotificationDestination? {
-    // `NotificationItem.id` is the wire id stringified at the FFI seam; a row
-    // whose id will not round-trip is one this build cannot act on.
-    guard let id = Int64(item.id) else { return nil }
-    let routed = notificationDestinationFor(item: FfiNotifItem(
-        id: id,
-        notifType: item.notifType,
-        source: item.source,
-        senderId: item.senderId,
-        contentId: item.contentId,
-        // A bridged row's subject as an AT-URI — the `External` arm's input;
-        // shared Rust turns it into the post's bsky.app address.
-        subjectUri: item.subjectUri,
-        // The row's real English summary, not `item.body` (which now carries
-        // the already-resolved localized/verbatim text) — unread by the
-        // router either way, but the field should say what it claims to.
-        summary: item.summary,
-        isRead: item.read,
-        createdAt: Int64(item.createdAt)
-    ))
-    guard let routed else { return nil }
+    guard let ffi = item.ffiItem else { return nil }
+    guard let routed = notificationDestinationFor(item: ffi) else { return nil }
     switch routed {
     case .post, .knock, .external: return routed
     case .family: return hasFamily ? routed : nil
+    }
+}
+
+/// Whether the row collapses behind `notification-muted` — the shared
+/// `notification_muted` decision (`docs/goal/behavior/notifications.md`
+/// § Muted words: the relayed `body.args` matched at Hide, a `security.notice`
+/// never) over the row as it arrived. `mutedKeywords` is the process-held list
+/// (``MutedWordsHolder``), never a read of its own. A row whose id will not
+/// round-trip renders in full.
+public func notificationMuted(_ item: NotificationItem, mutedKeywords: [MutedKeyword]) -> Bool {
+    guard !mutedKeywords.isEmpty, let ffi = item.ffiItem else { return false }
+    return notificationMutedFor(item: ffi, mutedKeywords: mutedKeywords)
+}
+
+extension NotificationItem {
+    /// The row handed back to shared Rust as the wire shape it arrived in —
+    /// the one reconstruction the router and the muted-word decision share.
+    /// `nil` when the stringified id will not round-trip.
+    var ffiItem: FfiNotifItem? {
+        // `NotificationItem.id` is the wire id stringified at the FFI seam; a
+        // row whose id will not round-trip is one this build cannot act on.
+        guard let id = Int64(id) else { return nil }
+        return FfiNotifItem(
+            id: id,
+            notifType: notifType,
+            source: source,
+            senderId: senderId,
+            contentId: contentId,
+            // A bridged row's subject as an AT-URI — the `External` arm's
+            // input; shared Rust turns it into the post's bsky.app address.
+            subjectUri: subjectUri,
+            // The row's real English summary, not `body` (the already-resolved
+            // localized/verbatim text) — the muted decision's fallback for a
+            // row with no `body`, so the field must say what it claims to.
+            summary: summary,
+            isRead: read,
+            createdAt: Int64(createdAt),
+            body: localizedBody
+        )
     }
 }

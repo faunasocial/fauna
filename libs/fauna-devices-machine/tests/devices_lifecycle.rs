@@ -77,6 +77,11 @@ fn member_set(name: &str, gid: &str) -> WireFolderSummary {
 /// A fake [`MlsQuery`] that reports "joined" only for a fixed allow-set of raw hex
 /// group ids (mirrors `MlsEngine::has_group` over the client's joined groups).
 struct JoinedGroups(Vec<String>);
+impl fauna_devices_machine::FolderChannelOwners for JoinedGroups {
+    fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+        None
+    }
+}
 impl MlsQuery for JoinedGroups {
     fn is_joined_shared_set(&self, mls_group_id_hex: &str) -> bool {
         self.0.iter().any(|g| g == mls_group_id_hex)

@@ -22,9 +22,9 @@ namespace FaunaApp.Tests;
 /// </summary>
 public class ModerationViewModelSealedTrainTests
 {
-    // FfiObligationAction(id, content_type, content_id, category, confidence_per_mille, action, timestamp)
+    // FfiObligationAction(id, content_type, content_id, category, confidence_per_mille, action, timestamp, issuer_nest)
     private static FfiObligationAction ServerRow(string contentId, string category, byte action, ushort perMille, long ts) =>
-        new(0L, "post", contentId, category, perMille, action, ts);
+        new(0L, "post", contentId, category, perMille, action, ts, null);
 
     // LocalDetection(content_id, content_type, category, confidence_per_mille, timestamp)
     private static LocalDetection LocalRow(string contentId, string category, ushort perMille, long ts) =>

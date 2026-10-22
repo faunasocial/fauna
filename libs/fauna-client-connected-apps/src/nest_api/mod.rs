@@ -81,6 +81,12 @@ pub trait ConnectedAppsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
         &self,
         request_uri: String,
     ) -> Result<Option<NestConsentRow>, ConnectedAppsApiError>;
+    /// `fauna.plugins.bind` — open this account's bind card for the hosted
+    /// plugin whose install row is `principal_id`, assigned to the caller.
+    async fn bind_plugin(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<NestConsentRow, ConnectedAppsApiError>;
     /// `fauna.oauth.consent.block_client`.
     async fn block_client(
         &self,
@@ -124,4 +130,9 @@ pub trait ConnectedAppsNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// reply). `Unavailable` when this nest or session cannot answer it; the
     /// machine then holds the flag at its default, ON.
     async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError>;
+    /// `fauna.bridges.atproto.set_external_apps_enabled` — flip the account's
+    /// external-apps switch. The same write the AT Protocol page's machine
+    /// makes (`fauna_client_bridges::AtprotoSettingsClient`): the switch is one
+    /// flag, and this page is where it lives for every integration level.
+    async fn set_external_apps_enabled(&self, enabled: bool) -> Result<(), ConnectedAppsApiError>;
 }

@@ -15,7 +15,10 @@
 //! `provisioning-price-bom` (container), `provisioning-bom-domain-line`
 //! (optional — only when buying a new domain), `provisioning-bom-vps-line`
 //! (always present) — sourced from `OnboardingMachine::bom_domain_line()` /
-//! `bom_vps_line()`.
+//! `bom_vps_line()`; `provisioning-ssh-door-command` (only after a
+//! successful door run — `ssh <domain>`, the admitted address and the key
+//! this app wrote to `~/.ssh`; linux renders no save-key button, ui.yaml scopes it to the apps
+//! with no `~/.ssh`).
 //!
 //! ui.yaml IDs (per step row, indexed 0..3): `provisioning-step-row`,
 //! `provisioning-step-checkbox`, `provisioning-step-label`,
@@ -176,6 +179,10 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
 
     root.append(&price_bom);
 
+    // -- By-continuing terms notice: below the price recap, before the charge
+    // (Buy and set up is the acceptance gesture; onboarding-provisioning.md §6) --
+    root.append(&super::widgets::terms_notice());
+
     // -- Top-region "Buy and set up" CTA --
     // Visible only while overall == Idle (per target doc §6 click-handler
     // table).
@@ -221,6 +228,15 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
     set_test_id(&elapsed, ids::PROVISIONING_ELAPSED);
     elapsed.set_visible(false);
     root.append(&elapsed);
+
+    // -- The SSH door after a door run (`onboarding-provisioning.md` § 5) --
+    let ssh_door_command = Label::new(None);
+    ssh_door_command.set_wrap(true);
+    ssh_door_command.set_selectable(true);
+    ssh_door_command.set_halign(gtk::Align::Start);
+    set_test_id(&ssh_door_command, ids::PROVISIONING_SSH_DOOR_COMMAND);
+    ssh_door_command.set_visible(false);
+    root.append(&ssh_door_command);
 
     // -- Page-level error label --
     let error_label = Label::new(None);
@@ -317,6 +333,7 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
         let last_overall = last_overall.clone();
         let bom_domain_line = bom_domain_line.clone();
         let bom_vps_line = bom_vps_line.clone();
+        let ssh_door_command = ssh_door_command.clone();
         move || {
             let snap = m.provisioning_snapshot();
 
@@ -376,6 +393,37 @@ pub fn build(m: Arc<OnboardingMachine>) -> (Box, Rc<dyn Fn()>) {
                     elapsed.set_visible(true);
                 }
                 None => elapsed.set_visible(false),
+            }
+
+            // The door's command, only once a door run succeeded — the key is
+            // this device's alone (mirrors tui's `wizard::nest_provisioning`).
+            match m
+                .ssh_door_readout()
+                .filter(|_| overall == OverallStatus::Succeeded)
+            {
+                Some(door) => {
+                    use crate::i18n::strings::onboarding::nest_provisioning as t;
+                    let address = door
+                        .admitted_from
+                        .as_deref()
+                        .unwrap_or(t::SSH_DOOR_ADDRESS_UNKNOWN);
+                    let text = match &door.key_path {
+                        Some(path) => t::ssh_door_command_template(
+                            &door.command,
+                            address,
+                            path,
+                            &door.fingerprint,
+                        ),
+                        None => t::ssh_door_command_no_path_template(
+                            &door.command,
+                            address,
+                            &door.fingerprint,
+                        ),
+                    };
+                    ssh_door_command.set_text(&text);
+                    ssh_door_command.set_visible(true);
+                }
+                None => ssh_door_command.set_visible(false),
             }
 
             // Page-level error: prefer the snapshot's final_error (set on

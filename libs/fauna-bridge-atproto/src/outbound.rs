@@ -1744,6 +1744,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         }
     }
@@ -1764,6 +1765,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         let out = translate_profile_for_projection(&profile, None, None).expect("translate");
@@ -1930,6 +1932,7 @@ mod tests {
             load_hint: None,
             inbox_mode: InboxMode::Open,
             recovery_head: None,
+            audience: fauna_core::data::ProfileAudience::ThisNest,
             updated_at: Timestamp(0),
         };
         let stored = sign_and_pack(&kp, &profile).expect("sign+pack");

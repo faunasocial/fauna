@@ -12,13 +12,18 @@
 // else in the SPA should string-match these.
 //
 // Shape owner: docs/goal/ui/backups.md § Snapshot-list shape.
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 /** One row of the folder selector (`backup-folder-selector`). */
 export interface BackupFolderRow {
+  /** A folder's name, or — on a kind entry — its i18n label key, which is
+   *  also the locale-stable value the selector selects by. */
   name: string;
   snapshot_count: number;
   last_snapshot_at: number | null;
+  /** The wire message kind on a **kind entry** (`ui/backups.md` § Snapshot-list
+   *  shape → *Kind entries*); `null` on a folder row. */
+  message_kind: string | null;
 }
 
 /** `fauna_backups_machine::SnapshotState`, externally tagged. */
@@ -89,6 +94,9 @@ export interface SnapshotDetail {
   /** The set's wire hash, hex; `null` when the reply carried none. */
   folder_hash: string | null;
   files: SnapshotFileRow[];
+  /** Set when the snapshot belongs to a kind entry: it holds messages, not
+   *  files, and restores from the Restore section below. */
+  message_kind: string | null;
 }
 
 /** The last check's verdict. A completed check with errors is a **result, not

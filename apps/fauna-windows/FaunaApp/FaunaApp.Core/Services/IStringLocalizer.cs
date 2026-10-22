@@ -180,6 +180,26 @@ public static class Strings
     }
 
     /// <summary>
+    /// A feature-policy editor cell's no-effect note, fully composed — the C# twin
+    /// of shared Rust <c>editor_note_text</c> / android <c>editorNoteText</c>. When
+    /// the cell carries <c>noteMagnitude</c> (a volume ceiling, itself a localized
+    /// magnitude), it is resolved FIRST and substituted into the note's
+    /// <c>{limit}</c> hole; otherwise <c>{limit}</c> is already a finished number.
+    /// <c>null</c> = no note (the ceiling does not bind at or below the typed value).
+    /// </summary>
+    internal static string? EditorNoteText(uniffi.fauna_ffi.FfiEditorCell cell)
+    {
+        if (cell.@note is not { } note) return null;
+        if (cell.@noteMagnitude is not { } magnitude) return Resolve(note);
+
+        var args = new Dictionary<string, string>(note.@args)
+        {
+            ["limit"] = Resolve(magnitude),
+        };
+        return Resolve(note with { @args = args });
+    }
+
+    /// <summary>
     /// The `custody-holder-receipt-status` line — the C# twin of apple
     /// <c>ValueFormat.custodyReceiptStatusText</c> / android
     /// <c>Localized.kt::custodyReceiptStatusText</c> / linux

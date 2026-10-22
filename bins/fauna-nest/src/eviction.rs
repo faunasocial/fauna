@@ -171,6 +171,19 @@ mod tests {
             .await
             .unwrap();
         }
+        // A landing set in flight (`reserved-folders.md` § __mail Sync → *The
+        // landing set*) is the evicted account's custody too, and goes with it.
+        let landing = fauna_protocol::segments::landing_set_name("mail", &guest).unwrap();
+        db.create_folder_with_options(
+            &landing,
+            &guest,
+            crate::db::FolderOptions {
+                custody_copy: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
 
         let (first_tick, second_tick) = evict_now(&state, &guest).await;
         assert_eq!(
@@ -211,6 +224,13 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "the evicted backup guest's reserved folder is reclaimed"
+        );
+        assert!(
+            db.get_folder_for_actor(&landing, &guest)
+                .await
+                .unwrap()
+                .is_none(),
+            "the evicted account's landing set is reclaimed with its rails"
         );
         assert!(
             db.get_folder_for_actor("__mail", &bystander)

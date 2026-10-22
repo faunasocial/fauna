@@ -20,6 +20,11 @@ public final class TrainedTopicsVM {
 
     private var api: APIClient?
 
+    /// Bumped at the start and end of every registry write, so a store-change
+    /// re-read that overlapped one drops its (possibly older) answer rather
+    /// than painting it over the write's own.
+    private var gestureEpoch = 0
+
     public init() {}
 
     /// The success-path clear every registry round trip shares; held back
@@ -44,11 +49,26 @@ public final class TrainedTopicsVM {
         }
     }
 
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — Personalization's trained
+    /// topics): replaces the rows only when they differ, never touches
+    /// `errorMessage`, the publish sheet or a typed name (the view's), and
+    /// drops its answer if a registry write ran meanwhile — the write's own
+    /// answer is the fresher one.
+    public func resync() async {
+        guard let api else { return }
+        let epoch = gestureEpoch
+        guard let fresh = try? await api.trainedTopicsList(), epoch == gestureEpoch else { return }
+        if fresh != rows { rows = fresh }
+    }
+
     /// Create a new trained factor named `name` (trimmed; a blank create is a
     /// client-side no-op — the boundary's own `BlankName` error is a defensive
     /// fallback that should never actually fire from this guard).
     public func create(name: String) async {
         guard let api else { return }
+        gestureEpoch += 1
+        defer { gestureEpoch += 1 }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         do {
@@ -63,6 +83,8 @@ public final class TrainedTopicsVM {
     /// same guard as `create`).
     public func rename(id: Data, name: String) async {
         guard let api else { return }
+        gestureEpoch += 1
+        defer { gestureEpoch += 1 }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         do {
@@ -77,6 +99,8 @@ public final class TrainedTopicsVM {
     /// Layer A).
     public func setLearnFromEngagement(id: Data, on: Bool) async {
         guard let api else { return }
+        gestureEpoch += 1
+        defer { gestureEpoch += 1 }
         do {
             rows = try await api.trainedTopicsSetLearnFromEngagement(id: id, on: on)
             clearErrorAfterSuccess()
@@ -89,6 +113,8 @@ public final class TrainedTopicsVM {
     /// still referencing the key stay valid via the zero-term seam).
     public func delete(id: Data) async {
         guard let api else { return }
+        gestureEpoch += 1
+        defer { gestureEpoch += 1 }
         do {
             rows = try await api.trainedTopicsDelete(id: id)
             clearErrorAfterSuccess()

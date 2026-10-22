@@ -48,6 +48,7 @@ import pytest
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
 from helpers.app_surface import app_name, skip_unbuilt
+from helpers.indexed_rows import row_present
 from i18n.strings import S
 
 pytestmark = [
@@ -116,7 +117,7 @@ def test_the_admin_walks_the_three_sign_in_key_controls_through_the_app(
 
     app.admin.navigate_nest()
     _poll(
-        lambda: app.driver.count("admin-nest-oauth-key-item-0") > 0,
+        lambda: row_present(app.driver, "admin-nest-oauth-key-item"),
         _PAGE_BUDGET_S,
         "admin-nest paints the served key set",
     )

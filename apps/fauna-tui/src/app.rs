@@ -90,6 +90,11 @@ pub enum DataMessage {
             Result<fauna_protocol::region::RegionArtifactGetReply, String>,
         )>,
     ),
+    /// The session nest's self-description (`fauna.nest.info`), read at
+    /// sign-in and re-read on the `nest_info` push — folded by
+    /// `crate::nest_rules::apply_info`. Carries the [`App::session_generation`]
+    /// it was fired under. Boxed: the reply is large.
+    NestInfo(u64, Box<fauna_protocol::discovery::NestInfoReply>),
     /// The aftermath's `NestBackupKey` leg reported in — fired by the
     /// post-store-ready pass, which reads this box's list from
     /// `fauna.state.backup`. Same rule as the arm above: the projection
@@ -106,6 +111,11 @@ pub enum DataMessage {
     /// come through here at all — every re-minted grant is marked at rest, and
     /// the mark renders on the Nests page.
     GrantRemintProgress(fauna_client_capabilities::GrantRemintProgress),
+    /// The aftermath's subscriber-tier period-key rotation leg (leg 8;
+    /// `succession-aftermath.md` § Re-key scope). The projection travels for
+    /// the same reason as the arms above; its nest-too-old arm reports a
+    /// still-open exposure, not a delay.
+    PeriodRotationProgress(fauna_client_subscriptions::orchestration::PeriodRotationProgress),
     /// The aftermath's **file corpus** leg (`succession-aftermath.md` § Re-key
     /// scope, the `BackupKey` corpus row).
     ///
@@ -727,8 +737,13 @@ pub fn gesture_work(app: &mut App, gesture: crate::element::Gesture) -> GestureW
         }
         // The nav-edge refresh rides home exactly like any other page op.
         Gesture::Nav(page) => app.apply(page).into(),
-        Gesture::OpenProfile(target) => {
-            app.open_profile(target);
+        Gesture::OpenProfile { actor, home } => {
+            // A post's author line can name the viewer (their own post, on the
+            // feed or their own Posts tab): normalize to SELF, as the nav patch
+            // does, so it never opens their profile in OTHER shape.
+            let own = app.session.as_ref().map(|s| s.actor_id.as_str());
+            let actor = actor.and_then(|hex| fauna_core::format::profile_nav_target(&hex, own));
+            app.open_profile(actor, home);
             GestureWork::None
         }
         // The row is already cached — unlike `SelectCalendar`, which refetches.
@@ -776,6 +791,16 @@ pub fn gesture_work(app: &mut App, gesture: crate::element::Gesture) -> GestureW
         // would produce — so a deep-linked post still resolves and unseals.
         Gesture::OpenNotification(dest) => {
             crate::notifications::open_notification(app, dest).into()
+        }
+        // A withheld own message's badge opens its queue row's appeal: the
+        // moderation page's own nav-edge read, then the draft on that row.
+        Gesture::AppealWithheld { content_id } => {
+            crate::moderation::queue_appeal(app, content_id);
+            app.apply(Page::Moderation).into()
+        }
+        // The same shape again: a room-search post hit opens on the feed page.
+        Gesture::OpenRoomSearchHit(nav) => {
+            crate::conversations::open_room_search_hit(app, nav).into()
         }
         Gesture::Media(a) => crate::media::apply_local(app, a).map(PageOp::Media).into(),
         Gesture::Nostr(a) => crate::nostr::apply_local(app, a).map(PageOp::Nostr).into(),
@@ -883,7 +908,9 @@ fn on_nav_enter(app: &mut App, page: Page) -> Option<PageOp> {
         // linked bridge's follows (`fauna.bridges.{list,list_follows}`) — an
         // AWAITED op like Nostr's, so a driver's next read never sees the
         // pre-fetch frame (the one nav-edge rule).
-        Page::Bridges => crate::bridges::nav_enter_op(&app.bridges).map(PageOp::Bridges),
+        Page::Bridges => {
+            crate::bridges::nav_enter_op(&app.bridges, app.am_i_admin).map(PageOp::Bridges)
+        }
         // Entering the gated Family tab re-reads `fauna.family.status` + the
         // guardian's approvals queue — AWAITED like the two above, and never
         // skipped: the queue is nest-authoritative, so a knock or mail hold can
@@ -956,6 +983,12 @@ pub struct AftermathProgress {
     /// under the successor. Runs in the post-store-ready pass, off the
     /// succession ledger's rows.
     pub grant_remint: Option<fauna_client_capabilities::GrantRemintProgress>,
+    /// The subscriber-tier period-key rotation (leg 8). Runs in the
+    /// post-store-ready pass right after [`Self::grant_remint`].
+    ///
+    /// ⚠ Its nest-too-old arm is an open exposure (the predecessor-era key is
+    /// still live), not a delay.
+    pub period_rotation: Option<fauna_client_subscriptions::orchestration::PeriodRotationProgress>,
     /// The user's own **file corpus** — files, photos and folders moved out
     /// from under the retired identity's `BackupKey`. Runs beside the other legs
     /// rather than behind them (it reads only the predecessor keys), and is the
@@ -1510,6 +1543,11 @@ pub struct App {
     /// about the device), and re-applied to [`Self::content_policy`] whenever
     /// that is reset.
     pub region: crate::region::RegionState,
+    /// The nest rules' member side (`nest-rules.md`) — the book of every
+    /// nest's last-accepted signed rules (device-scoped like
+    /// [`Self::region`]: restored at start, kept across identity changes) and
+    /// the session nest it binds as the engine's nest source.
+    pub nest_rules: crate::nest_rules::NestRulesState,
     /// The headless-store unlock/create surface's buffers + error
     /// (`crate::unlock`; painted when [`Self::launch`] is `Unlock` /
     /// `CreatePassphrase`).
@@ -1605,6 +1643,9 @@ impl App {
         // the very first feed paint already folds a last-known-good policy.
         app.region = crate::region::RegionState::launch();
         crate::region::apply_rule_sets(&app);
+        // The nest-rules book, likewise restored before any session; the
+        // session nest's read binds it at sign-in.
+        app.nest_rules = crate::nest_rules::NestRulesState::launch();
         app
     }
 
@@ -1668,6 +1709,7 @@ impl App {
             screen_lock: crate::screen_lock::ScreenLock::default(),
             content_policy: crate::content_policy::ContentPolicyState::default(),
             region: crate::region::RegionState::empty(),
+            nest_rules: crate::nest_rules::NestRulesState::default(),
             unlock: crate::unlock::UnlockState::default(),
             locked: crate::locked::LockedState::default(),
             launch_machine: None,
@@ -2135,6 +2177,9 @@ impl App {
             // feed error painted nowhere.
             // The thread page's own fetch error leads while it is open.
             crate::pages::Page::Feed => crate::feed::page_error(&self.feed),
+            // The Posts tab's author-window read (`profile.md` § The Posts tab
+            // → *Empty, loading, error*).
+            crate::pages::Page::Profile => crate::profile::page_error(self),
             _ => None,
         }
     }
@@ -2598,8 +2643,14 @@ impl App {
         // through the same open door so the SELF reset + refetch always fire, even
         // when already on an OTHER profile (`self.page` is already `Profile`).
         if page == Page::Profile && self.authenticated() {
-            self.open_profile(None);
+            self.open_profile(None, None);
             return None;
+        }
+        // Opening Settings reaches the rules surface the changed notice points
+        // at — the change is read (`nest-rules.md` § Acceptance at joining, and
+        // a change of rules).
+        if page == Page::Settings {
+            self.nest_rules.changed_notice = None;
         }
         self.set_page(page);
         self.clamp_focus();
@@ -2627,9 +2678,15 @@ impl App {
     /// twin: a fresh target resets the per-view state and re-fetches (no
     /// client-side cache — `ui/profile.md` § Persistence). The open-time reads
     /// ride the channel; the driver's reads after a nav are all polling.
-    pub fn open_profile(&mut self, target: Option<String>) {
+    ///
+    /// `home` is the open target's routing hint (`profile.md` § Layout & flow →
+    /// *Reaching another actor's profile*): it seeds the actor-home slot at
+    /// once, so a follow pressed before the header read answers already routes,
+    /// and the header read's answer replaces it.
+    pub fn open_profile(&mut self, target: Option<String>, home: Option<String>) {
         self.profile.viewing = target;
         self.profile.reset_for_open();
+        self.profile.seed_actor_home(home);
         self.profile.overlays = crate::contacts::overlay_projection(self);
         if self.authenticated() {
             crate::profile::spawn_open_refresh(
@@ -2643,7 +2700,14 @@ impl App {
                     .as_ref()
                     .map(std::sync::Arc::downgrade),
                 self.session_generation,
+                crate::feed::blob_hosts(&self.feed),
             );
+        }
+        // Posts is the tab every open lands on: read its window afresh.
+        if self.authenticated()
+            && let Some(op) = crate::profile::open_posts(self)
+        {
+            self.spawn_page_op(PageOp::Profile(op));
         }
         self.page = Page::Profile;
         self.clamp_focus();
@@ -3168,6 +3232,10 @@ impl App {
         // re-arm it on the fresh engine, and forget only the session's nest.
         self.region.clear_session();
         crate::region::apply_rule_sets(self);
+        // The nest-rules book is the device's too; only the session's nest
+        // binding goes, and the next sign-in's read re-binds it.
+        self.nest_rules.clear_session();
+        crate::nest_rules::apply_rule_sets(self);
         // Drop the settings account surface (releases the client Arc + zeroes the
         // identity secret + clears the account-switcher snapshot); the
         // client-local prefs survive.
@@ -3296,6 +3364,9 @@ impl App {
             UiMessage::Data(DataMessage::RegionReplies(replies)) => {
                 crate::region::apply_replies(self, replies);
             }
+            UiMessage::Data(DataMessage::NestInfo(generation, info)) => {
+                crate::nest_rules::apply_info(self, generation, &info);
+            }
             // The aftermath's backup leg reported in. Stored verbatim — this
             // surface renders what the pass says and never re-derives a verdict.
             UiMessage::Data(DataMessage::BackupRegrantProgress(progress)) => {
@@ -3311,6 +3382,11 @@ impl App {
             // for the same reason as the three arms above.
             UiMessage::Data(DataMessage::GrantRemintProgress(progress)) => {
                 self.aftermath.grant_remint = Some(progress);
+            }
+            // The aftermath's period-key rotation leg reported in. Stored
+            // verbatim for the same reason as the arms above.
+            UiMessage::Data(DataMessage::PeriodRotationProgress(progress)) => {
+                self.aftermath.period_rotation = Some(progress);
             }
             // The aftermath's file-corpus leg reported in. Stored verbatim for
             // the same reason as the four arms above; unlike them it is a
@@ -3442,6 +3518,11 @@ impl App {
             UiMessage::Data(DataMessage::FeedChanged) => {
                 self.clamp_focus();
                 crate::feed::fire_resolves(&self.feed);
+                // The profile's author window ticks through this same arm (its
+                // observer is the feed's), and owes its cards the same resolves.
+                if let Some(window) = &self.profile.posts {
+                    crate::feed::fire_resolves_for(window);
+                }
                 // The snapshot may now name a resolved `post-image` hash whose
                 // bytes the cache has never fetched — `fire_resolves` folds the
                 // hash into the document, this fetches the bytes behind it. The
@@ -3992,6 +4073,7 @@ impl App {
         // per keystroke for as long as it rests there. (Same discipline as the
         // wizard's page-entry reads, which fire on the step edge, not the tick.)
         let was_at_last_card = crate::feed::at_last_card(self);
+        let was_at_last_post = crate::profile::at_last_post(self);
         match key.code {
             // Abandon an in-flight append-mode "Add account" and return to the live
             // session — the guaranteed in-app escape (`long-term-store.md`
@@ -4133,6 +4215,14 @@ impl App {
         // and the edge check above keeps it to one request per arrival.
         if !was_at_last_card && crate::feed::at_last_card(self) {
             self.spawn_gesture(crate::element::Gesture::Feed(crate::feed::Action::LoadMore));
+        }
+        // …and the bottom of the profile's Posts tab, the same gesture on the
+        // page's own author window (`profile.md` § The Posts tab → *Order and
+        // paging*).
+        if !was_at_last_post && crate::profile::at_last_post(self) {
+            self.spawn_gesture(crate::element::Gesture::Profile(
+                crate::profile::Action::LoadMorePosts,
+            ));
         }
         // The nav-edge hook's other ordinary call site (`gesture_work`'s doc
         // comment names the first): catches the Esc arms above, which mutate
@@ -4426,6 +4516,15 @@ impl App {
         {
             self.spawn_page_op(PageOp::Settings(op));
         }
+        // The import twin of mail_export — see `StaleSurfaces::mail_import`:
+        // another device's import (or its failure, or its dismissal) reaching
+        // the wizard open here.
+        if r.mail_import
+            && self.page == Page::Settings
+            && let Some(op) = crate::settings::mail_import_resync_op(&self.settings)
+        {
+            self.spawn_page_op(PageOp::Settings(op));
+        }
         // Page-gated, unlike every arm above — see `StaleSurfaces::media`. `Media` is
         // a cross-*set* aggregate whose nav-enter read already covers the
         // arrive-while-elsewhere case, so the flag buys exactly one thing: the
@@ -4453,6 +4552,14 @@ impl App {
         // re-fire for the same reason: a failed read keeps the loaded thresholds.
         if r.own_thresholds {
             crate::content_policy::spawn_spam_preferences_check(self, &self.tx);
+        }
+        // The nest's self-description, past the per-connection memo: an
+        // accepted rules write pushes `fauna.nest.info_changed`, and a change
+        // made while the socket was down is found on reconnect by its newer
+        // sequence (`nest-rules.md` § Acceptance at joining, and a change of
+        // rules).
+        if r.nest_info {
+            crate::nest_rules::spawn_reread(self);
         }
     }
 
@@ -4520,13 +4627,43 @@ pub(crate) mod tests {
     /// wholesale, and `session::secret_store()` with no `FAUNA_KEYRING_APP` /
     /// `FAUNA_E2E_CREDENTIAL_DIR` set — which is every `cargo test` run —
     /// resolves to the developer's real `fauna-tui` libsecret namespace. A test
-    /// touching a real keyring is a bug even when it only reads.
+    /// touching a real keyring is a bug even when it only reads. The store owns
+    /// its dir and removes it when the last clone drops (`testing.md` § Test
+    /// temp-dir hygiene).
     pub(crate) fn test_credentials() -> Arc<CredentialStore> {
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("fauna-tui-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        Arc::new(CredentialStore::with_file_backend("fauna-tui-test", dir))
+        Arc::new(CredentialStore::with_scratch_file_backend(
+            "fauna-tui-test",
+            dir,
+        ))
+    }
+
+    /// The private namespace leaves nothing behind: what a test wrote under
+    /// [`test_credentials`]'s dir is gone once the store drops — and so is
+    /// the dir, the leak that once filled the shared temp dir with one entry
+    /// per unit test. The beside-control (the write lands inside the dir
+    /// while the store lives) keeps the drop half from passing vacuously.
+    #[test]
+    fn test_credentials_dir_is_removed_with_the_store() {
+        use fauna_client_accounts::SecretStore as _;
+        let store = test_credentials();
+        let dir = store
+            .file_backend_dir()
+            .expect("a file backend")
+            .to_path_buf();
+        assert!(dir.starts_with(std::env::temp_dir()));
+        store.set("probe", "secret");
+        assert_eq!(store.get("probe").as_deref(), Some("secret"));
+        assert!(dir.is_dir(), "the write lands inside the store's dir");
+        drop(store);
+        assert!(
+            !dir.exists(),
+            "the credential dir outlived its store: {}",
+            dir.display()
+        );
     }
 
     /// An app whose `UiMessage` receiver is dropped: the wizard's observer

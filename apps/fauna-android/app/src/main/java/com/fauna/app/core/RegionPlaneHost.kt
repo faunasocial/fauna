@@ -1,7 +1,9 @@
 package com.fauna.app.core
 
 import android.content.Context
+import com.fauna.ffi.FfiGuardianPlaceholder
 import com.fauna.ffi.FfiNestClient
+import com.fauna.ffi.FfiNestPlaceholder
 import com.fauna.ffi.FfiRegionPlaceholder
 import com.fauna.ffi.FfiRegionPlane
 import com.fauna.ffi.FfiRegionSource
@@ -26,7 +28,7 @@ import java.util.Collections
  * transparency surface*) — a paint of the shared `FfiRegionPlane`
  * (`libs/fauna-ffi/src/region.rs`), the one face the four UniFFI apps drive.
  * windows' `RegionPlaneHost.cs`, apple's `RegionStore.swift`, linux's
- * `apps/fauna-linux/src/region.rs` and web's `$lib/region.svelte.ts` are the
+ * `apps/fauna-linux/src/region.rs` and web's `#lib/region.svelte.ts` are the
  * sibling legs.
  *
  * Everything that decides — verify, fold, persist, the refresh cadence, the
@@ -92,6 +94,12 @@ object RegionPlaneHost {
         _revision.update { it + 1 }
     }
 
+    /** Repaint every composed verdict — a source beside the plane (the
+     *  session nest's rules, [NestRulesHost]) changed what it answers. */
+    fun invalidate() {
+        _revision.update { it + 1 }
+    }
+
     /** The plane, or `null` before [RegionLeaf] opened it. */
     fun plane(): FfiRegionPlane? = plane
 
@@ -147,9 +155,10 @@ object RegionPlaneHost {
 
     /**
      * One item's render decision with the region composed in — the region, the
-     * guardian floor and the viewer's own thresholds, strictest-wins in shared
-     * Rust. With no plane open the family-only verdict stands and no region
-     * placeholder exists.
+     * session nest's rules ([NestRulesHost], `nest-rules.md` § The nest source
+     * in the engine), the guardian floor and document, and the viewer's own
+     * thresholds, strictest-wins in shared Rust, in the ONE composed call. With
+     * no plane open the family-only verdict stands and no placeholder exists.
      */
     fun render(
         labels: List<ContentLabelEntry>,
@@ -163,18 +172,34 @@ object RegionPlaneHost {
         val p = plane ?: return RegionRenderDecision(
             if (reported) "block" else inputs.verdictFor(labels), null, reported,
         )
-        val r = p.render(
-            labels, inputs.contentPolicy, inputs.ownSpamPermille, inputs.ownPhishingPermille,
-            subject.contentIdHex, subject.authorHex, subject.text, subject.hashtags,
-            subject.hasMedia, UI_LANG,
-        )
-        if (!reported) return RegionRenderDecision(r.verdict, r.placeholder, false)
+        val nest = NestRulesHost.source()
+        val r = if (nest != null) {
+            p.renderWithNest(
+                nest.first, nest.second,
+                labels, inputs.contentPolicy, inputs.ownSpamPermille, inputs.ownPhishingPermille,
+                subject.contentIdHex, subject.authorHex, subject.text, subject.hashtags,
+                subject.hasMedia, UI_LANG,
+            )
+        } else {
+            p.render(
+                labels, inputs.contentPolicy, inputs.ownSpamPermille, inputs.ownPhishingPermille,
+                subject.contentIdHex, subject.authorHex, subject.text, subject.hashtags,
+                subject.hasMedia, UI_LANG,
+            )
+        }
+        if (!reported) {
+            return RegionRenderDecision(
+                r.verdict, r.placeholder, false, r.nestPlaceholder, r.guardianPlaceholder,
+            )
+        }
         // Reported: the item is blocked whatever the region said. A region BLOCK
         // keeps its placeholder (convention 17: a region block never renders
         // silent); a region COLLAPSE is dropped — the viewer's own act is the more
         // specific explanation, and a reveal must not lift it. windows' Render.
         return RegionRenderDecision(
             "block", r.placeholder?.takeIf { it.verb == "block" }, true,
+            // A nest BLOCK keeps its placeholder too (convention 17's nest twin).
+            r.nestPlaceholder?.takeIf { it.verb == "block" },
         )
     }
 
@@ -281,15 +306,28 @@ data class RegionSubject(
 
 /**
  * One item's render decision: the composed [verdict], and the region
- * [placeholder] to paint AHEAD of the family arm when the region drove a `block`
- * or `collapse` (`null` → the app's existing arms). [reported] is the viewer's
- * own report (the "You reported this" notice).
+ * [placeholder] — or the [nestPlaceholder], when a rule of the nest the item was
+ * read through drove the verb — to paint AHEAD of the family arm when that
+ * source drove a `block` or `collapse` (`null` → the app's existing arms). One
+ * source wins a verdict, so at most one of the two is set. [reported] is the
+ * viewer's own report (the "You reported this" notice).
  */
 data class RegionRenderDecision(
     val verdict: String,
     val placeholder: FfiRegionPlaceholder?,
     val reported: Boolean = false,
+    val nestPlaceholder: FfiNestPlaceholder? = null,
+    val guardianPlaceholder: FfiGuardianPlaceholder? = null,
 ) {
+    /** The guardian rule's reason, verbatim, to paint beside the family-policy
+     *  frame (`content-policy-blocked-reason`) — `null` for a floor, the viewer's
+     *  own threshold, a report or any other source (`nest-rules.md` § The shared
+     *  rule editor → *The reason is the member's to read*). */
+    val guardianReason: String? get() = guardianPlaceholder?.reason?.takeIf { it.isNotEmpty() }
+
     /** Whether the region blocks this item — convention 17's verdict side. */
     val isRegionBlocked: Boolean get() = placeholder?.verb == "block"
+
+    /** Whether a nest rule blocks this item — convention 17's nest twin. */
+    val isNestBlocked: Boolean get() = nestPlaceholder?.verb == "block"
 }

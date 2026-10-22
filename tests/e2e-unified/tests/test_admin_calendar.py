@@ -92,6 +92,36 @@ def test_calendar_page_renders(admin_app):
     )
 
 
+#: Apps that tag the port field's help line (`admin-calendar-caldav-port-help-text`):
+#: tui is the lead app; windows and apple paint it untagged until their trickle-down.
+_PORT_HELP_TAGGED_APPS = {"tui", "linux", "web", "android"}
+
+
+@pytest.mark.feature("admin-calendar-contacts-files")
+def test_caldav_port_field_says_it_applies_only_without_a_domain(admin_app):
+    """The CalDAV-port field's help line says the port is for a nest with no
+    domain, and that a domain nest ignores it (admin.md § 8 Calendar) — the
+    string the shared catalog holds for it, read through its own id."""
+    from helpers.app_surface import app_name, skip_unbuilt
+
+    if app_name(admin_app.driver) not in _PORT_HELP_TAGGED_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-calendar-caldav-port-help-text",
+            detail="the port help line is tagged on tui first",
+            tracked="the six-app trickle-down of the admin-calendar port help id",
+        )
+    admin_app.admin.navigate_calendar()
+    assert _wait(admin_app.admin.caldav_port_field_present), (
+        f"port field did not render. error: {admin_app.error_text()!r}"
+    )
+    want = " ".join(S.admin.calendar_page.caldav_port_desc.split())
+    assert _wait(lambda: " ".join(admin_app.admin.caldav_port_help_text().split()) == want), (
+        f"port help line reads {admin_app.admin.caldav_port_help_text()!r}, wanted {want!r}"
+    )
+    assert "no domain" in want and "ignored" in want
+
+
 @pytest.mark.feature("admin-calendar-contacts-files")
 def test_caldav_port_round_trips(admin_app, nest_instance):
     """Setting the admin CalDAV port from the UI writes through the shared

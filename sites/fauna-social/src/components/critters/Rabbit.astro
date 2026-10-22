@@ -1,0 +1,35 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="27" ry="5" class="critter-shadow" />
+  <!-- ears (behind head; the right one cocked) -->
+  <ellipse cx="50" cy="18" rx="7.5" ry="20" transform="rotate(-6 50 18)" fill="#c9a37c" />
+  <ellipse cx="50" cy="20" rx="3.8" ry="13" transform="rotate(-6 50 20)" fill="#e8b09a" />
+  <ellipse cx="71" cy="19" rx="7.5" ry="20" transform="rotate(14 71 19)" fill="#c9a37c" />
+  <ellipse cx="70.5" cy="21" rx="3.8" ry="13" transform="rotate(14 70.5 21)" fill="#e8b09a" />
+  <!-- waving arm (behind body) -->
+  <g class="wave" style="transform-origin: 80px 98px;">
+    <ellipse cx="86" cy="88" rx="5.5" ry="13" transform="rotate(-30 86 88)" fill="#c9a37c" />
+    <circle cx="91" cy="77" r="4.5" fill="#d9b58f" />
+  </g>
+  <!-- tail -->
+  <circle cx="34" cy="118" r="6" fill="#f7e8d4" />
+  <!-- body -->
+  <ellipse cx="60" cy="104" rx="24" ry="27" fill="#c9a37c" />
+  <ellipse cx="60" cy="110" rx="14" ry="17" fill="#f7e8d4" />
+  <ellipse cx="40" cy="106" rx="5.5" ry="12" transform="rotate(18 40 106)" fill="#b28d63" />
+  <ellipse cx="47" cy="130" rx="9" ry="4.5" fill="#b28d63" />
+  <ellipse cx="73" cy="130" rx="9" ry="4.5" fill="#b28d63" />
+  <!-- head -->
+  <circle cx="60" cy="52" r="21" fill="#c9a37c" />
+  <ellipse cx="60" cy="61" rx="12" ry="9" fill="#f7e8d4" />
+  <circle cx="51" cy="48" r="3" fill="#2b2a24" />
+  <circle cx="69" cy="48" r="3" fill="#2b2a24" />
+  <ellipse cx="60" cy="57" rx="2.8" ry="2.2" fill="#2b2a24" />
+  <!-- buck teeth -->
+  <rect x="56.6" y="60" width="3.2" height="5" rx="1.2" fill="#ffffff" />
+  <rect x="60.2" y="60" width="3.2" height="5" rx="1.2" fill="#ffffff" />
+</svg>

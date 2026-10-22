@@ -157,7 +157,9 @@ struct FeedFormView: View {
                     .automationSelect(
                         Ids.feedFactorSelect,
                         value: { form.selectedFactorKey },
-                        set: { form.selectedFactorKey = $0 }
+                        options: { form.factorOptionLabels },
+                        optionKeys: { form.factorOptionKeys },
+                        set: { form.selectFactor($0) }
                     )
 
                     TextField(L.feed.create.factorWeightPlaceholder, text: $form.newFactorWeight)

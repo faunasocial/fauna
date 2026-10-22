@@ -23,6 +23,9 @@ struct MacNestProvisioningView: View {
 
             ProvisioningPriceBom(items: vm.machine.billOfMaterials())
 
+            // Below the price recap, before the Buy-and-set-up CTA.
+            TermsNotice()
+
             if snap.overall == .idle {
                 Button(L.onboarding.nestProvisioning.startButton) {
                     Task { await vm.machine.runProvisioning() }

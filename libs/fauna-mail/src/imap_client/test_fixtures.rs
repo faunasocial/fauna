@@ -20,14 +20,21 @@
 
 use std::sync::Arc;
 
-/// A self-signed cert for `localhost`, plus its PEM (the client's trust anchor).
+/// A self-signed cert, plus its PEM (the client's trust anchor).
 pub struct TestCert {
     pub cert_pem: String,
     pub key_pem: String,
 }
 
 pub fn mint_cert() -> TestCert {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+    mint_cert_for("localhost")
+}
+
+/// A self-signed cert for `host` — a provider's own name, for a source the
+/// preset-host redirect seed dials on loopback while the handshake still
+/// verifies that name (`tests/imap_client_host_map_seed.rs`).
+pub fn mint_cert_for(host: &str) -> TestCert {
+    let cert = rcgen::generate_simple_self_signed(vec![host.to_string()]).unwrap();
     TestCert {
         cert_pem: cert.cert.pem(),
         key_pem: cert.signing_key.serialize_pem(),

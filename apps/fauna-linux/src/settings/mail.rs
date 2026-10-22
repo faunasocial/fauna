@@ -75,6 +75,7 @@ enum FormMode {
 struct MailPageWidgets {
     // Top group.
     enabled_toggle: adw::SwitchRow,
+    unavailable_row: adw::ActionRow,
     status_marker: gtk::Label,
     status_row: adw::ActionRow,
     error_label: gtk::Label,
@@ -165,6 +166,29 @@ struct MailPageWidgets {
     /// bound, never hard-coded. `None` until the first read resolves; the
     /// limit commit is inert until then.
     forward_ceiling: Rc<Cell<Option<u32>>>,
+
+    // Per-account switches, automatic reply and quota (visible while mail is
+    // enabled; `mail-policy-config.md` § Tier 3, `email-filters.md` § The
+    // auto-respond setting). Every row stays hidden until its first nest read
+    // lands, so a click can never write a guessed value.
+    account_group: adw::PreferencesGroup,
+    receive_toggle: adw::SwitchRow,
+    send_toggle: adw::SwitchRow,
+    scan_result_visible_toggle: adw::SwitchRow,
+    autorespond_toggle: adw::SwitchRow,
+    autorespond_message_input: gtk::Entry,
+    autorespond_message_row: adw::ActionRow,
+    mailbox_quota_row: adw::ActionRow,
+    mailbox_quota: gtk::Label,
+    submission_quota_row: adw::ActionRow,
+    submission_quota: gtk::Label,
+    over_quota_row: adw::ActionRow,
+    over_quota_notice: gtk::Label,
+    /// `(receive_enabled, send_enabled, scan_result_visible)` as the nest last
+    /// confirmed them.
+    switches: Rc<Cell<Option<(bool, bool, bool)>>>,
+    /// Whether the automatic reply is on, as the filter rules last read it.
+    autorespond_on: Rc<Cell<Option<bool>>>,
 }
 
 /// Everything the page's event handlers + render need: the shared machine, the
@@ -222,6 +246,17 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     crate::offline_gate::declare_wire_kind(&enabled_toggle, "fauna.account.state.put");
     top_group.add(&enabled_toggle);
 
+    // mail-settings-unavailable-notice — on a box that cannot enable mail
+    // (`snapshot.mail_unavailable_here`) it stands in for the toggle's enable
+    // explanation; hidden otherwise (mail-settings.md § Layout & flow).
+    let (unavailable_row, _unavailable_notice) = mua_field_row(
+        "",
+        crate::i18n::strings::mail_settings::UNAVAILABLE_NOTICE,
+        ids::MAIL_SETTINGS_UNAVAILABLE_NOTICE,
+    );
+    unavailable_row.set_visible(false);
+    top_group.add(&unavailable_row);
+
     // mail-settings-status-indicator — subtle status line. The marker label
     // carries the status text for the e2e driver; the row subtitle mirrors it.
     let status_marker = super::marker("mail-settings-status-indicator");
@@ -268,7 +303,7 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     page.add(&banner_group);
 
     // --- Credentials pointer group ---
-    // The app-password rows (`mail-settings-credential-item*`) moved to
+    // The app-password rows (now `connected-apps-item*`) live on
     // Settings → Connected apps; this group keeps the one line that says so.
     // Visible when a mailbox exists.
     let credentials_group = adw::PreferencesGroup::builder()
@@ -683,9 +718,86 @@ pub fn build_mail_page() -> adw::PreferencesPage {
     forwarding_group.add(&forward_per_hour_row);
     page.add(&forwarding_group);
 
+    // --- Receive / send switches, automatic reply, mailbox quota ---
+    // Non-optimistic, the serve-here shape: each switch repaints from the
+    // nest's re-read, and the `state` attr carries its on/off.
+    let account_group = adw::PreferencesGroup::new();
+    account_group.set_visible(false);
+    let switch_row = |title: &str, subtitle: &str, id: &str, kind: &'static str| {
+        let row = adw::SwitchRow::builder().build();
+        row.set_use_markup(false);
+        row.set_title(title);
+        row.set_subtitle(subtitle);
+        row.set_visible(false);
+        set_test_id(&row, id);
+        crate::offline_gate::declare_wire_kind(&row, kind);
+        row
+    };
+    let receive_toggle = switch_row(
+        MS::RECEIVE_LABEL,
+        MS::RECEIVE_SUBTITLE,
+        ids::MAIL_SETTINGS_RECEIVE_TOGGLE,
+        "fauna.bridges.set_mail_switches",
+    );
+    let send_toggle = switch_row(
+        MS::SEND_LABEL,
+        MS::SEND_SUBTITLE,
+        ids::MAIL_SETTINGS_SEND_TOGGLE,
+        "fauna.bridges.set_mail_switches",
+    );
+    let scan_result_visible_toggle = switch_row(
+        MS::SCAN_RESULT_VISIBLE_LABEL,
+        MS::SCAN_RESULT_VISIBLE_SUBTITLE,
+        ids::MAIL_SETTINGS_SCAN_RESULT_VISIBLE_TOGGLE,
+        "fauna.bridges.set_mail_switches",
+    );
+    // The facade's binding leg is the filter-rule create (tui's declaration).
+    let autorespond_toggle = switch_row(
+        MS::AUTORESPOND_LABEL,
+        MS::AUTORESPOND_SUBTITLE,
+        ids::MAIL_SETTINGS_AUTORESPOND_TOGGLE,
+        "fauna.email.filters.create",
+    );
+    account_group.add(&receive_toggle);
+    account_group.add(&send_toggle);
+    account_group.add(&scan_result_visible_toggle);
+    account_group.add(&autorespond_toggle);
+    let autorespond_message_input = gtk::Entry::builder().valign(gtk::Align::Center).build();
+    set_test_id(
+        &autorespond_message_input,
+        ids::MAIL_SETTINGS_AUTORESPOND_MESSAGE_INPUT,
+    );
+    crate::offline_gate::declare_wire_kind(
+        &autorespond_message_input,
+        "fauna.email.filters.create",
+    );
+    let autorespond_message_row = adw::ActionRow::builder()
+        .title(MS::AUTORESPOND_MESSAGE_LABEL)
+        .activatable(false)
+        .build();
+    autorespond_message_row.set_use_markup(false);
+    autorespond_message_row.add_suffix(&autorespond_message_input);
+    account_group.add(&autorespond_message_row);
+    // Read-only readouts: a 1px marker carries the id, the row's subtitle the
+    // painted text (the `mua_field_row` idiom).
+    let (mailbox_quota_row, mailbox_quota) =
+        mua_field_row("", "", ids::MAIL_SETTINGS_MAILBOX_QUOTA);
+    mailbox_quota_row.set_visible(false);
+    account_group.add(&mailbox_quota_row);
+    let (submission_quota_row, submission_quota) =
+        mua_field_row("", "", ids::MAIL_SETTINGS_SUBMISSION_QUOTA);
+    submission_quota_row.set_visible(false);
+    account_group.add(&submission_quota_row);
+    let (over_quota_row, over_quota_notice) =
+        mua_field_row("", "", ids::MAIL_SETTINGS_OVER_QUOTA_NOTICE);
+    over_quota_row.set_visible(false);
+    account_group.add(&over_quota_row);
+    page.add(&account_group);
+
     // --- Wire the shared state machine ---
     let widgets = MailPageWidgets {
         enabled_toggle,
+        unavailable_row,
         status_marker,
         status_row,
         error_label,
@@ -741,6 +853,21 @@ pub fn build_mail_page() -> adw::PreferencesPage {
         forward_per_hour_input,
         forward_per_hour_row,
         forward_ceiling: Rc::new(Cell::new(None)),
+        account_group,
+        receive_toggle,
+        send_toggle,
+        scan_result_visible_toggle,
+        autorespond_toggle,
+        autorespond_message_input,
+        autorespond_message_row,
+        mailbox_quota_row,
+        mailbox_quota,
+        submission_quota_row,
+        submission_quota,
+        over_quota_row,
+        over_quota_notice,
+        switches: Rc::new(Cell::new(None)),
+        autorespond_on: Rc::new(Cell::new(None)),
     };
     wire_machine(&page, widgets);
 
@@ -795,7 +922,7 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
 
     // Hydrate on mount: load the `fauna.state.mail` entries and render the snapshot.
     hydrate_and_render(&ctx);
-    hydrate_forwarding(&ctx);
+    hydrate_account(&ctx);
 
     // The Forwarding entries commit on Enter.
     {
@@ -809,6 +936,63 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
             .forward_per_hour_input
             .clone()
             .connect_activate(move |_| commit_forward_per_hour(&c));
+    }
+
+    // The receive / send / scan-result switches: a genuine flip writes that one switch and
+    // repaints both from the nest's re-read (guarded against `render_account`'s
+    // own `set_active`).
+    {
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .receive_toggle
+            .clone()
+            .connect_active_notify(move |btn| {
+                if c.guard.get() || c.w.switches.get().is_none() {
+                    return;
+                }
+                commit_switches(&c, Some(btn.is_active()), None);
+            });
+        let c = Rc::clone(&ctx);
+        ctx.w.send_toggle.clone().connect_active_notify(move |btn| {
+            if c.guard.get() || c.w.switches.get().is_none() {
+                return;
+            }
+            commit_switches(&c, None, Some(btn.is_active()));
+        });
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .scan_result_visible_toggle
+            .clone()
+            .connect_active_notify(move |btn| {
+                if c.guard.get() || c.w.switches.get().is_none() {
+                    return;
+                }
+                commit_scan_result_visible(&c, btn.is_active());
+            });
+    }
+
+    // The automatic reply: off deletes the rule; on (the toggle, or Enter on
+    // the message) is the shared draft check first.
+    {
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .autorespond_toggle
+            .clone()
+            .connect_active_notify(move |btn| {
+                if c.guard.get() || c.w.autorespond_on.get().is_none() {
+                    return;
+                }
+                if btn.is_active() {
+                    commit_autorespond_message(&c);
+                } else {
+                    commit_autorespond(&c, None);
+                }
+            });
+        let c = Rc::clone(&ctx);
+        ctx.w
+            .autorespond_message_input
+            .clone()
+            .connect_activate(move |_| commit_autorespond_message(&c));
     }
 
     // The status line reads the machine's LIVE status, not the copy the last
@@ -842,7 +1026,7 @@ fn wire_machine(page: &adw::PreferencesPage, widgets: MailPageWidgets) {
         let ctx = Rc::clone(&ctx);
         page.connect_map(move |_| {
             hydrate_and_render(&ctx);
-            hydrate_forwarding(&ctx);
+            hydrate_account(&ctx);
         });
     }
 
@@ -1280,25 +1464,44 @@ fn hydrate_and_render(ctx: &Rc<MailPageCtx>) {
     );
 }
 
-/// One nest-confirmed read of the Forwarding section. Each half is `None` when
-/// the op did not touch it, so committing one field never repaints the other's
-/// uncommitted draft; the first failure either half carries lands on
-/// `error-message`.
-struct ForwardingRead {
+/// One nest-confirmed read of the page's per-account mail settings — the
+/// Forwarding pair, the receive / send switches, the automatic reply and the
+/// quotas. Each part is `None` when the op did not touch it, so committing one
+/// field never repaints another's uncommitted draft; the first failure any part
+/// carries lands on `error-message`.
+struct AccountRead {
     forward_all_to: Option<Result<Option<String>, String>>,
     forward_per_hour:
         Option<Result<fauna_protocol::bridge_routing::GetForwardPerHourReply, String>>,
+    switches: Option<Result<fauna_protocol::bridge_routing::GetMailSwitchesReply, String>>,
+    autorespond: Option<Result<fauna_client_email::AutoRespond, String>>,
+    quotas: Option<Result<fauna_protocol::bridge_routing::GetMailQuotasReply, String>>,
 }
 
-/// Read both Forwarding values (replay-safe pure reads) and paint them.
-fn hydrate_forwarding(ctx: &Rc<MailPageCtx>) {
+impl AccountRead {
+    /// A read that touched nothing — the base each single-part op fills in.
+    fn none() -> Self {
+        Self {
+            forward_all_to: None,
+            forward_per_hour: None,
+            switches: None,
+            autorespond: None,
+            quotas: None,
+        }
+    }
+}
+
+/// Read every per-account value the page shows (replay-safe pure reads) and
+/// paint them.
+fn hydrate_account(ctx: &Rc<MailPageCtx>) {
     let nest = Arc::clone(&ctx.nest);
     let ctx_render = Rc::clone(ctx);
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
+            let email = fauna_client_email::EmailClient::new(Arc::clone(&nest));
             let client = MailAccountClient::new(nest);
-            ForwardingRead {
+            AccountRead {
                 forward_all_to: Some(client.get_forward_all_to().await.map_err(|e| e.to_string())),
                 forward_per_hour: Some(
                     client
@@ -1306,9 +1509,12 @@ fn hydrate_forwarding(ctx: &Rc<MailPageCtx>) {
                         .await
                         .map_err(|e| e.to_string()),
                 ),
+                switches: Some(client.get_mail_switches().await.map_err(|e| e.to_string())),
+                autorespond: Some(email.autorespond_get().await.map_err(|e| e.to_string())),
+                quotas: Some(client.get_mail_quotas().await.map_err(|e| e.to_string())),
             }
         },
-        move |read| render_forwarding(&ctx_render, read),
+        move |read| render_account(&ctx_render, read),
     );
 }
 
@@ -1332,17 +1538,17 @@ fn commit_forward_all_to(ctx: &Rc<MailPageCtx>) {
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
-            ForwardingRead {
+            AccountRead {
                 forward_all_to: Some(
                     MailAccountClient::new(nest)
                         .set_forward_all_to_and_reload(value)
                         .await
                         .map_err(|e| e.to_string()),
                 ),
-                forward_per_hour: None,
+                ..AccountRead::none()
             }
         },
-        move |read| render_forwarding(&ctx_render, read),
+        move |read| render_account(&ctx_render, read),
     );
 }
 
@@ -1368,24 +1574,129 @@ fn commit_forward_per_hour(ctx: &Rc<MailPageCtx>) {
     spawn_with_snapshot(
         &ctx.rt,
         move || async move {
-            ForwardingRead {
-                forward_all_to: None,
+            AccountRead {
                 forward_per_hour: Some(
                     MailAccountClient::new(nest)
                         .set_forward_per_hour_and_reload(value)
                         .await
                         .map_err(|e| e.to_string()),
                 ),
+                ..AccountRead::none()
             }
         },
-        move |read| render_forwarding(&ctx_render, read),
+        move |read| render_account(&ctx_render, read),
     );
 }
 
-/// Paint a Forwarding read: each confirmed half repaints its own entry (and the
-/// limit's explainer, which names the ceiling); a failure lands on
-/// `error-message`, a success clears it.
-fn render_forwarding(ctx: &Rc<MailPageCtx>, read: ForwardingRead) {
+/// Write one receive / send switch (`None` keeps the other's stored value),
+/// then re-read both so the toggles reflect the **persisted** values.
+fn commit_switches(
+    ctx: &Rc<MailPageCtx>,
+    receive_enabled: Option<bool>,
+    send_enabled: Option<bool>,
+) {
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            AccountRead {
+                switches: Some(
+                    MailAccountClient::new(nest)
+                        .set_mail_switches_and_reload(receive_enabled, send_enabled)
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+                ..AccountRead::none()
+            }
+        },
+        move |read| render_account(&ctx_render, read),
+    );
+}
+
+/// Write the scan-result-row switch, then re-read all three switches.
+fn commit_scan_result_visible(ctx: &Rc<MailPageCtx>, scan_result_visible: bool) {
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            AccountRead {
+                switches: Some(
+                    MailAccountClient::new(nest)
+                        .set_scan_result_visible_and_reload(scan_result_visible)
+                        .await
+                        .map_err(|e| e.to_string()),
+                ),
+                ..AccountRead::none()
+            }
+        },
+        move |read| render_account(&ctx_render, read),
+    );
+}
+
+/// Turn the automatic reply on with `message` (or change it), or off when
+/// `None`, through the shared facade; then re-read the setting.
+fn commit_autorespond(ctx: &Rc<MailPageCtx>, message: Option<String>) {
+    let nest = Arc::clone(&ctx.nest);
+    let ctx_render = Rc::clone(ctx);
+    spawn_with_snapshot(
+        &ctx.rt,
+        move || async move {
+            let email = fauna_client_email::EmailClient::new(nest);
+            let written = match &message {
+                Some(message) => email.autorespond_set(message).await,
+                None => email.autorespond_clear().await,
+            };
+            let autorespond = match written {
+                Ok(()) => email.autorespond_get().await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            AccountRead {
+                autorespond: Some(autorespond),
+                ..AccountRead::none()
+            }
+        },
+        move |read| render_account(&ctx_render, read),
+    );
+}
+
+/// The message's Enter, or the toggle flipped on: the shared draft check
+/// decides first, a refused (blank) draft names its reason on `error-message`
+/// and sends nothing.
+fn commit_autorespond_message(ctx: &Rc<MailPageCtx>) {
+    match fauna_client_mail_settings::parse_autorespond_message_draft(
+        &ctx.w.autorespond_message_input.text(),
+    ) {
+        Ok(message) => commit_autorespond(ctx, Some(message)),
+        Err(reason) => {
+            let text = reason.resolve(crate::i18n::strings::lookup);
+            super::render_error_label(&ctx.w.error_label, Some(&text));
+            // The toggle may have been flipped on without a message: snap it back.
+            paint_autorespond_toggle(ctx);
+        }
+    }
+}
+
+/// Repaint the automatic-reply toggle from the last confirmed read.
+fn paint_autorespond_toggle(ctx: &Rc<MailPageCtx>) {
+    let w = &ctx.w;
+    let on = w.autorespond_on.get().unwrap_or(false);
+    ctx.guard.set(true);
+    w.autorespond_toggle.set_active(on);
+    ctx.guard.set(false);
+    set_test_attr(
+        &w.autorespond_toggle,
+        "state",
+        if on { "on" } else { "off" },
+    );
+}
+
+/// Paint a per-account read: each confirmed part repaints its own control (and
+/// the limit's explainer, which names the ceiling); a failure lands on
+/// `error-message`, a success clears it. The switches repaint from the stored
+/// confirmed value even on failure, so a refused flip snaps back.
+fn render_account(ctx: &Rc<MailPageCtx>, read: AccountRead) {
     let w = &ctx.w;
     let mut error = None;
     match read.forward_all_to {
@@ -1404,6 +1715,83 @@ fn render_forwarding(ctx: &Rc<MailPageCtx>, read: ForwardingRead) {
                 &fauna_client_mail_settings::forward_per_hour_hint(reply.forward_per_hour_ceiling)
                     .resolve(crate::i18n::strings::lookup),
             );
+        }
+        Some(Err(msg)) => error = error.or(Some(msg)),
+        None => {}
+    }
+    match read.switches {
+        Some(Ok(reply)) => w.switches.set(Some((
+            reply.receive_enabled,
+            reply.send_enabled,
+            reply.scan_result_visible,
+        ))),
+        Some(Err(msg)) => error = error.or(Some(msg)),
+        None => {}
+    }
+    if let Some((receive, send, scan_visible)) = w.switches.get() {
+        ctx.guard.set(true);
+        w.receive_toggle.set_active(receive);
+        w.send_toggle.set_active(send);
+        w.scan_result_visible_toggle.set_active(scan_visible);
+        ctx.guard.set(false);
+        w.receive_toggle.set_visible(true);
+        w.send_toggle.set_visible(true);
+        w.scan_result_visible_toggle.set_visible(true);
+        set_test_attr(
+            &w.receive_toggle,
+            "state",
+            if receive { "on" } else { "off" },
+        );
+        set_test_attr(&w.send_toggle, "state", if send { "on" } else { "off" });
+        set_test_attr(
+            &w.scan_result_visible_toggle,
+            "state",
+            if scan_visible { "on" } else { "off" },
+        );
+    }
+    match read.autorespond {
+        Some(Ok(autorespond)) => {
+            // An off reply has no body; keep the user's draft rather than
+            // blanking it, so turning the reply back on sends the last words.
+            if autorespond.enabled {
+                w.autorespond_message_input.set_text(&autorespond.message);
+            }
+            w.autorespond_on.set(Some(autorespond.enabled));
+        }
+        Some(Err(msg)) => error = error.or(Some(msg)),
+        None => {}
+    }
+    if w.autorespond_on.get().is_some() {
+        w.autorespond_toggle.set_visible(true);
+        w.autorespond_message_row.set_visible(true);
+        paint_autorespond_toggle(ctx);
+    }
+    match read.quotas {
+        Some(Ok(quotas)) => {
+            // Two readouts from the one read (`imap-server.md` § Composition
+            // with submission quota): the mailbox helper words the storage /
+            // message pair only, the submission helper the daily allowance.
+            let text =
+                fauna_client_mail_settings::mail_quota_text(&quotas, crate::i18n::strings::lookup);
+            w.mailbox_quota.set_text(&text);
+            w.mailbox_quota_row.set_subtitle(&text);
+            w.mailbox_quota_row.set_visible(true);
+            let text = fauna_client_mail_settings::mail_submission_quota_text(
+                &quotas,
+                crate::i18n::strings::lookup,
+            );
+            w.submission_quota.set_text(&text);
+            w.submission_quota_row.set_subtitle(&text);
+            w.submission_quota_row.set_visible(true);
+            match fauna_client_mail_settings::mail_over_quota_notice(&quotas) {
+                Some(notice) => {
+                    let text = notice.resolve(crate::i18n::strings::lookup);
+                    w.over_quota_notice.set_text(&text);
+                    w.over_quota_row.set_subtitle(&text);
+                    w.over_quota_row.set_visible(true);
+                }
+                None => w.over_quota_row.set_visible(false),
+            }
         }
         Some(Err(msg)) => error = error.or(Some(msg)),
         None => {}
@@ -1430,11 +1818,26 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     // below) so the e2e harness's `ensure_mail_enabled` phase-1 gate reads
     // "on"/"off" consistently with apple/windows, instead of the unmarked
     // SwitchRow fallback's "true"/"false".
+    //
+    // On a box that cannot enable mail (the shared machine's
+    // `mail_unavailable_here`, read — never re-derived) a mailbox that is off
+    // reads `unavailable`, its toggle is insensitive and the notice stands in
+    // for the enable subtitle. A mailbox already on keeps its live toggle so it
+    // can still be turned off.
+    let unavailable = !snap.enabled && snap.mail_unavailable_here;
     set_test_attr(
         &w.enabled_toggle,
         "state",
-        if snap.enabled { "on" } else { "off" },
+        match (snap.enabled, unavailable) {
+            (true, _) => "on",
+            (false, true) => "unavailable",
+            (false, false) => "off",
+        },
     );
+    w.enabled_toggle.set_sensitive(!unavailable);
+    w.enabled_toggle
+        .set_subtitle(if unavailable { "" } else { SM::ENABLE_SUBTITLE });
+    w.unavailable_row.set_visible(unavailable);
     set_test_attr(
         &w.serve_here_toggle,
         "state",
@@ -1495,6 +1898,7 @@ fn render(ctx: &Rc<MailPageCtx>, snap: &MailSettingsSnapshot) {
     // Forwarding is a mail feature, so it shows while mail is enabled (not for
     // a CalDAV-only mailbox).
     w.forwarding_group.set_visible(snap.enabled);
+    w.account_group.set_visible(snap.enabled);
 
     // MUA connection details render whenever a mailbox is provisioned (email OR
     // CalDAV OR CardDAV OR WebDAV). Within the one `mail-settings-mua-instructions`
@@ -1700,9 +2104,8 @@ mod tests {
 
     /// The Mail page exposes every static ui.yaml ID for the `mail-settings`
     /// page plus the `mail-add-credential` form IDs (Slice 3). The indexed
-    /// `mail-settings-credential-item*` rows are added from the snapshot at
-    /// render time (no registered client in this test), so they're not asserted
-    /// here. The form fields live in the tree regardless of the form group's
+    /// credential rows are not on this page (they render on Connected apps as
+    /// `connected-apps-item*`). The form fields live in the tree regardless of the form group's
     /// initial (hidden) visibility.
     #[test]
     fn mail_page_exposes_static_ui_yaml_ids() {
@@ -1721,6 +2124,14 @@ mod tests {
                 "mail-settings-rotate-keys-button",
                 "mail-settings-keys-info",
                 "mail-settings-serve-here-toggle",
+                "mail-settings-receive-toggle",
+                "mail-settings-send-toggle",
+                "mail-settings-scan-result-visible-toggle",
+                "mail-settings-autorespond-toggle",
+                "mail-settings-autorespond-message-input",
+                "mail-settings-mailbox-quota",
+                "mail-settings-submission-quota",
+                "mail-settings-over-quota-notice",
                 "mail-settings-mua-instructions",
                 "mail-settings-mua-imap-host",
                 "mail-settings-mua-imap-port",

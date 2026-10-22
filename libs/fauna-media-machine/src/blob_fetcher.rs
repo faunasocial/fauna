@@ -209,7 +209,7 @@ pub use native::NativeBlobFetcher;
 // verify → decrypt render leg in shared Rust on web too (priority #2).
 #[cfg(all(target_arch = "wasm32", feature = "rpc-glue"))]
 mod wasm {
-    use fauna_core::file_download::{ERROR_BODY_READ_CAP, check_declared_body_len};
+    use fauna_core::file_download::check_declared_body_len;
     use fauna_rpc_wasm::WsRpcClient;
 
     use super::{MediaApiError, MediaBlobFetcher};
@@ -249,16 +249,7 @@ mod wasm {
 
             let status = resp.status();
             if !(200..300).contains(&status) {
-                let message = if check_declared_body_len(
-                    resp.headers().get("content-length").as_deref(),
-                    ERROR_BODY_READ_CAP,
-                )
-                .is_ok()
-                {
-                    resp.text().await.unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let message = fauna_core::file_download::read_error_body(resp).await;
                 return Err(crate::nest_api::map_blob_http_err(
                     fauna_rpc_wasm::BlobHttpError::Status { status, message },
                     "blob fetch",

@@ -9,7 +9,7 @@
 // Why web needs it. The ceremony supersedes the identity this session holds,
 // so the session's next bearer re-mint (or background silent refresh) is
 // refused as superseded the instant the nest commits — typically before the
-// ceremony's own result has been handled. `$lib/post-auth-escalation` answers
+// ceremony's own result has been handled. `#lib/post-auth-escalation` answers
 // that refusal with a full document navigation, which unloads the page, the
 // ceremony's pending promise and the only surviving copy of the successor's
 // key with it.
@@ -20,7 +20,7 @@
 // FaunaKit's `StolenCeremonyHold`. A pure decision object, as
 // `RecoveryErrorGuard` is, so it is unit-testable under `just web-unit-test`
 // (`own-supersession-hold.test.ts`). Module-level — not page state — because
-// the escalation is decided in `$lib`, far from the Settings page that owns
+// the escalation is decided in `#lib`, far from the Settings page that owns
 // the ceremony; one document runs at most one ceremony.
 
 export class OwnSupersessionHold {

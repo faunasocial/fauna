@@ -585,6 +585,36 @@ async fn claim_rejects_taken_handle() {
     assert_eq!(err.code, "fauna.account.handle_taken");
 }
 
+/// A handle an exact alias already holds is "handle taken" at the claim door
+/// too, never an internal fault (`mail-aliases.md` § Cross-user uniqueness):
+/// the writer's typed refusal surfaces as the A3 code, and the code survives
+/// for a retry under another handle.
+#[tokio::test]
+async fn claim_rejects_a_handle_an_alias_holds() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let holder = ActorKeypair::generate();
+    db.put_exact_alias(DOMAIN, "held", "exact", &holder.actor_id().0)
+        .await
+        .unwrap();
+    let (st, _dir) = state_with_claim_code(db.clone(), Some(CLAIM_CODE));
+    let r = router();
+    let kp = ActorKeypair::generate();
+
+    let err = dispatch(
+        &r,
+        st.clone(),
+        claim_payload(&kp, CLAIM_CODE, "held", now_ms()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "fauna.account.handle_taken");
+    assert!(!db.is_admin(&kp.actor_id().0).await.unwrap());
+
+    dispatch(&r, st, claim_payload(&kp, CLAIM_CODE, "admin", now_ms()))
+        .await
+        .expect("the code is still good under another handle");
+}
+
 #[tokio::test]
 async fn claim_rejects_malformed_payload() {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
@@ -596,4 +626,143 @@ async fn claim_rejects_malformed_payload() {
         .await
         .unwrap_err();
     assert_eq!(err.code, "fauna.protocol.malformed");
+}
+
+// ── The SSH door's one address (installers/vps.md § The SSH door) ────────────
+
+/// Dispatch the claim as the dispatcher does for an anonymous connection whose
+/// recorded peer is `peer`, so the handler's `current_caller()` answers.
+async fn dispatch_from(
+    router: &RpcRouter,
+    state: Arc<AppState>,
+    payload: Bytes,
+    peer: &str,
+) -> Result<Bytes, RpcError> {
+    let caller = fauna_nest::dispatch_core::CallerRef {
+        conn_id: 1,
+        correlation_id: 1,
+        peer_ip: Some(peer.parse().unwrap()),
+        loopback_peer: false,
+        served_name: None,
+    };
+    fauna_nest::dispatch_core::scope_caller(caller, dispatch(router, state, payload)).await
+}
+
+/// The claim hands the claimant's source address to the host once, in the
+/// flat `address=<ip>` form, through the container-owned maintenance dir; a
+/// later claim attempt from elsewhere does not overwrite it.
+#[tokio::test]
+async fn claim_writes_ssh_door_source_once() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let (st, dir) = state_with_claim_code(db, Some(CLAIM_CODE));
+    std::fs::create_dir(dir.path().join("maintenance")).unwrap();
+    let source = dir.path().join("maintenance/ssh-door-source");
+    let r = router();
+
+    let admin = ActorKeypair::generate();
+    let out = dispatch_from(
+        &r,
+        st.clone(),
+        claim_payload(&admin, CLAIM_CODE, "admin", now_ms()),
+        "203.0.113.7",
+    )
+    .await
+    .expect("claim ok");
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "address=203.0.113.7\n"
+    );
+    // The reply echoes the address the nest wrote, so the wizard can name it
+    // before the host's door pass has run (onboarding-provisioning.md § 5).
+    let reply: ClaimAdminReply = decode(&out).unwrap();
+    assert_eq!(reply.ssh_door_source.as_deref(), Some("203.0.113.7"));
+
+    // A lingering code and a second claimant from another address: refused,
+    // and the door's address is untouched.
+    std::fs::write(dir.path().join("claim-code"), CLAIM_CODE).unwrap();
+    let other = ActorKeypair::generate();
+    let err = dispatch_from(
+        &r,
+        st,
+        claim_payload(&other, CLAIM_CODE, "intruder", now_ms()),
+        "198.51.100.9",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "fauna.auth.already_claimed");
+    assert_eq!(
+        std::fs::read_to_string(&source).unwrap(),
+        "address=203.0.113.7\n"
+    );
+}
+
+/// A v4 claimant seen through a dual-stack socket is recorded as the IPv4
+/// address it is — the host's ufw rule must match its real traffic.
+#[tokio::test]
+async fn claim_records_a_mapped_v4_claimant_as_ipv4() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let (st, dir) = state_with_claim_code(db, Some(CLAIM_CODE));
+    std::fs::create_dir(dir.path().join("maintenance")).unwrap();
+    let out = dispatch_from(
+        &router(),
+        st,
+        claim_payload(&ActorKeypair::generate(), CLAIM_CODE, "admin", now_ms()),
+        "::ffff:203.0.113.7",
+    )
+    .await
+    .expect("claim ok");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("maintenance/ssh-door-source")).unwrap(),
+        "address=203.0.113.7\n"
+    );
+    let reply: ClaimAdminReply = decode(&out).unwrap();
+    assert_eq!(reply.ssh_door_source.as_deref(), Some("203.0.113.7"));
+}
+
+/// No maintenance mount (dev / desktop / bare-metal): the claim succeeds,
+/// writes nothing and echoes no address.
+#[tokio::test]
+async fn claim_without_maintenance_mount_writes_no_ssh_door_source() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let (st, dir) = state_with_claim_code(db, Some(CLAIM_CODE));
+    let out = dispatch_from(
+        &router(),
+        st,
+        claim_payload(&ActorKeypair::generate(), CLAIM_CODE, "admin", now_ms()),
+        "203.0.113.7",
+    )
+    .await
+    .expect("claim ok");
+    assert!(!dir.path().join("maintenance").exists());
+    // Nothing written, nothing echoed: no host will admit anyone.
+    let reply: ClaimAdminReply = decode(&out).unwrap();
+    assert_eq!(reply.ssh_door_source, None);
+}
+
+/// `fauna.setup.status` reports the address the host's door admitted — read
+/// from the host's root-owned record — to an admin only; an anonymous or
+/// non-admin caller reads `None`, as for the `os_*` fields.
+#[tokio::test]
+async fn setup_status_reports_the_admitted_door_address_to_admins_only() {
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let (st, dir) = state_with_claim_code(db, Some(CLAIM_CODE));
+    let host = dir.path().join("maintenance-host");
+    std::fs::create_dir(&host).unwrap();
+
+    let before = fauna_nest::discovery_core::setup_status_core(&st, true).await;
+    assert_eq!(before.ssh_door_admitted_from, None, "not admitted yet");
+
+    std::fs::write(
+        host.join("ssh-door-admitted"),
+        "address=2001:db8::7\nat=1700000000\n",
+    )
+    .unwrap();
+    let admin = fauna_nest::discovery_core::setup_status_core(&st, true).await;
+    assert_eq!(admin.ssh_door_admitted_from.as_deref(), Some("2001:db8::7"));
+    let anonymous = fauna_nest::discovery_core::setup_status_core(&st, false).await;
+    assert_eq!(anonymous.ssh_door_admitted_from, None);
+
+    std::fs::write(host.join("ssh-door-admitted"), "refused=malformed\nat=1\n").unwrap();
+    let refused = fauna_nest::discovery_core::setup_status_core(&st, true).await;
+    assert_eq!(refused.ssh_door_admitted_from, None, "a refusal is no door");
 }

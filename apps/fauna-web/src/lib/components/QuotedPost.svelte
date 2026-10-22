@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { shortActor } from '$lib/feed-utils';
-  import { legalTakedownTombstone } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
+  import { shortActor } from '#lib/feed-utils';
+  import { legalTakedownTombstone, adminBlockNotice } from '#lib/wasm';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
   import UnverifiedSourceBadge from './UnverifiedSourceBadge.svelte';
   import DelegatedOriginBadge from './DelegatedOriginBadge.svelte';
-  import { IDS } from '$lib/generated/uiIds';
-  import { t } from '$lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+  import { t } from '#lib/i18n/strings';
 
   /** The shared `fauna_feed::QuotedPostView` — `{ post_id, author, body, verification,
    *  legal_takedown_ref }` with `body` already truncated to the 280-char cap by the
@@ -41,6 +41,13 @@
     </p>
   {:else if view?.not_found}
     <p class="quoted-body quoted-not-found">{t.feed.post.post_not_found}</p>
+  {:else if view?.admin_block_reason && !view.body}
+    <!-- Admin-blocked (moderation.md § Admin block of a reported item): the nest
+         withheld the body from every viewer but its author, so the shared notice
+         stands in its place — never a blank embed. -->
+    <p class="quoted-body quoted-admin-block">
+      {resolveLocalizedNested(adminBlockNotice(view.admin_block_reason))}
+    </p>
   {:else if view}
     <div class="quoted-header">
       <span class="quoted-author">{shortActor(view.author)}</span>
@@ -48,6 +55,12 @@
       <DelegatedOriginBadge authoringOrigin={view.authoring_origin} />
     </div>
     <p class="quoted-body">{view.body}</p>
+    {#if view.admin_block_reason}
+      <!-- The author's own read keeps the body; the notice paints beside it. -->
+      <p class="quoted-body quoted-admin-block">
+        {resolveLocalizedNested(adminBlockNotice(view.admin_block_reason))}
+      </p>
+    {/if}
   {:else}
     <p class="muted quoted-loading">{post_id.slice(0, 16)}...</p>
   {/if}
@@ -65,6 +78,7 @@
   .quoted-author { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); }
   .quoted-body { font-size: 0.8rem; margin: 0; }
   .quoted-legal-takedown,
+  .quoted-admin-block,
   .quoted-not-found { color: var(--text-muted); font-style: italic; }
   .quoted-loading { font-size: 0.75rem; margin: 0; }
   .muted { color: var(--text-muted); }

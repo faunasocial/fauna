@@ -1,5 +1,6 @@
 package com.fauna.app.ui.screen.settings
 
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import org.junit.Assert.assertEquals
@@ -7,6 +8,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.fauna.app.testing.FaunaRobolectricTestRunner
+import com.fauna.app.R
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import uniffi.fauna_client_mail_settings.CredentialKind
 import uniffi.fauna_client_mail_settings.MailCredentialSummary
@@ -52,6 +55,7 @@ class MailSettingsContentTest {
 
     private fun render(
         enabled: Boolean = true,
+        mailUnavailableHere: Boolean = false,
         caldavEnabled: Boolean = false,
         carddavEnabled: Boolean = false,
         servesWebdavSet: Boolean = false,
@@ -93,10 +97,22 @@ class MailSettingsContentTest {
         onStartRotation: (List<String>, () -> Unit) -> Unit = { _, _ -> },
         onResumeRotation: () -> Unit = {},
         onNavAliases: () -> Unit = {},
+        receiveEnabled: Boolean? = null,
+        sendEnabled: Boolean? = null,
+        onToggleReceive: () -> Unit = {},
+        onToggleSend: () -> Unit = {},
+        autorespondEnabled: Boolean? = null,
+        autorespondMessage: String = "",
+        onToggleAutorespond: () -> Unit = {},
+        onCommitAutorespondMessage: () -> Unit = {},
+        quotaText: String? = null,
+        submissionQuotaText: String? = null,
+        overQuotaNotice: String? = null,
     ) {
         composeTestRule.setContent {
             MailSettingsContent(
                 enabled = enabled,
+                mailUnavailableHere = mailUnavailableHere,
                 caldavEnabled = caldavEnabled,
                 carddavEnabled = carddavEnabled,
                 servesWebdavSet = servesWebdavSet,
@@ -125,8 +141,134 @@ class MailSettingsContentTest {
                 onResumeRotation = onResumeRotation,
                 onRegeneratePassword = {},
                 onClearToken = {},
+                receiveEnabled = receiveEnabled,
+                sendEnabled = sendEnabled,
+                onToggleReceive = onToggleReceive,
+                onToggleSend = onToggleSend,
+                autorespondEnabled = autorespondEnabled,
+                autorespondMessage = autorespondMessage,
+                onToggleAutorespond = onToggleAutorespond,
+                onCommitAutorespondMessage = onCommitAutorespondMessage,
+                quotaText = quotaText,
+                submissionQuotaText = submissionQuotaText,
+                overQuotaNotice = overQuotaNotice,
             )
         }
+    }
+
+    @Test
+    fun receiveAndSendSwitchesAreAbsentUntilTheFirstRead() {
+        render(enabled = true)
+        composeTestRule.onAllNodesWithTag("mail-settings-receive-toggle").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-send-toggle").assertCountEquals(0)
+    }
+
+    @Test
+    fun receiveAndSendSwitchesReflectTheReadAndDispatchOnTap() {
+        var receiveTaps = 0
+        var sendTaps = 0
+        render(
+            enabled = true,
+            receiveEnabled = true,
+            sendEnabled = false,
+            onToggleReceive = { receiveTaps++ },
+            onToggleSend = { sendTaps++ },
+        )
+        composeTestRule.onNodeWithTag("mail-settings-receive-toggle").performScrollTo().assertIsOn()
+        composeTestRule.onNodeWithTag("mail-settings-send-toggle").performScrollTo().assertIsOff()
+        composeTestRule.onNodeWithTag("mail-settings-receive-toggle").performClick()
+        composeTestRule.onNodeWithTag("mail-settings-send-toggle").performClick()
+        assertEquals(1, receiveTaps)
+        assertEquals(1, sendTaps)
+        // Non-optimistic: a tap alone repaints nothing — only a new read does.
+        composeTestRule.onNodeWithTag("mail-settings-receive-toggle").assertIsOn()
+        composeTestRule.onNodeWithTag("mail-settings-send-toggle").assertIsOff()
+    }
+
+    @Test
+    fun autorespondToggleIsAbsentUntilReadButTheMessageInputIsAlwaysThere() {
+        render(enabled = true)
+        composeTestRule.onAllNodesWithTag("mail-settings-autorespond-toggle").assertCountEquals(0)
+        composeTestRule.onNodeWithTag("mail-settings-autorespond-message-input").performScrollTo().assertExists()
+    }
+
+    @Test
+    fun autorespondToggleShowsTheStateAndDispatches() {
+        var taps = 0
+        render(enabled = true, autorespondEnabled = true, autorespondMessage = "Away", onToggleAutorespond = { taps++ })
+        composeTestRule.onNodeWithTag("mail-settings-autorespond-toggle").performScrollTo().assertIsOn()
+        composeTestRule.onNodeWithTag("mail-settings-autorespond-toggle").performClick()
+        assertEquals(1, taps)
+    }
+
+    @Test
+    fun quotaReadoutAndNoticeRenderTheSharedTextAndAreAbsentBeforeTheRead() {
+        render(enabled = true)
+        composeTestRule.onAllNodesWithTag("mail-settings-mailbox-quota").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-submission-quota").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-over-quota-notice").assertCountEquals(0)
+    }
+
+    @Test
+    fun submissionQuotaReadoutShowsTheSharedTextWhenGiven() {
+        render(enabled = true, submissionQuotaText = "3 of 100 recipients today")
+        composeTestRule.onNodeWithTag("mail-settings-submission-quota").performScrollTo()
+            .assertTextEquals("3 of 100 recipients today")
+    }
+
+    @Test
+    fun quotaReadoutShowsTheTextAndTheNoticeOnlyWhenOneIsGiven() {
+        render(enabled = true, quotaText = "1 MB of 2 MB · 3 of 10 messages")
+        composeTestRule.onNodeWithTag("mail-settings-mailbox-quota").performScrollTo()
+            .assertTextEquals("1 MB of 2 MB · 3 of 10 messages")
+        composeTestRule.onAllNodesWithTag("mail-settings-over-quota-notice").assertCountEquals(0)
+    }
+
+    @Test
+    fun overQuotaNoticeRendersWhenGiven() {
+        render(enabled = true, quotaText = "full", overQuotaNotice = "Your mailbox is full.")
+        composeTestRule.onNodeWithTag("mail-settings-over-quota-notice").performScrollTo()
+            .assertTextEquals("Your mailbox is full.")
+    }
+
+    @Test
+    fun accountControlsAreHiddenWhenMailIsDisabled() {
+        render(enabled = false, receiveEnabled = true, sendEnabled = true, autorespondEnabled = false, quotaText = "x")
+        composeTestRule.onAllNodesWithTag("mail-settings-receive-toggle").assertCountEquals(0)
+        composeTestRule.onAllNodesWithTag("mail-settings-mailbox-quota").assertCountEquals(0)
+    }
+
+    private fun stateIs(expected: String) =
+        SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, expected)
+
+    @Test
+    fun unavailableBoxDisablesTheToggleAndShowsTheNotice() {
+        // A box that cannot enable mail (shared `mail_unavailable_here`): the toggle
+        // reads `unavailable`, is disabled, and the notice replaces the subtitle.
+        render(enabled = false, mailUnavailableHere = true)
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle")
+            .assertIsNotEnabled()
+            .assert(stateIs("unavailable"))
+        composeTestRule.onNodeWithTag("mail-settings-unavailable-notice")
+            .assertTextEquals(RuntimeEnvironment.getApplication().getString(R.string.mail_settings_unavailable_notice))
+    }
+
+    @Test
+    fun mailAlreadyOnKeepsALiveToggleOnAnUnavailableBox() {
+        render(enabled = true, mailUnavailableHere = true)
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle")
+            .assertIsEnabled()
+            .assert(stateIs("on"))
+        composeTestRule.onNodeWithTag("mail-settings-unavailable-notice").assertDoesNotExist()
+    }
+
+    @Test
+    fun availableBoxReadsOffWithoutANotice() {
+        render(enabled = false, mailUnavailableHere = false)
+        composeTestRule.onNodeWithTag("mail-settings-enabled-toggle")
+            .assertIsEnabled()
+            .assert(stateIs("off"))
+        composeTestRule.onNodeWithTag("mail-settings-unavailable-notice").assertDoesNotExist()
     }
 
     @Test

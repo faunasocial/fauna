@@ -115,11 +115,12 @@ pub async fn run_spam_baseline_publish(state: &Arc<AppState>) -> anyhow::Result<
     publish_run(state, false).await
 }
 
-/// The run itself. `cadence` marks a standing-publish tick: it re-reads
-/// `baseline_standing_publish` just before landing, so an admin turning
-/// standing off while the run waited on its holder is not silently undone by
-/// a baseline served after the unpublish. The admin's click (`cadence ==
-/// false`) never asks — "publish now" works with standing off.
+/// The run itself. `cadence` marks a standing-publish tick: its landing reads
+/// `baseline_standing_publish` inside the landing transaction
+/// ([`crate::db::CacheDb::land_spam_baseline_publish`]'s `require_standing`),
+/// so an admin turning standing off while the run waited on its holder is not
+/// silently undone by a baseline served after the unpublish. The admin's click
+/// (`cadence == false`) never asks — "publish now" works with standing off.
 async fn publish_run(state: &Arc<AppState>, cadence: bool) -> anyhow::Result<PublishOutcome> {
     let snapshot = state.db.snapshot_spam_baseline_run().await?;
 
@@ -255,9 +256,6 @@ async fn publish_run(state: &Arc<AppState>, cadence: bool) -> anyhow::Result<Pub
     baseline.cap_to_bytes(fauna_mail::spam::MODEL_MAX_BYTES_DEFAULT);
     let sample_count = baseline.sample_count();
     let model_json = baseline.to_bytes();
-    if cadence && !standing_publish_enabled(state).await? {
-        return Ok(deferred(contributors, skipped_contributors));
-    }
     let landed = state
         .db
         .land_spam_baseline_publish(
@@ -270,12 +268,13 @@ async fn publish_run(state: &Arc<AppState>, cadence: bool) -> anyhow::Result<Pub
                 summed: &summed,
             },
             snapshot.state.departures,
+            cadence,
         )
         .await?;
     if !landed {
-        // A contributor departed while this run merged: landing would serve
-        // the counts that departure withdrew. The next run rebuilds without
-        // them.
+        // A contributor departed while this run merged (landing would serve
+        // the counts that departure withdrew; the next run rebuilds without
+        // them), or a cadence run met standing publish switched off.
         return Ok(deferred(contributors, skipped_contributors));
     }
     Ok(PublishOutcome {

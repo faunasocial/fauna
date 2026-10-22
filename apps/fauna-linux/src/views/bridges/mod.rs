@@ -1,5 +1,6 @@
 pub mod detail;
 pub mod list;
+pub mod plugins;
 
 pub use list::{BridgeListHandles, update_bridge_list};
 
@@ -21,11 +22,13 @@ pub type BridgesSnapshot = Rc<RefCell<HashMap<String, BridgeStatus>>>;
 pub struct BridgesViewHandles {
     pub list_handles: BridgeListHandles,
     pub split: adw::NavigationSplitView,
-    /// `(bridge_id, follows_list)` of the currently-open detail pane, if any —
+    /// `(bridge_id, detail handles)` of the currently-open detail pane, if any —
     /// so `app.rs`'s `DataMessage::BridgeFollowsLoaded` handler can repaint the
     /// right widget when the reply for the open bridge lands.
     /// Updated on every row activation below; read-only from `app.rs`'s side.
-    pub open_detail: Rc<RefCell<Option<(String, gtk::ListBox)>>>,
+    pub open_detail: Rc<RefCell<Option<(String, detail::BridgeDetailHandles)>>>,
+    /// The admin's hosted plugins under the bridge list.
+    pub plugins: Rc<plugins::PluginsSection>,
 }
 
 /// Build the full bridges view: NavigationSplitView with bridge list on the
@@ -37,6 +40,8 @@ pub fn build_bridges_view(
     let split = adw::NavigationSplitView::new();
 
     let (list_widget, list_handles) = list::build_bridge_list(client);
+    let plugins = plugins::PluginsSection::build(client);
+    list_widget.append(plugins.widget());
 
     let list_page = adw::NavigationPage::builder()
         .title(bridges_strings::TITLE)
@@ -58,7 +63,8 @@ pub fn build_bridges_view(
     split.set_sidebar(Some(&list_page));
     split.set_content(Some(&detail_page));
 
-    let open_detail: Rc<RefCell<Option<(String, gtk::ListBox)>>> = Rc::new(RefCell::new(None));
+    let open_detail: Rc<RefCell<Option<(String, detail::BridgeDetailHandles)>>> =
+        Rc::new(RefCell::new(None));
 
     // Wire list row selection to open the detail pane. This is the single
     // activation path: the detail pane's link form is rendered from the
@@ -75,24 +81,28 @@ pub fn build_bridges_view(
             }
             // Derive a display name from the row's label child.
             let bridge_name = extract_bridge_name(row);
-            let (link_modes, linked, error, settings) = snapshot
-                .borrow()
-                .get(&bridge_id)
-                .map(|b| {
-                    (
-                        b.link_modes.clone().unwrap_or_default(),
-                        b.linked,
-                        b.error.clone(),
-                        b.settings.clone(),
-                    )
-                })
-                .unwrap_or_default();
+            let (link_modes, linked, error, identity, settings, supports_follow_requests) =
+                snapshot
+                    .borrow()
+                    .get(&bridge_id)
+                    .map(|b| {
+                        (
+                            b.link_modes.clone().unwrap_or_default(),
+                            b.linked,
+                            b.error.clone(),
+                            b.identity.clone(),
+                            b.settings.clone(),
+                            b.linked && b.supports_follow_requests,
+                        )
+                    })
+                    .unwrap_or_default();
             let (detail, handles) = detail::build_bridge_detail(
                 &bridge_id,
                 &bridge_name,
                 link_modes,
                 linked,
                 error,
+                identity,
                 settings,
                 Rc::clone(&c),
             );
@@ -101,8 +111,20 @@ pub fn build_bridges_view(
                 .child(&detail)
                 .build();
             sp.set_content(Some(&page));
-            *open_detail.borrow_mut() = Some((bridge_id.clone(), handles.follows_list));
+            if supports_follow_requests {
+                let c = Rc::clone(&c);
+                let bid = bridge_id.clone();
+                detail::paint_cached_follow_requests(
+                    &handles.follow_requests,
+                    &bridge_id,
+                    move |id, approve| c.resolve_bridge_follow_request(&bid, id, approve),
+                );
+            }
+            *open_detail.borrow_mut() = Some((bridge_id.clone(), handles));
             c.fetch_bridge_follows(&bridge_id);
+            if supports_follow_requests {
+                c.fetch_bridge_follow_requests(&bridge_id);
+            }
         });
     }
 
@@ -110,6 +132,7 @@ pub fn build_bridges_view(
         list_handles,
         split: split.clone(),
         open_detail,
+        plugins,
     };
     (split, handles)
 }

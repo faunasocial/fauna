@@ -1,6 +1,10 @@
 package com.fauna.app.payments
 
 import com.fauna.app.core.ApiClient
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * The `payments` plane's glue — **the excised half** (`dynamic-features.md`
@@ -42,6 +46,18 @@ suspend fun ApiClient.paymentsProvidersRemove(kind: String) = Unit
 @Suppress("UNUSED_PARAMETER")
 fun ApiClient.paymentsWebhookUrl(kind: String): String = ""
 
+/** Excised — the §4 form's return-URL display is not rendered in this flavor. */
+@Suppress("UNUSED_PARAMETER")
+fun paymentsReturnUrl(siteOrigin: String, kind: String): String = ""
+
+/** Excised — no web-site origin is read for the §4 return-URL display in this flavor. */
+@Singleton
+class PaymentsSiteOrigin @Inject constructor() {
+    val origin: StateFlow<String?> = MutableStateFlow(null)
+
+    fun ensure() = Unit
+}
+
 /** Excised — the claim-redemption row is not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")
 suspend fun ApiClient.paymentsClaimsRedeem(code: String) = Unit
@@ -49,6 +65,10 @@ suspend fun ApiClient.paymentsClaimsRedeem(code: String) = Unit
 /** Excised — the §5 mint control is not rendered in this flavor. */
 @Suppress("UNUSED_PARAMETER")
 suspend fun ApiClient.paymentsClaimsMint(tier: String) = Unit
+
+/** Excised — the §5 Void control is not rendered in this flavor. */
+@Suppress("UNUSED_PARAMETER")
+suspend fun ApiClient.paymentsClaimsVoid(code: String) = Unit
 
 /** Excised — the §5 claim list is not rendered in this flavor. */
 suspend fun ApiClient.paymentsClaimsList(): List<ClaimItem> = emptyList()

@@ -100,6 +100,7 @@ fn record(uid: u32, message_id: &str, subject: &str, body: &str) -> InboundMailR
         mailbox: fauna_conversations::backend::MailFeed::Inbox,
         suppress_from_view: false,
         has_seen_flag: false,
+        warmup_hold: None,
     }
 }
 

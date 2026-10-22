@@ -66,7 +66,10 @@ impl<R: RpcRequester> EmailClient<R> {
     /// `fauna.email.filters.create` — create a new server-side filter
     /// rule. Replay-safe (the idempotency cache replays the prior reply
     /// on retry, returning the same server-assigned id). Returns the
-    /// new row id.
+    /// new row id. `priority` is the rule's place in the evaluation order
+    /// (`priority ASC, id ASC`) and `continue_on_match` the Sieve `continue`
+    /// flag (`email-filters.md` § Email filter rules) — `false` is
+    /// first-match-wins.
     pub async fn filters_create(
         &self,
         name: impl Into<String>,
@@ -74,6 +77,7 @@ impl<R: RpcRequester> EmailClient<R> {
         combination: impl Into<String>,
         action: EmailFilterAction,
         priority: i32,
+        continue_on_match: bool,
     ) -> Result<i64, R::Error> {
         let reply: CreateEmailFilterReply = self
             .nest
@@ -85,11 +89,7 @@ impl<R: RpcRequester> EmailClient<R> {
                     combination: combination.into(),
                     action,
                     priority,
-                    // Defaults to first-match-wins. Exposing the Sieve `continue`
-                    // flag through this typed wrapper + the client UIs is the
-                    // client-area follow-up;
-                    // the wire field already round-trips so a raw create can set it.
-                    continue_on_match: false,
+                    continue_on_match,
                     extra: Default::default(),
                 },
             )
@@ -115,8 +115,8 @@ impl<R: RpcRequester> EmailClient<R> {
     }
 
     /// `fauna.email.filters.update` — overwrite an existing filter
-    /// rule (name + rules + combination + action + priority all
-    /// replaced). Idempotent overwrite — replay-safe. Returns
+    /// rule (name + rules + combination + action + priority + the
+    /// `continue` flag all replaced). Idempotent overwrite — replay-safe. Returns
     /// `fauna.email.not_found` when no row matches `(id, calling
     /// actor)`. The `{ ok: true }` reply is discarded by the wrapper.
     #[allow(clippy::too_many_arguments)]
@@ -128,6 +128,7 @@ impl<R: RpcRequester> EmailClient<R> {
         combination: impl Into<String>,
         action: EmailFilterAction,
         priority: i32,
+        continue_on_match: bool,
     ) -> Result<(), R::Error> {
         let _: UpdateEmailFilterReply = self
             .nest
@@ -140,9 +141,7 @@ impl<R: RpcRequester> EmailClient<R> {
                     combination: combination.into(),
                     action,
                     priority,
-                    // First-match-wins default; see filters_create — exposing the
-                    // `continue` flag is the client-UI follow-up.
-                    continue_on_match: false,
+                    continue_on_match,
                     extra: Default::default(),
                 },
             )
@@ -453,6 +452,7 @@ mod tests {
                 mailbox: "Reading".into(),
             },
             10,
+            true,
         ))
         .expect("infallible mock");
         let (kind, payload) = rec.recorded();
@@ -462,6 +462,7 @@ mod tests {
         assert_eq!(req.name, "Move newsletters");
         assert_eq!(req.combination, "any");
         assert_eq!(req.priority, 10);
+        assert!(req.continue_on_match);
     }
 
     #[test]
@@ -489,6 +490,7 @@ mod tests {
                 label: "Newsletters".into(),
             },
             20,
+            false,
         ))
         .expect("infallible mock");
         let (kind, payload) = rec.recorded();
@@ -498,6 +500,7 @@ mod tests {
         assert_eq!(req.id, 17);
         assert_eq!(req.name, "Updated name");
         assert_eq!(req.priority, 20);
+        assert!(!req.continue_on_match);
     }
 
     #[test]

@@ -415,23 +415,102 @@ def test_mint_reveal_and_revoke_round_trip(atproto_hosted_logged_in_app):
     )
 
 
-@pytest.mark.windows
-@pytest.mark.linux
 @pytest.mark.web
-@pytest.mark.tui
+@pytest.mark.linux
+@pytest.mark.android
 @pytest.mark.macos
 @pytest.mark.ios
-@pytest.mark.android
+@pytest.mark.windows
+@pytest.mark.tui
 @pytest.mark.feature("atproto")
-def test_kill_switch_is_non_destructive(atproto_hosted_logged_in_app):
-    """Flipping the external-apps kill-switch off and back on must never remove
-    credential rows (rule 3: OFF suspends the plane, keeps every row listed and
-    individually revocable)."""
+def test_an_app_password_carries_dm_access_only_when_the_toggle_was_on(
+    atproto_hosted_logged_in_app, atproto_hosted_nest
+):
+    """The mint-time direct-message choice (`atproto-pds-full.md` D3, catalog
+    `atproto` 47): one credential minted with `atproto-app-credential-dm-access`
+    off (its default) and one with it on. The credential list rows say which
+    carries direct-message access, and the nest's own listing agrees — the
+    choice reached the wire, not just the screen."""
+    from clients.ws_rpc_admin_client import WsRpcAdminClient
+
     app = atproto_hosted_logged_in_app
     bs = app.atproto_settings
     bs.ensure_hosted_full()
     assert bs.wait_for_fullpds_visible(), (
-        f"the full-PDS panel (kill-switch) must be present. error: {bs.page_error_text()!r}"
+        f"the full-PDS panel must be present to mint. error: {bs.page_error_text()!r}"
+    )
+    assert not bs.dm_access_checked(), (
+        "direct-message access must be off by default (least privilege)"
+    )
+    before = bs.credential_count()
+    dm_line = S.atproto_settings.credential_dm_access
+
+    bs.mint_credential()
+    assert bs.wait_for_credential_count(before + 1), (
+        f"minting should add one credential row. error: {bs.page_error_text()!r}"
+    )
+    plain_index = before
+
+    assert bs.set_dm_access(True), "the toggle must read on once switched on"
+    bs.mint_credential()
+    assert bs.wait_for_credential_count(before + 2), (
+        f"the second mint should add a second row. error: {bs.page_error_text()!r}"
+    )
+    dm_index = before + 1
+
+    try:
+        assert dm_line not in bs.credential_row_text(plain_index), (
+            "the credential minted with the toggle off must not claim DM access: "
+            f"{bs.credential_row_text(plain_index)!r}"
+        )
+        assert dm_line in bs.credential_row_text(dm_index), (
+            "the credential minted with the toggle on must say it carries DM access: "
+            f"{bs.credential_row_text(dm_index)!r}"
+        )
+
+        alice = atproto_hosted_nest["user"]
+        with WsRpcAdminClient(
+            atproto_hosted_nest["url"],
+            actor_id=alice["actor_id_bytes"],
+            signing_key=bytes(alice["signing_key"]),
+        ) as ws:
+            listed = ws.call("fauna.bridges.atproto.list_app_credentials", {})
+        flags = [c["dm_allowed"] for c in listed["credentials"]][-2:]
+        assert flags == [False, True], (
+            "the nest must hold dm_allowed false for the first mint and true for "
+            f"the second, in listing order: {listed!r}"
+        )
+    finally:
+        # Revoke newest first so the earlier index stays valid.
+        bs.revoke_credential(dm_index)
+        bs.revoke_credential(plain_index)
+        bs.set_dm_access(False)
+        assert bs.wait_for_credential_count(before), (
+            f"cleanup revoke failed. error: {bs.page_error_text()!r}"
+        )
+
+
+# tui led the switch's move to the Connected apps page (owner-ruled
+# 2026-10-16), web, linux, android, macos and ios followed; windows re-adds its
+# marker in the batched trickle-down.
+@pytest.mark.web
+@pytest.mark.linux
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.android
+@pytest.mark.tui
+@pytest.mark.feature("atproto")
+def test_kill_switch_is_non_destructive(atproto_hosted_logged_in_app):
+    """Flipping the external-apps kill-switch off and back on must never remove
+    credential rows (rule 3: OFF suspends the plane, keeps every row listed and
+    individually revocable). The switch lives on the Connected apps page; the
+    credential rows stay on the AT Protocol page."""
+    app = atproto_hosted_logged_in_app
+    bs = app.atproto_settings
+    ca = app.connected_apps
+    bs.ensure_hosted_full()
+    assert bs.wait_for_fullpds_visible(), (
+        f"the full-PDS panel must be present. error: {bs.page_error_text()!r}"
     )
 
     # Ensure at least one row exists so "unchanged" is a meaningful assertion.
@@ -442,24 +521,28 @@ def test_kill_switch_is_non_destructive(atproto_hosted_logged_in_app):
         before = 1
 
     # Start from ON (the nest column default; restore if a prior test left it off).
-    bs.set_external_apps_enabled(True)
-    assert bs.wait_for_external_apps_state("on"), (
-        f"the kill-switch should default/return on. error: {bs.page_error_text()!r}"
+    ca.navigate()
+    ca.set_external_apps_enabled(True)
+    assert ca.wait_for_external_apps_state("on"), (
+        f"the kill-switch should default/return on. error: {ca.current_error_text()!r}"
     )
 
-    bs.set_external_apps_enabled(False)
-    assert bs.wait_for_external_apps_state("off"), (
-        f"the kill-switch should flip off. error: {bs.page_error_text()!r}"
+    ca.set_external_apps_enabled(False)
+    assert ca.wait_for_external_apps_state("off"), (
+        f"the kill-switch should flip off. error: {ca.current_error_text()!r}"
     )
-    assert bs.credential_count() == before, (
+    bs.navigate()
+    assert bs.wait_for_credential_count(before), (
         "the kill-switch must not remove credential rows while off"
     )
 
-    bs.set_external_apps_enabled(True)
-    assert bs.wait_for_external_apps_state("on"), (
-        f"the kill-switch should flip back on. error: {bs.page_error_text()!r}"
+    ca.navigate()
+    ca.set_external_apps_enabled(True)
+    assert ca.wait_for_external_apps_state("on"), (
+        f"the kill-switch should flip back on. error: {ca.current_error_text()!r}"
     )
-    assert bs.credential_count() == before, (
+    bs.navigate()
+    assert bs.wait_for_credential_count(before), (
         "toggling the kill-switch back on must not change credential rows"
     )
 

@@ -1639,4 +1639,57 @@ mod tests {
         verify_custody_accept(&env, &h.actor_id())
             .expect_err("nest form must refuse dial candidates at verify");
     }
+
+    /// The host-side marks that keep a torn-down or paused custody down
+    /// survive the cross-device merge:
+    /// `removed` is monotone (a device that never saw the reclaim must not
+    /// resurrect it), and the host's Stop/budget merge freshest-wins on
+    /// `set_at`, whichever way the knob moved, never lost to a side that has
+    /// none. Both argument orders.
+    #[test]
+    fn the_held_merge_keeps_the_reclaim_and_the_freshest_host_knobs() {
+        let config = |removed: bool, knobs: Option<HostKnobs>| CustodyConfig {
+            granted: Vec::new(),
+            held: vec![HeldCustody {
+                grant_id: vec![0x2E; 16],
+                removed,
+                host_knobs: knobs,
+                updated_at: Timestamp(1_000),
+                ..Default::default()
+            }],
+        };
+        let stop = HostKnobs {
+            retained_bytes_cap: 7,
+            stopped: true,
+            set_at: Timestamp(2_000),
+        };
+        let resumed_later = HostKnobs {
+            retained_bytes_cap: 9,
+            stopped: false,
+            set_at: Timestamp(3_000),
+        };
+        let stopped_later = HostKnobs {
+            retained_bytes_cap: 5,
+            stopped: true,
+            set_at: Timestamp(4_000),
+        };
+
+        let (a, b) = (config(true, None), config(false, Some(stop)));
+        for merged in [a.merge(&b), b.merge(&a)] {
+            let h = &merged.held[0];
+            assert!(h.removed, "a reclaim on either device is a reclaim");
+            assert_eq!(h.host_knobs, Some(stop), "a recorded Stop beats none");
+        }
+
+        for (older, newer) in [(stop, resumed_later), (resumed_later, stopped_later)] {
+            let (a, b) = (config(false, Some(older)), config(false, Some(newer)));
+            for merged in [a.merge(&b), b.merge(&a)] {
+                assert_eq!(
+                    merged.held[0].host_knobs,
+                    Some(newer),
+                    "the later setting wins, whichever way it moved"
+                );
+            }
+        }
+    }
 }

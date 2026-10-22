@@ -153,6 +153,21 @@ pub fn populate_snapshot_file_list(
     let Some(detail) = detail else {
         return;
     };
+    // A kind entry's snapshot holds messages, not files: one line says where it
+    // restores from, never the bare empty-list placeholder (§ Snapshot-list
+    // shape → *Kind entries*).
+    if detail.message_kind.is_some() {
+        let line = gtk::Label::new(Some(backups_strings::KIND_SNAPSHOT_RESTORES_BELOW));
+        line.add_css_class("dim-label");
+        line.set_wrap(true);
+        line.set_margin_top(16);
+        line.set_margin_bottom(16);
+        let row = gtk::ListBoxRow::new();
+        row.set_activatable(false);
+        row.set_child(Some(&line));
+        list_box.append(&row);
+        return;
+    }
     // The set the snapshot names — what the download licenses a plaintext
     // entry by (`backup-restore.md` § Security Properties → Integrity).
     let set = fauna_client_snapshots::SnapshotSet::from_named(

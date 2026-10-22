@@ -37,19 +37,19 @@ use fauna_client_dns::{
 use fauna_client_dns::{enable_dns_provider_fake_for_test, set_dns_clock_override_for_test};
 use fauna_client_mail_settings::rpc_glue::{
     build_bridge_approval_machine, build_caldav_policy_machine, build_carddav_policy_machine,
-    build_forwarders_machine, build_local_domains_machine, build_mail_aliases_machine,
-    build_mail_export_machine, build_mail_import_machine, build_mail_list_members_machine,
-    build_mail_lists_machine, build_mail_policy_machine, build_mail_settings_machine,
-    build_mail_spam_machine, build_webdav_policy_machine,
+    build_dmarc_reports_machine, build_forwarders_machine, build_local_domains_machine,
+    build_mail_aliases_machine, build_mail_export_machine, build_mail_import_machine,
+    build_mail_list_members_machine, build_mail_lists_machine, build_mail_policy_machine,
+    build_mail_settings_machine, build_mail_spam_machine, build_webdav_policy_machine,
 };
 use fauna_client_mail_settings::{
-    BridgeApprovalAction, BridgeApprovalMachine, CaldavPolicyAction, CaldavPolicyMachine,
-    CarddavPolicyAction, CarddavPolicyMachine, CredentialKind, ForwarderAction, ForwarderMachine,
-    LocalDomainAction, LocalDomainMachine, MailAliasesAction, MailAliasesMachine, MailExportAction,
-    MailExportMachine, MailImportAction, MailImportMachine, MailListMembersAction,
-    MailListMembersMachine, MailListsAction, MailListsMachine, MailPolicyAction, MailPolicyMachine,
-    MailSettingsAction, MailSettingsMachine, MailSpamAction, MailSpamMachine, WebdavPolicyAction,
-    WebdavPolicyMachine,
+    BridgeApprovalAction, BridgeApprovalMachine, BridgeConfirm, CaldavPolicyAction,
+    CaldavPolicyMachine, CarddavPolicyAction, CarddavPolicyMachine, CredentialKind,
+    DmarcReportsAction, DmarcReportsMachine, ForwarderAction, ForwarderMachine, LocalDomainAction,
+    LocalDomainMachine, MailAliasesAction, MailAliasesMachine, MailExportAction, MailExportMachine,
+    MailImportAction, MailImportMachine, MailListMembersAction, MailListMembersMachine,
+    MailListsAction, MailListsMachine, MailPolicyAction, MailPolicyMachine, MailSettingsAction,
+    MailSettingsMachine, MailSpamAction, MailSpamMachine, WebdavPolicyAction, WebdavPolicyMachine,
 };
 use fauna_core::identity::ActorKeypair;
 use fauna_rpc_wasm::WsRpcClient as InnerClient;
@@ -172,6 +172,29 @@ pub fn dmarc_forensic_mode_options() -> Result<JsValue, JsValue> {
     crate::rpc::to_js(&fauna_client_mail_settings::admin_policy::dmarc_forensic_mode_options())
 }
 
+/// `fauna_client_mail_settings::admin_policy::sender_dashboard_links` → the two
+/// `admin-mail-health-sender-dashboard-link` targets (`gmail`, `outlook`) with
+/// their URL and label key, in display order.
+#[wasm_bindgen(js_name = senderDashboardLinks)]
+pub fn sender_dashboard_links() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::admin_policy::sender_dashboard_links())
+}
+
+/// `fauna_client_mail_settings::admin_policy::dmarc_forensic_retention_warns` →
+/// whether a forensic-report retention of `days` earns the page's PII warning
+/// (past the 30-day default). Sibling of `dmarcForensicModeOptions`.
+#[wasm_bindgen(js_name = dmarcForensicRetentionWarns)]
+pub fn dmarc_forensic_retention_warns(days: u32) -> bool {
+    fauna_client_mail_settings::admin_policy::dmarc_forensic_retention_warns(days)
+}
+
+/// `fauna_client_mail_settings::dmarc_report_window_options` → the
+/// `admin-mail-reports-window-select` windows in days, in render order.
+#[wasm_bindgen(js_name = dmarcReportWindowOptions)]
+pub fn dmarc_report_window_options() -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::dmarc_report_window_options())
+}
+
 /// `fauna_client_mail_settings::admin_policy::imap_delete_nonempty_options` →
 /// the two `admin-mail-imap-delete-nonempty-select` values in render order.
 /// Sibling of `fcrdnsModeOptions`; the same page's other raw-value picker.
@@ -249,6 +272,41 @@ wasm_admin_machine!(
     build_local_domains_machine,
 );
 
+#[wasm_bindgen]
+impl WasmLocalDomainMachine {
+    /// Open the remove-confirm dialog for `domain`
+    /// ([`LocalDomainMachine::arm_remove_domain`]). Synchronous — it reaches no
+    /// nest — so the page repaints from `snapshot().remove_confirm_domain` on
+    /// the click's own frame.
+    #[wasm_bindgen(js_name = armRemoveDomain)]
+    pub fn arm_remove_domain(&self, domain: String) {
+        self.inner.arm_remove_domain(domain);
+    }
+
+    /// Close the remove-confirm dialog with nothing removed
+    /// ([`LocalDomainMachine::cancel_remove_domain`]).
+    #[wasm_bindgen(js_name = cancelRemoveDomain)]
+    pub fn cancel_remove_domain(&self) {
+        self.inner.cancel_remove_domain();
+    }
+}
+
+/// `fauna_client_mail_settings::local_domains::remove_confirm_title` → the
+/// remove-confirm dialog's title as a `LocalizedText` `{ key, args }` the SPA
+/// resolves through `resolveLocalized`.
+#[wasm_bindgen(js_name = removeConfirmTitle)]
+pub fn remove_confirm_title(domain: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::local_domains::remove_confirm_title(domain))
+}
+
+/// `fauna_client_mail_settings::local_domains::remove_confirm_body` → the
+/// remove-confirm dialog's body as a `LocalizedText`, beside
+/// `removeConfirmTitle`.
+#[wasm_bindgen(js_name = removeConfirmBody)]
+pub fn remove_confirm_body(domain: String) -> Result<JsValue, JsValue> {
+    crate::rpc::to_js(&fauna_client_mail_settings::local_domains::remove_confirm_body(domain))
+}
+
 wasm_admin_machine!(
     /// Web `admin-bridges-pending` page — the pending-bridge approval feed +
     /// deployment-wide mail-enable toggle.
@@ -257,6 +315,26 @@ wasm_admin_machine!(
     BridgeApprovalAction,
     build_bridge_approval_machine,
 );
+
+#[wasm_bindgen]
+impl WasmBridgeApprovalMachine {
+    /// Open the confirm dialog for `confirm` (a `BridgeConfirm` JS object:
+    /// `{ Reject: { pubkey_hex } }` / `{ Rotate: { pubkey_hex } }`). Sync, so
+    /// the page paints the dialog in the click's own frame; read it back as
+    /// `snapshot().armed`.
+    #[wasm_bindgen(js_name = arm)]
+    pub fn arm(&self, confirm: JsValue) -> Result<(), JsValue> {
+        let confirm: BridgeConfirm = from_js(confirm)?;
+        self.inner.arm(confirm);
+        Ok(())
+    }
+
+    /// The open dialog's cancel button: close it, no write.
+    #[wasm_bindgen(js_name = disarm)]
+    pub fn disarm(&self) {
+        self.inner.disarm();
+    }
+}
 
 wasm_admin_machine!(
     /// Web flat `admin-mail` policy page — the deployment-wide inbound spam
@@ -331,6 +409,20 @@ wasm_admin_machine!(
     ForwarderMachine,
     ForwarderAction,
     build_forwarders_machine,
+);
+
+wasm_admin_machine!(
+    /// Web `admin-mail-reports` page — the DMARC aggregate reports peer mail
+    /// servers send about this nest's domains (`dmarc-reporting.md` § Admin pane
+    /// summary surface): the window totals, the top lists, the report rows and
+    /// the raw view, all folded in the shared `DmarcReportsMachine`
+    /// (`list_dmarc_aggregate_reports` / `get_dmarc_aggregate_report` over
+    /// `MailAdminClient`). The wasm twin of the UniFFI exposure — Admin-class,
+    /// connection-only, so the macro fits.
+    WasmDmarcReportsMachine,
+    DmarcReportsMachine,
+    DmarcReportsAction,
+    build_dmarc_reports_machine,
 );
 
 wasm_admin_machine!(
@@ -721,6 +813,31 @@ pub fn serving_enablement_json() -> String {
     fauna_client_mail_settings::serving_enablement::serving_enablement_json_text()
 }
 
+/// How often a long-lived connected SPA re-runs the submission-token refresh
+/// between connects (`token_refresh::TOKEN_REFRESH_TICK_SECS`) — read from the
+/// shared constant, never re-spelled in TypeScript.
+#[wasm_bindgen(js_name = tokenRefreshTickSecs)]
+pub fn token_refresh_tick_secs() -> f64 {
+    fauna_client_mail_settings::token_refresh::TOKEN_REFRESH_TICK_SECS as f64
+}
+
+/// Move the submission-token refresh's clock
+/// (`fauna_client_mail_settings::token_refresh`) — the `now` the 7-day re-mint
+/// cadence is measured against and each re-minted token's `issued_at`, never
+/// the bearer clock (testing.md convention 14). The wasm twin of the UniFFI
+/// `set_mail_token_refresh_clock_offset_secs`, driven by the SPA's
+/// `mail_token_refresh_advance_clock` command. Gated on `test-helpers`
+/// (convention 15); the `ForTest` suffix is what
+/// `scripts/check-wasm-seam-exclusion.py` keys on.
+///
+/// ⚠ Module-wide, and nothing auto-resets it — zero it once the assertions
+/// are done.
+#[cfg(feature = "test-helpers")]
+#[wasm_bindgen(js_name = mailTokenRefreshSetClockOffsetForTest)]
+pub fn mail_token_refresh_set_clock_offset_for_test(offset_secs: f64) {
+    fauna_client_mail_settings::token_refresh::set_clock_offset_secs(offset_secs as i64);
+}
+
 #[wasm_bindgen]
 impl WasmMailSettingsMachine {
     /// The rendered snapshot as a plain JS object (sync).
@@ -757,6 +874,27 @@ impl WasmMailSettingsMachine {
         future_to_promise(async move {
             m.refresh_epoch_schedule().await.map_err(err_to_js)?;
             Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    /// The background **submission-token refresh**
+    /// (`docs/goal/behavior/mail-credentials.md` § Architectural rules, rule
+    /// 10): re-mint every live credential's token that is a cadence old, on the
+    /// shared token clock (`token_refresh::now_secs`, which the
+    /// `mail_token_refresh_advance_clock` command moves). The web twin of the
+    /// native connect-time trigger's token pass
+    /// (`rpc_glue::refresh_epoch_schedule_on_every_connect`); the SPA calls it
+    /// at every post-auth edge and on the [`token_refresh_tick_secs`] tick.
+    /// Resolves the number of tokens re-minted; best-effort, never surfaced.
+    #[wasm_bindgen(js_name = refreshSubmissionTokens)]
+    pub fn refresh_submission_tokens(&self) -> js_sys::Promise {
+        let m = self.inner.clone();
+        future_to_promise(async move {
+            let n = m
+                .refresh_submission_tokens(fauna_client_mail_settings::token_refresh::now_secs())
+                .await
+                .map_err(err_to_js)?;
+            Ok(JsValue::from(n))
         })
     }
 
@@ -940,7 +1078,7 @@ impl WasmMailSettingsMachine {
     }
 
     /// Reveal a single credential's secret (password / OAUTHBEARER token) on
-    /// demand, for the `mail-settings-credential-item-reveal-secret` toggle. A
+    /// demand, for the `connected-apps-item-reveal-secret` toggle. A
     /// pure read from the client's own `fauna.state.mail` custody (sealed under `BackupKey`),
     /// so the secret is recoverable without a revoke + re-add. Resolves the plain
     /// secret `string` (shown for the user to copy into their MUA) — the WASM twin
@@ -1201,6 +1339,66 @@ pub fn forward_per_hour_draft_outcome(draft: &str, ceiling: u32) -> Result<JsVal
     to_js(&fauna_client_mail_settings::forward_per_hour_draft_outcome(
         draft, ceiling,
     ))
+}
+
+/// `fauna_client_mail_settings::autorespond_message_draft_outcome` → `{ kind:
+/// "set" | "refused", text?, message? }` (`message` a `LocalizedText`) — the
+/// automatic-reply message check before `emailAutorespondSet`
+/// (`email-filters.md` § The auto-respond setting).
+#[wasm_bindgen(js_name = autorespondMessageDraftOutcome)]
+pub fn autorespond_message_draft_outcome(draft: &str) -> Result<JsValue, JsValue> {
+    to_js(&fauna_client_mail_settings::autorespond_message_draft_outcome(draft))
+}
+
+/// `fauna_client_mail_settings::mail_quota_display_of` → `{ label, used, limit }`
+/// (three `LocalizedText`s; the label's `{used}`/`{limit}` are filled from the
+/// other two once resolved) for a `MailQuotas` from `mailQuotasGet`.
+#[wasm_bindgen(js_name = mailQuotaDisplay)]
+pub fn mail_quota_display(quotas: JsValue) -> Result<JsValue, JsValue> {
+    let quotas: fauna_client_mail_settings::MailQuotas = from_js(quotas)?;
+    to_js(&fauna_client_mail_settings::mail_quota_display_of(quotas))
+}
+
+/// `fauna_client_mail_settings::mail_submission_quota_display_of` → a
+/// `LocalizedText` (`{used}`/`{limit}` as plain args) for a `MailQuotas` from
+/// `mailQuotasGet`.
+#[wasm_bindgen(js_name = mailSubmissionQuotaDisplay)]
+pub fn mail_submission_quota_display(quotas: JsValue) -> Result<JsValue, JsValue> {
+    let quotas: fauna_client_mail_settings::MailQuotas = from_js(quotas)?;
+    to_js(&fauna_client_mail_settings::mail_submission_quota_display_of(quotas))
+}
+
+/// `fauna_client_mail_settings::mail_over_quota_notice_of` → a `LocalizedText`
+/// naming the limit that ran out, or `null` while none has.
+#[wasm_bindgen(js_name = mailOverQuotaNotice)]
+pub fn mail_over_quota_notice(quotas: JsValue) -> Result<JsValue, JsValue> {
+    let quotas: fauna_client_mail_settings::MailQuotas = from_js(quotas)?;
+    to_js(&fauna_client_mail_settings::mail_over_quota_notice_of(
+        quotas,
+    ))
+}
+
+/// `fauna_mail::aliases::delivered::delivered_alias` → the "Delivered to" tag
+/// `{ address, kind: { kind, domain? }, pattern, label }`, or `null`, for an
+/// opened message's raw bytes against the user's alias rows (`AliasLabelRow[]`,
+/// `{ kind, local_domain, pattern, label }` — `mail-aliases.md` § Label).
+#[wasm_bindgen(js_name = deliveredAlias)]
+pub fn delivered_alias(raw_message: &[u8], rows: JsValue) -> Result<JsValue, JsValue> {
+    let rows: Vec<fauna_mail::aliases::delivered::AliasLabelRow> = from_js(rows)?;
+    to_js(&fauna_mail::aliases::delivered::delivered_alias(
+        raw_message,
+        &rows,
+    ))
+}
+
+/// `fauna_client_mail_settings::admin_policy::secret_rotation_text` → the
+/// `admin-mail` line for the last secret rotation (`MailPolicySnapshot
+/// .secret_rotation`), a `LocalizedText` `{ key, args }` the SPA resolves
+/// through `resolveLocalized`. Throws when `view` is not a `SecretRotationView`.
+#[wasm_bindgen(js_name = secretRotationText)]
+pub fn secret_rotation_text(view: JsValue) -> Result<JsValue, JsValue> {
+    let view: fauna_client_mail_settings::admin_policy::SecretRotationView = from_js(view)?;
+    to_js(&fauna_client_mail_settings::admin_policy::secret_rotation_text(&view))
 }
 
 /// `fauna_client_mail_settings::forward_per_hour_hint` → a `LocalizedText`

@@ -39,6 +39,18 @@ public protocol EventsAPI: AnyObject {
     func removeReminder(eventId: String) async throws
     func importCalendar(calendarId: String, icsText: String) async throws -> CalendarImportResult
     func exportCalendar(calendarId: String) async throws -> String
+    /// The refused-change list (`ui/events.md` § Refused scheduling changes).
+    /// Defaulted below so the test doubles that stub only the calendar surface
+    /// keep compiling; `APIClient` supplies the real FFI-backed pair.
+    func refusedChangesOpen() async -> [FfiRefusedChange]
+    @discardableResult
+    func refusedChangeDismiss(key: String) async throws -> Bool
+}
+
+extension EventsAPI {
+    public func refusedChangesOpen() async -> [FfiRefusedChange] { [] }
+    @discardableResult
+    public func refusedChangeDismiss(key: String) async throws -> Bool { false }
 }
 
 /// The production conformance is empty on purpose: every requirement above is

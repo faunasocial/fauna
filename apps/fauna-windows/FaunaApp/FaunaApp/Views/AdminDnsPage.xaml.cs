@@ -856,9 +856,10 @@ public sealed partial class AdminDnsPage : Page
     /// managed or CNAME-delegated domain fires a single client-driven DNS-01 order
     /// (`IssueCert`); a manual, undelegated domain opens the two-phase manual-paste
     /// flow (`BeginManualIssueCert` → the `_acme-challenge` paste surface +
-    /// complete/cancel). `target_nest_id` is the connected nest's identity
-    /// (`LinkedNestsMachine.this_nest().id`, uniform across all 7 apps — same
-    /// source `NestsPanel` uses). Native-only; mirrors linux `dns_issue_cert` /
+    /// complete/cancel). `target_nest_id` is the identity the connection is bound
+    /// to (`LinkedNestsMachine.BoundNestId()`, uniform across all 7 apps — never
+    /// the nest's own `fauna.nest.info` claim, which `BoundNestId()` refuses when
+    /// it disagrees). Native-only; mirrors linux `dns_issue_cert` /
     /// `dns_begin_manual_issue`. The CA round-trip itself can't complete in a no-CA
     /// env (the order errors, surfaced in `error-message`); the pebble test covers
     /// the full round-trip.</summary>
@@ -870,12 +871,14 @@ public sealed partial class AdminDnsPage : Page
         LoadProgress.Visibility = Visibility.Visible;
         try
         {
-            // Resolve the home nest the cert serves (this_nest = the connected nest),
-            // over the shared WS-RPC client (the INestRpcClient seam).
-            var self = await (await _clients.Rpc.BuildLinkedNestsMachineAsync()).ThisNest();
+            // Resolve the home nest the cert serves (the identity the connection is
+            // bound to), over the shared WS-RPC client (the INestRpcClient seam). A
+            // disagreeing claim makes BoundNestId() throw: no issuance, and the
+            // refusal lands in the catch below as the error banner.
+            var boundNestId = await (await _clients.Rpc.BuildLinkedNestsMachineAsync()).BoundNestId();
             DnsAction action = item.IsSingleIssue
-                ? new DnsAction.IssueCert(item.DomainName, self.id)
-                : (DnsAction)new DnsAction.BeginManualIssueCert(item.DomainName, self.id);
+                ? new DnsAction.IssueCert(item.DomainName, boundNestId)
+                : (DnsAction)new DnsAction.BeginManualIssueCert(item.DomainName, boundNestId);
             await _machine.Dispatch(action);
             await _machine.Dispatch(new DnsAction.RefreshCertStatus());
             RenderAll();

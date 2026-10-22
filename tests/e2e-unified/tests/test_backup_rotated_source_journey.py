@@ -50,6 +50,7 @@ from actions import ActionLayer
 from common.auth import register_user
 from common.launch_harness import make_launch_harness, reached_authenticated_app
 from conftest import _trust_seeder
+from helpers.indexed_rows import row_present
 from i18n.strings import S
 from tests.test_backups import _backlog_count, _seed_one_mail_segment
 
@@ -57,7 +58,7 @@ pytestmark = [pytest.mark.tier_3, pytest.mark.tui]
 
 # Element IDs (tests/e2e-unified/ui.yaml § admin_nest).
 ARM_BUTTON = "admin-nest-seed-rotate-button"
-ROSTER_ITEM_0 = "admin-nest-seed-rotate-roster-item-0"
+ROSTER_ITEM = "admin-nest-seed-rotate-roster-item"
 CONFIRM_BUTTON = "admin-nest-seed-rotate-confirm-button"
 STATUS = "admin-nest-seed-rotate-status"
 DONE = "Deployment identity rotated. Apps re-trust this nest automatically."
@@ -161,7 +162,7 @@ def _rotate_through_the_admin_page(driver, nest_url):
     })
     _poll(lambda: driver.count(ARM_BUTTON) > 0, _PAGE_BUDGET_S, "admin-nest renders")
     driver.click(ARM_BUTTON)
-    _poll(lambda: driver.count(ROSTER_ITEM_0) > 0, _PAGE_BUDGET_S, "the roster resolves")
+    _poll(lambda: row_present(driver, ROSTER_ITEM), _PAGE_BUDGET_S, "the roster resolves")
     from helpers.waiting import account_pump_role, await_account_runtime_assembled
 
     if account_pump_role(driver) is not None:

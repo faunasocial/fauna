@@ -113,7 +113,9 @@ import uniffi.fauna_client_dns.RecordVerdict
 import uniffi.fauna_client_dns.VerifyStatus
 import uniffi.fauna_client_mail_settings.AliasPolicyView
 import uniffi.fauna_client_mail_settings.AuthPolicyView
+import uniffi.fauna_client_mail_settings.DmarcPolicyView
 import uniffi.fauna_client_mail_settings.ImapPolicyView
+import uniffi.fauna_client_mail_settings.MicrosoftRegistrationView
 import uniffi.fauna_client_mail_settings.OutboundPolicyView
 import uniffi.fauna_client_mail_settings.SpamPolicyView
 import uniffi.fauna_client_mail_settings.SubmissionPolicyView
@@ -140,6 +142,7 @@ import uniffi.fauna_client_mail_settings.AliasKind
 import uniffi.fauna_client_mail_settings.AliasView
 import uniffi.fauna_client_mail_settings.ApprovedBridgeView
 import uniffi.fauna_client_mail_settings.ForwarderView
+import uniffi.fauna_client_mail_settings.BridgeConfirm
 import uniffi.fauna_client_mail_settings.PendingBridgeView
 import uniffi.fauna_client_mail_settings.CredentialKind
 import uniffi.fauna_client_mail_settings.ListView
@@ -437,6 +440,7 @@ class OfflineGateTest {
                 pairing = true,
                 servingPort = 8443,
                 frontedByRouter = false,
+                osHostStatusPresent = true,
                 osSecurityUpdates = 1,
                 osRebootPending = osRebootPending,
                 restartingNow = false,
@@ -942,6 +946,14 @@ class OfflineGateTest {
         composeTestRule.onNodeWithText(needsNest()).assertDoesNotExist()
     }
 
+    @Test
+    fun deleteAccountConfirmMessageCarriesTheConfirmTextId() {
+        render(FfiConnectionState.CONNECTED) {
+            DeleteAccountConfirmDialog(onDismiss = {}, onConfirm = {})
+        }
+        composeTestRule.onNodeWithTag(Ids.SETTINGS_DELETE_CONFIRM_TEXT).assertIsDisplayed()
+    }
+
     // ── nostr: the bunker invite commit (the roster and its revoke live on
     // the Connected apps page — see the connected-apps group below) ────────
 
@@ -954,6 +966,7 @@ class OfflineGateTest {
         mode = "generated",
         settings = emptyList(),
         supportsFollows = true,
+        supportsFollowRequests = false,
         linkModes = null,
         error = null,
     )
@@ -1029,6 +1042,7 @@ class OfflineGateTest {
                 requests = requests,
                 principals = rows,
                 blocked = emptyList(),
+                externalAppsOff = false,
                 error = null,
             ),
             code = "ABCD",
@@ -1040,6 +1054,7 @@ class OfflineGateTest {
             onResolveRequest = { _, _ -> },
             onBlockRequest = {},
             onUnblock = {},
+            onSetExternalAppsEnabled = {},
             onArmRevoke = {},
             onConfirmRevoke = {},
             onCancelRevoke = {},
@@ -1114,6 +1129,7 @@ class OfflineGateTest {
         handle = "someone",
         since = 0uL,
         authorDisplay = "someone",
+        homeNestUrl = null,
     )
 
     @Composable
@@ -1907,7 +1923,7 @@ class OfflineGateTest {
             onNextPage = {},
             onPrevPage = {},
             onSaveRegistration = { _, _, _ -> },
-            onAdmitUser = { _, _, _, _ -> },
+            onAdmitUser = { _, _, _, _, _ -> },
             hexFull = { HexUtil.bytesToHex(it) },
             mailServingStatusLabel = { LocalizedText("admin.users_page.serving_here", emptyMap()) },
             rowControls = {
@@ -2124,9 +2140,9 @@ class OfflineGateTest {
         // in as many words), so the pair around the confirm must stay live —
         // and the arm has to, or the confirm could not be reached.
         render(FfiConnectionState.DISCONNECTED) { AdminCustodyHosting() }
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0]
             .performScrollTo().assertIsEnabled()
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0]
             .performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-confirm-button")
             .performScrollTo().assertIsNotEnabled()
@@ -2137,7 +2153,7 @@ class OfflineGateTest {
     @Test
     fun theCustodyRemoveConfirmIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) { AdminCustodyHosting() }
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0]
             .performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-confirm-button")
             .performScrollTo().assertIsEnabled()
@@ -2153,7 +2169,7 @@ class OfflineGateTest {
         // confirm only exists in the armed branch, and a busy row will not arm.
         val working = mutableStateOf(false)
         render(FfiConnectionState.CONNECTED) { AdminCustodyHosting(working = working.value) }
-        composeTestRule.onNodeWithTag("admin-custody-hosting-remove-button-0")
+        composeTestRule.onAllNodesWithTag("admin-custody-hosting-remove-button")[0]
             .performScrollTo().performClick()
         composeTestRule.onNodeWithTag("admin-custody-hosting-remove-confirm-button")
             .performScrollTo().assertIsEnabled()
@@ -2273,6 +2289,7 @@ class OfflineGateTest {
         delegations: List<DelegationView> = emptyList(),
         pendingCert: PendingCertIssue? = null,
         working: Boolean = false,
+        removeConfirmDomain: String? = null,
     ) {
         // Deliberately NOT wrapped in [ScrollHost]: `AdminDnsContent` owns its own
         // `verticalScroll`, and nesting two vertical scrollers is an immediate
@@ -2283,6 +2300,7 @@ class OfflineGateTest {
             activeRename = activeRename,
             renameAvailable = renameAvailable,
             addingFirstDomain = false,
+            removeConfirmDomain = removeConfirmDomain,
             dnsDomains = dnsDomains,
             credentials = emptyList(),
             actors = actors,
@@ -2295,7 +2313,7 @@ class OfflineGateTest {
             onBack = {},
             onRefresh = {},
             onAddDomain = {},
-            onRemoveDomain = {},
+            onArmRemoveDomain = {},
             onRestoreDomain = {},
             onStartRename = { _, _ -> },
             onCompleteRename = { _, _ -> },
@@ -2344,7 +2362,7 @@ class OfflineGateTest {
     }
 
     @Test
-    fun theDomainRemoveAndRestoreCommitsGate() {
+    fun theDomainRemoveConfirmAndRestoreCommitsGate_whileTheRowPressAndCancelStayLive() {
         render(FfiConnectionState.DISCONNECTED) {
             AdminDns(
                 activeDomains = listOf(localDomain(domain = "b.example.com", primary = false)),
@@ -2352,10 +2370,17 @@ class OfflineGateTest {
                 removedDomains = listOf(
                     localDomain(domain = "gone.example.com", primary = false, removed = 1L),
                 ),
+                removeConfirmDomain = "b.example.com",
             )
         }
+        // The row's press only opens the confirm, so it reaches no nest and stays
+        // live; the confirm is the commit that gates, its cancel the buffer.
         composeTestRule.onNodeWithTag("admin-dns-domain-remove-button")
+            .performScrollTo().assertIsEnabled()
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-confirm-button")
             .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("admin-dns-domain-remove-cancel-button")
+            .performScrollTo().assertIsEnabled()
         composeTestRule.onNodeWithTag("admin-dns-removed-domain-restore-button")
             .performScrollTo().assertIsNotEnabled()
     }
@@ -2774,6 +2799,8 @@ class OfflineGateTest {
             imap = mailImap(),
             outbound = mailOutbound(),
             alias = mailAlias(),
+            dmarc = mailDmarc(),
+            microsoft = MicrosoftRegistrationView(clientId = "", tenant = "", isDefault = true),
             working = working,
             onBack = {},
             onSetMailEnabled = {},
@@ -2783,18 +2810,36 @@ class OfflineGateTest {
             onSaveImap = {},
             onSaveOutbound = {},
             onSaveAlias = {},
+            onSaveDmarc = {},
+            onSaveMicrosoft = { _, _ -> },
             baselinePublishResult = null,
-            onPublishBaseline = {},
             parseCount = { it.trim().toUIntOrNull() },
             parseCountU64 = { it.trim().toULongOrNull() },
+            dmarcRetentionWarns = { it > 30u },
         )
     }
 
+    private fun mailDmarc() = DmarcPolicyView(
+        policyMode = "reject",
+        subdomainPolicyMode = "reject",
+        pct = 100u.toUByte(),
+        adkimMode = "s",
+        aspfMode = "s",
+        ruaDestination = null,
+        rufPublish = false,
+        rufDestination = null,
+        foMode = "0",
+        riSeconds = 86400u,
+        aggregateRetentionDays = 90u,
+        forensicRetentionDays = 30u,
+    )
+
     @Test
-    fun allSixPolicySavesGate_andSoDoTheEnableAndTheBaseline() {
+    fun allEightPolicySavesGate_andSoDoTheEnableAndTheBaseline() {
         render(FfiConnectionState.DISCONNECTED) { AdminMail() }
-        // The six full-PUTs, each its own wire kind.
-        for (group in listOf("spam", "auth", "submission", "imap", "outbound", "alias")) {
+        // The six full-PUTs, each its own wire kind, plus the DMARC catalog and
+        // the Microsoft registration (`put_dmarc_policy` / `set_microsoft_registration`).
+        for (group in listOf("spam", "auth", "submission", "imap", "outbound", "alias", "dmarc", "microsoft")) {
             composeTestRule.onNodeWithTag("admin-mail-$group-save-button")
                 .performScrollTo().assertIsNotEnabled()
         }
@@ -3510,6 +3555,9 @@ class OfflineGateTest {
 
     @Composable
     private fun AdminBridgesPending() {
+        // The open confirm lives in the shared machine on device; a plain holder
+        // stands in for its `armed` here.
+        val armed = remember { mutableStateOf<BridgeConfirm?>(null) }
         AdminBridgesPendingContent(
             pending = listOf(
                 PendingBridgeView(
@@ -3530,21 +3578,27 @@ class OfflineGateTest {
             displayName = { it },
             onBack = {},
             onApprove = { _, _ -> },
-            onReject = {},
-            onRotate = {},
+            armed = armed.value,
+            onArm = { armed.value = it },
+            onDisarm = { armed.value = null },
+            onConfirm = { armed.value = null },
         )
     }
 
     @Test
-    fun theApproveAndRejectGate_becauseRefusingAnAdmissionIsStillACommit() {
+    fun theApproveAndRejectConfirmGate_becauseRefusingAnAdmissionIsStillACommit() {
         // A DENY is a commit — the fourth instance of that shape in this
-        // fan-out. The reject is also a two-click inline confirm and gates
-        // whole, arm click included: no opener, nothing revealed.
+        // fan-out. The approve gates; the reject opener stays live (it reveals a
+        // warning worth reading with no nest) and the reject CONFIRM declares.
         render(FfiConnectionState.DISCONNECTED) { AdminBridgesPending() }
         composeTestRule.onNodeWithTag("admin-bridges-pending-approve-button")
             .performScrollTo().assertIsNotEnabled()
         composeTestRule.onNodeWithTag("admin-bridges-pending-reject-button")
+            .performScrollTo().assertIsEnabled().performClick()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-confirm-button")
             .performScrollTo().assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("admin-bridges-reject-cancel-button")
+            .performScrollTo().assertIsEnabled()
     }
 
     @Test
@@ -3588,6 +3642,7 @@ class OfflineGateTest {
         mode = "generated",
         settings = emptyList(),
         supportsFollows = true,
+        supportsFollowRequests = false,
         linkModes = listOf(
             FfiBridgeLinkMode(
                 mode = "token",
@@ -4245,7 +4300,6 @@ class OfflineGateTest {
             onCancelTransition = {},
             onSetDidMethod = {},
             onSetHistoryBackfill = {},
-            onSetExternalAppsEnabled = {},
             onMint = { _, _ -> null },
             onRevealSecret = { null },
             onRevoke = {},
@@ -4376,14 +4430,12 @@ class OfflineGateTest {
 
     @Test
     @Config(qualifiers = "h1280dp")
-    fun theExternalAppsKillSwitchAndMintGate_whileTheDidMethodDraftStaysLive() {
+    fun theMintGate_whileTheDidMethodDraftStaysLive() {
         render(FfiConnectionState.DISCONNECTED) {
             AtprotoUnderTest(
                 atprotoSnapshot(level = "hosted_full", showDidMethodRadio = true)
             )
         }
-        // A dispatch-on-change toggle IS the commit — no Save beside it.
-        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("atproto-app-credential-mint").assertIsNotEnabled()
         // The DID-method radio is a DRAFT the machine holds locally
         // (`AtprotoVM.setDidMethod` never dispatches) — a user may choose their
@@ -4395,12 +4447,26 @@ class OfflineGateTest {
 
     @Test
     @Config(qualifiers = "h1280dp")
-    fun theExternalAppsKillSwitchAndMintAreLiveWhenConnected() {
+    fun theMintIsLiveWhenConnected() {
         render(FfiConnectionState.CONNECTED) {
             AtprotoUnderTest(atprotoSnapshot(level = "hosted_full"))
         }
-        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsEnabled()
         composeTestRule.onNodeWithTag("atproto-app-credential-mint").assertIsEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExternalAppsSwitchGates_becauseItsToggleIsTheCommit() {
+        // A dispatch-on-change toggle IS the commit — no Save beside it.
+        render(FfiConnectionState.DISCONNECTED) { ConnectedApps(emptyList()) }
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").performScrollTo().assertIsNotEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "h1280dp")
+    fun theExternalAppsSwitchIsLiveWhenConnected() {
+        render(FfiConnectionState.CONNECTED) { ConnectedApps(emptyList()) }
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").performScrollTo().assertIsEnabled()
     }
 
     @Test
@@ -4826,7 +4892,13 @@ class OfflineGateTest {
             onPause = {},
             onResume = { _, _ -> },
             onCancel = {},
+            onSkipRest = {},
+            onRestart = {},
+            onDismiss = {},
+            onForgetSource = {},
+            onSetImportDuplicates = {},
             onViewImported = {},
+                onSignInWithMicrosoft = {},
         )
     }
 

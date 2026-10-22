@@ -49,9 +49,9 @@ Stamped 2026-09-19 at 8ac16765e4.
 | App | Status | Stamp |
 |---|---|---|
 | web | — absent | |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+6d8dc256.dirty standalone |
-| macos | ✅ full | 0.1.4-dev+52904896 standalone |
+| macos | ✅ full | 0.1.5-dev+61b844ca standalone |
 | ios | ⚠ partial | 0.1.2-dev+9b7a1a50 standalone |
 | android |  no run recorded | |
 | tui | ⚠ partial | 0.1.2-dev+7663afa6 standalone |
@@ -60,8 +60,8 @@ Stamped 2026-09-19 at 8ac16765e4.
 |---|---|---|---|
 | 1 | app | `tests/e2e-unified/tests/test_search_local_index.py::test_received_mail_is_found_by_search_via_the_local_index` | linux (linux): failed, windows (windows): failed, macos (macos): passed, tui (linux): passed |
 | 2 | app | `tests/e2e-unified/tests/test_conversations_selected_message.py::test_select_thread_and_message_marks_and_scrolls_the_named_message` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed, tui (windows): passed |
-| 3 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_contact_search_result_navigates_to_its_card` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
-| 3 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_file_search_result_navigates_to_its_media_detail` | linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_contact_search_result_navigates_to_its_card` | web (linux): skipped, linux (linux): passed, macos (macos): passed, tui (linux): passed |
+| 3 | app | `tests/e2e-unified/tests/test_search.py::test_activating_a_file_search_result_navigates_to_its_media_detail` | web (linux): skipped, linux (linux): passed, macos (macos): passed, tui (linux): passed |
 | 3 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_contact_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 3 | app | `tests/e2e-unified/tests/test_search.py::test_a_phone_opens_a_file_result_a_desktop_seat_indexed` | macos (macos): passed, ios (macos): passed |
 | 4 | app | `tests/e2e-unified/tests/test_search_private_index.py::test_a_conversation_message_a_post_and_a_draft_of_your_own_are_found_by_their_contents` | linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): skipped, tui (linux): failed |

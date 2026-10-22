@@ -27,6 +27,7 @@ fn smtp_inbound(
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -722,6 +723,7 @@ fn fauna_inbound(sender: &str, body: &str) -> RailInboundMessage {
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -2140,6 +2142,7 @@ fn smtp_inbound_at(sender: &str, subject: &str, body: &str, ts_ms: i64) -> RailI
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -2212,6 +2215,7 @@ fn smtp_inbound_multi(sender: &str, recipients: &[&str], body: &str) -> RailInbo
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -2836,6 +2840,7 @@ async fn toggle_reaction_and_sender_only_delete() {
             attachments: vec![],
             badges: Default::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         },
     )
@@ -2965,6 +2970,7 @@ fn fauna_inbound_actor(actor_id: ActorId, body: &str, message_id: MessageId) -> 
         attachments: vec![],
         badges: Default::default(),
         legal_takedown_ref: None,
+        admin_block_reason: None,
         plane_ref: None,
     }
 }
@@ -3974,7 +3980,9 @@ fn can_delete_marks_own_messages_and_every_message_for_a_governing_viewer() {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: None,
+            search: None,
         }
     }
     let m = ConversationsManager::new();
@@ -5305,7 +5313,9 @@ async fn a_room_this_device_was_removed_from_is_not_offered_for_a_post() {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: None,
+            search: None,
         }
     }
     let owner = TypedAddress::Fauna {
@@ -5586,6 +5596,7 @@ fn a_contact_overlay_nickname_paints_as_the_message_sender() {
             attachments: vec![],
             badges: Default::default(),
             legal_takedown_ref: None,
+            admin_block_reason: None,
             plane_ref: None,
         },
     )
@@ -5728,4 +5739,46 @@ fn a_verified_succession_folds_the_overlay_and_every_load_reconciles_it() {
         folds.take().is_empty(),
         "the outgoing account's verdicts do not fold the incoming account's overlays"
     );
+}
+
+/// The conversations oracle's headless send (`conversations-oracle.md` § The
+/// two classes, `conversation.send`; § Don't do these, *the oracle never
+/// writes into the user's compose draft*): `send_text` sends through the
+/// thread's own rail and appends the own copy like the page's send, while a
+/// half-written draft under the user's cursor survives untouched — body,
+/// reply target and send state.
+#[tokio::test]
+async fn a_headless_send_leaves_the_users_draft_untouched() {
+    let m = ConversationsManager::new();
+    m.register_backend(Arc::new(MockRailBackend::new(Rail::FaunaMls)));
+    let grp = m.create_mls_group(vec![TypedAddress::Email {
+        email_address: "bob@host.test".into(),
+    }]);
+    m.set_compose_body(grp.clone(), "half a thought".into());
+    let before = m.thread_detail(grp.clone()).expect("thread").compose;
+
+    let sent = m
+        .send_text(grp.clone(), "running ten minutes late".into())
+        .await
+        .expect("the headless send goes out");
+
+    let detail = m.thread_detail(grp.clone()).expect("thread");
+    let own = detail
+        .messages
+        .iter()
+        .find(|msg| msg.message_id == sent)
+        .expect("the sent copy is appended");
+    assert!(own.is_own);
+    assert_eq!(own.body, "running ten minutes late");
+    assert_eq!(
+        format!("{:?}", detail.compose),
+        format!("{before:?}"),
+        "the draft is the user's, untouched"
+    );
+    assert_eq!(detail.compose.body_draft, "half a thought");
+
+    // An empty body is no message, and nothing is appended.
+    let count = detail.messages.len();
+    assert!(m.send_text(grp.clone(), "  ".into()).await.is_err());
+    assert_eq!(m.thread_detail(grp).expect("thread").messages.len(), count);
 }

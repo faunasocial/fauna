@@ -176,7 +176,7 @@ fun NestRecoveryScreen(
             )
             Spacer(Modifier.height(8.dp))
             Column(modifier = Modifier.testTag(Ids.RECOVER_BOX_LIST)) {
-                boxes.forEachIndexed { idx, nestActorId ->
+                boxes.forEach { nestActorId ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -184,7 +184,7 @@ fun NestRecoveryScreen(
                                 selected = selectedId == nestActorId,
                                 onClick = { vm.selectBox(nestActorId) },
                             )
-                            .testTag("recover-box-item-$idx"),
+                            .testTag(Ids.RECOVER_BOX_ITEM),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(

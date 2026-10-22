@@ -27,7 +27,7 @@ pub struct AdminUpdateChannelGetRequest {
 }
 
 /// What the box follows now and what it runs.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdminUpdateChannelGetReply {
     /// The channel in force — the admin's choice, else the one the install's
     /// image tag seeded — as its id. Absent on a *pinned* box: one installed
@@ -42,11 +42,37 @@ pub struct AdminUpdateChannelGetReply {
     /// failed read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_head_version: Option<String>,
+    /// Whether a channel can be enacted on this box: `true` on a nest run from
+    /// the container image, whose bundle runs the updater; `false` on a nest
+    /// the image does not run (a Windows service, a macOS daemon, a Linux
+    /// package), where no channel applies, `channel` is absent and `set` is
+    /// refused (`nest/update-channel.md` § The channel as nest state → *Where
+    /// the channel applies*). Additive (2026-10-19): a nest that predates the
+    /// field omits it, and an older nest is an image nest, so absent reads
+    /// `true`.
+    #[serde(default = "default_enactable")]
+    pub enactable: bool,
     /// Forward-compat catch-all: unknown keys from a newer peer are
     /// preserved here and re-emitted on encode (transport.md § Schema
     /// and forward-compat discipline, rule 4).
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for AdminUpdateChannelGetReply {
+    fn default() -> Self {
+        Self {
+            channel: None,
+            running_version: String::new(),
+            channel_head_version: None,
+            enactable: true,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_enactable() -> bool {
+    true
 }
 
 /// `fauna.admin.update_channel.set` — a whole-value replace of the admin's
@@ -103,5 +129,24 @@ mod tests {
             decode_strict(&encode_canonical(&reply).unwrap()).unwrap();
         assert_eq!(back.channel.as_deref(), Some("nightly"));
         assert_eq!(back.channel_head_version.as_deref(), Some("0.2.1"));
+    }
+
+    /// A reply from a nest that predates `enactable` carries no such key; it
+    /// is an image nest (the only kind that existed), so the field reads
+    /// `true` — and a nest the image does not run says `false` on the wire.
+    #[test]
+    fn an_absent_enactable_reads_true_and_false_survives_the_wire() {
+        let older = encode_canonical(&serde_json::json!({ "running_version": "0.1.4" })).unwrap();
+        let back: AdminUpdateChannelGetReply = decode_strict(&older).unwrap();
+        assert!(back.enactable);
+        let packaged = AdminUpdateChannelGetReply {
+            running_version: "0.1.5".into(),
+            enactable: false,
+            ..Default::default()
+        };
+        let back: AdminUpdateChannelGetReply =
+            decode_strict(&encode_canonical(&packaged).unwrap()).unwrap();
+        assert!(!back.enactable);
+        assert_eq!(back.channel, None);
     }
 }

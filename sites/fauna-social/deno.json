@@ -1,0 +1,9 @@
+{
+  "tasks": {
+    "dev": "ASTRO_TELEMETRY_DISABLED=1 deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --serve --net=localhost,127.0.0.1,[::1],0.0.0.0,[::] --read=../../docs,../../installer -- npm:astro dev",
+    "build": "ASTRO_TELEMETRY_DISABLED=1 deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --net=localhost,127.0.0.1,[::1] --read=../../docs,../../installer -- npm:astro build",
+    "preview": "ASTRO_TELEMETRY_DISABLED=1 deno run --allow-read --allow-env --allow-run=deno,git,bwrap --allow-ffi ../../scripts/deno-sandbox.ts --serve --net=localhost,127.0.0.1,[::1],0.0.0.0,[::] --read=../../docs,../../installer -- npm:astro preview"
+  },
+  "nodeModulesDir": "manual",
+  "minimumDependencyAge": "P7D"
+}

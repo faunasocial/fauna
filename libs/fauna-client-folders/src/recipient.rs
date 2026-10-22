@@ -76,7 +76,7 @@ pub struct FolderWelcomeJoin {
     pub home_nest_actor_id: Option<String>,
     /// The sharer's handle + handle domain — the cross-nest owner label, a
     /// pair only when the recipient's own nest verified it
-    /// (`federation.md` § … *The cross-nest owner label*).
+    /// (`federation-shared-folders.md` § … *The cross-nest owner label*).
     pub shared_by_handle: Option<String>,
     /// See [`Self::shared_by_handle`].
     pub shared_by_domain: Option<String>,

@@ -426,6 +426,45 @@ async fn a_list_send_naming_another_local_user_is_refused_before_any_cap() {
 }
 
 #[tokio::test]
+async fn a_list_send_whose_from_names_other_than_one_mailbox_is_refused_before_any_cap() {
+    let (router, state) = nest().await;
+    let news = alices_list(&state, "news").await;
+    let ceiling = account_quota_ceiling(&state).await;
+
+    // Two mailboxes (the second another local user's), a two-member group, and
+    // a From naming no mailbox at all: none may skip the ownership question.
+    for from in [
+        "bob@example.test, alice@example.test",
+        "team: bob@example.test, alice@example.test;",
+        "Undisclosed Author",
+    ] {
+        let err = send_list(
+            &router,
+            &state,
+            ALICE,
+            news,
+            message(from, "news@example.test", "multi"),
+        )
+        .await
+        .expect_err("a From must name exactly one mailbox");
+        assert_eq!(err.code, "fauna.bridges.invalid_params", "From: {from}");
+        assert!(spooled(&state).await.is_empty(), "nothing fans out: {from}");
+    }
+
+    // No quota was reserved by any refusal.
+    let reply = send_list(
+        &router,
+        &state,
+        ALICE,
+        news,
+        message("alice@example.test", "news@example.test", "own"),
+    )
+    .await
+    .expect("the owner's handle fans out");
+    assert_eq!(reply.estimated_quota_remaining, ceiling - 1);
+}
+
+#[tokio::test]
 async fn a_list_send_naming_another_lists_address_is_refused_even_the_owners_own() {
     let (router, state) = nest().await;
     let news = alices_list(&state, "news").await;

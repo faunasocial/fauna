@@ -1,0 +1,29 @@
+---
+import Base from '../../../layouts/Base.astro';
+import { Content as BylawsNo } from '../../../../../../docs/governance/vedtekter.md';
+// Deliberately linked ONLY from /organization/bylaws (user direction
+// 2026-08-03): the Norwegian original is reached through the English page,
+// not from any navigation or listing.
+---
+<Base
+  title="Vedtekter — Fauna Social"
+  description="Vedtektene for Fauna Social — den autoritative norske originalen, publisert slik § 17 krever."
+>
+  <div class="wrap page">
+    <div class="prose" lang="no">
+      <h1>Vedtekter</h1>
+      <p class="lead">
+        Den autoritative norske originalen av vedtektene, publisert her og
+        holdt oppdatert slik § 17 krever.
+      </p>
+
+      <section class="doc">
+        <BylawsNo />
+      </section>
+    </div>
+  </div>
+</Base>
+
+<style>
+  .doc { margin-top: 2rem; }
+</style>

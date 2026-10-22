@@ -487,6 +487,14 @@ public struct AtprotoSettingsView: View {
                         }
                         .faunaGate("fauna.bridges.atproto.provision_app_credential")
                 }
+                Toggle(L.atprotoSettings.mintDmAccessLabel, isOn: $vm.mintDmAccess)
+                    .accessibilityIdentifier(Ids.atprotoAppCredentialDmAccess)
+                    .automationActivate(
+                        Ids.atprotoAppCredentialDmAccess,
+                        value: { vm.mintDmAccess ? "on" : "off" }
+                    ) {
+                        vm.mintDmAccess.toggle()
+                    }
                 let credentials = snapshot?.credentials ?? []
                 if credentials.isEmpty {
                     Text(L.atprotoSettings.appCredentialsEmpty)
@@ -501,23 +509,7 @@ public struct AtprotoSettingsView: View {
             .accessibilityIdentifier(Ids.atprotoAppCredentialsList)
             .automationValue(Ids.atprotoAppCredentialsList, text: { "\(snapshot?.credentials.count ?? 0)" })
 
-            Toggle(L.atprotoSettings.externalAppsToggle, isOn: Binding(
-                get: { snapshot?.externalAppsEnabled ?? true },
-                set: { newVal in Task { await vm.setExternalAppsEnabled(newVal) } }
-            ))
-            .accessibilityIdentifier(Ids.atprotoExternalAppsEnable)
-            .automationActivate(
-                Ids.atprotoExternalAppsEnable,
-                value: { (snapshot?.externalAppsEnabled ?? true) ? "on" : "off" }
-            ) {
-                Task { await vm.setExternalAppsEnabled(!(snapshot?.externalAppsEnabled ?? true)) }
-            }
-            // A dispatch-on-change toggle: flipping it IS the nest write.
-            .faunaGate("fauna.bridges.atproto.set_external_apps_enabled")
-            Text(L.atprotoSettings.externalAppsHint)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
+            // The account's external-apps switch lives on the Connected apps page.
             delegationSection
         }
     }
@@ -667,6 +659,9 @@ public struct AtprotoSettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(cred.label)
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                if cred.dmAllowed {
+                    Text(L.atprotoSettings.credentialDmAccess).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Spacer()
             if cred.revealable || revealed != nil {
@@ -702,7 +697,11 @@ public struct AtprotoSettingsView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Ids.atprotoAppCredentialItem)
-        .automationValue(Ids.atprotoAppCredentialItem, text: { cred.credentialId })
+        .automationValue(Ids.atprotoAppCredentialItem, text: {
+            // Label and detail, ending with the direct-message line on a credential that carries the access.
+            ([cred.label, subtitle] + (cred.dmAllowed ? [L.atprotoSettings.credentialDmAccess] : []))
+                .joined(separator: " · ")
+        })
         .automationScope(Ids.atprotoAppCredentialItem, index: index)
     }
 }

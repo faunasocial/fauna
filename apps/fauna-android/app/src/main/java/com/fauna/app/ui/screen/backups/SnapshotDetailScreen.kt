@@ -31,7 +31,7 @@ import social.fauna.generated.Ids
 fun SnapshotDetailScreen(
     navController: NavController,
     snapshotId: Int,
-    vm: BackupsVM = hiltViewModel()
+    vm: BackupsVM = backupsPageVm(navController)
 ) {
     // The file list is the MACHINE's custody-wired sealed-plane read
     // (`ui/backups.md` § User actions), not a second `SnapshotsClient` this
@@ -127,7 +127,16 @@ fun SnapshotDetailScreen(
                         )
                         HorizontalDivider()
                     }
-                    if (files.isEmpty()) {
+                    if (detail.messageKind != null) {
+                        // A kind entry's snapshot holds messages, not files: one
+                        // line says where it restores from, never an empty list
+                        // without a reason (§ Snapshot-list shape → *Kind entries*).
+                        item {
+                            ListItem(
+                                headlineContent = { Text(stringResource(R.string.backups_kind_snapshot_restores_below)) }
+                            )
+                        }
+                    } else if (files.isEmpty()) {
                         item {
                             ListItem(
                                 headlineContent = { Text(stringResource(R.string.backups_no_files_in_snapshot)) }
@@ -138,4 +147,20 @@ fun SnapshotDetailScreen(
             }
         }
     }
+}
+
+/**
+ * The Backups page's own [BackupsVM] when the detail was reached from it, so
+ * the detail reads the SAME machine the list drives: the list's selection is
+ * what tells the machine a kind entry's snapshot is open (its detail is
+ * composed without a round trip), and the list already dispatched
+ * `openSnapshot` before navigating. A deep link with no Backups entry on the
+ * stack falls back to a VM of its own.
+ */
+@Composable
+private fun backupsPageVm(navController: NavController): BackupsVM {
+    val pageEntry = remember(navController) {
+        runCatching { navController.getBackStackEntry("backups") }.getOrNull()
+    }
+    return if (pageEntry != null) hiltViewModel(pageEntry) else hiltViewModel()
 }

@@ -9,7 +9,7 @@ that both then drive the MLS commit/save path.
 
 **Why that is a corruption bug and not a tidiness one.** Every tab of one origin
 holding one account shares that account's ``localStorage`` device id
-(``$lib/device-id``), hence one MLS **device leaf**,
+(``#lib/device-id``), hence one MLS **device leaf**,
 and one account-scoped ``provider`` replica both CAS-put on the nest. Two
 engines advancing one leaf is precisely the fork
 ``libs/fauna-client-mls-sync/src/commit_gate.rs`` forbids ("a shared single leaf

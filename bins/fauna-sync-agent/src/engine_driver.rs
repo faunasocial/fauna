@@ -127,8 +127,8 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
         .filter(|f| {
             if f.access_revoked {
                 tracing::info!(
-                    path = %f.path,
-                    folder = ?f.folder,
+                    path = %fauna_core::log_redact::log_path(&f.path),
+                    folder = ?f.folder.as_deref().map(fauna_core::log_redact::log_folder_name),
                     "sync folder is parked: write access was revoked by the nest that owns \
                      the set; not serving it (local files untouched; re-bind to retry)"
                 );
@@ -143,7 +143,7 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
                 return true;
             };
             tracing::warn!(
-                path = %f.path,
+                path = %fauna_core::log_redact::log_path(&f.path),
                 mode = %mode,
                 "sync folder is in a mode this build cannot name; not serving it \
                  (local files untouched; pick a mode, or run a build that knows it)"
@@ -159,7 +159,7 @@ pub fn plan_engines(config: &SyncConfig) -> Vec<EngineMapping> {
             }),
             None => {
                 tracing::info!(
-                    folder = %f.path,
+                    folder = %fauna_core::log_redact::log_path(&f.path),
                     mode = ?f.mode,
                     "sync folder has no folder binding; skipping (not served until bound)"
                 );
@@ -448,7 +448,7 @@ impl EngineSpec for LocationEngineSpec {
             // resolution names the set.
             if !names_set {
                 tracing::warn!(
-                    folder = %folder,
+                    folder = %fauna_core::log_redact::log_folder_name(&folder),
                     "the agent's content-key resolution does not name this set; not building \
                      its engine (fail closed) — the next edge that names it rebuilds it"
                 );
@@ -623,6 +623,15 @@ impl EngineSpec for LocationEngineSpec {
         })
     }
 
+    /// Publish the live engine count — an engine leaves it only once its
+    /// future has ended, so its state DB is closed: what the succession carry
+    /// waits on before it renames that DB (`SyncServiceState::engines_running`).
+    fn on_engines_changed(&self, running: usize) {
+        if let Some(state) = self.state.upgrade() {
+            state.engines_running.send_replace(running);
+        }
+    }
+
     /// The relay-serving seat's connection half, for the host's whole life:
     /// announce the running engines' folders and route the nest's asks to
     /// them, app open or closed (`sync-agent.md` § Scope per platform).
@@ -786,7 +795,7 @@ async fn build_until_served(
             match nest_rpc.ensure_connected().await {
                 Ok(()) => connected = true,
                 Err(e) => tracing::warn!(
-                    folder,
+                    folder = %fauna_core::log_redact::log_folder_name(folder),
                     error = %e,
                     retry_in = ?backoff,
                     "control-plane connect failed; retrying"
@@ -797,7 +806,7 @@ async fn build_until_served(
             if let Some(built) = build_engine(params()).await {
                 return Some(built);
             }
-            tracing::warn!(folder, retry_in = ?backoff, "engine build refused; retrying");
+            tracing::warn!(folder = %fauna_core::log_redact::log_folder_name(folder), retry_in = ?backoff, "engine build refused; retrying");
         }
         tokio::select! {
             () = cancel.cancelled() => return None,
@@ -846,8 +855,8 @@ async fn watch_for_access_revocation(
 /// `access_revoked` flag — which is the whole point of D4's "local files and
 /// pending local edits are never touched".
 pub(crate) async fn park_revoked_set(state: &Arc<SyncServiceState>, folder_ref: FolderRef) {
-    let folder = folder_ref.to_wire();
-    let folder = folder.as_str();
+    // The set's opaque ref, never its user-chosen name — loggable as is.
+    let set_ref = folder_ref.to_wire();
     let persisted = {
         let mut config = state.config.write().await;
         let mut changed = false;
@@ -855,8 +864,8 @@ pub(crate) async fn park_revoked_set(state: &Arc<SyncServiceState>, folder_ref: 
             f.binding().is_some_and(|b| b.folder_ref == folder_ref) && !f.access_revoked
         }) {
             tracing::warn!(
-                path = %location.path,
-                folder,
+                path = %fauna_core::log_redact::log_path(&location.path),
+                folder_ref = %set_ref,
                 "write access revoked: parking this binding. The folder and its contents \
                  are untouched; it is no longer synced until re-bound."
             );
@@ -869,7 +878,7 @@ pub(crate) async fn park_revoked_set(state: &Arc<SyncServiceState>, folder_ref: 
             // across a restart, not fail-closedness now.
             if let Err(e) = state.paths.save_config(&config) {
                 tracing::error!(
-                    folder,
+                    folder_ref = %set_ref,
                     error = %e,
                     "failed to persist the parked binding; it will be re-discovered \
                      on the next refused write after a restart"
@@ -880,7 +889,7 @@ pub(crate) async fn park_revoked_set(state: &Arc<SyncServiceState>, folder_ref: 
     };
 
     if persisted && let Err(e) = reconcile_engines(state).await {
-        tracing::error!(folder, error = %e, "reconcile after parking the set failed");
+        tracing::error!(folder_ref = %set_ref, error = %e, "reconcile after parking the set failed");
     }
 }
 
@@ -1341,8 +1350,8 @@ fn open_root_reach(
             Ok(reach) => Some(reach),
             Err(e) => {
                 tracing::error!(
-                    folder,
-                    path = %path.display(),
+                    folder = %fauna_core::log_redact::log_folder_name(folder),
+                    path = %fauna_core::log_redact::log_path(&path.to_string_lossy()),
                     error = %e,
                     "opening the on-demand root's directory failed; the root runs unmounted \
                      and lists no placeholders"
@@ -1443,8 +1452,8 @@ async fn run_on_demand_root(
             Ok(conn) => Some(conn),
             Err(e) => {
                 tracing::error!(
-                    folder,
-                    path = %path.display(),
+                    folder = %fauna_core::log_redact::log_folder_name(&folder),
+                    path = %fauna_core::log_redact::log_path(&path.to_string_lossy()),
                     error = %e,
                     "cfapi sync-root registration failed; root serves nothing"
                 );
@@ -1468,8 +1477,8 @@ async fn run_on_demand_root(
                 Err(e) => {
                     mount_report.failed(&e);
                     tracing::error!(
-                        folder,
-                        path = %reach.mount_point().display(),
+                        folder = %fauna_core::log_redact::log_folder_name(&folder),
+                        path = %fauna_core::log_redact::log_path(&reach.mount_point().to_string_lossy()),
                         error = %e,
                         "mounting the on-demand root failed; root lists no placeholders"
                     );
@@ -1587,7 +1596,7 @@ async fn drive_always_resident_root(
     // holds real files, not placeholders.
     if let Err(e) = engine.connect_control_plane().await {
         tracing::warn!(
-            folder,
+            folder = %fauna_core::log_redact::log_folder_name(&folder),
             error = %e,
             "control-plane connect failed; retrying on the rescan tick"
         );
@@ -1791,7 +1800,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
             let keyed = keys.contains_key(&m.engine_key());
             if !keyed {
                 tracing::info!(
-                    folder = %m.folder,
+                    folder = %fauna_core::log_redact::log_folder_name(&m.folder),
                     "not in the agent's content-key resolution yet; withholding its engine \
                      until an edge names it"
                 );
@@ -1902,7 +1911,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                 match running.started.get(&engine_key) {
                     None => {
                         tracing::info!(
-                            folder = %mapping.folder,
+                            folder = %fauna_core::log_redact::log_folder_name(&mapping.folder),
                             mode = ?mapping.mode,
                             "serving folder"
                         );
@@ -1911,7 +1920,7 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                     }
                     Some(prev) if *prev != stamp => {
                         tracing::info!(
-                            folder = %mapping.folder,
+                            folder = %fauna_core::log_redact::log_folder_name(&mapping.folder),
                             mode = ?mapping.mode,
                             "engine key material, folder or mode changed; restarting engine"
                         );
@@ -1941,7 +1950,8 @@ pub(crate) async fn reconcile_resolved(state: &Arc<SyncServiceState>) -> Result<
                 .collect();
             for key in stale {
                 let prev = running.started.remove(&key);
-                tracing::info!(folder = %key, "stopping folder");
+                // The engine key is the set's opaque ref, never its name.
+                tracing::info!(folder_ref = %key, "stopping folder");
                 #[cfg(windows)]
                 if let Some(folder) = prev.as_ref().and_then(|p| full_teardown_location(p, None)) {
                     crate::cfapi_host::mark_root_for_full_teardown(&folder);
@@ -2609,6 +2619,58 @@ mod tests {
             None,
             "a stopped engine must leave no count behind"
         );
+    }
+
+    /// The drain-level half of the hostile-size pin (the fold-level half is
+    /// `hostile_declared_sizes_saturate_instead_of_panicking_the_fold`): two
+    /// `FileStarted` sizes summing past `u64::MAX` reach the drain that also
+    /// carries the mass-delete floor's verdict, and a `DeletesHeld` sent after
+    /// them still lands. A plain `+=` in the fold panics this task under the
+    /// shipped `overflow-checks` (`build-system.md` § Shipped-profile overflow
+    /// checks), the hold never reaches the shared state, and the drain's join
+    /// handle reports the panic.
+    #[tokio::test]
+    async fn hostile_declared_sizes_leave_the_drain_alive_for_a_later_hold() {
+        let (event_tx, _event_rx) = broadcast::channel::<Event>(8);
+        let (progress_tx, progress_rx) =
+            mpsc::unbounded_channel::<fauna_sync_engine::progress::ProgressEvent>();
+        let tmp = tempfile::tempdir().unwrap();
+        let (shutdown_tx, _rx) = tokio::sync::watch::channel(false);
+        let (ev, _) = broadcast::channel(16);
+        let state = crate::state::SyncServiceState::new(
+            crate::config::SyncConfig::default(),
+            shutdown_tx,
+            ev,
+            crate::config::SyncPaths::at(tmp.path().to_path_buf()),
+        );
+
+        let drain = tokio::spawn(drive_progress_notifications(
+            progress_rx,
+            event_tx,
+            PathBuf::from("/home/user/Fauna"),
+            "documents".to_string(),
+            test_ref("documents"),
+            Arc::downgrade(&state),
+        ));
+
+        for path in ["a.bin", "b.bin"] {
+            progress_tx
+                .send(fauna_sync_engine::progress::ProgressEvent::FileStarted {
+                    path: path.to_string(),
+                    size: u64::MAX,
+                    chunk_count: 1,
+                })
+                .unwrap();
+        }
+        progress_tx
+            .send(fauna_sync_engine::progress::ProgressEvent::DeletesHeld { held: 3 })
+            .unwrap();
+        await_held(&state, "documents", Some(3)).await;
+
+        drop(progress_tx);
+        drain
+            .await
+            .expect("the drain must survive hostile sizes and end on channel close");
     }
 
     /// The unreadable-path twin of the hold test above: the drain writes the

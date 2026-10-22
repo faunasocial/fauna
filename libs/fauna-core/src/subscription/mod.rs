@@ -99,7 +99,7 @@ pub const ROOM_POST_TIER_RANK: u32 = 0;
 /// user to an attacker-chosen scheme (the F-CL2 anti-phishing-redirect class; see
 /// `docs/goal/architecture/security.md`). This is a plain scheme-prefix check,
 /// not full URL parsing: it matches the check web's
-/// `$lib/safe-url.ts::isSafeNavUrl` already applies (`parsed.protocol ===
+/// `#lib/safe-url.ts::isSafeNavUrl` already applies (`parsed.protocol ===
 /// 'https:'`), and native callers just need the same "https or refuse" gate
 /// before invoking their platform's opener.
 ///

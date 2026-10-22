@@ -256,6 +256,98 @@ def test_a_member_opens_a_room_post_and_an_outsider_sees_it_locked(
         teardown_seats([outsider])
 
 
+def _wait_profile_badge(seat, needle: str, expected: str, what: str) -> int:
+    """Deadline-poll the profile Posts tab's card carrying ``needle`` until its
+    `gated-post-badge` reads ``expected`` (convention 14) — `_wait_badge`'s twin
+    on the profile page, where the room's label is the same per-read derivation
+    on the author window. Returns the card's index."""
+
+    def read():
+        at = seat.app.profile.post_card_index(needle)
+        if at < 0:
+            return None
+        try:
+            return at, seat.app.profile.post_card_badge(at)
+        except Exception:  # noqa: BLE001 — mid-render races are expected while polling
+            return None
+
+    found = wait_for(
+        what,
+        read,
+        lambda got: got is not None and got[1] == expected,
+        MESSAGE_BUDGET_S,
+        diagnose=lambda: (
+            f"cards={seat.app.profile.post_card_texts()!r} "
+            f"error-message={seat.app.profile.error_text()!r}\n{seat_story(seat)}"
+        ),
+    )
+    return found[0]
+
+
+@pytest.mark.feature("room-restricted-posts")
+def test_a_room_post_appears_on_the_authors_profile_for_a_member_and_locked_for_an_outsider(
+    room_seats, nest_instance, room_app, request
+):
+    """Outcome 5 — a room post is an ordinary post of its author, so it lists
+    on the author's profile (`profile.md` § Layout & flow → *The Posts tab*:
+    "public, tier-gated, sold and room-restricted posts all list, and each
+    paints as its feed card already does"). The author addresses a post to the
+    room through the composer; a member opens the author's profile and finds
+    the card naming the room by the member's own label; a reader who is not in
+    the room finds the same card with the teaser and the reserved-tier lock."""
+    owner, member, third = room_seats
+    owner.app.profile.require_posts_tab_supported()
+
+    marker = f"room-body-{uuid.uuid4().hex[:8]}"
+    preview = f"A room post for the profile — {uuid.uuid4().hex[:6]}"
+    full_body = f"Only the room reads this: {marker}"
+
+    group_id, channel_hex = bootstrap_room(owner, member, third)
+    member_thread = wait_thread_by_channel(
+        member, channel_hex, what="the room reaching the member"
+    )
+
+    outsider = launch_seat(nest_instance, seat_app_path(request, room_app), room_app, request)
+    try:
+        label = thread_by_id(owner.app, group_id).label
+        option = S.feed.post.gate_room(room=label)
+        owner.app.feed.navigate()
+        assert owner.app.feed.wait_for_audience_option(option, MESSAGE_BUDGET_S), (
+            f"compose-gate-tier-select should offer {option!r} once the room is "
+            f"bound; error-message={owner.app.error_text()!r}\n{seat_story(owner)}"
+        )
+        owner.app.feed.create_gated_post(full_body, preview, option)
+        _wait_badge(owner, 0, option, "the author's card naming the room")
+
+        # ── A member opens the author's profile: the card names the room. ────
+        member.app.profile.navigate_to_actor(owner.actor_hex)
+        member.app.profile.open_posts_tab()
+        at = _wait_profile_badge(
+            member,
+            preview,
+            S.feed.post.gate_room(room=member_thread.label),
+            "the member's profile card naming the room",
+        )
+        assert marker not in member.app.profile.post_card_texts()[at], (
+            "the list card shows the teaser; the room's words open on the detail"
+        )
+
+        # ── A reader who is not in the room: the teaser and the lock. ────────
+        outsider.app.profile.navigate_to_actor(owner.actor_hex)
+        outsider.app.profile.open_posts_tab()
+        at = _wait_profile_badge(
+            outsider,
+            preview,
+            ROOM_POST_TIER,
+            "the outsider's profile card carrying the reserved-tier badge",
+        )
+        assert marker not in outsider.app.profile.post_card_texts()[at], (
+            "the outsider's card must show only the teaser"
+        )
+    finally:
+        teardown_seats([outsider])
+
+
 def _wait_card_badge(seat, post_id: str, expected: str, what: str) -> None:
     """Deadline-poll the `gated-post-badge` scoped to the card of ``post_id``
     until it reads ``expected``. Id-keyed, not index-keyed: a repost row and
@@ -795,15 +887,13 @@ def test_a_rooms_labels_show_on_a_room_posts_card_for_its_members_only(
     (`_DETAIL_OPEN_IS_SETTLED`): the open that would have fetched a member's
     verdicts has already run when the click returns."""
     founder, member = room_seat_pair
-    if app_name(founder.app.driver) != "tui":
+    if app_name(founder.app.driver) == "windows":
         skip_unbuilt(
             founder.app.driver,
             surface="the room post's label journey (Esc out of the post detail)",
-            detail="the label merge is shared Rust; tui leads the witness, the "
-            "other six follow in their trickle-down",
+            detail="the label merge is shared Rust; windows follows in its trickle-down",
             tracked="ui/feed.md § Implementation status today",
         )
-
     labeler = publish_wasm_labeler(
         run_seal_helper, nest_instance, FIXTURES / "room_commercial_labeler.wat"
     ).hex()

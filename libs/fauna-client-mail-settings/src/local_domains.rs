@@ -35,9 +35,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{DispatchError, NestError};
 use crate::primary_domain_rename::{PrimaryDomainRenameView, rename_available};
 
-/// MTA-STS cert-mode default: `expand_primary` (the shared-DNS-provider case) —
-/// `mail-multidomain.md` § Adding a new local domain step 3 `:334`.
-pub const DEFAULT_CERT_MODE: &str = "expand_primary";
+// MTA-STS cert-mode default (`expand_primary`): lifted to the protocol crate so
+// the cli's catalog sends the same string; re-exported here for the apps.
+pub use fauna_protocol::bridge_routing::DEFAULT_CERT_MODE;
 
 /// One overridable role address whose per-domain delivery target the admin may
 /// redirect — the four RFC 2142 / RFC 5321 §4.5.1 operations roles
@@ -436,6 +436,16 @@ pub struct LocalDomainsSnapshot {
     /// the add-domain form's irreversibility warning; the nest is authority on
     /// whether an add is actually first.
     pub adding_first_domain: bool,
+    /// The active domain whose remove-confirm dialog is open, or `None` when no
+    /// dialog is (`mail-multidomain.md` § Removing a local domain: the row's
+    /// remove control opens a confirm dialog, and only its confirm removes).
+    /// Set by [`LocalDomainMachine::arm_remove_domain`], cleared by
+    /// [`LocalDomainMachine::cancel_remove_domain`], by the confirm itself
+    /// ([`LocalDomainAction::ConfirmRemoveDomain`]), by any other dispatched
+    /// action but a re-read, and by a re-read that no longer lists the domain
+    /// as active. The dialog names this domain, so the key is the name, never
+    /// a row position a re-read could reshape.
+    pub remove_confirm_domain: Option<String>,
 }
 
 impl LocalDomainsSnapshot {
@@ -449,8 +459,25 @@ impl LocalDomainsSnapshot {
             active_rename: None,
             rename_available: false,
             adding_first_domain: false,
+            remove_confirm_domain: None,
         }
     }
+}
+
+/// The remove-confirm dialog's title for `domain` — the dialog names what it
+/// removes (`mail-multidomain.md` § Removing a local domain), as
+/// [`LocalizedText`] each app resolves through its own string table.
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn remove_confirm_title(domain: String) -> LocalizedText {
+    LocalizedText::key_arg("admin.dns.remove_confirm_title", "domain", domain)
+}
+
+/// The remove-confirm dialog's ratified body for `domain` — what stops working,
+/// the 30-day restore, what is lost after (`mail-multidomain.md` § Confirm
+/// dialog text), as [`LocalizedText`] beside [`remove_confirm_title`].
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+pub fn remove_confirm_body(domain: String) -> LocalizedText {
+    LocalizedText::key_arg("admin.dns.remove_confirm_body", "domain", domain)
 }
 
 /// Actions the per-app UI dispatches.
@@ -470,9 +497,17 @@ pub enum LocalDomainAction {
         domain: String,
         mta_sts_cert_mode: String,
     },
-    /// Soft-delete a domain (30-day recovery). The nest refuses the primary
-    /// (`cannot_remove_primary_domain`); the resulting error surfaces.
+    /// Soft-delete a domain (30-day recovery) with no confirm. The nest refuses
+    /// the primary (`cannot_remove_primary_domain`); the resulting error
+    /// surfaces. The admin's remove goes through the confirm instead
+    /// ([`LocalDomainMachine::arm_remove_domain`] →
+    /// [`Self::ConfirmRemoveDomain`]); this direct form stays for the apps not
+    /// yet lifted onto the confirm.
     RemoveDomain { domain: String },
+    /// The remove-confirm dialog's confirm: soft-delete the domain
+    /// [`LocalDomainsSnapshot::remove_confirm_domain`] names and close the
+    /// dialog. Nothing armed → a no-op, never a removal of a stale pick.
+    ConfirmRemoveDomain,
     /// Un-soft-delete a domain within the 30-day window.
     RestoreDomain { domain: String },
     /// Partial edit of the per-domain knobs (each `None` leaves it untouched;
@@ -678,6 +713,11 @@ impl LocalDomainMachine {
         let active_rename =
             rename_row.map(|r| PrimaryDomainRenameView::project(&r, &active_views, &soft_views));
         let mut snap = self.inner.lock().expect("snapshot mutex");
+        if let Some(armed) = &snap.remove_confirm_domain
+            && !active_views.iter().any(|d| &d.domain == armed)
+        {
+            snap.remove_confirm_domain = None;
+        }
         snap.adding_first_domain = active_views.is_empty();
         snap.active = active_views;
         snap.soft_deleted = soft_views;
@@ -712,6 +752,19 @@ impl LocalDomainMachine {
         // possibly-stale snapshot. The UI hides Remove on `is_primary` rows.
         self.nest.remove_local_domain(domain).await?;
         self.refresh().await
+    }
+
+    async fn confirm_remove_domain(&self) -> Result<(), DispatchError> {
+        let armed = self
+            .inner
+            .lock()
+            .expect("snapshot mutex")
+            .remove_confirm_domain
+            .take();
+        match armed {
+            Some(domain) => self.remove_domain(domain).await,
+            None => Ok(()),
+        }
     }
 
     async fn restore_domain(&self, domain: String) -> Result<(), DispatchError> {
@@ -825,6 +878,25 @@ impl LocalDomainMachine {
     pub fn snapshot(&self) -> LocalDomainsSnapshot {
         fauna_core::clone_locked(&self.inner, |s| s)
     }
+
+    /// The row's remove control: open the remove-confirm dialog for `domain`
+    /// ([`LocalDomainsSnapshot::remove_confirm_domain`]). Reaches no nest, so it
+    /// is synchronous — the dialog paints on the same frame as the click. A
+    /// domain the last read did not list as active arms nothing.
+    pub fn arm_remove_domain(&self, domain: String) {
+        let mut snap = self.inner.lock().expect("snapshot mutex");
+        if snap.active.iter().any(|d| d.domain == domain) {
+            snap.remove_confirm_domain = Some(domain);
+        }
+    }
+
+    /// The remove-confirm dialog's cancel: close it, removing nothing.
+    pub fn cancel_remove_domain(&self) {
+        self.inner
+            .lock()
+            .expect("snapshot mutex")
+            .remove_confirm_domain = None;
+    }
 }
 
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
@@ -840,6 +912,15 @@ impl LocalDomainMachine {
             let mut snap = self.inner.lock().expect("snapshot mutex");
             snap.error = None;
             snap.last_add_skipped = false;
+            // Any other act closes an open remove-confirm; a re-read keeps it
+            // while its domain is still listed (`refresh`), and the confirm
+            // takes it itself.
+            if !matches!(
+                action,
+                LocalDomainAction::Refresh | LocalDomainAction::ConfirmRemoveDomain
+            ) {
+                snap.remove_confirm_domain = None;
+            }
         }
         let result = match action {
             LocalDomainAction::Refresh => self.refresh().await,
@@ -848,6 +929,7 @@ impl LocalDomainMachine {
                 mta_sts_cert_mode,
             } => self.add_domain(domain, mta_sts_cert_mode).await,
             LocalDomainAction::RemoveDomain { domain } => self.remove_domain(domain).await,
+            LocalDomainAction::ConfirmRemoveDomain => self.confirm_remove_domain().await,
             LocalDomainAction::RestoreDomain { domain } => self.restore_domain(domain).await,
             LocalDomainAction::UpdateConfig {
                 domain,
@@ -1479,6 +1561,115 @@ mod tests {
         assert_eq!(snap.soft_deleted.len(), 1);
         assert_eq!(snap.soft_deleted[0].domain, "two.example");
         assert!(snap.soft_deleted[0].removed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn arming_a_remove_opens_the_confirm_and_removes_nothing() {
+        let m = machine_with(
+            vec![row("primary.example", true), row("two.example", false)],
+            vec![],
+        );
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        let snap = m.snapshot();
+        assert_eq!(snap.remove_confirm_domain.as_deref(), Some("two.example"));
+        assert_eq!(snap.active.len(), 2, "arming reaches no nest");
+        assert!(snap.soft_deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn confirming_removes_the_armed_domain_and_closes_the_confirm() {
+        let m = machine_with(
+            vec![row("primary.example", true), row("two.example", false)],
+            vec![],
+        );
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        m.dispatch(LocalDomainAction::ConfirmRemoveDomain)
+            .await
+            .unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.remove_confirm_domain, None);
+        assert_eq!(snap.soft_deleted.len(), 1);
+        assert_eq!(snap.soft_deleted[0].domain, "two.example");
+    }
+
+    #[tokio::test]
+    async fn cancelling_closes_the_confirm_and_keeps_the_domain() {
+        let m = machine_with(
+            vec![row("primary.example", true), row("two.example", false)],
+            vec![],
+        );
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        m.cancel_remove_domain();
+        assert_eq!(m.snapshot().remove_confirm_domain, None);
+        // A confirm with nothing armed is a no-op, never a stale removal.
+        m.dispatch(LocalDomainAction::ConfirmRemoveDomain)
+            .await
+            .unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.active.len(), 2);
+        assert!(snap.soft_deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn only_a_listed_active_domain_can_be_armed() {
+        let mut gone = row("gone.example", false);
+        gone.removed_at = Some(1_700_000_000_000);
+        let m = machine_with(vec![row("primary.example", true)], vec![gone]);
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("gone.example".to_string());
+        assert_eq!(m.snapshot().remove_confirm_domain, None);
+        m.arm_remove_domain("never.example".to_string());
+        assert_eq!(m.snapshot().remove_confirm_domain, None);
+    }
+
+    #[tokio::test]
+    async fn a_reread_keeps_the_confirm_while_its_domain_is_listed() {
+        let m = machine_with(
+            vec![row("primary.example", true), row("two.example", false)],
+            vec![],
+        );
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        m.dispatch(LocalDomainAction::Refresh).await.unwrap();
+        assert_eq!(
+            m.snapshot().remove_confirm_domain.as_deref(),
+            Some("two.example"),
+            "a background re-read must not close the dialog under the admin"
+        );
+        // The armed domain removed by any other path: the re-read no longer
+        // lists it, so there is nothing left to confirm.
+        m.dispatch(LocalDomainAction::RemoveDomain {
+            domain: "two.example".to_string(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            m.snapshot().remove_confirm_domain,
+            None,
+            "a re-read that no longer lists the armed domain closes the confirm"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_action_closes_the_confirm() {
+        let m = machine_with(
+            vec![row("primary.example", true), row("two.example", false)],
+            vec![],
+        );
+        m.hydrate().await.unwrap();
+        m.arm_remove_domain("two.example".to_string());
+        m.dispatch(LocalDomainAction::AddDomain {
+            domain: "three.example".to_string(),
+            mta_sts_cert_mode: DEFAULT_CERT_MODE.to_string(),
+        })
+        .await
+        .unwrap();
+        let snap = m.snapshot();
+        assert_eq!(snap.remove_confirm_domain, None);
+        assert!(snap.active.iter().any(|d| d.domain == "two.example"));
     }
 
     #[tokio::test]

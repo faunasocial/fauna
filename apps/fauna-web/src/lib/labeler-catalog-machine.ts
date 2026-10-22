@@ -1,8 +1,8 @@
 // Shared snapshot shapes for the page-level `LabelerCatalogMachine`
 // (`libs/fauna-labeler-catalog-machine`, WASM twin
 // `libs/fauna-wasm-labeler-catalog`), consumed by the Personalization home
-// (`$lib/components/PersonalizationSection.svelte`) and the Community
-// labelers catalog (`$lib/components/LabelerCatalogSection.svelte`) — both
+// (`#lib/components/PersonalizationSection.svelte`) and the Community
+// labelers catalog (`#lib/components/LabelerCatalogSection.svelte`) — both
 // render off the SAME `LabelerCatalogSnapshot` the one shared machine owns,
 // the personalization home just client-filtering `entries` to
 // `subscribed === true`. See
@@ -11,7 +11,7 @@
 // Mirrors `fauna_labeler_catalog_machine::snapshots::{LabelerCatalogEntry,
 // LabelerInspectView, LabelerCatalogSnapshot}` serde JSON (snake_case across
 // the serde_json boundary).
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 /** One community labeler in the catalog (`labeler-catalog-item` row). */
 export interface LabelerCatalogEntry {

@@ -11,7 +11,7 @@ snapshots here. As a result:
 - History on `main` is a sequence of reviewed snapshots, not individual upstream commits.
 - External pull requests are welcome, but are integrated by **re-applying the change
   upstream** and republishing — so a merged change may land as part of a later snapshot
-  rather than as your exact commit. Your authorship is preserved in the changelog/credits.
+  rather than as your exact commit.
 - For anything non-trivial, **open an issue first** to discuss direction before writing code.
 
 ## Licensing — no CLA

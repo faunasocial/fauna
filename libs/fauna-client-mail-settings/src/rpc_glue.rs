@@ -65,15 +65,39 @@ where
     Sleep: Fn(u32) -> SleepFut,
     SleepFut: core::future::Future<Output = ()>,
 {
+    request_idempotent_classified(nest, kind, payload, sleep, nest_error, |e| {
+        matches!(e, NestError::Transient(_))
+    })
+    .await
+}
+
+/// [`request_idempotent`] under a seam's own error type: `classify` maps the
+/// transport error, and a mapped error `is_transient` reads as retryable is
+/// re-issued. For a kind one of whose refusals the caller reads by its exact
+/// code (`set_mail_enabled` → [`crate::error::SetMailEnabledError`]).
+async fn request_idempotent_classified<R, Req, Reply, Sleep, SleepFut, E>(
+    nest: &R,
+    kind: &'static str,
+    payload: Req,
+    sleep: Sleep,
+    classify: impl Fn(R::Error) -> E,
+    is_transient: impl Fn(&E) -> bool,
+) -> Result<Reply, E>
+where
+    R: RpcRequester,
+    R::Error: RpcErrorClass,
+    Req: serde::Serialize + Clone,
+    Reply: serde::de::DeserializeOwned,
+    Sleep: Fn(u32) -> SleepFut,
+    SleepFut: core::future::Future<Output = ()>,
+{
     let mut attempt = 1u32;
     loop {
         match <R as RpcRequester>::request::<Req, Reply>(nest, kind, payload.clone()).await {
             Ok(reply) => return Ok(reply),
             Err(e) => {
-                let mapped = nest_error(e);
-                if attempt < MAIL_PROVISION_MAX_ATTEMPTS
-                    && matches!(mapped, NestError::Transient(_))
-                {
+                let mapped = classify(e);
+                if attempt < MAIL_PROVISION_MAX_ATTEMPTS && is_transient(&mapped) {
                     // 200ms, 400ms, 800ms — give the reconnect supervisor time
                     // to re-establish the WS before re-issuing.
                     sleep(200u32 << (attempt - 1)).await;
@@ -302,6 +326,7 @@ fn project_import_session(
         error_reason: info.error_reason,
         scope: info.scope,
         date_from: info.date_from,
+        skip_dedup: info.skip_dedup,
         cursors: info
             .cursors
             .into_iter()
@@ -328,6 +353,7 @@ fn fresh_import_session(
     total_count: u64,
     scope: Vec<String>,
     date_from: String,
+    skip_dedup: bool,
 ) -> crate::import::ImportSessionView {
     crate::import::ImportSessionView {
         session_id,
@@ -340,6 +366,7 @@ fn fresh_import_session(
         error_reason: String::new(),
         scope,
         date_from,
+        skip_dedup,
         cursors: Vec::new(),
         // The reply carries only the id; the row was stamped a moment ago, so
         // the client's clock stands in until the first session read replaces it.
@@ -537,7 +564,9 @@ mod native {
         UnsubscribeListMemberReply, UnsubscribeListMemberRequest, UpdateAccountListReply,
         UpdateAccountListRequest,
     };
-    use fauna_protocol::discovery::{NestInfoReply, NestInfoRequest, capability};
+    use fauna_protocol::discovery::{
+        NestInfoReply, NestInfoRequest, SetupStatusReply, SetupStatusRequest, capability,
+    };
     use fauna_protocol::folders::{FoldersListReply, FoldersListRequest, KIND_FOLDERS_LIST};
     use fauna_protocol::wrapped_blob::{
         GetCaldavPortReply, GetCaldavPortRequest, GetMailServingEnabledReply,
@@ -556,7 +585,7 @@ mod native {
     use crate::caldav_policy::{CaldavPolicyMachine, CaldavPolicyNest};
     use crate::carddav_policy::{CarddavPolicyMachine, CarddavPolicyNest};
     use crate::error::DispatchError;
-    use crate::error::{NestError, SignerError, nest_error};
+    use crate::error::{NestError, SetMailEnabledError, SignerError, nest_error};
     use crate::export::{
         ArchiveFileSink, ExportArchiveDelivery, ExportChunkProgress, ExportFetchPage, ExportFormat,
         ExportMailboxCount, ExportRecord, ExportScope, ExportSeamError, ExportSessionView,
@@ -917,6 +946,63 @@ mod native {
         }))
     }
 
+    // ── DmarcReportsNest (admin-mail-reports) ───────────────────────
+
+    struct RpcDmarcReportsNest {
+        admin: MailAdminClient<Arc<NestClient>>,
+    }
+
+    #[async_trait]
+    impl crate::dmarc_reports::DmarcReportsNest for RpcDmarcReportsNest {
+        async fn list_reports(
+            &self,
+            window_days: u32,
+            our_domain: Option<String>,
+        ) -> Result<fauna_protocol::bridge_routing::ListDmarcAggregateReportsReply, NestError>
+        {
+            self.admin
+                .list_dmarc_aggregate_reports(window_days, our_domain)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn get_report(
+            &self,
+            our_domain: String,
+            submitter: String,
+            report_id: String,
+        ) -> Result<fauna_protocol::bridge_routing::GetDmarcAggregateReportReply, NestError>
+        {
+            self.admin
+                .get_dmarc_aggregate_report(our_domain, submitter, report_id)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn list_local_domains(&self) -> Result<Vec<String>, NestError> {
+            Ok(self
+                .admin
+                .list_local_domains()
+                .await
+                .map_err(nest_error)?
+                .active
+                .into_iter()
+                .map(|d| d.domain_name)
+                .collect())
+        }
+    }
+
+    /// Build a [`crate::dmarc_reports::DmarcReportsMachine`] over a native
+    /// WS-RPC handle (`admin-mail-reports`, `dmarc-reporting.md` § Admin pane
+    /// summary surface).
+    pub fn build_dmarc_reports_machine(
+        nest: Arc<NestClient>,
+    ) -> crate::dmarc_reports::DmarcReportsMachine {
+        crate::dmarc_reports::DmarcReportsMachine::new(Arc::new(RpcDmarcReportsNest {
+            admin: MailAdminClient::new(nest),
+        }))
+    }
+
     // ── MailPolicyNest (admin-mail policy form) ─────────────────────
 
     struct RpcMailPolicyNest {
@@ -929,9 +1015,16 @@ mod native {
             self.admin.get_mail_config().await.map_err(nest_error)
         }
 
-        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
             self.admin
                 .set_mail_enabled(enabled)
+                .await
+                .map_err(SetMailEnabledError::classify)
+        }
+
+        async fn get_mail_unavailable_here(&self) -> Result<bool, NestError> {
+            self.admin
+                .get_mail_unavailable_here()
                 .await
                 .map_err(nest_error)
         }
@@ -946,6 +1039,29 @@ mod native {
         async fn set_auto_enable_mail_for_new_users(&self, enabled: bool) -> Result<(), NestError> {
             self.admin
                 .set_auto_enable_mail_for_new_users(enabled)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn get_microsoft_registration(
+            &self,
+        ) -> Result<
+            Option<fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus>,
+            NestError,
+        > {
+            self.admin
+                .get_microsoft_registration()
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn set_microsoft_registration(
+            &self,
+            client_id: String,
+            tenant: String,
+        ) -> Result<(), NestError> {
+            self.admin
+                .set_microsoft_registration(client_id, tenant)
                 .await
                 .map_err(nest_error)
         }
@@ -1034,6 +1150,22 @@ mod native {
                 .outbound_warmup_reset()
                 .await
                 .map(drop)
+                .map_err(nest_error)
+        }
+
+        async fn rotate_list_unsubscribe_secret(&self) -> Result<u64, NestError> {
+            self.admin
+                .rotate_list_unsubscribe_secret()
+                .await
+                .map(|r| r.members_retokenized)
+                .map_err(nest_error)
+        }
+
+        async fn rotate_srs_secret(&self) -> Result<i64, NestError> {
+            self.admin
+                .rotate_srs_secret()
+                .await
+                .map(|r| r.rotated_at)
                 .map_err(nest_error)
         }
     }
@@ -1175,6 +1307,19 @@ mod native {
                 .map_err(nest_error)
         }
 
+        async fn extend_disposable_alias(
+            &self,
+            alias_id: Vec<u8>,
+            pattern: String,
+            controls: AliasControls,
+            expires_at_ms: u64,
+        ) -> Result<(), NestError> {
+            self.account
+                .extend_disposable_alias(alias_id, pattern, controls, expires_at_ms)
+                .await
+                .map_err(nest_error)
+        }
+
         async fn revoke_account_alias(&self, alias_id: Vec<u8>) -> Result<(), NestError> {
             self.account
                 .revoke_account_alias(alias_id)
@@ -1216,6 +1361,17 @@ mod native {
         ) -> Result<Vec<ImportAliasOutcome>, NestError> {
             self.account
                 .import_account_aliases(lines)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn list_account_alias_hits(
+            &self,
+            alias_id: Vec<u8>,
+            limit: u32,
+        ) -> Result<Vec<fauna_protocol::bridge_routing::AliasHitRow>, NestError> {
+            self.account
+                .list_account_alias_hits(alias_id, limit, None)
                 .await
                 .map_err(nest_error)
         }
@@ -1995,6 +2151,9 @@ mod native {
         /// owner root has to come from the connection — the same split as
         /// `SyncClient::seal_device_label`.
         nest: Arc<NestClient>,
+        /// The `fauna.setup.status` reader the admin's Microsoft registration
+        /// comes off — any user's connection reads it, no admin rights needed.
+        setup: MailAdminClient<Arc<NestClient>>,
     }
 
     impl RpcMailImportNest {
@@ -2028,6 +2187,18 @@ mod native {
 
     #[async_trait]
     impl MailImportNest for RpcMailImportNest {
+        async fn microsoft_registration(
+            &self,
+        ) -> Result<Option<imap_client::MicrosoftRegistration>, NestError> {
+            Ok(self
+                .setup
+                .get_microsoft_registration()
+                .await
+                .map_err(nest_error)?
+                .as_ref()
+                .map(imap_client::MicrosoftRegistration::from_status))
+        }
+
         async fn list_sessions(&self) -> Result<Vec<crate::import::ImportSessionView>, NestError> {
             // Derived once for the whole listing: a per-row derivation would
             // repeat the BackupKey KDF for every session on the resume screen.
@@ -2048,6 +2219,7 @@ mod native {
             total_count: u64,
             scope: Vec<String>,
             date_from: String,
+            skip_dedup: bool,
         ) -> Result<crate::import::ImportSessionView, NestError> {
             let sealed = self.seal_source(&source_descriptor);
             let reply = self
@@ -2057,6 +2229,7 @@ mod native {
                     total_count,
                     scope.clone(),
                     date_from.clone(),
+                    skip_dedup,
                     sealed,
                 )
                 .await
@@ -2067,6 +2240,7 @@ mod native {
                 total_count,
                 scope,
                 date_from,
+                skip_dedup,
             ))
         }
 
@@ -2109,6 +2283,13 @@ mod native {
             ))
         }
 
+        async fn discard_session(&self, session_id: String) -> Result<bool, NestError> {
+            self.client
+                .discard_session(session_id)
+                .await
+                .map_err(nest_error)
+        }
+
         async fn finalize_session(
             &self,
             session_id: String,
@@ -2142,12 +2323,11 @@ mod native {
             mailbox: String,
             uid_validity: u32,
             outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
-        ) -> Result<(), NestError> {
+        ) -> Result<fauna_protocol::bridge_routing::RecordImportOutcomesReply, NestError> {
             self.client
                 .record_outcomes(session_id, mailbox, uid_validity, outcomes)
                 .await
-                .map_err(nest_error)?;
-            Ok(())
+                .map_err(nest_error)
         }
 
         async fn send_unit(
@@ -2373,17 +2553,12 @@ mod native {
             drop_if_broken(&mut guard, estimate)
         }
 
-        async fn examine(
-            &self,
-            mailbox: &str,
-            cursor: Option<MailboxCursor>,
-        ) -> Result<imap_client::MailboxStatus, NestError> {
+        async fn examine(&self, mailbox: &str) -> Result<imap_client::MailboxStatus, NestError> {
             let (mut guard, _) = self.live_session().await?;
             let session = guard.as_mut().ok_or_else(source_not_connected)?;
-            let status = session
-                .examine(mailbox, cursor.map(|c| c.source_uid_validity))
-                .await
-                .map_err(imap_error);
+            // No expected UIDVALIDITY: the loop compares the one reported
+            // against its cursor itself (§ Resume protocol step 4).
+            let status = session.examine(mailbox, None).await.map_err(imap_error);
             drop_if_broken(&mut guard, status)
         }
 
@@ -2410,6 +2585,18 @@ mod native {
                 .fetch_window_on(session, reopened, mailbox, cursor, max, max_size_bytes)
                 .await;
             drop_if_broken(&mut guard, window)
+        }
+
+        async fn enumerate_window(
+            &self,
+            mailbox: &str,
+            cursor: Option<MailboxCursor>,
+            max: usize,
+        ) -> Result<Vec<imap_client::UidEntry>, NestError> {
+            let (mut guard, reopened) = self.live_session().await?;
+            let session = guard.as_mut().ok_or_else(source_not_connected)?;
+            let entries = enumerate_window_on(session, reopened, mailbox, cursor, max).await;
+            drop_if_broken(&mut guard, entries)
         }
 
         async fn logout(&self) -> Result<(), NestError> {
@@ -2441,29 +2628,14 @@ mod native {
             max: usize,
             max_size_bytes: u64,
         ) -> Result<crate::import::FetchWindow, NestError> {
-            if reopened {
-                session
-                    .examine(mailbox, cursor.map(|c| c.source_uid_validity))
-                    .await
-                    .map_err(imap_error)?;
-            }
-            let from_uid = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
-            // `enumerate_uids` has no cap of its own (§ its own docs), so a
-            // large mailbox is re-enumerated from `from_uid` on every window —
-            // correct (each call returns the right slice) but not the
-            // cheapest possible re-fetch pattern; a future pass could cache
-            // the enumeration per mailbox inside this seam if it becomes a
-            // measured cost.
             // § Per-message flow step 1: the size is compared on the
             // enumeration's `RFC822.SIZE`, so an over-limit body is never
             // transferred at all.
-            let (too_large, wanted): (Vec<_>, Vec<_>) = session
-                .enumerate_uids(from_uid)
-                .await
-                .map_err(imap_error)?
-                .into_iter()
-                .take(max)
-                .partition(|e| e.is_oversize(max_size_bytes));
+            let (too_large, wanted): (Vec<_>, Vec<_>) =
+                enumerate_window_on(session, reopened, mailbox, cursor, max)
+                    .await?
+                    .into_iter()
+                    .partition(|e| e.is_oversize(max_size_bytes));
             let uids: Vec<u32> = wanted.into_iter().map(|e| e.uid).collect();
             let mut outcomes = Vec::with_capacity(uids.len());
             session
@@ -2475,6 +2647,39 @@ mod native {
                 too_large,
             })
         }
+    }
+
+    /// At most `max` of `mailbox`'s messages after `cursor`, by enumeration
+    /// alone — the first half of [`ImportSourceNest::fetch_window`] and the
+    /// whole of [`ImportSourceNest::enumerate_window`]. A session just
+    /// re-opened is `EXAMINE`d first (`fetch_window`'s comment on `reopened`).
+    async fn enumerate_window_on(
+        session: &mut NativeSourceSession,
+        reopened: bool,
+        mailbox: &str,
+        cursor: Option<MailboxCursor>,
+        max: usize,
+    ) -> Result<Vec<imap_client::UidEntry>, NestError> {
+        if reopened {
+            session
+                .examine(mailbox, cursor.map(|c| c.source_uid_validity))
+                .await
+                .map_err(imap_error)?;
+        }
+        let from_uid = cursor.map_or(1, |c| c.last_processed_source_uid + 1);
+        // `enumerate_uids` has no cap of its own (§ its own docs), so a
+        // large mailbox is re-enumerated from `from_uid` on every window —
+        // correct (each call returns the right slice) but not the cheapest
+        // possible re-fetch pattern; a future pass could cache the
+        // enumeration per mailbox inside this seam if it becomes a measured
+        // cost.
+        Ok(session
+            .enumerate_uids(from_uid)
+            .await
+            .map_err(imap_error)?
+            .into_iter()
+            .take(max)
+            .collect())
     }
 
     /// § Failure handling's TCP/TLS backoff (5 s / 30 s / 2 min), on tokio —
@@ -2524,6 +2729,7 @@ mod native {
         let machine = MailImportMachine::new(
             Arc::new(RpcMailImportNest {
                 client: imap_client::MailImportClient::new(Arc::clone(&nest)),
+                setup: MailAdminClient::new(Arc::clone(&nest)),
                 nest,
             }),
             Arc::new(RpcImportSourceNest::new()),
@@ -2980,8 +3186,8 @@ mod native {
             Ok(capability::supports(&reply.capabilities, token))
         }
 
-        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
-            let _: SetMailEnabledReply = super::request_idempotent(
+        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
+            let _: SetMailEnabledReply = super::request_idempotent_classified(
                 &*self.nest,
                 "fauna.bridges.set_mail_enabled",
                 SetMailEnabledRequest {
@@ -2989,9 +3195,22 @@ mod native {
                     extra: Default::default(),
                 },
                 provision_backoff,
+                SetMailEnabledError::classify,
+                |e| matches!(e, SetMailEnabledError::Nest(NestError::Transient(_))),
             )
             .await?;
             Ok(())
+        }
+
+        async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
+            let reply: SetupStatusReply = super::request_idempotent(
+                &*self.nest,
+                "fauna.setup.status",
+                SetupStatusRequest::default(),
+                provision_backoff,
+            )
+            .await?;
+            Ok(reply.mail_unavailable_here())
         }
 
         async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
@@ -3021,7 +3240,7 @@ mod native {
             Ok(reply.enabled)
         }
 
-        async fn get_caldav_port(&self) -> Result<u16, NestError> {
+        async fn get_caldav_port(&self) -> Result<crate::state::DavListener, NestError> {
             // Nest-wide singleton (not caller-scoped); the request is empty.
             let reply: GetCaldavPortReply = super::request_idempotent(
                 &*self.nest,
@@ -3030,7 +3249,10 @@ mod native {
                 provision_backoff,
             )
             .await?;
-            Ok(reply.port)
+            Ok(crate::state::DavListener {
+                port: reply.port,
+                direct: reply.direct_listener,
+            })
         }
 
         async fn serves_any_webdav_set(&self) -> Result<bool, NestError> {
@@ -3213,6 +3435,14 @@ mod native {
     /// future once per signed-in client, at its post-auth edge; a per-app
     /// reconnect leg of its own is what this replaces.
     ///
+    /// Each pass also runs the **submission-token refresh**
+    /// ([`MailSettingsMachine::refresh_submission_tokens`] on the token clock,
+    /// `mail-credentials.md` § Architectural rules, rule 10), and between
+    /// connects the loop wakes every
+    /// [`crate::token_refresh::TOKEN_REFRESH_TICK_SECS`] to run that one
+    /// alone — a session that never reconnects must still re-mint inside the
+    /// 7-day cadence. The epoch refresh stays connect-driven.
+    ///
     /// Holds the client only weakly between passes, so it never keeps a
     /// signed-out session alive: the reconnect watch closes when the client
     /// drops, and the loop ends there. Best-effort and log-only, as every
@@ -3228,6 +3458,7 @@ mod native {
         let mut reconnects = nest.subscribe_reconnects();
         let nest = Arc::downgrade(nest);
         async move {
+            let mut connected = true;
             loop {
                 let Some(client) = nest.upgrade() else {
                     return;
@@ -3244,21 +3475,42 @@ mod native {
                     );
                     return;
                 };
-                match machine.refresh_epoch_schedule().await {
-                    Ok(()) => tracing::debug!(
-                        "mail epoch schedule refresh: no-op or republished (mail disabled \
-                         no-ops silently)"
-                    ),
+                if connected {
+                    match machine.refresh_epoch_schedule().await {
+                        Ok(()) => tracing::debug!(
+                            "mail epoch schedule refresh: no-op or republished (mail disabled \
+                             no-ops silently)"
+                        ),
+                        Err(e) => tracing::warn!(
+                            "mail epoch schedule refresh failed (best-effort; re-converges \
+                             next connect): {e}"
+                        ),
+                    }
+                }
+                match machine
+                    .refresh_submission_tokens(crate::token_refresh::now_secs())
+                    .await
+                {
+                    Ok(0) => {}
+                    // tier_3 `test_mail_submission_token_refresh.py` waits on
+                    // this line's "re-minted".
+                    Ok(n) => {
+                        tracing::info!("mail submission-token refresh: re-minted {n} token(s)")
+                    }
                     Err(e) => tracing::warn!(
-                        "mail epoch schedule refresh failed (best-effort; re-converges \
-                         next connect): {e}"
+                        "mail submission-token refresh failed (best-effort; retried next \
+                         connect or tick): {e}"
                     ),
                 }
                 // The machine holds the client strongly; drop it before the wait.
                 drop(machine);
-                if reconnects.changed().await.is_err() {
-                    return; // The client is gone: signed out.
-                }
+                let tick =
+                    std::time::Duration::from_secs(crate::token_refresh::TOKEN_REFRESH_TICK_SECS);
+                connected = match tokio::time::timeout(tick, reconnects.changed()).await {
+                    Ok(Ok(())) => true,
+                    Ok(Err(_)) => return, // The client is gone: signed out.
+                    Err(_) => false,      // The tick: the token refresh alone.
+                };
             }
         }
     }
@@ -3807,7 +4059,8 @@ mod native {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{
     build_bridge_approval_machine, build_caldav_policy_machine, build_carddav_policy_machine,
-    build_forwarders_machine, build_linked_nests_machine_with_mail_relay,
+    build_dmarc_reports_machine, build_forwarders_machine,
+    build_linked_nests_machine_with_mail_relay,
     build_linked_nests_machine_with_mail_relay_and_trust, build_local_domains_machine,
     build_mail_aliases_machine, build_mail_export_machine,
     build_mail_export_machine_without_key_custody, build_mail_import_machine,
@@ -3877,7 +4130,7 @@ mod wasm {
     use crate::bridge_approval::{BridgeApprovalMachine, BridgeApprovalNest};
     use crate::caldav_policy::{CaldavPolicyMachine, CaldavPolicyNest};
     use crate::carddav_policy::{CarddavPolicyMachine, CarddavPolicyNest};
-    use crate::error::{NestError, SignerError, nest_error};
+    use crate::error::{NestError, SetMailEnabledError, SignerError, nest_error};
     use crate::export::{
         ExportArchiveDelivery, ExportChunkProgress, ExportFetchPage, ExportFormat,
         ExportMailboxCount, ExportRecord, ExportScope, ExportSeamError, ExportSessionView,
@@ -4225,6 +4478,63 @@ mod wasm {
         }))
     }
 
+    // ── DmarcReportsNest (admin-mail-reports) ───────────────────────
+
+    struct RpcDmarcReportsNest {
+        admin: MailAdminClient<WsRpcClient>,
+    }
+
+    #[async_trait(?Send)]
+    impl crate::dmarc_reports::DmarcReportsNest for RpcDmarcReportsNest {
+        async fn list_reports(
+            &self,
+            window_days: u32,
+            our_domain: Option<String>,
+        ) -> Result<fauna_protocol::bridge_routing::ListDmarcAggregateReportsReply, NestError>
+        {
+            self.admin
+                .list_dmarc_aggregate_reports(window_days, our_domain)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn get_report(
+            &self,
+            our_domain: String,
+            submitter: String,
+            report_id: String,
+        ) -> Result<fauna_protocol::bridge_routing::GetDmarcAggregateReportReply, NestError>
+        {
+            self.admin
+                .get_dmarc_aggregate_report(our_domain, submitter, report_id)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn list_local_domains(&self) -> Result<Vec<String>, NestError> {
+            Ok(self
+                .admin
+                .list_local_domains()
+                .await
+                .map_err(nest_error)?
+                .active
+                .into_iter()
+                .map(|d| d.domain_name)
+                .collect())
+        }
+    }
+
+    /// Build a [`crate::dmarc_reports::DmarcReportsMachine`] over the browser
+    /// WS-RPC handle (`admin-mail-reports`). The wasm twin of native's
+    /// `build_dmarc_reports_machine`.
+    pub fn build_dmarc_reports_machine(
+        nest: WsRpcClient,
+    ) -> crate::dmarc_reports::DmarcReportsMachine {
+        crate::dmarc_reports::DmarcReportsMachine::new(Arc::new(RpcDmarcReportsNest {
+            admin: MailAdminClient::new(nest),
+        }))
+    }
+
     // ── MailPolicyNest (admin-mail policy form) ─────────────────────
 
     struct RpcMailPolicyNest {
@@ -4237,9 +4547,16 @@ mod wasm {
             self.admin.get_mail_config().await.map_err(nest_error)
         }
 
-        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
+        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
             self.admin
                 .set_mail_enabled(enabled)
+                .await
+                .map_err(SetMailEnabledError::classify)
+        }
+
+        async fn get_mail_unavailable_here(&self) -> Result<bool, NestError> {
+            self.admin
+                .get_mail_unavailable_here()
                 .await
                 .map_err(nest_error)
         }
@@ -4254,6 +4571,29 @@ mod wasm {
         async fn set_auto_enable_mail_for_new_users(&self, enabled: bool) -> Result<(), NestError> {
             self.admin
                 .set_auto_enable_mail_for_new_users(enabled)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn get_microsoft_registration(
+            &self,
+        ) -> Result<
+            Option<fauna_protocol::microsoft_registration::MicrosoftRegistrationStatus>,
+            NestError,
+        > {
+            self.admin
+                .get_microsoft_registration()
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn set_microsoft_registration(
+            &self,
+            client_id: String,
+            tenant: String,
+        ) -> Result<(), NestError> {
+            self.admin
+                .set_microsoft_registration(client_id, tenant)
                 .await
                 .map_err(nest_error)
         }
@@ -4342,6 +4682,22 @@ mod wasm {
                 .outbound_warmup_reset()
                 .await
                 .map(drop)
+                .map_err(nest_error)
+        }
+
+        async fn rotate_list_unsubscribe_secret(&self) -> Result<u64, NestError> {
+            self.admin
+                .rotate_list_unsubscribe_secret()
+                .await
+                .map(|r| r.members_retokenized)
+                .map_err(nest_error)
+        }
+
+        async fn rotate_srs_secret(&self) -> Result<i64, NestError> {
+            self.admin
+                .rotate_srs_secret()
+                .await
+                .map(|r| r.rotated_at)
                 .map_err(nest_error)
         }
     }
@@ -4487,6 +4843,19 @@ mod wasm {
                 .map_err(nest_error)
         }
 
+        async fn extend_disposable_alias(
+            &self,
+            alias_id: Vec<u8>,
+            pattern: String,
+            controls: AliasControls,
+            expires_at_ms: u64,
+        ) -> Result<(), NestError> {
+            self.account
+                .extend_disposable_alias(alias_id, pattern, controls, expires_at_ms)
+                .await
+                .map_err(nest_error)
+        }
+
         async fn revoke_account_alias(&self, alias_id: Vec<u8>) -> Result<(), NestError> {
             self.account
                 .revoke_account_alias(alias_id)
@@ -4528,6 +4897,17 @@ mod wasm {
         ) -> Result<Vec<ImportAliasOutcome>, NestError> {
             self.account
                 .import_account_aliases(lines)
+                .await
+                .map_err(nest_error)
+        }
+
+        async fn list_account_alias_hits(
+            &self,
+            alias_id: Vec<u8>,
+            limit: u32,
+        ) -> Result<Vec<fauna_protocol::bridge_routing::AliasHitRow>, NestError> {
+            self.account
+                .list_account_alias_hits(alias_id, limit, None)
                 .await
                 .map_err(nest_error)
         }
@@ -4883,10 +5263,25 @@ mod wasm {
 
     struct RpcMailImportNest {
         client: imap_client::MailImportClient<WsRpcClient>,
+        /// The `fauna.setup.status` reader the admin's Microsoft registration
+        /// comes off — any user's connection reads it.
+        setup: MailAdminClient<WsRpcClient>,
     }
 
     #[async_trait(?Send)]
     impl MailImportNest for RpcMailImportNest {
+        async fn microsoft_registration(
+            &self,
+        ) -> Result<Option<imap_client::MicrosoftRegistration>, NestError> {
+            Ok(self
+                .setup
+                .get_microsoft_registration()
+                .await
+                .map_err(nest_error)?
+                .as_ref()
+                .map(imap_client::MicrosoftRegistration::from_status))
+        }
+
         async fn list_sessions(&self) -> Result<Vec<crate::import::ImportSessionView>, NestError> {
             Ok(self
                 .client
@@ -4904,6 +5299,7 @@ mod wasm {
             total_count: u64,
             scope: Vec<String>,
             date_from: String,
+            skip_dedup: bool,
         ) -> Result<crate::import::ImportSessionView, NestError> {
             let reply = self
                 .client
@@ -4916,6 +5312,7 @@ mod wasm {
                     total_count,
                     scope.clone(),
                     date_from.clone(),
+                    skip_dedup,
                     None,
                 )
                 .await
@@ -4926,6 +5323,7 @@ mod wasm {
                 total_count,
                 scope,
                 date_from,
+                skip_dedup,
             ))
         }
 
@@ -4968,6 +5366,13 @@ mod wasm {
             ))
         }
 
+        async fn discard_session(&self, session_id: String) -> Result<bool, NestError> {
+            self.client
+                .discard_session(session_id)
+                .await
+                .map_err(nest_error)
+        }
+
         async fn finalize_session(
             &self,
             session_id: String,
@@ -5001,12 +5406,11 @@ mod wasm {
             mailbox: String,
             uid_validity: u32,
             outcomes: Vec<fauna_protocol::bridge_routing::ClientImportOutcome>,
-        ) -> Result<(), NestError> {
+        ) -> Result<fauna_protocol::bridge_routing::RecordImportOutcomesReply, NestError> {
             self.client
                 .record_outcomes(session_id, mailbox, uid_validity, outcomes)
                 .await
-                .map_err(nest_error)?;
-            Ok(())
+                .map_err(nest_error)
         }
 
         async fn send_unit(
@@ -5049,11 +5453,7 @@ mod wasm {
                 "(web IMAP transport) estimate_mailbox",
             ))
         }
-        async fn examine(
-            &self,
-            _mailbox: &str,
-            _cursor: Option<MailboxCursor>,
-        ) -> Result<imap_client::MailboxStatus, NestError> {
+        async fn examine(&self, _mailbox: &str) -> Result<imap_client::MailboxStatus, NestError> {
             Err(super::import_source_unimpl("(web IMAP transport) examine"))
         }
         async fn fetch_window(
@@ -5065,6 +5465,16 @@ mod wasm {
         ) -> Result<crate::import::FetchWindow, NestError> {
             Err(super::import_source_unimpl(
                 "(web IMAP transport) fetch_window",
+            ))
+        }
+        async fn enumerate_window(
+            &self,
+            _mailbox: &str,
+            _cursor: Option<MailboxCursor>,
+            _max: usize,
+        ) -> Result<Vec<imap_client::UidEntry>, NestError> {
+            Err(super::import_source_unimpl(
+                "(web IMAP transport) enumerate_window",
             ))
         }
         async fn logout(&self) -> Result<(), NestError> {
@@ -5106,7 +5516,8 @@ mod wasm {
     pub fn build_mail_import_machine(nest: WsRpcClient) -> MailImportMachine {
         MailImportMachine::new(
             Arc::new(RpcMailImportNest {
-                client: imap_client::MailImportClient::new(nest),
+                client: imap_client::MailImportClient::new(nest.clone()),
+                setup: MailAdminClient::new(nest),
             }),
             Arc::new(RpcImportSourceNest),
             Arc::new(RpcRetryClock),
@@ -5531,8 +5942,8 @@ mod wasm {
             Ok(capability::supports(&reply.capabilities, token))
         }
 
-        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), NestError> {
-            let _: SetMailEnabledReply = super::request_idempotent(
+        async fn set_mail_enabled(&self, enabled: bool) -> Result<(), SetMailEnabledError> {
+            let _: SetMailEnabledReply = super::request_idempotent_classified(
                 &self.nest,
                 "fauna.bridges.set_mail_enabled",
                 SetMailEnabledRequest {
@@ -5540,9 +5951,22 @@ mod wasm {
                     extra: Default::default(),
                 },
                 provision_backoff,
+                SetMailEnabledError::classify,
+                |e| matches!(e, SetMailEnabledError::Nest(NestError::Transient(_))),
             )
             .await?;
             Ok(())
+        }
+
+        async fn mail_unavailable_here(&self) -> Result<bool, NestError> {
+            let reply: SetupStatusReply = super::request_idempotent(
+                &self.nest,
+                "fauna.setup.status",
+                SetupStatusRequest::default(),
+                provision_backoff,
+            )
+            .await?;
+            Ok(reply.mail_unavailable_here())
         }
 
         async fn set_mail_serving_enabled(&self, enabled: bool) -> Result<(), NestError> {
@@ -5572,7 +5996,7 @@ mod wasm {
             Ok(reply.enabled)
         }
 
-        async fn get_caldav_port(&self) -> Result<u16, NestError> {
+        async fn get_caldav_port(&self) -> Result<crate::state::DavListener, NestError> {
             // Nest-wide singleton (not caller-scoped); the request is empty.
             let reply: GetCaldavPortReply = super::request_idempotent(
                 &self.nest,
@@ -5581,7 +6005,10 @@ mod wasm {
                 provision_backoff,
             )
             .await?;
-            Ok(reply.port)
+            Ok(crate::state::DavListener {
+                port: reply.port,
+                direct: reply.direct_listener,
+            })
         }
 
         async fn serves_any_webdav_set(&self) -> Result<bool, NestError> {
@@ -5763,10 +6190,11 @@ mod wasm {
 #[cfg(target_arch = "wasm32")]
 pub use wasm::{
     build_bridge_approval_machine, build_caldav_policy_machine, build_carddav_policy_machine,
-    build_forwarders_machine, build_local_domains_machine, build_mail_aliases_machine,
-    build_mail_export_machine, build_mail_import_machine, build_mail_list_members_machine,
-    build_mail_lists_machine, build_mail_policy_machine, build_mail_settings_machine,
-    build_mail_spam_machine, build_webdav_policy_machine, dispatch_post_claim_serving_enablement,
+    build_dmarc_reports_machine, build_forwarders_machine, build_local_domains_machine,
+    build_mail_aliases_machine, build_mail_export_machine, build_mail_import_machine,
+    build_mail_list_members_machine, build_mail_lists_machine, build_mail_policy_machine,
+    build_mail_settings_machine, build_mail_spam_machine, build_webdav_policy_machine,
+    dispatch_post_claim_serving_enablement,
 };
 
 /// Fault-injection coverage for [`request_idempotent`] — the regression guard

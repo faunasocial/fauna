@@ -101,6 +101,22 @@ public final class BackupDestinationsVM {
     /// and after a run that stopped (a stop renders on `error-message`).
     public private(set) var reseedResultText: String?
 
+    /// `Some(destination_id)` while `backup-audit-recover-confirm-modal` is
+    /// open — the plain confirm in front of the recovery gesture (`ui/backups.md`
+    /// § Audit-alert surface → *The recovery gesture*). No re-type: the recovery
+    /// deletes nothing, here or at the backup, and a re-run recovers nothing
+    /// twice.
+    public private(set) var recoverConfirmingId: String?
+
+    /// A recovery is running: every `backup-audit-recover-button` is disarmed
+    /// until it ends, so one tap cannot start two runs.
+    public private(set) var recoverRunning = false
+
+    /// `backup-audit-recover-result`'s text — the running line while the run
+    /// goes, then the shared `result_lines`; `nil` until a first run and after a
+    /// run that stopped (a stop renders on `error-message`).
+    public private(set) var recoverResultText: String?
+
     private var api: APIClient?
     /// Where this device's sealed custodian store lives on this platform — the
     /// agent on macOS, this process's own disk on iOS. One seam so neither this
@@ -146,6 +162,13 @@ public final class BackupDestinationsVM {
     /// arms a destructive gesture must be provable without a live nest.
     func seedDestinationsForTest(_ rows: [FfiBackupDestinationView]) {
         destinations = rows
+    }
+
+    /// Seed the audit pass's verdicts — **unit tests only**, for the same
+    /// reason: which banner carries the recover button is decidable from the
+    /// destination list and the audit rows alone.
+    func seedAuditRowsForTest(_ rows: [FfiDestinationAuditRow]) {
+        auditRows = Dictionary(uniqueKeysWithValues: rows.map { ($0.destinationId, $0) })
     }
     #endif
 
@@ -202,6 +225,20 @@ public final class BackupDestinationsVM {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
+    }
+
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — the Backups destinations,
+    /// the store-backed half of the page): a destination another device
+    /// added, edited or removed lands on the open page, with the live status
+    /// read behind it. Sets only what differs, raises no banner, never
+    /// touches the add/edit form's draft or an armed removal, and leaves the
+    /// audit pass and the orphaned-store verdict to the page's own hydrate.
+    public func resyncStore() async {
+        guard let api, let fresh = try? await api.listBackupDestinations(),
+              fresh != destinations else { return }
+        destinations = fresh
+        await refreshStatuses()
     }
 
     /// Run one client-side audit pass and rebuild `auditRows`, keyed by
@@ -520,7 +557,10 @@ public final class BackupDestinationsVM {
         guard custodianStore != nil else { return [] }
         return backupReseedRows(
             destinations: destinations, thisDeviceId: deviceId ?? "",
-            orphanedStore: orphanedStoreBytes != nil)
+            orphanedStore: orphanedStoreBytes != nil,
+            // The nest-held pull-back is not wired on apple yet: no button on a
+            // nest-kind row until its confirm runs `backupPullBackFromDestination`.
+            hostsPullBack: false)
     }
 
     /// Does the orphaned-store row carry the restore button?
@@ -860,6 +900,115 @@ public final class BackupDestinationsVM {
             return renderLocalizedText(
                 backupAuditAlertLabel(reason: .selfReported, destinationLabel: label(dest)))
         }
+    }
+
+    // MARK: - The recovery gesture on the fifth audit-alert reason
+
+    /// One `backup-audit-alert` banner: its text, and — only on a fifth-reason
+    /// banner whose destination offers the recovery gesture — the destination
+    /// the `backup-audit-recover-button` inside it runs for.
+    public struct AuditBanner: Equatable {
+        public let text: String
+        public let recoverDestinationId: String?
+    }
+
+    /// Every `backup-audit-alert` banner, in paint order: each destination's
+    /// owner-side reasons, then the client-device custodians' self-reported
+    /// failures. The flat list the view indexes (`backup-audit-alert[i]`).
+    public func auditBanners() -> [AuditBanner] {
+        Self.auditBanners(
+            destinations: destinations, auditRows: auditRows, statuses: statuses
+        ) { label(for: $0) }
+    }
+
+    /// Free-function-shaped twin of the instance wrapper above — pure data, so
+    /// directly unit-testable without seeding a live VM's `private(set)` maps.
+    static func auditBanners(
+        destinations: [FfiBackupDestinationView],
+        auditRows: [String: FfiDestinationAuditRow],
+        statuses: [String: FfiBackupDestinationStatus],
+        label: (FfiBackupDestinationView) -> String
+    ) -> [AuditBanner] {
+        let ownerSide = destinations.flatMap { dest -> [AuditBanner] in
+            guard let row = auditRows[dest.destinationId] else { return [] }
+            let name = label(dest)
+            return row.alertReasons.map { reason in
+                var recoverId: String?
+                if case .sourceRegressed = reason, recoverButtonOffered(dest, row) {
+                    recoverId = dest.destinationId
+                }
+                return AuditBanner(
+                    text: renderLocalizedText(backupAuditAlertLabel(reason: reason, destinationLabel: name)),
+                    recoverDestinationId: recoverId)
+            }
+        }
+        let selfReported = selfReportedAlertTexts(destinations: destinations, statuses: statuses, label: label)
+            .map { AuditBanner(text: $0, recoverDestinationId: nil) }
+        return ownerSide + selfReported
+    }
+
+    /// Does this row's fifth-reason banner carry `backup-audit-recover-button`?
+    /// The shared `recover_offered` answer, taken whole from the audit row
+    /// (`recoverOffered`; never re-derived from `alertReasons`). The answer also
+    /// offers the button on this device's own custodian row; the confirm then
+    /// runs the recovery from this device's own store (`confirmRecover`).
+    static func recoverButtonOffered(
+        _ dest: FfiBackupDestinationView, _ row: FfiDestinationAuditRow?
+    ) -> Bool {
+        row?.recoverOffered == true
+    }
+
+    /// Open the recovery confirm for `destinationId`. A no-op while a run is in
+    /// flight or when no painted button stands for that destination — the
+    /// keyboard/registry backstop behind the paint.
+    public func armRecover(destinationId: String) {
+        guard !recoverRunning,
+              let dest = destinations.first(where: { $0.destinationId == destinationId }),
+              Self.recoverButtonOffered(dest, auditRows[destinationId])
+        else { return }
+        recoverConfirmingId = destinationId
+    }
+
+    public func cancelRecover() {
+        recoverConfirmingId = nil
+    }
+
+    /// The confirmed recovery: the shared native composition over the FFI, then
+    /// the page's re-read — its audit pass reads the record the run's duty
+    /// cleared, so the banner leaves because the record says so, never because
+    /// this VM hid it. Nothing about the run's order or its result is decided
+    /// here; this only paints how it ended.
+    public func confirmRecover() async {
+        guard let id = recoverConfirmingId, !recoverRunning, let api,
+              let deviceId, !deviceId.isEmpty else { return }
+        // The kind decides only which leg runs: this device's own row recovers
+        // from its own store where that store lives (the agent on macOS, this
+        // process on iOS — both grant the key themselves); a nest row takes
+        // the shared network face.
+        let ownRow = destinations.first(where: { $0.destinationId == id })?.kind
+            == destinationKindClientDevice()
+        if ownRow && custodianStore == nil { return }
+        recoverConfirmingId = nil
+        recoverRunning = true
+        errorMessage = nil
+        recoverResultText = L.backups.backupRecoverRunning
+        defer { recoverRunning = false }
+        let result: FfiRecoveryResult
+        do {
+            if ownRow, let custodianStore {
+                result = try await custodianStore.recoverCustodianStore()
+            } else {
+                result = try await api.backupRecoverFromDestination(
+                    destinationId: id, deviceIdHex: deviceId, statePath: FaunaClient.backupAuditStatePath)
+            }
+        } catch {
+            recoverResultText = nil
+            errorMessage = L.backups.backupRecoverFailed(reason: mapError(error) ?? "\(error)")
+            return
+        }
+        // The face resolved the lines (and their nested set/remedy keys) already.
+        recoverResultText = result.lines.joined(separator: "\n")
+        await runAudit()
     }
 
     /// Map an FFI error to a user string; the edit-different-nest sentinel becomes

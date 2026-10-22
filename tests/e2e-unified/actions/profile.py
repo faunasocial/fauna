@@ -90,7 +90,88 @@ class ProfileActions:
                 tracked="per-app NEXTs",
             )
 
+    def require_remote_profile_read_supported(self) -> None:
+        """Skip unless this app builds the remote profile read — the edit
+        form's ``profile-edit-audience-toggle`` and the OTHER header's relay
+        through the carried home (``profile.md`` § Where logic lives → *The
+        remote read*). tui leads, android and linux have followed; the other four
+        follow in the batched trickle-down, so this is parity debt
+        (``skip_unbuilt``)."""
+        if not (self.driver.is_tui() or self.driver.is_android() or self.driver.is_linux()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="the remote profile read (profile-edit-audience-toggle + the header relay)",
+                detail="the audience toggle and the OTHER header's fall-through to fauna.profile.get_remote",
+                tracked="profile.md § Implementation status today; the batched per-app trickle-down",
+            )
+
+    # --- header pictures (``profile-avatar`` / ``profile-banner``) ---
+
+    def require_header_pictures_supported(self) -> None:
+        """Skip unless this app paints the stored avatar and banner in the
+        Profile header (``profile.md`` § Layout & flow, the ``user-header``
+        component; IDs user-approved 2026-10-20). tui leads; linux, web and
+        android have followed; windows, macos and ios follow in the batched
+        trickle-down, so this is parity debt (``skip_unbuilt``)."""
+        d = self.driver
+        if not (d.is_tui() or d.is_linux() or d.is_web() or d.is_android()):
+            from helpers.app_surface import skip_unbuilt
+
+            skip_unbuilt(
+                self.driver,
+                surface="the Profile header's stored pictures (profile-avatar / profile-banner)",
+                detail="tui, linux, web and android have it; windows, macos and ios follow",
+                tracked="profile.md § Implementation status today; the batched per-app trickle-down",
+            )
+
+    def picture_state(self, element_id: str) -> str:
+        """``absent`` / ``empty`` / ``painted`` for a header picture.
+
+        ``absent`` = the profile names no such picture, so the element is not
+        rendered; ``empty`` = it is rendered but holds no picture (still
+        loading, or a failed fetch — never an error). tui paints half-block
+        art, so the picture IS the element's text, a ``▀`` per cell
+        (``apps/fauna-tui/src/thumbnail.rs`` HALF_BLOCK); the other apps
+        answer ``get_attr(<id>, state)`` with the ``painted`` / ``placeholder``
+        contract ``post-image`` uses."""
+        d = self.driver
+        if d.count(element_id) == 0:
+            return "absent"
+        if d.is_tui():
+            return "painted" if "▀" in (d.get_text(element_id) or "") else "empty"
+        return "painted" if d.get_attr(element_id, "state") == "painted" else "empty"
+
+    def wait_for_picture_state(self, element_id: str, want: str, timeout: float = 15.0) -> str:
+        """Poll until ``picture_state(element_id) == want``; returns the last
+        state read, so a miss reports what was there instead."""
+        deadline = time.time() + timeout
+        state = self.picture_state(element_id)
+        while state != want and time.time() < deadline:
+            time.sleep(0.3)
+            state = self.picture_state(element_id)
+        return state
+
     # --- edit form ---
+
+    def toggle_audience(self) -> None:
+        """Press ``profile-edit-audience-toggle`` — staged; signed on Save."""
+        self.driver.click("profile-edit-audience-toggle")
+
+    def audience_toggle_checked(self) -> bool:
+        return self.driver.get_attr("profile-edit-audience-toggle", "checked") == "true"
+
+    def wait_for_audience_toggle(self, want: bool, timeout: float = 15.0) -> bool:
+        """Poll until the toggle reads ``want`` — the form opens before its
+        read-modify-write base lands, so the stored audience paints a round
+        trip after ``open_edit_form`` returns."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.audience_toggle_checked() == want:
+                return True
+            time.sleep(0.3)
+        return self.audience_toggle_checked() == want
 
     def open_edit_form(self) -> None:
         """Click the edit button and wait for the form (shown async after the
@@ -206,6 +287,17 @@ class ProfileActions:
         self.driver.clear_and_type("profile-label-field", text)
         self.driver.click("profile-label-add-button")
 
+    def type_private_label(self, text: str) -> None:
+        """Type into ``profile-label-field`` without adding it."""
+        self.driver.clear_and_type("profile-label-field", text)
+
+    def label_suggestions(self) -> list[str]:
+        """The completion rows offered under the label field, in order."""
+        return self.driver.get_texts("profile-label-suggestion")
+
+    def pick_label_suggestion(self, index: int = 0) -> None:
+        self.driver.click("profile-label-suggestion", index)
+
     def save_private(self) -> None:
         self.driver.click("profile-private-save-button")
 
@@ -240,6 +332,87 @@ class ProfileActions:
         except Exception:
             pass
         return ""
+
+    # --- Posts tab (profile.md § Layout & flow → The Posts tab) ---
+    #
+    # The default tab lists the viewed actor's posts as the feed paints them:
+    # ``profile-posts-section`` hosts the feed's own ``post-card`` rows (every
+    # child scoped ``post-card[i]``, as on the feed), newest first, or
+    # ``profile-posts-empty``. The rows are read here, not through
+    # ``FeedActions``, whose reads assume the feed page (and its state-read
+    # fallback on the apple apps).
+
+    # The apps that paint the Posts tab's content (`profile.md` § Implementation
+    # status today): tui led; linux, web and android followed.
+    _POSTS_TAB_APPS = frozenset({"tui", "linux", "web", "android"})
+
+    def require_posts_tab_supported(self) -> None:
+        """Skip unless this app paints the Posts tab's content (e2e convention
+        7). tui leads (`profile.md` § Implementation status today); the other
+        apps follow in the batched trickle-down."""
+        from helpers.app_surface import app_name, skip_unbuilt
+
+        if app_name(self.driver) not in self._POSTS_TAB_APPS:
+            skip_unbuilt(
+                self.driver,
+                surface="profile-posts-section (the profile's Posts tab)",
+                detail="tui, linux, web and android paint it; macos, ios and windows follow",
+                tracked="docs/goal/ui/profile.md § Implementation status today",
+            )
+
+    def open_posts_tab(self) -> None:
+        """Activate ``profile-posts-tab`` — every activation reads the author's
+        posts afresh — and wait for its section."""
+        self.driver.click("profile-posts-tab")
+        self.driver.wait_for("profile-posts-section", timeout=10.0)
+
+    def post_card_texts(self) -> list[str]:
+        """The tab's card bodies, in painted order (one read, may race a paint)."""
+        texts = []
+        for i in range(self.driver.count("post-card")):
+            texts.append(
+                self.driver.get_text("feed-post-text", scope=f"post-card[{i}]") or ""
+            )
+        return texts
+
+    def _post_card_texts_safe(self) -> list[str]:
+        try:
+            return self.post_card_texts()
+        except Exception:  # noqa: BLE001 — mid-render races are expected while polling
+            return []
+
+    def wait_for_post_cards(self, needles: list[str], timeout: float = 15.0) -> list[str]:
+        """Deadline-poll until the tab lists a card for every needle, in the
+        given order (convention 14); return the card texts last read."""
+        def in_order(texts: list[str]) -> bool:
+            at = 0
+            for needle in needles:
+                while at < len(texts) and needle not in texts[at]:
+                    at += 1
+                if at == len(texts):
+                    return False
+                at += 1
+            return True
+
+        deadline = time.time() + timeout
+        texts = self._post_card_texts_safe()
+        while not in_order(texts) and time.time() < deadline:
+            time.sleep(0.3)
+            texts = self._post_card_texts_safe()
+        return texts
+
+    def post_card_index(self, needle: str) -> int:
+        """The index of the tab's card whose body carries ``needle`` (-1 if none)."""
+        for i, text in enumerate(self._post_card_texts_safe()):
+            if needle in text:
+                return i
+        return -1
+
+    def post_card_badge(self, index: int) -> str:
+        """The ``gated-post-badge`` of the tab's index-th card (``""`` if none)."""
+        if self.driver.count("gated-post-badge", scope=f"post-card[{index}]") == 0:
+            return ""
+        return self.driver.get_text("gated-post-badge", scope=f"post-card[{index}]") or ""
 
     # --- offers section (another actor's profile, subscriber-browse) ---
     #
@@ -424,17 +597,43 @@ class ProfileActions:
                 tracked="",
             )
 
-    def navigate_to_actor(self, actor_id: str) -> None:
+    def navigate_to_actor(self, actor_id: str, home_nest_url: str | None = None) -> None:
         """Open another actor's profile via the nav-stack ``actor_id`` (the
         state-protocol equivalent of a contact-row tap; used where a client's e2e
         drives nav through the state protocol).
+
+        ``home_nest_url`` is the open target's optional routing hint — the
+        entry's additive field (``profile.md`` § Layout & flow → *Reaching
+        another actor's profile*); omitted, the entry carries none.
 
         Gate with :meth:`require_state_protocol_actor_nav_supported` first — an
         app that ignores the ``actor_id`` lands on the SELF profile and still
         satisfies the ``profile-view`` wait below.
         """
-        self.driver.set_state({"nav": {"stack": [{"view": "profile", "actor_id": actor_id}]}})
+        entry = {"view": "profile", "actor_id": actor_id}
+        if home_nest_url is not None:
+            entry["home_nest_url"] = home_nest_url
+        self.driver.set_state({"nav": {"stack": [entry]}})
         self.driver.wait_for("profile-view", timeout=10.0)
+
+    def _wait_for_profile_field(self, field: str, want, timeout: float):
+        state = self.driver.get_state(
+            "data.profile",
+            wait_for=lambda p: isinstance(p, dict) and p.get(field) == want,
+            timeout=timeout,
+        )
+        return (state or {}).get(field) if isinstance(state, dict) else None
+
+    def wait_for_viewed_actor(self, actor_id: str, timeout: float = 10.0) -> str | None:
+        """Poll the ``profile.actor_id`` state field until it names
+        ``actor_id``; returns the last value read (the mismatch, on timeout)."""
+        return self._wait_for_profile_field("actor_id", actor_id, timeout)
+
+    def wait_for_home_nest_url(self, want: str | None, timeout: float = 10.0) -> str | None:
+        """Poll the actor-home slot the follow and the knock read
+        (``profile.home_nest_url`` state field; ``None`` = this nest) until it
+        reads ``want``; returns the last value read (the mismatch, on timeout)."""
+        return self._wait_for_profile_field("home_nest_url", want, timeout)
 
     def has_offers_section(self) -> bool:
         return self.driver.is_visible("subscription-offers-section")

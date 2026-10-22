@@ -59,11 +59,22 @@ pub const GIFT_WRAP_INBOX_PER_RECIPIENT_PER_MINUTE: u32 = 30;
 /// surface. The per-IP governor and connection limit gate only the HTTP
 /// *upgrade*; inside an established socket the read loop would otherwise
 /// process unauthenticated queries as fast as they arrive. AUTH is exempt so
-/// a legitimate local user can always authenticate out of the budget; CLOSE
-/// is exempt because it only frees state. Generous for real use: an
-/// unauthenticated reader syncs an outbox with a handful of REQs, and
-/// gift-wrap senders are separately bounded per recipient.
+/// a legitimate local user can always authenticate out of the budget — it has
+/// its own, [`UNAUTHED_AUTH_PER_MINUTE`]; CLOSE is exempt because it only frees
+/// state. Generous for real use: an unauthenticated reader syncs an outbox with
+/// a handful of REQs, and gift-wrap senders are separately bounded per
+/// recipient.
 pub const UNAUTHED_MSGS_PER_MINUTE: u32 = 60;
+
+/// Max NIP-42 AUTH messages per minute processed on one connection, before or
+/// after it authenticates — the separate budget that keeps AUTH out of
+/// [`UNAUTHED_MSGS_PER_MINUTE`] without leaving it unmetered. Each AUTH costs a
+/// Schnorr verify and an account lookup, and until 2026-10-17 a connection could
+/// send them as fast as it liked (`deployment-threat-model.md` § Concern 1a,
+/// finding H2). A real client authenticates once, after a retry or two at most,
+/// so a query flood can never starve it of this budget and this budget never
+/// binds it. A hard-coded constant, never a configuration surface.
+pub const UNAUTHED_AUTH_PER_MINUTE: u32 = 6;
 
 /// Pre-query validation of a REQ/COUNT's filters: `Some(reason)` when the
 /// request must be refused (NIP-01 `CLOSED`) **before** touching the store —
@@ -786,6 +797,11 @@ async fn handle_relay_ws(state: Arc<AppState>, socket: WebSocket) {
     let unauthed_limiter = governor::RateLimiter::direct(governor::Quota::per_minute(
         std::num::NonZeroU32::new(UNAUTHED_MSGS_PER_MINUTE).unwrap(),
     ));
+    // AUTH's own budget (UNAUTHED_AUTH_PER_MINUTE): every AUTH buys a Schnorr
+    // verify, so it is metered on its own rather than exempt.
+    let auth_limiter = governor::RateLimiter::direct(governor::Quota::per_minute(
+        std::num::NonZeroU32::new(UNAUTHED_AUTH_PER_MINUTE).unwrap(),
+    ));
 
     // Subscribe to broadcast channel for live events
     let mut live_rx = state.nostr.relay_tx.subscribe();
@@ -877,6 +893,19 @@ async fn handle_relay_ws(state: Arc<AppState>, socket: WebSocket) {
                 }
 
                 match parsed {
+                    // AUTH past its own budget: refused loudly before the
+                    // Schnorr verify and the account lookup, NIP-01's
+                    // machine-readable `rate-limited:` prefix like the budget
+                    // above.
+                    Ok(ClientMessage::Auth(event)) if auth_limiter.check().is_err() => {
+                        let _ = ws_tx
+                            .send(Message::Text(
+                                reject_ok(&event.id, "rate-limited: too many AUTH attempts")
+                                    .to_json()
+                                    .into(),
+                            ))
+                            .await;
+                    }
                     Ok(ClientMessage::Auth(event)) => {
                         // The relay tag is matched by *host*, not by exact
                         // string: real clients echo the URL as they normalized

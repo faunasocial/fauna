@@ -75,6 +75,13 @@ struct MacHandleEntryView: View {
                 ErrorBanner(message: error)
             }
 
+            // The by-continuing notice only while Continue signs in — the
+            // shared `terms_notice_visible` (true iff `AlreadyOnNest`); the
+            // other nest outcomes lead on to a page carrying its own notice.
+            if snap.termsNoticeVisible {
+                TermsNotice()
+            }
+
             HStack {
                 Button(L.common.back) { vm.machine.back() }
                     .accessibilityIdentifier(Ids.handleEntryBackButton)

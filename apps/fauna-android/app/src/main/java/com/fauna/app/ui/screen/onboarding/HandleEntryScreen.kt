@@ -12,6 +12,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavController
+import com.fauna.app.BuildConfig
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
 import com.fauna.ffi.onboarding.HandleCheckOutcome
@@ -144,6 +145,10 @@ fun HandleEntryScreen(
 
         Spacer(Modifier.weight(1f))
 
+        // Only while Continue signs in — the shared snapshot's field, never
+        // re-derived here (terms-and-content-guidelines.md § The decisions, 3).
+        if (snap.termsNoticeVisible) TermsNotice()
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -191,9 +196,12 @@ internal fun routeForStep(step: OnboardingStep): String = when (step) {
     OnboardingStep.IDENTITY_IMPORT -> "onboarding/identity-import"
     OnboardingStep.HANDLE_ENTRY -> "onboarding/handle-entry"
     OnboardingStep.INVITE_REQUEST -> "onboarding/invite-request"
-    OnboardingStep.DNS_CONFIG -> "onboarding/dns-config"
-    OnboardingStep.VPS_CONFIG -> "onboarding/vps-config"
-    OnboardingStep.NEST_PROVISIONING -> "onboarding/nest-provisioning"
+    // Nest setup (DNS, VPS, provisioning) is not registered on the kids build, which
+    // only joins a guardian's nest by invite: the step keeps the person on handle entry.
+    OnboardingStep.DNS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/dns-config"
+    OnboardingStep.VPS_CONFIG -> if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/vps-config"
+    OnboardingStep.NEST_PROVISIONING ->
+        if (BuildConfig.KIDS) "onboarding/handle-entry" else "onboarding/nest-provisioning"
     OnboardingStep.DNS_POST_INSTRUCTIONS -> "onboarding/dns-post-instructions"
     OnboardingStep.CLAIM_CODE -> "onboarding/claim-code"
     OnboardingStep.DONE -> "onboarding/handle-entry"  // unreachable; caller routes via WizardOutcome

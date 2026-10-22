@@ -24,7 +24,8 @@ pub const AUTORESPOND_SUBJECT: &str = "Automatic reply";
 
 /// At most one reply per `(recipient, sender)` per this many hours — 7 days,
 /// the Sieve `vacation` default (RFC 5230 § 4.1). A constant, not a knob.
-pub const AUTORESPOND_INTERVAL_HOURS: u32 = 7 * 24;
+pub const AUTORESPOND_INTERVAL_HOURS: u32 =
+    fauna_protocol::email::DEFAULT_AUTO_REPLY_INTERVAL_HOURS;
 
 /// The facade's rule sorts before every other rule (evaluation is
 /// `priority ASC, id ASC`), so a user's terminal rule can never shadow it.

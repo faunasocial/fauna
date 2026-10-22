@@ -69,6 +69,12 @@ pub struct FfiContactItem {
     pub created_at: i64,
     pub handle: Option<String>,
     pub domain: Option<String>,
+    /// The peer's home nest URL — `Some` for a federated peer whose home the
+    /// nest knows, `None` otherwise; the contact row's tap carries it as the
+    /// Profile's home (contacts.md § State & data shape). Defaulted so the
+    /// bindings' existing labelled constructions keep compiling.
+    #[uniffi(default = None)]
+    pub home_nest_url: Option<String>,
 }
 
 impl From<ContactItem> for FfiContactItem {
@@ -80,6 +86,7 @@ impl From<ContactItem> for FfiContactItem {
             created_at: c.created_at,
             handle: c.handle,
             domain: c.domain,
+            home_nest_url: c.home_nest_url,
         }
     }
 }
@@ -298,13 +305,27 @@ mod tests {
             created_at: 1200,
             handle: None,
             domain: None,
-            extra: std::collections::BTreeMap::new(),
+            ..Default::default()
         };
         let ffi: FfiContactItem = proto.into();
         assert_eq!(ffi.peer_id, "11".repeat(32));
         assert_eq!(ffi.status, "accepted");
         assert_eq!(ffi.accepted_at, Some(1234));
         assert_eq!(ffi.created_at, 1200);
+        assert_eq!(ffi.home_nest_url, None);
+    }
+
+    #[test]
+    fn contact_item_maps_the_peers_home_nest_url() {
+        let proto = ContactItem {
+            peer_id: "33".repeat(32),
+            status: "pending".into(),
+            created_at: 1300,
+            home_nest_url: Some("https://peer.example".into()),
+            ..Default::default()
+        };
+        let ffi: FfiContactItem = proto.into();
+        assert_eq!(ffi.home_nest_url.as_deref(), Some("https://peer.example"));
     }
 
     #[test]
@@ -316,7 +337,7 @@ mod tests {
             created_at: 1100,
             handle: None,
             domain: None,
-            extra: std::collections::BTreeMap::new(),
+            ..Default::default()
         };
         let ffi: FfiContactItem = proto.into();
         assert!(ffi.accepted_at.is_none());

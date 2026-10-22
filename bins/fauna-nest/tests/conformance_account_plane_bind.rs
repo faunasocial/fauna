@@ -4415,7 +4415,10 @@ async fn store_a_record_of(d: &AccountStoreHandle, kind: TipSealedKind) -> bool 
         | K::ContactOverlay
         // Born on the plane with the third-party kinds (S8a), never a blob
         // field.
-        | K::KindManifest => return false,
+        | K::KindManifest
+        // Born on the plane with the remembered mail-import source, never a
+        // blob field.
+        | K::MailImportSource => return false,
         K::GroupShareCeremony => {
             d.merge_group_shares(fauna_core::group_ceremony::GroupShareConfig {
                 initiated: vec![],
@@ -4562,6 +4565,7 @@ async fn store_a_record_of(d: &AccountStoreHandle, kind: TipSealedKind) -> bool 
                 created_at: 1_700_000_000,
                 updated_at: Timestamp::default(),
                 wrapped_under: Some(MsekFingerprint::of(&msek)),
+                token_minted_at: None,
                 revoked_at_unix: None,
                 burned: None,
             })

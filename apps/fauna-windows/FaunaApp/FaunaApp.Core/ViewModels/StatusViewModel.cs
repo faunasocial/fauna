@@ -84,6 +84,12 @@ public partial class StatusViewModel : ViewModelBase
     // the page hands the read in; null (unit tests) leaves the MLS leg absent.
     private readonly Func<ulong>? _secureChannelCount;
 
+    /// <summary>The self host of the shared <c>feature-policy-editor</c> — each
+    /// Feature limits row's <c>feature-limits-own-summary</c> /
+    /// <c>-own-edit-button</c> and the open editor (self tier; <c>settings.md</c> §
+    /// Layout &amp; flow item 2b). A saved limit re-reads the transparency rows.</summary>
+    internal FeatureAuthoringHost FeatureLimits { get; }
+
     internal StatusViewModel(INestHttpClient nest, INestRpcClient rpc, IAgentStatusProbe agentStatus,
         Func<ulong>? secureChannelCount = null)
     {
@@ -91,6 +97,10 @@ public partial class StatusViewModel : ViewModelBase
         _rpc = rpc;
         _agentStatus = agentStatus;
         _secureChannelCount = secureChannelCount;
+        FeatureLimits = new FeatureAuthoringHost(
+            () => rpc.FeaturesAuthoredRowsAsync("self"),
+            feature => rpc.FeaturesOpenEditorAsync("self", feature),
+            onWritten: ReloadFeatureLimitsAsync);
     }
 
     [RelayCommand]
@@ -191,21 +201,37 @@ public partial class StatusViewModel : ViewModelBase
             // member whose capability token this nest build doesn't advertise
             // at all, matching every other app's render boundary (linux
             // `update_features`, tui `root.rs`).
-            try
-            {
-                var rows = await _rpc.FeaturesRowsAsync();
-                FeatureLimitRows = rows.Where(r => r.@affordance != "hidden").ToList();
-            }
-            catch
-            {
-                // Feature-limits read failed (e.g. a transport error) —
-                // leave FeatureLimitRows null so the section stays hidden rather
-                // than painting an empty/stale surface.
-            }
+            await ReloadFeatureLimitsAsync();
+
+            // The self host's authored read (each row's own-limit summary). A
+            // failure leaves the rows without their summary + Edit control rather
+            // than painting "No limit set" with no basis.
+            await FeatureLimits.RefreshAsync();
         }
         finally
         {
             IsLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Re-read the transparency rows (<c>FeatureLimitRows</c>). Also the self
+    /// host's <c>onWritten</c>: a saved own limit binds immediately, so the row
+    /// above must show the new bound without a re-navigation (§ Authoring
+    /// surfaces). A failed read keeps the last good rows.
+    /// </summary>
+    internal async Task ReloadFeatureLimitsAsync()
+    {
+        try
+        {
+            var rows = await _rpc.FeaturesRowsAsync();
+            FeatureLimitRows = rows.Where(r => r.@affordance != "hidden").ToList();
+        }
+        catch
+        {
+            // Feature-limits read failed (e.g. a transport error) —
+            // leave FeatureLimitRows as it was (null on the first load) so the
+            // section stays hidden rather than painting an empty/stale surface.
         }
     }
 

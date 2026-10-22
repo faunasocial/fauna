@@ -128,7 +128,7 @@ pub struct ChannelHistorySlice {
     /// re-home a restored **local** channel to a peer-declared URL. A slice
     /// written before this marker existed decodes `false` (`serde(default)`),
     /// restores as **absent** from the map, and remains fillable — the declared,
-    /// bounded residual (`federation.md` § Cross-nest → route (a)); the nest-side
+    /// bounded residual (`federation-shared-folders.md` § Cross-nest → route (a)); the nest-side
     /// verified-origin resolution bounds even that plant to the sender's own
     /// verified nest, and a peer that declares **no** origin at all now writes
     /// nothing rather than pinning the entry — the bound is
@@ -143,6 +143,14 @@ pub struct ChannelHistorySlice {
     /// doc for the full residual and why no migration is planned.
     #[serde(default)]
     pub home_same_nest: bool,
+    /// The identity (hex `nest_actor_id`) of the foreign home in
+    /// [`Self::home_nest_url`], as the writing device recorded it from its own
+    /// nest's Welcome stamp — persisted beside the URL so the room-attachment
+    /// read still graduates its pin after a relaunch (`transport-trust.md`
+    /// § The post arm). `None` with a same-nest channel, an unknown home, or a
+    /// Welcome that carried none; never `Some` without a `home_nest_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_nest_actor_id: Option<String>,
     /// Where each of this channel's attachments rests and which key opens it,
     /// keyed by `blob_hash` — the attachment store's FaunaMls coordinates for
     /// the messages above, so a device restored from this slice can fetch an
@@ -326,6 +334,7 @@ impl Default for ChannelHistorySlice {
             watermark: 0,
             home_nest_url: None,
             home_same_nest: false,
+            home_nest_actor_id: None,
             attachment_coordinates: BTreeMap::new(),
             anchor_grade_handles: Vec::new(),
             deleted_messages: BTreeSet::new(),
@@ -392,6 +401,7 @@ impl ThreadStore {
             // `channel_home` and stamps both routing fields after the snapshot.
             home_nest_url: None,
             home_same_nest: false,
+            home_nest_actor_id: None,
             // Nor where attachment bytes rest: the manager's attachment store
             // does, and `ConversationsManager::snapshot_channel_slice` fills this.
             attachment_coordinates: BTreeMap::new(),
@@ -470,6 +480,12 @@ pub fn merge_history_slices(
     // A recorded foreign home wins over an absent one in either direction (see
     // the field below); computed once so the same-nest marker can key off it.
     let home_nest_url = a.home_nest_url.clone().or_else(|| b.home_nest_url.clone());
+    // The identity rides with the URL it was recorded beside: the side whose
+    // home won names it, else the other side's for that same URL.
+    let home_nest_actor_id = [a, b]
+        .into_iter()
+        .filter(|side| side.home_nest_url.is_some() && side.home_nest_url == home_nest_url)
+        .find_map(|side| side.home_nest_actor_id.clone());
 
     // The reaction log: a per-message union (see the field below).
     let reaction_log = merge_reaction_state(lo, hi);
@@ -523,6 +539,7 @@ pub fn merge_history_slices(
         // only add information (an explicit `SameNest` the pre-guard must not
         // overwrite); an absent (unknown) marker loses to a known one.
         home_same_nest: home_nest_url.is_none() && (a.home_same_nest || b.home_same_nest),
+        home_nest_actor_id,
         // Union by handle, the higher-watermark side's entry winning a handle
         // both carry — the messages' own side-pick, so the merge stays
         // commutative. Two entries for one handle name the same bytes (the
@@ -681,9 +698,15 @@ mod tests {
             deleted: false,
             is_own,
             legal_takedown_ref: None,
+            admin_block_reason: None,
             labels: vec![],
             plane_ref: None,
             can_delete: false,
+            undelivered: false,
+            warmup_hold: None,
+            scan_result_lines: Vec::new(),
+            delivered_to: None,
+            withheld: None,
         }
     }
 

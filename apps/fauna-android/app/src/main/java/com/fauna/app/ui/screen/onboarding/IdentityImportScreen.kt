@@ -13,7 +13,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
-import com.fauna.app.core.ShellLog
 import com.fauna.app.core.OnboardingHost
 import com.fauna.ffi.parseIdentityImport
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -38,23 +37,20 @@ class IdentityImportVM @Inject constructor(
      * OnboardingError on bad-format secrets). Persistence routes through the
      * SHARED confirm-identity moment (`confirmIdentity`, both modes — per-actor
      * account + secret read-back on a first run, nothing written in append
-     * mode; see [IdentityCreatedVM.confirm]'s doc); its failure surfaces
-     * log-only, the cross-app convention for a failed store write.
+     * mode; see [IdentityCreatedVM.confirm]'s doc); its failure is loud — the
+     * machine's `identityCommitFailed` keeps the wizard on this page with the
+     * error on `error-message` (the machine's line, so the local [error] is
+     * cleared to let it show) and this returns false.
      */
-    fun confirm(secret: String): Boolean {
+    fun confirm(secret: String, persistFailedTemplate: String): Boolean {
         val validated = try {
             host.machine.confirmImportedIdentity(secret)
         } catch (e: Exception) {
             error = e.message ?: "Invalid secret key"
             return false
         }
-        try {
-            registry.confirmIdentity(validated, host.appendMode)
-        } catch (e: Exception) {
-            ShellLog.w("IdentityImportVM", "persist_confirmed_identity (registry commit + read-back) failed: ${e.message}")
-        }
         error = null
-        return true
+        return commitConfirmedIdentity(host, registry, validated, persistFailedTemplate, "IdentityImportVM")
     }
 
     /** QR payload is `(identity, handle)` per target doc §1.identity_import. */
@@ -72,7 +68,7 @@ class IdentityImportVM @Inject constructor(
      * payload carried (when any) via [setHandleFromQr] before validating+persisting the
      * secret. Returns true when the caller should advance to handle entry.
      */
-    fun importIdentity(input: String, invalidMessage: String): Boolean {
+    fun importIdentity(input: String, invalidMessage: String, persistFailedTemplate: String): Boolean {
         val parts = parseIdentityImport(input.trim())
         if (parts.isEmpty()) {
             error = invalidMessage
@@ -80,7 +76,7 @@ class IdentityImportVM @Inject constructor(
         }
         val handle = parts.getOrNull(1).orEmpty()
         if (handle.isNotEmpty()) setHandleFromQr(handle)
-        return confirm(parts[0])
+        return confirm(parts[0], persistFailedTemplate)
     }
 }
 
@@ -190,6 +186,7 @@ private fun ScanQrTab() {
 private fun PasteKeyTab(vm: IdentityImportVM, navController: NavController) {
     var secretInput by remember { mutableStateOf("") }
     val invalidMessage = stringResource(R.string.onboarding_identity_import_invalid_secret)
+    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_successor)
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -217,7 +214,7 @@ private fun PasteKeyTab(vm: IdentityImportVM, navController: NavController) {
             // accepts the union — a pasted `fauna://identity` URI or the iOS colon form
             // (priority #4) — so a URL-bearing handle still pre-fills.
             onClick = {
-                if (vm.importIdentity(secretInput, invalidMessage)) {
+                if (vm.importIdentity(secretInput, invalidMessage, persistFailedTemplate)) {
                     navController.navigate("onboarding/handle-entry")
                 }
             },

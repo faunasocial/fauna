@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { rejectionText } from '$lib/rejection';
-  import { identity } from '$lib/store';
-  import { copyAndConfirm } from '$lib/copy-confirm';
-  import { aftermathProgress, configStageSettled } from '$lib/succession-aftermath';
+  import { rejectionText } from '#lib/rejection';
+  import { identity } from '#lib/store';
+  import { copyAndConfirm } from '#lib/copy-confirm';
+  import { aftermathProgress, configStageSettled } from '#lib/succession-aftermath';
   import {
     accountsList,
     accountsSwitch,
@@ -10,20 +10,24 @@
     accountsSetRequireConfirm,
     accountsRemove,
     type AccountEntry,
-  } from '$lib/accounts';
-  import { base } from '$app/paths';
-  import { pushOptedIn, enablePush, disablePush, dropActorPushRow } from '$lib/push';
+  } from '#lib/accounts';
+  import { resolve } from '$app/paths';
+  import { pushOptedIn, enablePush, disablePush, dropActorPushRow } from '#lib/push';
   import {
     ensureWasm,
-    encodeEmailFilterRule,
+    encodeEmailFilterRuleInputs,
+    defaultFilterRuleInputs,
+    FILTER_RULE_KINDS,
+    type FilterRuleInputs,
+    parseFilterPriority,
     encodeEmailFilterActionInputs,
     defaultFilterActionInputs,
     FILTER_ACTION_KINDS,
     type FilterActionInputs,
-    describeEmailFilterRule,
+    describeEmailFilterRuleInputs,
     describeEmailFilterActionInputs,
     emailFilterActionLabel,
-    filterIsEditableFor,
+    filterIsEditable,
     spamThresholdBand,
     inboxModeValues,
     validateHandle,
@@ -33,11 +37,11 @@
     logClear,
     identityQrEncode,
     type LogEntry,
-  } from '$lib/wasm';
-  import { qrDisplayFromUri, type QrDisplay } from '$lib/qr-display';
-  import { featureAuthoredRows, featureEditorOpen } from '$lib/rpc';
-  import type { AuthoredRow, PolicyEditorHandle } from '$lib/wasm';
-  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
+  } from '#lib/wasm';
+  import { qrDisplayFromUri, type QrDisplay } from '#lib/qr-display';
+  import { featureAuthoredRows, featureEditorOpen } from '#lib/rpc';
+  import type { AuthoredRow, PolicyEditorHandle } from '#lib/wasm';
+  import FeaturePolicyEditor from '#lib/components/FeaturePolicyEditor.svelte';
   import {
     authHeaders,
     nodeUrl,
@@ -74,7 +78,7 @@
     type EmailFilter,
     type RecoveryStatus,
     type RecoveryMinted,
-  } from '$lib/api';
+  } from '#lib/api';
   import {
     getConversationsManager,
     scheduleMlsSave,
@@ -87,20 +91,21 @@
     type MemberReview,
     type MemberReviewRowText,
     type CrossGroupEviction,
-  } from '$lib/conversations';
-  import { ephemeralReviewPassActive, deferEphemeralReviewPass, successionSweepCopy, successionSweepRetry, dischargeOwedSuccessionSweep } from '$lib/rpc';
-  // The owed-kit slot's three faces. From `$lib/wasm`, not `$lib/rpc`, because
+  } from '#lib/conversations';
+  import { ephemeralReviewPassActive, deferEphemeralReviewPass, successionSweepCopy, successionSweepRetry, dischargeOwedSuccessionSweep } from '#lib/rpc';
+  // The owed-kit slot's three faces. From `#lib/wasm`, not `#lib/rpc`, because
   // they are pure sessionStorage reads that need no connected client — see
   // their doc comments for why the sibling succession reads beside them do.
-  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, successionSweepOwed } from '$lib/wasm';
-  import { dischargeOwedKit } from '$lib/succession-kit';
-  import { RecoveryErrorGuard } from '$lib/recovery-error-guard';
-  import { recoveryDeadGenerations, recoveryLetGo, recoveryLetGoConfirmWord } from '$lib/wasm';
-  import { keypackagesLow, statusTextRaw } from '$lib/wasm';
-  import { letGoAnswer, letGoArmed, letGoRenders, type DeadGenerations } from '$lib/recovery-let-go';
-  import { ownSupersessionHold } from '$lib/own-supersession-hold';
-  import { performHeldBackSupersession } from '$lib/post-auth-escalation';
-  import type { SweepCopy } from '$lib/rpc';
+  import { claimOwedSuccessionKit, rearmOwedSuccessionKit, successionSweepOwed } from '#lib/wasm';
+  import { dischargeOwedKit } from '#lib/succession-kit';
+  import { RecoveryErrorGuard } from '#lib/recovery-error-guard';
+  import { recoveryDeadGenerations, recoveryLetGo, recoveryLetGoConfirmWord } from '#lib/wasm';
+  import { buildVersion, keypackagesLow, statusTextRaw, termsUrl } from '#lib/wasm';
+  import { mutedKeywordLevel } from '#lib/wasm';
+  import { letGoAnswer, letGoArmed, letGoRenders, type DeadGenerations } from '#lib/recovery-let-go';
+  import { ownSupersessionHold } from '#lib/own-supersession-hold';
+  import { performHeldBackSupersession } from '#lib/post-auth-escalation';
+  import type { SweepCopy } from '#lib/rpc';
   import {
     keypackageCount as wsKeypackageCount,
     statusNode,
@@ -112,14 +117,16 @@
     mutedKeywordsList,
     mutedKeywordsAdd,
     mutedKeywordsRemove,
+    mutedKeywordsSetLevel,
+    type MutedKeywordLevel,
     type MutedWordsSnapshot,
     type ObligationAction,
-  } from '$lib/rpc';
+  } from '#lib/rpc';
   import {
     conversationsSnapshot,
     moderationLocalDetections,
     trainModerationCorrection,
-  } from '$lib/conversations';
+  } from '#lib/conversations';
   import {
     accountDisplayLabel,
     appealFormView,
@@ -135,44 +142,47 @@
     type ReportLedgerRow,
     type LocalDetection,
     type QueueRow,
-  } from '$lib/wasm';
-  import { resolveLocalized, resolveLocalizedNested, cellValueText } from '$lib/i18n/localized';
+  } from '#lib/wasm';
+  import { resolveLocalized, resolveLocalizedNested, cellValueText } from '#lib/i18n/localized';
   import { goto } from '$app/navigation';
-  import { page } from '$app/stores';
+  import { consumePendingAppeal } from '#lib/pending-appeal';
+  import { page } from '$app/state';
   import { onDestroy, onMount } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
+  import { onStoreChange } from '#lib/store-change';
   // The already-built conversations manager, for the succession ceremony's
   // post-succession group sweep. Never builds one — see `doSucceedIdentity`.
   import {
     conversationsManagerIfReady,
     removeAccountBlocked,
     signOutBlockedByAnotherTab,
-  } from '$lib/conversations';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import NestsSection from '$lib/components/NestsSection.svelte';
-  import RegionSettingsSection from '$lib/components/RegionSettingsSection.svelte';
-  import TaskDelegationSection from '$lib/components/TaskDelegationSection.svelte';
-  import ConnectedAppsSection from '$lib/components/ConnectedAppsSection.svelte';
-  import MailSettingsSection from '$lib/components/MailSettingsSection.svelte';
-  import MailAliasesSection from '$lib/components/MailAliasesSection.svelte';
-  import MailListsSection from '$lib/components/MailListsSection.svelte';
-  import MailSpamSection from '$lib/components/MailSpamSection.svelte';
-  import MailExportSection from '$lib/components/MailExportSection.svelte';
-  import MailImportSection from '$lib/components/MailImportSection.svelte';
-  import WebSettingsSection from '$lib/components/WebSettingsSection.svelte';
-  import SubscriptionsSection from '$lib/components/SubscriptionsSection.svelte';
-  import NostrSettingsSection from '$lib/components/NostrSettingsSection.svelte';
-  import AtprotoSettingsSection from '$lib/components/AtprotoSettingsSection.svelte';
-  import DevicesSection from '$lib/components/DevicesSection.svelte';
-  import SessionsSection from '$lib/components/SessionsSection.svelte';
-  import FoldersSection from '$lib/components/FoldersSection.svelte';
-  import PersonalizationSection from '$lib/components/PersonalizationSection.svelte';
-  import LabelerCatalogSection from '$lib/components/LabelerCatalogSection.svelte';
-  import LogsView from '$lib/components/LogsView.svelte';
-  import ContentLabelBadge from '$lib/components/ContentLabelBadge.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { byteSize } from '$lib/value-format';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/conversations';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import NestsSection from '#lib/components/NestsSection.svelte';
+  import RegionSettingsSection from '#lib/components/RegionSettingsSection.svelte';
+  import NestRulesSettingsSection from '#lib/components/NestRulesSettingsSection.svelte';
+  import TaskDelegationSection from '#lib/components/TaskDelegationSection.svelte';
+  import ConnectedAppsSection from '#lib/components/ConnectedAppsSection.svelte';
+  import MailSettingsSection from '#lib/components/MailSettingsSection.svelte';
+  import MailAliasesSection from '#lib/components/MailAliasesSection.svelte';
+  import MailListsSection from '#lib/components/MailListsSection.svelte';
+  import MailSpamSection from '#lib/components/MailSpamSection.svelte';
+  import MailExportSection from '#lib/components/MailExportSection.svelte';
+  import MailImportSection from '#lib/components/MailImportSection.svelte';
+  import WebSettingsSection from '#lib/components/WebSettingsSection.svelte';
+  import SubscriptionsSection from '#lib/components/SubscriptionsSection.svelte';
+  import NostrSettingsSection from '#lib/components/NostrSettingsSection.svelte';
+  import AtprotoSettingsSection from '#lib/components/AtprotoSettingsSection.svelte';
+  import DevicesSection from '#lib/components/DevicesSection.svelte';
+  import SessionsSection from '#lib/components/SessionsSection.svelte';
+  import FoldersSection from '#lib/components/FoldersSection.svelte';
+  import PersonalizationSection from '#lib/components/PersonalizationSection.svelte';
+  import LabelerCatalogSection from '#lib/components/LabelerCatalogSection.svelte';
+  import LogsView from '#lib/components/LogsView.svelte';
+  import CredentialStoreSection from '#lib/components/CredentialStoreSection.svelte';
+  import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { byteSize } from '#lib/value-format';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The Settings sidebar-swap shell (settings.md § Navigation model): the rail
   // (routes/settings/+layout.svelte) switches sub-pages by URL — /app/settings
@@ -187,7 +197,7 @@
   // e2e action layer's uniform two-element nav sends
   // {"view":"settings","id":"status"} for the Status sub-page across every
   // app), so web must land on the same content for either form.
-  let rawSubpage = $derived($page.params.subpage ?? '');
+  let rawSubpage = $derived(page.params.subpage ?? '');
   let current = $derived(rawSubpage === 'status' ? '' : rawSubpage);
 
   // The shared page-heading (settings.md § Sub-page heading conformance) must
@@ -325,7 +335,7 @@
       // `sessionStorage` bump precisely so it survives the document swap.
       //
       // Reached through the installed `window.__fauna_*` hook rather than a
-      // static `$lib/generation-e2e` import, so convention 15 holds in the
+      // static `#lib/generation-e2e` import, so convention 15 holds in the
       // strong form the other hooks have: a production build constant-folds
       // this branch away AND never bundles the module, instead of shipping it
       // as dead code behind a false flag. A dynamic import here would be wrong
@@ -338,7 +348,7 @@
       // Raw navigation (full document reload) — `base` ('/app') + the route, so
       // /app/feed. A hard reload re-runs the launch flow against the now-active
       // identity; a soft `goto` would not rebuild the wasm WS-RPC/MLS session.
-      window.location.assign(`${base}/feed`);
+      window.location.assign(resolve('/feed'));
     } catch (e) {
       accountsError = rejectionText(e, t.settings.switch_refused({ account: actorId }));
       switchingAccount = false;
@@ -420,7 +430,7 @@
   // drivable by e2e, unlike the old native confirm()). settings.md § User actions.
   let showSignOutConfirm = $state(false);
 
-  // `qrDisplayFromUri` / `QrDisplay` live in `$lib/qr-display` — shared with
+  // `qrDisplayFromUri` / `QrDisplay` live in `#lib/qr-display` — shared with
   // onboarding's recovery-kit offer.
 
   // Identity export (settings.md § Identity export). `null` = collapsed: the QR and its
@@ -454,7 +464,7 @@
   /** The section's one error surface (rule A: one `error-message` per page).
    *  ⚠ Never assign this directly — every writer, INCLUDING the parking write
    *  in `doSucceedIdentity`'s persist-failure arm, MUST go through
-   *  `recoveryErrorGuard` (`$lib/recovery-error-guard`): the guard drops
+   *  `recoveryErrorGuard` (`#lib/recovery-error-guard`): the guard drops
    *  every ordinary write while a stolen-ceremony persist-failure message is
    *  parked, because that message is the ONLY surviving copy of the
    *  successor's identity secret (`settings.md` § Recovery kit → *The
@@ -492,7 +502,7 @@
   // pass is started from the root layout at the actor settle after a
   // successor signs in, while this sub-page mounts later, when the user walks
   // to it. Page state would be null at exactly the moment the surface exists
-  // to be read. See `$lib/succession-aftermath`.
+  // to be read. See `#lib/succession-aftermath`.
   //
   // Two fields stay null on web today and say so where they are declared: the
   // `__mls` leg (a barrier inside the conversations replica's own load) and
@@ -640,7 +650,7 @@
   // from `account`, never on an unrelated identity-store write.
   //
   // The same edge performs a supersession escalation held back for this
-  // device's own stolen-identity ceremony (`$lib/own-supersession-hold`, the
+  // device's own stolen-identity ceremony (`#lib/own-supersession-hold`, the
   // same section's closing rule): the user has read the key, so the dead
   // session it was parked over may now go the ordinary way.
   let wasOnAccountSubpage = current === 'account';
@@ -773,7 +783,7 @@
     } catch (e) {
       console.warn('[succession] could not discharge the owed sweep:', e);
     }
-    // The order and the failure arm live in `$lib/succession-kit`, where they
+    // The order and the failure arm live in `#lib/succession-kit`, where they
     // are unit-tested; this supplies the effects. `recoveryBusy` is raised only
     // once the claim is won, so an ordinary sign-in never paints a spinner over
     // a section that is doing nothing.
@@ -944,7 +954,7 @@
     recoveryError = recoveryErrorGuard.write(recoveryError, '');
     recoveryBusy = true;
     // From here the ceremony owns any supersession this session meets: it is
-    // what supersedes the identity (`$lib/own-supersession-hold`).
+    // what supersedes the identity (`#lib/own-supersession-hold`).
     ownSupersessionHold.ceremonyStarted();
     try {
       // The LIVE manager only — `conversationsManagerIfReady()` never builds
@@ -1085,6 +1095,15 @@
       import.meta.env.VITE_GIT_SHA ?? null,
     );
   });
+  // General's About row (`settings-app-version`): the workspace version, from
+  // shared Rust. Seeded empty and read after `ensureWasm()`: a top-level
+  // `buildVersion()` can run before the wasm module is up — the race the
+  // inbox-mode labels above document (`route-wasm-init-contract.test.ts`).
+  let appVersion = $state('');
+  // The About row's terms link target — `fauna_core::TERMS_URL` through the
+  // shared wasm face (terms-and-content-guidelines.md § The decisions, 4 (b)).
+  let termsHref = $state('');
+  void ensureWasm().then(() => { appVersion = buildVersion(); termsHref = termsUrl(); });
   let keyPackageError = $state('');
   let publishingKeys = $state(false);
 
@@ -1123,11 +1142,14 @@
   });
   let showFilterForm = $state(false);
   let newFilterName = $state('');
-  let newFilterRuleType = $state('SenderIs');
-  let newFilterRuleValue = $state('');
-  // The whole action-inputs object (kind, reject reason, Forward destination
-  // and copy mode), so an edit writes back what the form has no field for.
+  // The whole condition- and action-inputs objects (`FilterRuleInputs` /
+  // `FilterActionInputs`), so an edit writes back every input it was saved with.
+  let newFilterRule = $state<FilterRuleInputs>(defaultFilterRuleInputs());
   let newFilterAction = $state<FilterActionInputs>(defaultFilterActionInputs());
+  // The rule's order (`filter-priority-input`, blank is 0) and its `continue`
+  // flag (`filter-continue-toggle`) — `email-filters.md` § Email filter rules.
+  let newFilterPriority = $state('');
+  let newFilterContinue = $state(false);
   let creatingFilter = $state(false);
   // The shared form above doubles as the edit form: null = create mode,
   // else the id of the filter being edited (create-filter's counterpart,
@@ -1178,6 +1200,16 @@
   function openAppeal(contentId: string): void {
     appealDraft = { contentId, reason: '' };
     appealStatus = '';
+  }
+
+  /** Open the appeal a withheld-message badge tap asked for, on the loaded row it names —
+   *  through the same `moderationRowIsAppealable` gate as the row's own button. A row the
+   *  queue no longer carries opens nothing. */
+  function openPendingAppeal(): void {
+    const contentId = consumePendingAppeal();
+    if (contentId === null) return;
+    const row = moderationRows.find((r) => r.content_id === contentId);
+    if (row && moderationRowIsAppealable(row)) openAppeal(contentId);
   }
 
   function cancelAppeal(): void {
@@ -1263,7 +1295,7 @@
   // ring, read synchronously. Reloaded each time the Logs sub-page is shown so
   // events captured since the last view appear; Clear wipes the in-memory ring
   // (the on-disk file is web-absent — § Persistence & privacy — Web). The boot
-  // install (routes/+layout.svelte) seeds a startup line, so it is never empty.
+  // install (lib/components/RootShell.svelte) seeds a startup line, so it is never empty.
   let logEntries = $state<LogEntry[]>([]);
 
   async function refreshLogs() {
@@ -1309,6 +1341,9 @@
   // the user added or removed a term is dropped, so it never paints an older
   // list over the gesture's own answer.
   let mutedWordsGesture = 0;
+  // A round trip in flight: the add/remove buttons and every level picker wait
+  // for the returned record (`ui/settings.md` § Muted words — the level picker).
+  let mutedWordsBusy = $state(false);
 
   async function loadMutedWords() {
     const id = $identity;
@@ -1320,7 +1355,7 @@
     }
   }
 
-  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // The open page's re-read on a store-change notice (`#lib/store-change`):
   // the same read, level-shaped — it replaces only the list (the draft in the
   // input is its own state), and a failed or overtaken re-read replaces nothing.
   async function rereadMutedWords() {
@@ -1343,11 +1378,14 @@
     const term = newMutedWord.trim();
     if (!id || !term) return;
     mutedWordsGesture += 1;
+    mutedWordsBusy = true;
     try {
       mutedWords = await mutedKeywordsAdd(id.secretHex, term);
       newMutedWord = '';
     } catch (e) {
       mutedWordsError = e instanceof Error ? e.message : String(e);
+    } finally {
+      mutedWordsBusy = false;
     }
   }
 
@@ -1355,10 +1393,29 @@
     const id = $identity;
     if (!id) return;
     mutedWordsGesture += 1;
+    mutedWordsBusy = true;
     try {
       mutedWords = await mutedKeywordsRemove(id.secretHex, term);
     } catch (e) {
       mutedWordsError = e instanceof Error ? e.message : String(e);
+    } finally {
+      mutedWordsBusy = false;
+    }
+  }
+
+  // The level picker: saved at once as a delta, the row repainted from the
+  // returned record (never from the picked value).
+  async function setMutedWordLevel(term: string, level: MutedKeywordLevel) {
+    const id = $identity;
+    if (!id) return;
+    mutedWordsGesture += 1;
+    mutedWordsBusy = true;
+    try {
+      mutedWords = await mutedKeywordsSetLevel(id.secretHex, term, level);
+    } catch (e) {
+      mutedWordsError = e instanceof Error ? e.message : String(e);
+    } finally {
+      mutedWordsBusy = false;
     }
   }
 
@@ -1546,7 +1603,7 @@
     }
   }
 
-  // The open page's re-read on a store-change notice (`$lib/store-change`):
+  // The open page's re-read on a store-change notice (`#lib/store-change`):
   // the review items rest in the account store, so another device's verdict
   // walking in drops its row here. The roster only — the ephemeral pass's
   // witness and the sweep lines describe this tab's own ceremony, not the
@@ -1603,7 +1660,9 @@
     }
 
     loading = false;
-    loadAll();
+    // A `dm-message-withheld-badge` tap routed here asked for one queue row's appeal: open
+    // the queue's own draft on it once the queue is read (`lib/pending-appeal.ts`).
+    void loadAll().then(openPendingAppeal);
 
     if ($identity?.secretHex) {
       isAdmin = await checkIsAdmin($identity.secretHex);
@@ -1812,16 +1871,56 @@
   function openCreateFilterForm() {
     editingFilterId = null;
     newFilterName = '';
-    newFilterRuleType = 'SenderIs';
-    newFilterRuleValue = '';
+    newFilterRule = defaultFilterRuleInputs();
     newFilterAction = defaultFilterActionInputs();
+    newFilterPriority = '';
+    newFilterContinue = false;
     emailFilterError = '';
     showFilterForm = true;
   }
 
+  // The form's condition, action and order through the shared encoders
+  // (`fauna_protocol::email`); each throws a plain string on a bad input.
+  function encodeFilterForm() {
+    return {
+      rule: encodeEmailFilterRuleInputs(newFilterRule),
+      action: encodeEmailFilterActionInputs(newFilterAction),
+      priority: parseFilterPriority(newFilterPriority),
+    };
+  }
+
+  // The dropdowns' option labels — the condition's own string, or (for the
+  // two two-input conditions, which have none) the label of their second
+  // input, and each action's list-row badge.
+  function ruleKindLabel(kind: string): string {
+    const e = t.status.email_filters;
+    const p = t.settings.privacy_page;
+    return ({
+      SenderIs: e.sender_is,
+      SenderDomain: e.sender_domain,
+      SubjectContains: e.subject_contains,
+      BodyContains: e.body_contains,
+      HeaderExists: e.header_exists,
+      HeaderContains: p.header_value,
+      SpamScoreAtLeast: p.spam_score,
+    } as Record<string, string>)[kind] ?? kind;
+  }
+  function actionKindLabel(kind: string): string {
+    const e = t.status.email_filters;
+    return ({
+      Allow: e.action_allow,
+      Discard: e.action_discard,
+      Reject: e.action_reject,
+      Forward: e.action_forward,
+      FileInto: e.action_file_into,
+      AddLabel: e.action_add_label,
+      AutoReply: e.action_auto_reply,
+    } as Record<string, string>)[kind] ?? kind;
+  }
+
   // Open the shared form pre-populated for an existing filter — a fresh
   // getEmailFilter (not the cached list row), so the edit reflects current
-  // server state. The row's own filter-edit button is gated filterIsEditableFor,
+  // server state. The row's own filter-edit button is gated filterIsEditable,
   // so decode failure here means the filter changed server-side between
   // list-load and the click (rare) rather than the common case.
   async function handleEditFilter(filterId: number) {
@@ -1831,7 +1930,7 @@
     try {
       await ensureWasm();
       const filter = await getEmailFilter(id.secretHex, filterId);
-      const rule = filter.rules[0] !== undefined ? describeEmailFilterRule(filter.rules[0] as any) : null;
+      const rule = filter.rules[0] !== undefined ? describeEmailFilterRuleInputs(filter.rules[0] as any) : null;
       const action = describeEmailFilterActionInputs(filter.action as any);
       if (!rule || !action) {
         emailFilterError = t.settings.errors.update_filter;
@@ -1839,9 +1938,10 @@
       }
       editingFilterId = filter.id;
       newFilterName = filter.name;
-      newFilterRuleType = rule[0];
-      newFilterRuleValue = rule[1];
+      newFilterRule = rule;
       newFilterAction = action;
+      newFilterPriority = String(filter.priority);
+      newFilterContinue = filter.continue_on_match;
       showFilterForm = true;
     } catch (e: any) {
       emailFilterError = (e instanceof Error ? e.message : String(e)) || t.settings.errors.update_filter;
@@ -1855,14 +1955,12 @@
     emailFilterError = '';
     try {
       await ensureWasm();
-      const rule = encodeEmailFilterRule(newFilterRuleType, newFilterRuleValue);
-      const action = encodeEmailFilterActionInputs(newFilterAction);
-      await updateEmailFilter(id.secretHex, editingFilterId, newFilterName, [rule], 'all', action, 0);
+      const { rule, action, priority } = encodeFilterForm();
+      await updateEmailFilter(id.secretHex, editingFilterId, newFilterName, [rule], 'all', action, priority, newFilterContinue);
       emailFilters = await listEmailFilters(id.secretHex);
       showFilterForm = false;
       editingFilterId = null;
       newFilterName = '';
-      newFilterRuleValue = '';
     } catch (e: any) {
       emailFilterError = (e instanceof Error ? e.message : String(e)) || t.settings.errors.update_filter;
     } finally {
@@ -1881,13 +1979,11 @@
       // that could drift from what the nest deserializes. Throws on an unknown
       // kind (caught below). An empty reject reason rides the canonical default.
       await ensureWasm();
-      const rule = encodeEmailFilterRule(newFilterRuleType, newFilterRuleValue);
-      const action = encodeEmailFilterActionInputs(newFilterAction);
-      await createEmailFilter(id.secretHex, newFilterName, [rule], 'all', action, 0);
+      const { rule, action, priority } = encodeFilterForm();
+      await createEmailFilter(id.secretHex, newFilterName, [rule], 'all', action, priority, newFilterContinue);
       emailFilters = await listEmailFilters(id.secretHex);
       showFilterForm = false;
       newFilterName = '';
-      newFilterRuleValue = '';
     } catch (e: any) {
       // The encoder throws a plain string on an unknown kind; createEmailFilter
       // rejects with an Error. Surface either.
@@ -2157,6 +2253,11 @@
        surface, after feature limits (linux's Status sub-page order). -->
   <RegionSettingsSection />
 
+  <!-- `settings-nest-rules-section` — the rules in force for the nest this
+       session reads through (nest-rules.md § Acceptance at joining, and a change
+       of rules → The rules surface), the region section's twin. -->
+  <NestRulesSettingsSection />
+
   {#if isAdmin}
     <section class="section">
       <h2>{t.status.admin_section.title}</h2>
@@ -2375,7 +2476,7 @@
        identity-stolen-button/-confirm-field are built too, just below: web drives
        the whole succession ceremony now.
        The seven aftermath-progress lines are no longer render-only —
-       run_aftermath_web files each leg's line into $lib/succession-aftermath as
+       run_aftermath_web files each leg's line into #lib/succession-aftermath as
        the pass runs (legs 2-7), so these read a live pass rather than a
        permanent null. A field that stays null is a leg web does not narrate yet;
        that store's per-leg doc comments say which and why. -->
@@ -2439,7 +2540,7 @@
         </button>
       {/if}
 
-      <!-- The seven aftermath-progress lines, in the order the legs run
+      <!-- The eight aftermath-progress lines, in the order the legs run
            (settings.md § Recovery kit — leg 7 renders ABOVE leg 6). Each
            renders iff its field is non-null, mirroring linux's
            set_optional_line/is_visible gating. -->
@@ -2456,6 +2557,11 @@
       {#if recoveryAftermath.grantRemint}
         <p class="muted" data-testid={IDS.RECOVERY_KIT_GRANT_REMINT_STATUS}>
           {resolveLocalized(recoveryAftermath.grantRemint)}
+        </p>
+      {/if}
+      {#if recoveryAftermath.periodRotation}
+        <p class="muted" data-testid={IDS.RECOVERY_KIT_PERIOD_ROTATION_STATUS}>
+          {resolveLocalized(recoveryAftermath.periodRotation)}
         </p>
       {/if}
       {#if recoveryAftermath.corpusReseal}
@@ -2649,6 +2755,11 @@
     </section>
   {/if}
 
+  <!-- The credential-store section (settings.md § Credential store), after
+       Recovery kit — the third root-secret-custody affordance. Renders only
+       while this browser's identity store is sealed and unlocked. -->
+  <CredentialStoreSection />
+
   <!-- Change-handle renders whenever logged in (matching linux's unconditional
        change-handle group); the form is reachable even before the handle cache
        hydrates, and the shared validator gives instant feedback. -->
@@ -2678,7 +2789,7 @@
   {#if $identity?.handle}
     <section class="section">
       <h2>{t.common.danger_zone}</h2>
-      <p class="muted small">{t.status.danger_zone.delete_hint}</p>
+      <p class="muted small" data-testid={IDS.SETTINGS_DELETE_CONFIRM_TEXT}>{t.settings.account_page.delete_confirm_text}</p>
       <input data-testid={IDS.SETTINGS_DELETE_CONFIRM_FIELD} type="text" class="input" placeholder={t.settings.delete_confirm_placeholder} bind:value={deleteConfirmText} />
       <button data-testid={IDS.SETTINGS_DELETE_ACCOUNT_BUTTON} class="btn danger" onclick={doDeleteAccount} disabled={deleteConfirmText !== 'DELETE'}>{t.settings.account_page.delete_account}</button>
       {#if deleteAccountError}<p class="error" data-testid={IDS.ERROR_MESSAGE}>{deleteAccountError}</p>{/if}
@@ -2849,12 +2960,22 @@
           {@const actionText = item.action !== null ? resolveLocalized(obligationActionLabel(item.action)) : undefined}
           <div class="flagged-item">
             <span class="flagged-id mono">{shortId(item.content_id)}</span>
-            <ContentLabelBadge label={item.category} confidence={pct} action={actionText} />
+            <ContentLabelBadge
+              label={item.category}
+              confidence={pct}
+              action={actionText}
+              issuer={item.issuer_nest ?? undefined}
+            />
             <span class="muted small">{pct} {t.moderation.confidence}</span>
             <!-- A local detection carries no `action` (the client classifies, it never
-                 enforces) → blank action column, never a fabricated label. -->
+                 enforces) → blank action column, never a fabricated label. A row
+                 another nest delivered names where the decision was made: the shared
+                 `issued_by` suffix on the action line (moderation.md § Legal takedown
+                 → *The author homed on another nest*). -->
             {#if actionText !== undefined}
-              <span class="muted small action-label">{actionText}</span>
+              <span class="muted small action-label"
+                >{item.issued_by ? `${actionText} · ${resolveLocalized(item.issued_by)}` : actionText}</span
+              >
             {/if}
             <button
               data-testid={IDS.TRAIN_CORRECTION_BUTTON}
@@ -2950,7 +3071,7 @@
         <div data-testid={IDS.FILTER_ITEM} class="filter-item">
           <span data-testid={IDS.FILTER_NAME} class="filter-name">{filter.name}</span>
           <span data-testid={IDS.FILTER_ACTION} class="badge">{resolveLocalized(emailFilterActionLabel(filter.action))}</span>
-          {#if filterIsEditableFor(filter, FILTER_ACTION_KINDS)}
+          {#if filterIsEditable(filter)}
             <button data-testid={IDS.FILTER_EDIT} class="btn small" onclick={() => handleEditFilter(filter.id)}>{t.common.edit}</button>
           {/if}
           <!-- The post-succession review mark, and its Keep half —
@@ -2971,19 +3092,23 @@
     {:else}
       <div class="filter-form">
         <input data-testid={IDS.FILTER_NAME_INPUT} type="text" placeholder={t.settings.filter_name} bind:value={newFilterName} class="input" />
-        <select data-testid={IDS.FILTER_RULE_TYPE} bind:value={newFilterRuleType} class="input">
-          <option value="SenderIs">{t.status.email_filters.sender_is}</option>
-          <option value="SenderDomain">{t.status.email_filters.sender_domain}</option>
-          <option value="SubjectContains">{t.status.email_filters.subject_contains}</option>
-          <option value="BodyContains">{t.status.email_filters.body_contains}</option>
-          <option value="HeaderExists">{t.status.email_filters.header_exists}</option>
+        <select data-testid={IDS.FILTER_RULE_TYPE} bind:value={newFilterRule.kind} class="input">
+          {#each FILTER_RULE_KINDS as kind}
+            <option value={kind}>{ruleKindLabel(kind)}</option>
+          {/each}
         </select>
-        <input data-testid={IDS.FILTER_RULE_VALUE} type="text" placeholder={t.common.value} bind:value={newFilterRuleValue} class="input" />
+        <input data-testid={IDS.FILTER_RULE_VALUE} type="text" placeholder={t.common.value} bind:value={newFilterRule.value} class="input" />
+        <!-- The two conditions with a second input (email-filters.md § Email
+             filter rules): a header's value beside its name, and a spam score. -->
+        {#if newFilterRule.kind === 'HeaderContains'}
+          <input data-testid={IDS.FILTER_RULE_HEADER_VALUE} type="text" placeholder={t.settings.privacy_page.header_value} bind:value={newFilterRule.header_value} class="input" />
+        {:else if newFilterRule.kind === 'SpamScoreAtLeast'}
+          <input data-testid={IDS.FILTER_RULE_SPAM_SCORE} type="text" inputmode="decimal" placeholder={t.settings.privacy_page.spam_score} bind:value={newFilterRule.spam_score} class="input" />
+        {/if}
         <select data-testid={IDS.FILTER_ACTION_SELECT} bind:value={newFilterAction.kind} class="input">
-          <option value="Allow">{t.status.email_filters.action_allow}</option>
-          <option value="Discard">{t.status.email_filters.action_discard}</option>
-          <option value="Reject">{t.status.email_filters.action_reject}</option>
-          <option value="Forward">{t.status.email_filters.action_forward}</option>
+          {#each FILTER_ACTION_KINDS as kind}
+            <option value={kind}>{actionKindLabel(kind)}</option>
+          {/each}
         </select>
         {#if newFilterAction.kind === 'Forward'}
           <input data-testid={IDS.FILTER_FORWARD_ADDRESS} type="text" placeholder={t.settings.privacy_page.forward_address} bind:value={newFilterAction.forward_address} class="input" />
@@ -2991,14 +3116,29 @@
             <input data-testid={IDS.FILTER_KEEP_LOCAL_COPY} data-checked={newFilterAction.keep_local_copy ? 'true' : 'false'} type="checkbox" bind:checked={newFilterAction.keep_local_copy} />
             {t.settings.privacy_page.keep_local_copy}
           </label>
+        {:else if newFilterAction.kind === 'FileInto'}
+          <input data-testid={IDS.FILTER_FILE_INTO_MAILBOX} type="text" placeholder={t.settings.privacy_page.file_into_mailbox} bind:value={newFilterAction.file_into_mailbox} class="input" />
+        {:else if newFilterAction.kind === 'AddLabel'}
+          <input data-testid={IDS.FILTER_ADD_LABEL} type="text" placeholder={t.settings.privacy_page.add_label} bind:value={newFilterAction.label} class="input" />
+        {:else if newFilterAction.kind === 'AutoReply'}
+          <input data-testid={IDS.FILTER_AUTO_REPLY_SUBJECT} type="text" placeholder={t.settings.privacy_page.auto_reply_subject} bind:value={newFilterAction.auto_reply_subject} class="input" />
+          <textarea data-testid={IDS.FILTER_AUTO_REPLY_BODY} placeholder={t.settings.privacy_page.auto_reply_body} bind:value={newFilterAction.auto_reply_body} class="input"></textarea>
+          <input data-testid={IDS.FILTER_AUTO_REPLY_INTERVAL_HOURS} type="text" inputmode="numeric" placeholder={t.settings.privacy_page.auto_reply_interval_hours} bind:value={newFilterAction.auto_reply_interval_hours} class="input" />
         {/if}
+        <!-- The rule's place in the order and its `continue` flag: rules run in
+             order, the first match wins unless it is marked to keep going. -->
+        <input data-testid={IDS.FILTER_PRIORITY_INPUT} type="text" inputmode="numeric" placeholder={t.settings.privacy_page.priority} bind:value={newFilterPriority} class="input" />
+        <label class="pref-label">
+          <input data-testid={IDS.FILTER_CONTINUE_TOGGLE} data-checked={newFilterContinue ? 'true' : 'false'} type="checkbox" bind:checked={newFilterContinue} />
+          {t.settings.privacy_page.continue_matching}
+        </label>
         <div class="filter-form-actions">
           {#if editingFilterId === null}
-            <button data-testid={IDS.CREATE_FILTER} class="btn primary" onclick={handleCreateFilter} disabled={creatingFilter || !newFilterName.trim() || !newFilterRuleValue.trim()}>
+            <button data-testid={IDS.CREATE_FILTER} class="btn primary" onclick={handleCreateFilter} disabled={creatingFilter || !newFilterName.trim()}>
               {creatingFilter ? t.common.creating : t.common.create}
             </button>
           {:else}
-            <button data-testid={IDS.SAVE_FILTER} class="btn primary" onclick={handleSaveFilter} disabled={creatingFilter || !newFilterName.trim() || !newFilterRuleValue.trim()}>
+            <button data-testid={IDS.SAVE_FILTER} class="btn primary" onclick={handleSaveFilter} disabled={creatingFilter || !newFilterName.trim()}>
               {t.common.save}
             </button>
           {/if}
@@ -3027,7 +3167,7 @@
         class="input"
         onkeydown={(e) => { if (e.key === 'Enter') addMutedWord(); }}
       />
-      <button data-testid={IDS.MUTED_WORD_ADD_BUTTON} class="btn primary" onclick={addMutedWord} disabled={!newMutedWord.trim()}>
+      <button data-testid={IDS.MUTED_WORD_ADD_BUTTON} class="btn primary" onclick={addMutedWord} disabled={!newMutedWord.trim() || mutedWordsBusy}>
         {t.muted_words.add}
       </button>
     </div>
@@ -3038,10 +3178,21 @@
              empty): a page still reading paints neither rows nor this. -->
         <p data-testid={IDS.MUTED_WORD_EMPTY} class="muted">{t.muted_words.empty}</p>
       {:else}
-        {#each mutedWords.keywords.map((k) => k.keyword) as word (word)}
+        {#each mutedWords.keywords as keyword (keyword.keyword)}
+          {@const word = keyword.keyword}
           <div data-testid={IDS.MUTED_WORD_ITEM} class="filter-item">
             <span data-testid={IDS.MUTED_WORD_TEXT} class="filter-name">{word}</span>
-            <button data-testid={IDS.MUTED_WORD_REMOVE_BUTTON} class="btn danger small" onclick={() => removeMutedWord(word)}>
+            <select
+              data-testid={IDS.MUTED_WORD_LEVEL_SELECT}
+              class="input"
+              value={mutedKeywordLevel(keyword.weight)}
+              disabled={mutedWordsBusy}
+              onchange={(e) => setMutedWordLevel(word, e.currentTarget.value as MutedKeywordLevel)}
+            >
+              <option value="hide">{t.muted_words.level_hide}</option>
+              <option value="show-less">{t.muted_words.level_show_less}</option>
+            </select>
+            <button data-testid={IDS.MUTED_WORD_REMOVE_BUTTON} class="btn danger small" disabled={mutedWordsBusy} onclick={() => removeMutedWord(word)}>
               {t.muted_words.remove}
             </button>
           </div>
@@ -3071,6 +3222,27 @@
       <span class="confirm-toggle-label">{t.settings.push_notifications.opt_in_label}</span>
     </label>
     {#if pushError}<p class="error" data-testid={IDS.PUSH_NOTIFICATIONS_ERROR}>{pushError}</p>{/if}
+  </section>
+
+  <!-- About — the product version this app is, the one every app and the nest
+       share (`product-version.md` § The model), read from shared Rust
+       (`buildVersion`), never a hand-kept copy. The update check beside it on
+       the desktop apps is absent by design on web. -->
+  <section class="section">
+    <h2>{t.settings.about}</h2>
+    <div class="field">
+      <span class="field-label">{t.settings.general_page.version}</span>
+      <span data-testid={IDS.SETTINGS_APP_VERSION}>{appVersion}</span>
+    </div>
+    <div class="field">
+      <a
+        class="btn link"
+        data-testid={IDS.SETTINGS_TERMS_LINK}
+        href={termsHref}
+        target="_blank"
+        rel="noopener noreferrer"
+      >{t.settings.terms_link}</a>
+    </div>
   </section>
 
 {:else if current === 'encryption'}

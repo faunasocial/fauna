@@ -89,6 +89,17 @@ def _smtp_banner(port: int, timeout: float = 10.0) -> str:
         return s.recv(256).decode("utf-8", "replace")
 
 
+def _mta_log_lines(name: str, n: int = 80) -> str:
+    """The MTA's lines of the container log. The image's services write to
+    stderr, so both streams are read; the MTA's are kept because the nest's
+    own lines would bury them."""
+    out = subprocess.run(
+        ["docker", "logs", name], capture_output=True, text=True, timeout=15)
+    lines = [ln for ln in (out.stdout + out.stderr).splitlines()
+             if "mta" in ln.lower()]
+    return "\n".join(lines[-n:])
+
+
 @pytest.mark.feature("admin-bridges")
 def test_admin_revoke_re_keys_mta_hands_free(serving_nest):
     """Revoke the MTA → archived keypair + fresh auto-approved identity +
@@ -112,11 +123,15 @@ def test_admin_revoke_re_keys_mta_hands_free(serving_nest):
         )
         assert reply.get("ok") is True
 
-        # NOTHING else — the whole loop is hands-free from here: the running
-        # bridge's next periodic RPC gets the central-gate permission_denied,
-        # the ReconnectingClient's standing probe (whoami also denied) turns it
-        # into the revoke shutdown (≤ ~30 s, the outbound-poll interval), s6
-        # restarts it, and the cold-boot re-key + re-bless loop runs.
+        # NOTHING else — the whole loop is hands-free from here: the revoke
+        # force-closes the running bridge's WS with 4401, its reconnect is
+        # refused at the upgrade (401 — the revoked standing), the
+        # pre-identity enrollment status answers `revoked`, the bridge shuts
+        # down, s6 restarts it, and the cold-boot re-key + re-bless +
+        # auto-approve loop runs (mail-bridge-lifecycle.md § Service-user
+        # re-keying steps 4–8). The reconnect dials the loopback nest's
+        # self-signed TLS, so it must ride the bridge's loopback client — a
+        # verifying one fails x509 before the 401 and the loop never starts.
 
         # ── The whole loop runs unattended; wait for the NEW approved MTA. ──
         deadline = time.monotonic() + 180
@@ -130,11 +145,8 @@ def test_admin_revoke_re_keys_mta_hands_free(serving_nest):
             time.sleep(2.0)
         assert new_mta is not None, (
             "a FRESH auto-approved MTA identity must appear after the revoke "
-            f"(old still sole approved after 180s). docker logs tail:\n"
-            + subprocess.run(
-                ["docker", "logs", "--tail", "80", name],
-                capture_output=True, text=True, timeout=15,
-            ).stdout
+            f"(old still sole approved after 180s). MTA lines of the docker log:\n"
+            + _mta_log_lines(name)
         )
         new_mta_pk = bytes(new_mta["ed25519_pubkey"])
 

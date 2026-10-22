@@ -1,5 +1,5 @@
 //! How a **refused scheduling change** reads on the Events page — the one
-//! projection all 7 apps render (`caldav-server.md` § Who may mutate an
+//! projection all 7 apps render (`inbound-scheduling-authority.md` § Who may mutate an
 //! existing event over the inbound rail → *Surfacing*; the page's presentation
 //! is `ui/events.md` § Refused scheduling changes).
 //!
@@ -29,7 +29,7 @@
 //! address the delivery door authenticated
 //! ([`RefusedSchedulingChange::sender_address`]), which names the row as it
 //! stands — never a handle this device resolved, and never the message's own
-//! `From:` (`caldav-server.md` § Who may mutate an existing event over the
+//! `From:` (`inbound-scheduling-authority.md` § Who may mutate an existing event over the
 //! inbound rail → *The mail rail*).
 
 use fauna_core::data::RefusedSchedulingChange;
@@ -102,7 +102,7 @@ fn attesting_nest(row: &RefusedSchedulingChange) -> Option<AttestingNest> {
 /// Whether the nest that attested a row's author may lend it `handle` — the
 /// name THIS device knows that actor id by.
 ///
-/// **The principal is the pair** (`caldav-server.md` § Who may mutate an
+/// **The principal is the pair** (`inbound-scheduling-authority.md` § Who may mutate an
 /// existing event over the inbound rail): a hostile nest can attest any actor
 /// id, but only for channels homed on itself. So a device-known handle names a
 /// foreign attestation only when that handle lives on the attesting nest's own
@@ -337,6 +337,27 @@ mod tests {
         // for by a foreign nest.
         let bare = refused_change_view(&foreign, Some("alice"));
         assert_eq!(bare.author.key, "events.refused_changes.sender_via_nest");
+    }
+
+    /// A non-blank home-nest URL with no host this build can read is still a
+    /// foreign attestation: it lends no handle, and the row names the nest by
+    /// the URL itself rather than passing it off as the recipient's own.
+    #[test]
+    fn a_foreign_nest_with_no_readable_host_lends_no_handle() {
+        let unreadable = RefusedSchedulingChange {
+            author_home_nest_url: "https://".into(),
+            ..row("REQUEST", "spoofed_organizer")
+        };
+
+        let view = refused_change_view(&unreadable, Some("alice@fauna.test"));
+        assert_eq!(
+            view.author.key, "events.refused_changes.sender_via_nest",
+            "an unreadable nest must not lend the colleague's handle"
+        );
+        assert_eq!(
+            view.author.args.get("nest").map(String::as_str),
+            Some("https://")
+        );
     }
 
     /// A refused mailed `REPLY` has no actor; the address the delivery door

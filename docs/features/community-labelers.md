@@ -68,7 +68,7 @@ Stamped 2026-10-09 at 0ddfae47dc.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+13d662f5 standalone |
+| web | ⚠ partial | 0.1.2-dev+13d662f5 standalone |
 | linux | ✅ full | 0.1.2-dev+13d662f5 standalone |
 | windows | ⚠ partial | 0.1.2-dev+13d662f5 standalone |
 | macos | ⚠ partial | 0.1.2-dev+13d662f5 standalone |
@@ -84,17 +84,17 @@ Stamped 2026-10-09 at 0ddfae47dc.
 | 2 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_labeler_drain_scores_mail_via_subscription_and_user_minted_capability` | nest (linux): passed, nest (windows): passed |
 | 2 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_labeler_obligation_seeded_and_drained_at_ingest_without_config_changed` | nest (linux): passed, nest (windows): passed |
 | 3 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_subscribing_a_mail_labeler_trusts_the_mail_service_with_it_and_unsubscribing_withdraws_it` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 4 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 5 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 4 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 5 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_the_mail_filtering_grant_lets_no_community_labeler_read_your_mail` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_your_nest_cannot_swap_another_module_in_for_the_labeler_you_subscribed_to` | nest (linux): passed |
-| 8 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 8 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_mail_labeler_that_cannot_run_says_so_and_a_keyless_labeler_trusts_nothing` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_a_new_labeler_version_rescores_the_mail_the_old_one_scored` | nest (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_labeler_feed_scoring.py::test_a_subscribed_labeler_over_public_posts_scores_the_posts_you_see` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_labeler_whose_signature_does_not_check_out_cannot_be_subscribed` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_labeler_catalog.py::test_a_labeler_whose_signature_does_not_check_out_cannot_be_subscribed` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 12 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_pruned_list_labeler` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 13 | app | `tests/e2e-unified/tests/test_trained_topics.py::test_trained_factor_publishes_as_a_scrubbed_text_model` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 14 | app | `tests/e2e-unified/tests/test_labeler_feed_scoring.py::test_a_labeler_your_app_is_too_old_to_read_leaves_your_feeds_as_they_were` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 14 | app | `tests/e2e-unified/tests/test_labeler_feed_scoring.py::test_a_labeler_your_app_is_too_old_to_read_leaves_your_feeds_as_they_were` | web (linux): error, linux (linux): passed, tui (linux): passed |
 | 15 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_a_text_model_subscription_leaves_the_nest_nothing_to_score_with` | nest (linux): passed |
 | 16 | nest | `tests/e2e-unified/tests/test_capability_labeler_drain.py::test_a_subscribed_labeler_that_wants_the_network_never_runs` | nest (linux): passed |
 | 17 | nest | `tests/e2e-unified/tests/api/test_labeler_subscriptions.py::test_a_curated_list_scores_the_posts_it_names_including_later_ones_until_unsubscribe` | nest (linux): passed |

@@ -97,24 +97,29 @@ impl DeviceConfig {
     /// read a per-user `%LOCALAPPDATA%`, so both must resolve the same path. See
     /// `apps/fauna-windows/installer/README.md` (*Data directories*) and
     /// `fauna-nest-service/src/config.rs`.
-    pub fn default_path() -> PathBuf {
+    ///
+    /// Off Windows a missing, empty or relative `HOME` (with no absolute
+    /// `XDG_CONFIG_HOME`) is REFUSED with `NO_HOME_REFUSAL`, never mapped to
+    /// `/tmp` (`account-data-plane.md` § The account store → Placement).
+    pub fn default_path() -> Result<PathBuf, DeviceConfigError> {
         #[cfg(windows)]
         {
-            programdata_base().join("Fauna").join("device.toml")
+            Ok(programdata_base().join("Fauna").join("device.toml"))
         }
         #[cfg(not(windows))]
         {
-            let base = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                format!("{home}/.config")
-            });
-            PathBuf::from(base).join("fauna").join("device.toml")
+            fauna_core::platform_ids::xdg_config_root(
+                std::env::var_os("XDG_CONFIG_HOME"),
+                std::env::var_os("HOME"),
+            )
+            .map(|root| root.join("fauna").join("device.toml"))
+            .ok_or(DeviceConfigError::NoHome)
         }
     }
 
     /// Load from the default path.
     pub fn load() -> Result<Self, DeviceConfigError> {
-        Self::load_from(&Self::default_path())
+        Self::load_from(&Self::default_path()?)
     }
 
     /// Load from a specific path.
@@ -128,7 +133,7 @@ impl DeviceConfig {
 
     /// Save to the default path (creates parent directories).
     pub fn save(&self) -> Result<(), DeviceConfigError> {
-        self.save_to(&Self::default_path())
+        self.save_to(&Self::default_path()?)
     }
 
     /// Save to a specific path (creates parent directories).
@@ -155,6 +160,8 @@ pub enum DeviceConfigError {
     Parse(PathBuf, Box<toml::de::Error>),
     #[error("failed to serialize config: {0}")]
     Serialize(Box<toml::ser::Error>),
+    #[error("{}", fauna_core::platform_ids::NO_HOME_REFUSAL)]
+    NoHome,
 }
 
 #[cfg(test)]
@@ -200,7 +207,7 @@ mod tests {
             .join("Fauna")
             .join("device.toml");
         assert_eq!(
-            DeviceConfig::default_path(),
+            DeviceConfig::default_path().unwrap(),
             expected,
             "device.toml must resolve under %PROGRAMDATA% to match the nest-service writer"
         );

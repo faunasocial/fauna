@@ -468,14 +468,13 @@ fn requester(
 /// `BackupService` over a tempdir backs the blob store.
 fn control_plane() -> (StdArc<RpcRouter>, StdArc<AppState>) {
     let db = StdArc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         StdArc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
     let state = StdArc::new(AppState {
         backup_service: Some(backup_svc),
-        ..AppState::for_test(db)
+        ..base
     });
     let router = StdArc::new({
         let mut b = RpcRouter::builder();
@@ -1029,6 +1028,7 @@ impl ConversationsRpc for LoopbackConvRpc {
                 seq: m.seq,
                 envelope: m.envelope,
                 legal_takedown_ref: m.legal_takedown.map(|t| t.reference),
+                admin_block_reason: m.admin_block.map(|b| b.reason.token().to_string()),
                 labels: m.labels,
                 author: m.author,
             })
@@ -1075,6 +1075,7 @@ impl ConversationsRpc for LoopbackConvRpc {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
         _b: Vec<u8>,
     ) -> Result<(), ConvRpcError> {
@@ -1084,6 +1085,7 @@ impl ConversationsRpc for LoopbackConvRpc {
         &self,
         _c: String,
         _h: Option<String>,
+        _i: Option<String>,
         _s: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError> {
         unreachable!("not used by the folder commit poll")
@@ -3215,9 +3217,8 @@ async fn served_control_plane() -> (StdArc<RpcRouter>, StdArc<AppState>, String)
     let authority = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
 
     let db = StdArc::new(CacheDb::open_in_memory().unwrap());
-    let blob_dir = tempfile::tempdir().unwrap();
-    let blob_path = blob_dir.path().to_path_buf();
-    std::mem::forget(blob_dir); // outlive the test; never deleted under test
+    let base = AppState::for_test(db.clone());
+    let blob_path = base.test_scratch_path("blobs");
     let backup_svc =
         StdArc::new(BackupService::new(db.clone(), None, false, blob_path, None).unwrap());
 
@@ -3250,7 +3251,7 @@ async fn served_control_plane() -> (StdArc<RpcRouter>, StdArc<AppState>, String)
         // ceiling is not what these tests exercise, so don't enforce it.
         enforce_tier_quotas: StdArc::new(tokio::sync::RwLock::new(false)),
         backup_service: Some(backup_svc),
-        ..AppState::for_test(db)
+        ..base
     });
 
     let app = fauna_nest::build_router(state.clone());

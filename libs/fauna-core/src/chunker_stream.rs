@@ -132,6 +132,19 @@ pub fn content_hash_streaming(path: &Path) -> Result<ContentHash> {
     Ok(ContentHash::from_digest_raw(blake3_of_reader(file)?))
 }
 
+/// The file hash of `chunks` reassembled in order — equal to
+/// `ContentHash::of_raw` over their concatenation — without allocating the
+/// whole file. A caller holding verified chunks in memory decides a whole-file
+/// mismatch from these bytes rather than from a temp file's read-back, so a
+/// local write fault can never pass for the writer's own mismatch.
+pub fn content_hash_of_chunks<C: AsRef<[u8]>>(chunks: &[C]) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    for chunk in chunks {
+        hasher.update(chunk.as_ref());
+    }
+    ContentHash::from_digest_raw(*hasher.finalize().as_bytes())
+}
+
 /// Stream `reader` through BLAKE3 and return the raw 32-byte digest — the read
 /// loop behind [`content_hash_streaming`], shared with callers that need the
 /// bare digest, their own error type, or a reader that is not a path.

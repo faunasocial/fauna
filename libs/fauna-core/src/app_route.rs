@@ -1,10 +1,11 @@
 //! The `fauna://` **in-app routes**: a URI an OS surface outside the app opens
-//! to bring the app forward on one of its own surfaces. Today's producer is the
-//! Windows Explorer **Share** leaf, which hands off to the app instead of the
-//! seedless sync agent minting a link (`docs/goal/behavior/share-links.md`
-//! § Windows Explorer's Share leaf; the mechanism is
-//! `docs/goal/architecture/apps/windows.md` § Shell Extension → *The Share
-//! hand-off*).
+//! to bring the app forward on one of its own surfaces. The share routes'
+//! producers are the file managers' **Share** leaves — Windows Explorer's and
+//! GNOME Files' — which hand off to the app instead of the seedless sync agent
+//! minting a link (`docs/goal/behavior/share-links.md` § Windows Explorer's
+//! Share leaf; the mechanisms are `docs/goal/architecture/apps/windows.md`
+//! § Shell Extension → *The Share hand-off* and
+//! `docs/goal/architecture/apps/linux.md` § The file manager's Share entry).
 //!
 //! One grammar, spelled here and nowhere else, so the shell's builder and the
 //! app's parser cannot drift:
@@ -60,6 +61,19 @@ const FOLDER_SHARE: &str = "folder-share";
 const CONSENT: &str = "consent";
 
 impl AppRoute {
+    /// The route a file manager's **Share** leaf opens for the sync agent's
+    /// `ShareFile` target — the one target→route mapping both leaves call
+    /// (Windows Explorer's, GNOME Files' through the agent's `--share-target`
+    /// mode): a file (`Some(path)`, forward-slash, folder-relative) opens its
+    /// share-link create surface, the set's own root (`None`) its member
+    /// sharing.
+    pub fn for_share_target(folder_id: i64, path: Option<String>) -> Self {
+        match path {
+            Some(path) => Self::ShareLink { folder_id, path },
+            None => Self::FolderShare { folder_id },
+        }
+    }
+
     /// The route's URI.
     pub fn to_uri(&self) -> String {
         match self {
@@ -210,6 +224,25 @@ fn percent_decode(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one target→route mapping both file-manager leaves call
+    /// (`apps/windows.md` § Shell Extension → *The Share hand-off*,
+    /// `apps/linux.md` § The file manager's Share entry): a file opens the
+    /// create surface, the set's own root its member sharing.
+    #[test]
+    fn share_target_maps_a_file_to_share_link_and_a_root_to_folder_share() {
+        assert_eq!(
+            AppRoute::for_share_target(42, Some("photos/a b.jpg".into())),
+            AppRoute::ShareLink {
+                folder_id: 42,
+                path: "photos/a b.jpg".into()
+            }
+        );
+        assert_eq!(
+            AppRoute::for_share_target(7, None),
+            AppRoute::FolderShare { folder_id: 7 }
+        );
+    }
 
     #[test]
     fn share_link_round_trips_an_awkward_path() {

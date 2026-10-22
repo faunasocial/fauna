@@ -322,3 +322,155 @@ async fn the_roster_loads_from_its_source_and_a_failed_read_keeps_the_last() {
     m.refresh_contact_roster().await;
     assert_eq!(picker(&m).suggestions.len(), 1, "the last roster stands");
 }
+
+// ---------------------------------------------------------------------------
+// The match gate (`conversations.md` § Recipient suggestions → *Matching*,
+// ruled 2026-10-15): an unproven correspondent seat is a spelling and nothing
+// more — it never completes on the overlay of the id it claims, and never
+// stands for that id in the dedupe.
+// ---------------------------------------------------------------------------
+
+/// The paint-gate attacker's seat: a nest serving `attacker.test` answered `bob`
+/// with the actor id the viewer calls "Mum".
+const MUM: u8 = 0x5a;
+
+fn nicknamed_mum(m: &ConversationsManager) {
+    m.contacts().replace(BTreeMap::from([(
+        hex::encode([MUM; 32]),
+        ContactOverlay {
+            nickname: Register {
+                stamp: Stamp::new(1, [1; 32]),
+                value: Some("Mum".into()),
+            },
+            ..Default::default()
+        },
+    )]));
+}
+
+fn manager_with_mls_mock() -> (Arc<ConversationsManager>, Arc<MockRailBackend>) {
+    let m = ConversationsManager::new();
+    let mock = Arc::new(MockRailBackend::new(Rail::FaunaMls));
+    m.register_backend(mock.clone());
+    (m, mock)
+}
+
+#[test]
+fn an_unproven_seat_does_not_complete_on_the_overlay_of_the_id_it_claims() {
+    let (m, _mock) = manager_with_mls_mock();
+    // No engine roster for the thread: the seat's id is the dialed nest's
+    // bare claim.
+    m.create_mls_group(vec![fauna("bob@attacker.test", MUM)]);
+    nicknamed_mum(&m);
+    m.start_new_conversation();
+
+    assert!(
+        typed(&m, "mum").suggestions.is_empty(),
+        "the nickname must not surface an unproven seat"
+    );
+    assert!(
+        typed(&m, &hex::encode([MUM; 32])[..8])
+            .suggestions
+            .is_empty(),
+        "nor the hex of the id it claims"
+    );
+    // Its own spelling still completes, under its public label.
+    let p = typed(&m, "bob@att");
+    assert_eq!(p.suggestions, vec![fauna("bob@attacker.test", MUM)]);
+    assert_eq!(p.suggestion_displays, vec!["bob@attacker.test".to_string()]);
+}
+
+#[test]
+fn a_proven_seat_completes_on_the_nickname() {
+    let (m, mock) = manager_with_mls_mock();
+    let t = m.create_mls_group(vec![fauna("mum@home.test", MUM)]);
+    mock.set_engine_roster(t, vec![ActorId([MUM; 32])]);
+    nicknamed_mum(&m);
+    m.start_new_conversation();
+
+    let p = typed(&m, "mum");
+    assert_eq!(p.suggestions, vec![fauna("mum@home.test", MUM)]);
+    assert_eq!(p.suggestion_displays, vec!["Mum".to_string()]);
+    assert_eq!(
+        typed(&m, &hex::encode([MUM; 32])[..8]).suggestions.len(),
+        1,
+        "a proven seat completes on its id's hex too"
+    );
+}
+
+#[test]
+fn a_newer_unproven_seat_never_shadows_an_older_proven_seat_of_the_same_id() {
+    let (m, mock) = manager_with_mls_mock();
+    let genuine = fauna("mum@home.test", MUM);
+    let forged = fauna("bob@attacker.test", MUM);
+    let proven_thread = m.create_mls_group(vec![genuine.clone()]);
+    mock.set_engine_roster(proven_thread.clone(), vec![ActorId([MUM; 32])]);
+    let forged_thread = m.create_mls_group(vec![forged.clone()]);
+    // The attacker, holding a substituted leaf, posts to make its thread the
+    // newest correspondent.
+    m.ingest_inbound_to_thread(
+        forged_thread.clone(),
+        RailInboundMessage {
+            rail: Rail::FaunaMls,
+            sender: fauna("", 0x77),
+            recipients: vec![],
+            subject: None,
+            body: "the forged thread is the busy one".into(),
+            body_format: BodyFormat::PlainText,
+            timestamp_ms: 9_000,
+            message_id: MessageId("m-forged-1".into()),
+            in_reply_to: None,
+            attachments: vec![],
+            badges: Default::default(),
+            legal_takedown_ref: None,
+            admin_block_reason: None,
+            plane_ref: None,
+        },
+    )
+    .unwrap();
+    // Fixture check: the forged thread must be scanned first, or this pin
+    // proves nothing.
+    let order: Vec<_> = m
+        .snapshot()
+        .threads
+        .into_iter()
+        .map(|s| s.thread_id)
+        .collect();
+    assert_eq!(
+        order.first(),
+        Some(&forged_thread),
+        "scan order was {order:?}"
+    );
+    nicknamed_mum(&m);
+    m.start_new_conversation();
+
+    // Both spellings match: the proven seat leads with the nickname painted,
+    // and the forged seat shows separately under its own spelling — it stands
+    // for its spelling, never for the id it claims.
+    let p = typed(&m, "test");
+    assert_eq!(p.suggestions, vec![genuine.clone(), forged.clone()]);
+    assert_eq!(
+        p.suggestion_displays,
+        vec!["Mum".to_string(), "bob@attacker.test".to_string()]
+    );
+    // Only the proven seat completes on the nickname.
+    let p = typed(&m, "mum");
+    assert_eq!(p.suggestions, vec![genuine]);
+    assert_eq!(p.suggestion_displays, vec!["Mum".to_string()]);
+}
+
+#[test]
+fn a_contact_and_a_proven_seat_of_its_id_are_one_row_whatever_their_spellings() {
+    let (m, mock) = manager_with_mls_mock();
+    // The seat wears another spelling than the roster's `mum@nest.test`; its
+    // id is proven, so the dedupe compares ids (two trusted-id rows) and the
+    // contact row, ranked first, stands for both.
+    let t = m.create_mls_group(vec![fauna("mum@other.test", MUM)]);
+    mock.set_engine_roster(t, vec![ActorId([MUM; 32])]);
+    m.apply_contact_roster(vec![roster_entry(MUM, "mum", "confirmed")]);
+    m.start_new_conversation();
+
+    assert_eq!(
+        typed(&m, "mum@").suggestions,
+        vec![fauna("mum@nest.test", MUM)]
+    );
+}

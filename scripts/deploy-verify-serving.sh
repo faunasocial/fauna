@@ -84,6 +84,13 @@ fetch_health() {
     curl -fsk --max-time 10 "$HEALTH_URL" 2>/dev/null || true
 }
 
+# Anything the box answered is untrusted data and the Actions log must never
+# carry it verbatim (deployment-threat-model.md § Concern 2, path 6): at most
+# 200 bytes, every non-printable (newline and non-ASCII included) shown as '?'.
+box_summary() {
+    printf '%s' "$1" | head -c 200 | LC_ALL=C tr -c '[:print:]' '?'
+}
+
 json_field() {
     printf '%s' "$1" | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
 }
@@ -136,7 +143,7 @@ while :; do
         break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-        fail "after ${TIMEOUT}s health is '$(printf '%s' "$body" | head -c 200)' (want status=ok commit=$EXPECT)"
+        fail "after ${TIMEOUT}s health is '$(box_summary "$body")' (want status=ok commit=$EXPECT)"
     fi
     sleep "$INTERVAL"
 done
@@ -147,7 +154,7 @@ while [ "$(date +%s)" -lt "$soak_end" ]; do
     sleep "$INTERVAL"
     body=$(fetch_health)
     if ! health_ok "$body"; then
-        fail "flap during soak: health is '$(printf '%s' "$body" | head -c 200)'"
+        fail "flap during soak: health is '$(box_summary "$body")'"
     fi
 done
 
@@ -194,7 +201,7 @@ if [ -n "$MAIL_PORTS" ]; then
         until probe_port "$host" "$port" "$out"; do
             if [ "$(date +%s)" -ge "$probe_deadline" ]; then
                 echo "[serving-gate] last probe output for $host:$port:"
-                head -c 500 "$out" || true
+                box_summary "$(cat "$out" 2>/dev/null || true)"; echo
                 fail "$host:$port not serving after ${PROBE_TIMEOUT}s"
             fi
             sleep "$INTERVAL"

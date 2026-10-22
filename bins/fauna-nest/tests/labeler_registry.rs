@@ -1116,9 +1116,10 @@ async fn republishing_a_list_as_a_text_model_withdraws_the_materialized_rows() {
 }
 
 /// The publish gate refuses a text-model artifact that is out of contract —
-/// including one below the **distinct-document prune floor**, which is the
-/// boundary that makes the anti-quote floor a property of the artifact rather
-/// than of the publishing client's diligence.
+/// including one that asserts a count below the **distinct-document prune
+/// floor**, and (at a known version) one whose n-gram is out of the 1-3-token
+/// shape. The gate checks what the artifact asserts; whether its counts are
+/// true rests with the publisher's scrub.
 #[tokio::test]
 async fn publish_rejects_a_text_model_artifact_out_of_contract() {
     let db = CacheDb::open_in_memory().unwrap();
@@ -1162,6 +1163,31 @@ async fn publish_rejects_a_text_model_artifact_out_of_contract() {
     .expect_err("a count above its doc counter must be rejected");
     assert_eq!(err.code, "fauna.protocol.malformed");
 
+    // An out-of-shape n-gram at a known version: a 14-token sentence carrying
+    // a passing count can never match a subscriber's tokenizer, so it scores
+    // nothing and is pure disclosure.
+    let sentence = raw_text_model_artifact_bytes(
+        3,
+        0,
+        &[(
+            "i am quietly planning to leave my job at the end of the month",
+            3,
+            0,
+        )],
+    );
+    let metadata = signed_labeler(&kp, 1, &sentence);
+    let err = publish_labeler_core(
+        &db,
+        &TEST_CALLER,
+        &metadata,
+        &sentence,
+        "post",
+        "text-model",
+    )
+    .await
+    .expect_err("a sentence-length n-gram must be rejected at the gate");
+    assert_eq!(err.code, "fauna.protocol.malformed");
+
     // Mail is per-recipient, never public — the List's rule, restated for v2.
     let ok = text_model_artifact_bytes(4, 2, &[("cat", 4, 1)]);
     let metadata = signed_labeler(&kp, 1, &ok);
@@ -1190,6 +1216,14 @@ async fn publish_accepts_a_future_tokenizer_version() {
         .await
         .expect("an older nest must accept a newer client's tokenizer version");
     assert_eq!(db.list_labelers().await.unwrap().len(), 1);
+
+    // Shape included: a 4-token n-gram is out of *this* build's contract, not
+    // necessarily out of version 99's.
+    let wide = raw_text_model_artifact_bytes_at_version(99, 4, 2, &[("a b c d", 4, 1)]);
+    let metadata = signed_labeler(&kp, 2, &wide);
+    publish_labeler_core(&db, &TEST_CALLER, &metadata, &wide, "post", "text-model")
+        .await
+        .expect("the n-gram shape is not checked at an unknown tokenizer version");
 }
 
 /// Over the 64 KiB text-model cap — the gate that bounds the worst-case bytes,

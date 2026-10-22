@@ -115,12 +115,17 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use fauna_core::crypto::{NestBackupKey, OwnerSealKey};
 use fauna_core::data::{ContentHash, parse_folder_backup_set_name};
-use fauna_core::file_download::{BlobFetcher, FileDownloadKeys, download_file_bytes_by_manifest};
-use fauna_protocol::segments::SegmentRef;
+use fauna_core::file_download::{
+    BlobFetcher, FileDownloadKeys, download_file_bytes_by_manifest,
+    download_file_to_path_by_manifest,
+};
 use fauna_sync_engine::segment_backup::{
-    LiveManifestMirror, SegmentFamily, parse_reserved_backup_set_name, verify_meta_against,
+    LiveManifestMirror, SegmentFamily, parse_landing_set_name,
 };
 
+use super::pair_stage::{
+    PairStage, VerifiedPair, copy_new_synced, pair_paths, prefix_of, verify_pair,
+};
 use super::recover::{DavFold, DavRecord, DavVersion, dav_journal, held_write_stands};
 use crate::db::nest_backup_keys::NEST_BACKUP_KEY_LEN;
 use crate::routes::AppState;
@@ -131,10 +136,14 @@ use crate::routes::AppState;
 /// transaction plus a segment-area write that only ever *adds* files.
 #[derive(Debug)]
 pub(crate) enum MaterializeRefusal {
-    /// The set name is neither axis: not one [`parse_reserved_backup_set_name`]
-    /// could have produced, and not one
-    /// [`parse_folder_backup_set_name`] could have either. A typo, or an
-    /// ordinary user folder name that happens to be in the caller's custody.
+    /// The set name is neither axis: not a landing name
+    /// [`parse_landing_set_name`] could have produced, and not one
+    /// [`parse_folder_backup_set_name`] could have either. A typo, an
+    /// ordinary user folder name that happens to be in the caller's custody,
+    /// or a `__<kind>` name — a destination's own copy, which is never flipped
+    /// in place on the nest that holds it (the delivered corpus lands under
+    /// `__landing/<kind>`, `reserved-folders.md` § __mail Sync → *The landing
+    /// set*).
     NotASegmentSet { set_name: String },
     /// A folder-axis set was named with neither a target address
     /// (`folder_name_hash`) nor a display name.
@@ -356,7 +365,7 @@ impl std::fmt::Display for MaterializeRefusal {
         match self {
             Self::NotASegmentSet { set_name } => write!(
                 f,
-                "`{set_name}` is not a reserved backup set name on either axis"
+                "`{set_name}` is neither a landing set nor a covered-folder backup set"
             ),
             Self::FolderNameRequired { set_name } => write!(
                 f,
@@ -499,10 +508,11 @@ pub(crate) struct MaterializeOutcome {
     /// The covered-folder axis's paging: custody rows still not live in the
     /// target after this page. `None` on the segment axis.
     pub remaining: Option<u64>,
+    /// The segment axis reclaimed its whole landing's set
+    /// ([`reclaim_landing_set`]). Always `false` on the covered-folder axis,
+    /// whose `__folder/<nest>/<id>` set is no landing set and is kept.
+    pub landing_reclaimed: bool,
 }
-
-/// One segment pair, opened and verified: `(segment_id, dat, meta)`.
-pub(super) type VerifiedPair = (u32, Vec<u8>, Vec<u8>);
 
 /// The custody one set holds, and the means to open it.
 struct CustodyReader<'a> {
@@ -512,7 +522,8 @@ struct CustodyReader<'a> {
 }
 
 impl CustodyReader<'_> {
-    /// Open one custody path, or `None` if the set holds no live custody there.
+    /// Open one custody path whole, or `None` if the set holds no live custody
+    /// there — for a mirror, which names segments and is never one.
     async fn open(&self, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
         match self.by_path.get(path).copied() {
             None => Ok(None),
@@ -520,6 +531,21 @@ impl CustodyReader<'_> {
                 .await
                 .map(Some)
                 .with_context(|| format!("open custody path `{path}`")),
+        }
+    }
+
+    /// Reassemble one custody path into a new file at `dest`, a window of
+    /// chunks at a time and verified against its content address; `false` if
+    /// the set holds no live custody there.
+    async fn open_to(&self, path: &str, dest: &std::path::Path) -> anyhow::Result<bool> {
+        match self.by_path.get(path).copied() {
+            None => Ok(false),
+            Some(h) => {
+                download_file_to_path_by_manifest(self.fetcher, self.keys, h, None, path, dest)
+                    .await
+                    .with_context(|| format!("open custody path `{path}`"))?;
+                Ok(true)
+            }
         }
     }
 
@@ -531,8 +557,9 @@ impl CustodyReader<'_> {
             .any(|path| *path == mirror || family.parse(scope_hex, path).is_some())
     }
 
-    /// Open one family's mirror and **every** pair it names, each verified
-    /// against that mirror, all in memory. Nothing is written.
+    /// Open one family's mirror and **every** pair it names, each staged into
+    /// `dir` and verified against that mirror. Nothing is written outside the
+    /// stage.
     ///
     /// One body for both families, so the journal is anchored exactly as the
     /// content is: the same missing-half refusal, the same unnamed-sidecar
@@ -547,6 +574,7 @@ impl CustodyReader<'_> {
         scope_hex: &str,
         kind: &str,
         set_name: &str,
+        dir: &std::path::Path,
     ) -> Result<(Vec<VerifiedPair>, u32), MaterializeRefusal> {
         let mirror_path = family.mirror_path(scope_hex, kind);
         let mirror_bytes = self
@@ -562,28 +590,31 @@ impl CustodyReader<'_> {
 
         let mut pairs: Vec<VerifiedPair> = Vec::with_capacity(mirror.live.len());
         for seg in &mirror.live {
-            let dat_path = family.dat_path(scope_hex, seg.segment_id);
-            let meta_path = family.meta_path(scope_hex, seg.segment_id);
-            let dat = self
-                .open(&dat_path)
-                .await
-                .map_err(MaterializeRefusal::Integrity)?
-                .ok_or_else(|| MaterializeRefusal::IncompleteSegment {
-                    segment_id: seg.segment_id,
-                    missing_path: dat_path,
-                })?;
-            let meta = self
-                .open(&meta_path)
-                .await
-                .map_err(MaterializeRefusal::Integrity)?
-                .ok_or_else(|| MaterializeRefusal::IncompleteSegment {
-                    segment_id: seg.segment_id,
-                    missing_path: meta_path,
-                })?;
-            verify_pair(&dat, &meta, seg).map_err(MaterializeRefusal::Integrity)?;
-            pairs.push((seg.segment_id, dat, meta));
+            let (dat, meta) = pair_paths(dir, seg.segment_id);
+            for (custody_path, staged) in [
+                (family.dat_path(scope_hex, seg.segment_id), &dat),
+                (family.meta_path(scope_hex, seg.segment_id), &meta),
+            ] {
+                if !self
+                    .open_to(&custody_path, staged)
+                    .await
+                    .map_err(MaterializeRefusal::Integrity)?
+                {
+                    return Err(MaterializeRefusal::IncompleteSegment {
+                        segment_id: seg.segment_id,
+                        missing_path: custody_path,
+                    });
+                }
+            }
+            let pair = VerifiedPair {
+                id: seg.segment_id,
+                dat,
+                meta,
+            };
+            verify_pair(&pair, seg).map_err(MaterializeRefusal::Integrity)?;
+            pairs.push(pair);
         }
-        pairs.sort_by_key(|(id, _, _)| *id);
+        pairs.sort_by_key(|p| p.id);
         Ok((pairs, mirror.next_segment_id_seen))
     }
 }
@@ -671,18 +702,20 @@ pub(crate) async fn materialize_segment_set(
     actor: &[u8; 32],
     set_name: &str,
 ) -> Result<MaterializeOutcome, MaterializeRefusal> {
-    let (kind, _named_scope) = parse_reserved_backup_set_name(set_name).ok_or_else(|| {
-        MaterializeRefusal::NotASegmentSet {
+    // The landing name, never the rail's (`reserved-folders.md` § __mail Sync →
+    // *The landing set*): a destination's own `__<kind>` copy is never flipped
+    // in place on the nest that holds it, so a `__<kind>` name is refused here.
+    let (kind, _named_scope) =
+        parse_landing_set_name(set_name).ok_or_else(|| MaterializeRefusal::NotASegmentSet {
             set_name: set_name.to_string(),
-        }
-    })?;
+        })?;
     // Every kind in the sweep that fills a backup corpus (`BACKED_UP_KINDS`)
-    // has an arm. `__conv/<hex>` parses — it is legitimately reserved-shaped —
+    // has an arm. `__landing/conv/<hex>` parses — it is legitimately landing-shaped —
     // but nothing has ever delivered one, so it is refused.
     let arm = KindArm::of(kind).ok_or(MaterializeRefusal::UnsupportedKind { kind })?;
     let segments = arm.segments(state);
     // The scope of every set an arm serves is the owner, and the owner is the
-    // authenticated connection's actor — never a wire parameter. (`__conv` is
+    // authenticated connection's actor — never a wire parameter. (conv is
     // the one kind whose name carries a scope; it is not reachable here.)
     let scope = *actor;
 
@@ -702,7 +735,7 @@ pub(crate) async fn materialize_segment_set(
     if let Some(marker) = &in_flight
         && marker.set_name != set_name
     {
-        // Unreachable: a kind has exactly one reserved set.
+        // Unreachable: a kind has exactly one landing set.
         return Err(MaterializeRefusal::Integrity(anyhow::anyhow!(
             "the in-flight `{kind}` flip is of `{}`, not `{set_name}`",
             marker.set_name
@@ -788,8 +821,20 @@ pub(crate) async fn materialize_segment_set(
     // The content's mirror names what to restore, and its absence is a torn
     // delivery (`NoManifestMirror`). The journal's is read the same way, with
     // one difference in what absence means.
+    let stage = PairStage::new(segments.data_dir())
+        .await
+        .map_err(MaterializeRefusal::Integrity)?;
+    let content_dir = stage
+        .named_dir("content")
+        .map_err(MaterializeRefusal::Integrity)?;
     let (pairs, ledger_generation) = custody
-        .verified_pairs(SegmentFamily::Content, &scope_hex, kind, set_name)
+        .verified_pairs(
+            SegmentFamily::Content,
+            &scope_hex,
+            kind,
+            set_name,
+            &content_dir,
+        )
         .await?;
 
     // A copy that holds content and no journal custody — or journal custody
@@ -805,8 +850,17 @@ pub(crate) async fn materialize_segment_set(
             // The journal's generation needs no floor: a journal never retires
             // a segment without minting a higher one, so its rebuilt counter
             // (the greatest adopted id plus one) already equals the ledger's.
+            let journal_dir = stage
+                .named_dir("journal")
+                .map_err(MaterializeRefusal::Integrity)?;
             let (journal_pairs, _journal_generation) = custody
-                .verified_pairs(SegmentFamily::Placement, &scope_hex, kind, set_name)
+                .verified_pairs(
+                    SegmentFamily::Placement,
+                    &scope_hex,
+                    kind,
+                    set_name,
+                    &journal_dir,
+                )
                 .await?;
             // Staged and judged: the empty-target rule's journal half, in full,
             // as a pre-flight — a lived-in account is refused HERE, with nothing
@@ -864,7 +918,7 @@ pub(crate) async fn materialize_segment_set(
     // so an arrival's segment can never take, or reclaim, an id the corpus
     // needs — mid-flip or not. Raising a counter writes nothing anything reads
     // as content, so a refusal below leaves only spent ids behind.
-    let ids: Vec<u32> = pairs.iter().map(|(id, _, _)| *id).collect();
+    let ids: Vec<u32> = pairs.iter().map(|p| p.id).collect();
     segments
         .floor_counter(&scope, ledger_generation)
         .await
@@ -1020,10 +1074,15 @@ pub(crate) async fn materialize_segment_set(
         .map_err(MaterializeRefusal::Integrity)?;
     let km = &manifest.kind_manifest;
     let mut resume: Vec<u32> = Vec::new();
-    for (segment_id, dat, meta) in &pairs {
+    for VerifiedPair {
+        id: segment_id,
+        dat,
+        meta,
+    } in &pairs
+    {
         let dat_path = root.join(format!("seg-{segment_id:08}.dat"));
         let meta_path = root.join(format!("seg-{segment_id:08}.meta"));
-        let halves = [(&meta_path, meta.as_slice()), (&dat_path, dat.as_slice())];
+        let halves = [(&meta_path, meta.as_path()), (&dat_path, dat.as_path())];
         let occupancy: Vec<Occupant> = halves
             .iter()
             .map(|(path, intended)| classify_occupant(path, intended))
@@ -1064,7 +1123,12 @@ pub(crate) async fn materialize_segment_set(
             }
         }
     }
-    for (segment_id, dat, meta) in &pairs {
+    for VerifiedPair {
+        id: segment_id,
+        dat,
+        meta,
+    } in &pairs
+    {
         let dat_path = root.join(format!("seg-{segment_id:08}.dat"));
         let meta_path = root.join(format!("seg-{segment_id:08}.meta"));
         // A resumed pair is already on disk and already proven byte-identical to
@@ -1191,12 +1255,83 @@ pub(crate) async fn materialize_segment_set(
         (n.max(0) as u64, placements)
     };
 
+    // The landing is whole — nothing remains and the marker is retired — so the
+    // landing set is scaffolding derived twice over: reclaim it in this call.
+    let landing_reclaimed = reclaim_landing_set(state, &scope, set_name).await;
+
     Ok(MaterializeOutcome {
         segments: ids,
         records,
         placements,
         remaining: None,
+        landing_reclaimed,
     })
+}
+
+/// Reclaim a **whole** landing's set — the lifecycle half of
+/// `reserved-folders.md` § __mail Sync → *The landing set*.
+///
+/// Called by both segment-axis verbs once the landing is whole (materialize:
+/// the corpus live and the in-flight marker retired; recover: every candidate
+/// landed), never on a torn or refused one, whose set is the retry's input. A
+/// whole landing verified every pair before its first write and the custodian
+/// still holds its own copy, so the set is derived twice over; left standing
+/// it is a second copy charged to the owner's quota that no app lists.
+///
+/// The path is the owner's own set-delete (`fauna.folders.delete`): the same
+/// op lock, then [`crate::db::CacheDb::delete_folder_by_id`] — the folder row
+/// deleted, its custody rows dropped with the quota credited back; the chunks
+/// reclaim through the ordinary GC walk and its grace window. Nothing here
+/// touches the blob store.
+///
+/// Returns whether the set was reclaimed. A failure is logged, never raised:
+/// the landing itself has already committed, and refusing the call would tell
+/// the owner a ceremony that succeeded had failed — the reply's `false` is the
+/// honest report.
+pub(super) async fn reclaim_landing_set(
+    state: &Arc<AppState>,
+    actor: &[u8; 32],
+    set_name: &str,
+) -> bool {
+    // Only a landing set, re-derived — never the rail, never a destination's
+    // own `__<kind>` copy.
+    if parse_landing_set_name(set_name).is_none() {
+        return false;
+    }
+    let folder = match state.db.get_folder_for_actor(set_name, actor).await {
+        Ok(Some(folder)) if folder.custody_copy => folder,
+        Ok(_) => return false,
+        Err(e) => {
+            tracing::warn!("landing reclaim: resolve {set_name}: {e:#}");
+            return false;
+        }
+    };
+    match state
+        .db
+        .try_acquire_op_lock("delete", folder.id, "landing-reclaim")
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("landing reclaim: {set_name} is locked by another operation");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!("landing reclaim: lock {set_name}: {e:#}");
+            return false;
+        }
+    }
+    let result = state.db.delete_folder_by_id(folder.id).await;
+    if let Err(e) = state.db.release_op_lock("delete", folder.id).await {
+        tracing::error!("release op lock error: {e}");
+    }
+    match result {
+        Ok(reclaimed) => reclaimed,
+        Err(e) => {
+            tracing::warn!("landing reclaim: delete {set_name}: {e:#}");
+            false
+        }
+    }
 }
 
 /// What differs between the backed-up kinds materialize reconstitutes — and
@@ -1500,7 +1635,12 @@ async fn stage_journal<K: crate::segments::AdoptableJournal>(
     judge: bool,
 ) -> Result<crate::segments::StagedJournal<K>, MaterializeRefusal> {
     let staged = journal
-        .stage_corpus(scope, pairs)
+        .stage_corpus(
+            scope,
+            pairs
+                .iter()
+                .map(|p| (p.id, p.dat.as_path(), p.meta.as_path())),
+        )
         .await
         .context("stage the corpus's placement journal")
         .map_err(MaterializeRefusal::Integrity)?;
@@ -3042,6 +3182,9 @@ pub(crate) async fn materialize_folder_set(
                 // A folder has no placement layer.
                 placements: None,
                 remaining: Some(remaining),
+                // A `__folder/<nest>/<id>` set is no landing set: its name is
+                // a destination's live custody too, so it is kept.
+                landing_reclaimed: false,
             })
         }
         Ok(crate::db::sync_storage::FolderMaterializeOutcome::Missing) => {
@@ -3093,28 +3236,27 @@ enum Occupant {
     Foreign,
 }
 
-/// Classify one destination path against the half intended for it.
+/// Classify one destination path against the staged half intended for it,
+/// compared a buffer at a time.
 ///
-/// Reading the file back is affordable exactly here: the caller already holds
-/// every pair in memory, because it verifies them all before writing any. An
+/// Reading the file back is affordable exactly here: the caller has every pair
+/// staged, because it verifies them all before writing any. An
 /// unreadable-but-present file is `Foreign` — refusing on a path we cannot
 /// inspect is the safe direction.
-fn classify_occupant(path: &std::path::Path, intended: &[u8]) -> Occupant {
-    let found = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+fn classify_occupant(path: &std::path::Path, intended: &std::path::Path) -> Occupant {
+    match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Occupant::Absent,
         Err(_) => return Occupant::Foreign,
-    };
-    if found.len() <= intended.len() && intended[..found.len()] == found[..] {
-        Occupant::OurWrite {
-            full: found.len() == intended.len(),
-        }
-    } else {
-        Occupant::Foreign
+        Ok(_) => {}
+    }
+    match prefix_of(path, intended) {
+        Ok(Some(full)) => Occupant::OurWrite { full },
+        Ok(None) | Err(_) => Occupant::Foreign,
     }
 }
 
-/// One half of a pair onto disk, **create-new** and durable.
+/// One staged half onto disk, **create-new** and durable, copied a buffer at a
+/// time.
 ///
 /// Not `crate::storage::atomic_write`: that is write-tmp + rename, and a rename
 /// *replaces* whatever sits at the destination. This is the one writer of the
@@ -3135,16 +3277,10 @@ fn classify_occupant(path: &std::path::Path, intended: &[u8]) -> Occupant {
 fn write_half(
     segment_id: u32,
     path: &std::path::Path,
-    bytes: &[u8],
+    staged: &std::path::Path,
 ) -> Result<(), MaterializeRefusal> {
-    use std::io::Write as _;
-
-    let mut f = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(f) => f,
+    match copy_new_synced(staged, path) {
+        Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(MaterializeRefusal::SegmentPathOccupied {
                 segment_id,
@@ -3153,17 +3289,10 @@ fn write_half(
         }
         Err(e) => {
             return Err(MaterializeRefusal::Integrity(
-                anyhow::Error::new(e).context(format!(
-                    "create {} for the materialized half",
-                    path.display()
-                )),
+                anyhow::Error::new(e).context(format!("write {}", path.display())),
             ));
         }
-    };
-    f.write_all(bytes)
-        .and_then(|()| f.sync_all())
-        .with_context(|| format!("write {}", path.display()))
-        .map_err(MaterializeRefusal::Integrity)?;
+    }
     // The parent-dir fsync the shared atomic primitive would have done: without
     // it a power loss can lose the directory entry for a file that was itself
     // synced. Unix only — `MoveFileEx`-backed Windows semantics do not need it,
@@ -3178,57 +3307,4 @@ fn write_half(
             .map_err(MaterializeRefusal::Integrity)?;
     }
     Ok(())
-}
-
-/// Both halves against what the source's own listing advertised — each
-/// unconditionally: the mirror's refs carry the sidecar hash as a required
-/// field, so the mirror is always the sidecar's anchor
-/// (`docs/goal/architecture/segment-backup-protocol.md` § *A sidecar in the
-/// corpus is anchored, or it is not restored*).
-///
-/// Nothing weaker stands in for the `.meta` check, and the fallback this comment
-/// once named does not exist: `FramedSegment::open` asserts only that the block
-/// count equals `record_order.len()` and that `floor_metadata.len()` matches it
-/// — two lengths, nothing about content. Two sidecars of the same owner with
-/// equal record counts are interchangeable to it, and the convergent seal
-/// carries no path or scope binding to tell them apart either.
-pub(super) fn verify_pair(dat: &[u8], meta: &[u8], advertised: &SegmentRef) -> anyhow::Result<()> {
-    let got = hex::encode(blake3::hash(dat).as_bytes());
-    anyhow::ensure!(
-        got == advertised.blake3_hex,
-        "segment {}: the custody `.dat` opens to bytes hashing {got}, but the source's own \
-         mirror advertised {}",
-        advertised.segment_id,
-        advertised.blake3_hex,
-    );
-    verify_meta_against(meta, advertised)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A ref as the corpus's own `manifest.<kind>` mirror carries it.
-    fn advertised(dat: &[u8], meta: &[u8]) -> SegmentRef {
-        SegmentRef {
-            segment_id: 7,
-            blake3_hex: hex::encode(blake3::hash(dat).as_bytes()),
-            meta_blake3_hex: hex::encode(blake3::hash(meta).as_bytes()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn an_anchored_pair_that_matches_the_mirror_verifies() {
-        let (dat, meta) = (b"the dat".as_slice(), b"the meta".as_slice());
-        verify_pair(dat, meta, &advertised(dat, meta)).expect("both halves match");
-    }
-
-    #[test]
-    fn an_anchored_sidecar_that_contradicts_the_mirror_is_refused() {
-        let (dat, meta) = (b"the dat".as_slice(), b"the meta".as_slice());
-        let err = verify_pair(dat, b"another segment's sidecar", &advertised(dat, meta))
-            .expect_err("the mirror's own hash catches the substitution");
-        assert!(format!("{err:#}").contains(".meta"), "{err:#}");
-    }
 }

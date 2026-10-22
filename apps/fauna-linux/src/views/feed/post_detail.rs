@@ -18,6 +18,23 @@ use super::post_list::{
 use crate::i18n::strings::{common, feed};
 use crate::views::document;
 
+/// Esc on an open post detail goes back to the list, the way the Back button
+/// does — tui's Esc arm (ui.yaml gives `post_detail` no dismiss element, so
+/// the key is the only gesture an automation drive can press over the painted
+/// dialog; a user gets the keyboard route too).
+pub(crate) fn bind_escape_back(detail: &impl IsA<gtk::Widget>, on_back: Rc<dyn Fn()>) {
+    let shortcuts = gtk::ShortcutController::new();
+    shortcuts.set_scope(gtk::ShortcutScope::Local);
+    shortcuts.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("Escape"),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            on_back();
+            gtk::glib::Propagation::Stop
+        })),
+    ));
+    detail.add_controller(shortcuts);
+}
+
 /// Build a detail view for a single feed post (a snapshot [`PostSummary`]).
 ///
 /// Shows full content (body + folded quoted-post / media embeds, walked from
@@ -37,10 +54,15 @@ pub fn build_post_detail<F: Fn() + 'static>(
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&gtk::Label::new(Some(common::FEED))));
 
+    let on_back: Rc<dyn Fn()> = Rc::new(on_back);
     let back_btn = gtk::Button::from_icon_name("go-previous-symbolic");
     back_btn.set_tooltip_text(Some(crate::i18n::strings::common::BACK));
-    back_btn.connect_clicked(move |_| on_back());
+    {
+        let on_back = Rc::clone(&on_back);
+        back_btn.connect_clicked(move |_| on_back());
+    }
     header.pack_start(&back_btn);
+    bind_escape_back(&outer, on_back);
 
     outer.append(&header);
 
@@ -80,13 +102,51 @@ pub fn build_post_detail<F: Fn() + 'static>(
         return outer;
     }
 
+    // ── Admin-blocked post (moderation.md § Admin block of a reported item):
+    //    for any viewer but its author the nest withheld the body, so the
+    //    shared notice stands in the body area exactly as the tombstone above
+    //    does; the author's own read keeps the body, and the notice paints
+    //    beside it (below). ───────────────────────────────────────────────
+    if let Some(reason) = post.admin_block_reason.as_deref()
+        && post.body.is_empty()
+    {
+        let notice = gtk::Label::new(Some(&crate::report::admin_block_notice(reason)));
+        notice.add_css_class("dim-label");
+        notice.set_halign(gtk::Align::Start);
+        notice.set_wrap(true);
+        notice.set_xalign(0.0);
+        crate::testid::set_test_id(&notice, ids::FEED_POST_DETAIL_BODY);
+        content.append(&notice);
+
+        let scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .vexpand(true)
+            .child(&content)
+            .build();
+        outer.append(&scrolled);
+        return outer;
+    }
+
     // ── Author ───────────────────────────────────────────────────────────
     let author_label = gtk::Label::new(Some(&super::post_list::author_label_text(post)));
     author_label.set_halign(gtk::Align::Start);
     author_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     author_label.add_css_class("heading");
     crate::testid::set_test_id(&author_label, ids::FEED_POST_DETAIL_AUTHOR);
+    super::post_list::wire_author_door(&author_label, client, post);
     content.append(&author_label);
+
+    // The author's own read of an admin-blocked post keeps the body; the shared
+    // notice paints beside it. No dedicated id is approved, so it is chrome.
+    if let Some(reason) = post.admin_block_reason.as_deref() {
+        let notice = gtk::Label::new(Some(&crate::report::admin_block_notice(reason)));
+        notice.add_css_class("dim-label");
+        notice.set_halign(gtk::Align::Start);
+        notice.set_wrap(true);
+        notice.set_xalign(0.0);
+        content.append(&notice);
+    }
 
     // ── Unverified-source badge ──────────────────────────────────────────
     // Shown iff THIS client failed to verify the decoded post's signed
@@ -104,6 +164,17 @@ pub fn build_post_detail<F: Fn() + 'static>(
     // atproto-pds-full.md § D10 → *Audit*). Mirrors the list card, so opening a
     // post never loses the marker the feed showed.
     if let Some(badge) = super::post_list::build_delegated_origin_badge(post.authoring_origin) {
+        badge.set_halign(gtk::Align::Start);
+        content.append(&badge);
+    }
+
+    // ── Content-label badge ──────────────────────────────────────────────
+    // The highest-confidence classifier verdict on the opened post, through the
+    // same shared builder as the list card. A room's relayed verdicts fold onto
+    // a deep-linked post at unlock, so this is where a member sees them even
+    // with no timeline card (feed-read-model.md § the cross-nest deep-link relay).
+    if let Some(entry) = fauna_core::content_category::primary_content_label(&post.labels) {
+        let badge = crate::views::moderation::build_content_label_badge(&entry.category);
         badge.set_halign(gtk::Align::Start);
         content.append(&badge);
     }
@@ -200,14 +271,25 @@ pub fn build_post_detail<F: Fn() + 'static>(
     //    A bridged post's own picture / video (render-model.md § D6c) takes
     //    the same slot when there is no blob one, as on the list card.
     if let Some(hash) = post.document.first_image_hash() {
-        content.append(&build_post_image(hash, manager, client));
+        content.append(&build_post_image(
+            hash,
+            crate::feed::post_media::post_home(post),
+            manager,
+            client,
+        ));
     } else if let Some(path) = post.document.proxied_post_image() {
         content.append(&build_post_proxied_image(path, manager, client));
     }
     // `video-thumbnail` — the D6b `Video` sibling of `Image` (render-model.md
     // § D6b); mutually exclusive with the image branch above, same fold.
     if let Some(block) = post_video_block(&post.document) {
-        content.append(&build_post_video(&post.post_id, block, manager, client));
+        content.append(&build_post_video(
+            &post.post_id,
+            block,
+            crate::feed::post_media::post_home(post),
+            manager,
+            client,
+        ));
     }
 
     // ── Tip surface (`monetization.md` § Tips) — the same surface the list
@@ -261,9 +343,10 @@ pub fn build_post_detail<F: Fn() + 'static>(
     // Wire Reply button.
     {
         let c = Rc::clone(client);
+        let m = Arc::clone(manager);
         let pid = post.post_id.clone();
         reply_btn.connect_clicked(move |btn| {
-            let dialog = build_reply_dialog(&c, &pid);
+            let dialog = build_reply_dialog(&c, &m, &pid);
             if let Some(root) = btn.root()
                 && let Some(win) = root.downcast_ref::<gtk::Window>()
             {
@@ -276,9 +359,10 @@ pub fn build_post_detail<F: Fn() + 'static>(
     // Wire Repost button.
     {
         let c = Rc::clone(client);
+        let m = Arc::clone(manager);
         let pid = post.post_id.clone();
         repost_btn.connect_clicked(move |_| {
-            c.interact_with_post(&pid, "repost", None);
+            c.interact_with_post(&m, &pid, "repost", None);
         });
     }
 

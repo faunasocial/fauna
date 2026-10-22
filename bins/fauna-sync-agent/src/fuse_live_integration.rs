@@ -33,7 +33,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use fauna_core::data::ContentHash;
 use fauna_ipc::sync::{BearerToken, Event, EventKind, FileStatus, SyncCapability};
 use fauna_sync_engine::FileHydrator;
-use fauna_sync_engine::always_resident::{EngineCommand, LocalWriteHost};
+use fauna_sync_engine::always_resident::{EngineCommand, FreeSpaceTally, LocalWriteHost};
 use fauna_sync_engine::db::{SyncDb, SyncState};
 use fauna_sync_engine::engine::{
     FoldedDelete, FoldedDeleteOutcome, PlaceholderFold, StaleHydratedRow,
@@ -211,6 +211,10 @@ impl HydrationHost for DbBackedHost {
 
     async fn pinned_placeholders(&self) -> Result<Vec<String>> {
         HydrationHost::pinned_placeholders(&self.engine).await
+    }
+
+    async fn on_device_files(&self) -> Result<Vec<(String, u64)>> {
+        HydrationHost::on_device_files(&self.engine).await
     }
 
     // No nest here, so nothing for the corpus passes to converge — a no-op this
@@ -433,6 +437,33 @@ impl Harness {
             .expect("reopen db")
             .stamp_recorded_content_from_local(rel, fauna_sync_engine::db::ProofOrigin::OwnRecord)
             .expect("stamp the recorded head");
+    }
+
+    /// One more hydrated file, written to the bound directory and seeded as a
+    /// completed sync leaves it ([`harness_against`]'s `REAL`) — recorded only
+    /// once [`Self::stamp_recorded`] says so. Before the root starts.
+    fn seed_hydrated(&self, rel: &str, bytes: &[u8]) {
+        let abs = self.root.join(rel);
+        std::fs::write(&abs, bytes).expect("write the hydrated file");
+        let meta = std::fs::metadata(&abs).expect("stat the hydrated file");
+        let hash = fauna_core::chunker_stream::content_hash_streaming(&abs)
+            .expect("hash the hydrated file");
+        let mtime = fauna_core::data::Timestamp::secs_or_zero(meta.modified().unwrap());
+        SyncDb::open(&self.db_path)
+            .expect("reopen db")
+            .upsert_entry(
+                rel,
+                Some(hash),
+                None,
+                Some(seeded_manifest_hash(rel)),
+                SyncState::Synced,
+                mtime,
+                mtime,
+                meta.len() as i64,
+                1,
+                None,
+            )
+            .expect("seed the hydrated row");
     }
 
     /// Pin `rel` in its row before the root starts.
@@ -1618,6 +1649,174 @@ async fn freeing_an_own_record_in_a_metadata_only_folder_is_refused() {
             .set_residency_reading(true)
             .expect("persist the residency reading");
         assert!(verb(&commands, free_space(REAL)).await.is_err());
+        assert_eq!(std::fs::read(reach.path().join(REAL)).unwrap(), REAL_BYTES);
+        assert_eq!(h.entry(REAL).expect("the row").state, SyncState::Synced);
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// Run one location-grain *Free up space* sweep on the loop and wait until its
+/// tally says it is done — `handle_free_location_space` on linux, minus the
+/// location lookup.
+async fn sweep(commands: &mpsc::Sender<EngineCommand>) -> FreeSpaceTally {
+    let tally = Arc::new(std::sync::Mutex::new(FreeSpaceTally::default()));
+    let handle = Arc::clone(&tally);
+    verb(commands, move |reply| EngineCommand::FreeLocationSpace {
+        tally: handle,
+        reply,
+    })
+    .await
+    .expect("the sweep is accepted");
+    eventually(
+        || !tally.lock().unwrap().running,
+        Duration::from_secs(20),
+        "the sweep to finish",
+    )
+    .await;
+    *tally.lock().unwrap()
+}
+
+/// **The location-grain *Free up space*** (`on-demand-files.md` § The
+/// free-up-space gesture where the OS offers none): one sweep frees the recorded
+/// file, keeps the unrecorded one with its bytes intact and the pinned one, and
+/// skips what is already cloud-only — every file down the per-file verb's one
+/// road. The freed name stays listed; the tally reads one freed, one kept; and two
+/// rescan passes later nothing was decided a delete (the nest is unreachable here,
+/// so a decided delete would show as a `LocallyDeleted` row).
+#[tokio::test]
+async fn freeing_a_location_frees_the_recorded_and_keeps_the_rest() {
+    const UNRECORDED: &str = "unrecorded.txt";
+    const UNRECORDED_BYTES: &[u8] = b"a change the nest has not recorded";
+    const PINNED: &str = "pinned.txt";
+    let h = harness();
+    h.stamp_recorded(REAL);
+    h.seed_hydrated(UNRECORDED, UNRECORDED_BYTES);
+    h.seed_hydrated(PINNED, b"kept on purpose");
+    h.stamp_recorded(PINNED);
+    h.pin(PINNED);
+    let reach = Reach::open(&h.root).expect("open the reach");
+    let (commands, commands_rx) = mpsc::channel(2);
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let loop_fut = h.serve_with(
+        &reach,
+        CancellationToken::new(),
+        Serve {
+            rescan: Duration::from_millis(500),
+            ticks: Arc::clone(&ticks),
+            commands: Some(commands_rx),
+            ..Serve::default()
+        },
+    );
+
+    let driver = async {
+        eventually(
+            || h.mounted(),
+            Duration::from_secs(20),
+            "the mount to come up",
+        )
+        .await;
+        let tally = sweep(&commands).await;
+        assert_eq!(
+            tally,
+            FreeSpaceTally {
+                running: false,
+                freed_files: 1,
+                freed_bytes: REAL_BYTES.len() as u64,
+                kept_unsynced: 1,
+                kept_pinned: 1,
+            }
+        );
+
+        assert!(
+            !reach.path().join(REAL).exists(),
+            "the recorded file's bytes left"
+        );
+        assert_eq!(
+            h.entry(REAL).expect("the row").state,
+            SyncState::Placeholder
+        );
+        assert_eq!(
+            std::fs::read(reach.path().join(UNRECORDED)).unwrap(),
+            UNRECORDED_BYTES,
+            "the unrecorded file keeps its bytes"
+        );
+        assert_eq!(
+            h.entry(UNRECORDED).expect("the row").state,
+            SyncState::Synced
+        );
+        assert_eq!(h.entry(PINNED).expect("the row").state, SyncState::Synced);
+        let listed = ls(&h.root).await;
+        for name in [REAL, UNRECORDED, PINNED, "cloud.txt"] {
+            assert!(
+                listed.iter().any(|l| l == name),
+                "{name} still listed: {listed:?}"
+            );
+        }
+
+        let swept = ticks.load(Ordering::SeqCst);
+        eventually(
+            || ticks.load(Ordering::SeqCst) >= swept + 2,
+            Duration::from_secs(30),
+            "two full rescan passes after the sweep",
+        )
+        .await;
+        for rel in [REAL, UNRECORDED, PINNED, "cloud.txt", "sub/deep.bin"] {
+            assert_ne!(
+                h.entry(rel).expect("the row survives").state,
+                SyncState::LocallyDeleted,
+                "no delete was decided for {rel}"
+            );
+        }
+        assert_eq!(
+            h.entry(REAL).expect("the row").state,
+            SyncState::Placeholder
+        );
+    };
+
+    drive_until_asserted(loop_fut, driver).await;
+}
+
+/// In a metadata-only folder this device's own record is kept by the sweep and
+/// counted with the unrecorded changes (`kept_unsynced`) — the nest holds no byte
+/// of it, so this device may hold the only copy — never freed.
+#[tokio::test]
+async fn freeing_a_metadata_only_location_keeps_an_own_record_as_the_only_copy() {
+    let h = harness();
+    h.stamp_recorded(REAL);
+    let reach = Reach::open(&h.root).expect("open the reach");
+    let (commands, commands_rx) = mpsc::channel(2);
+    let loop_fut = h.serve_with(
+        &reach,
+        CancellationToken::new(),
+        Serve {
+            commands: Some(commands_rx),
+            ..Serve::default()
+        },
+    );
+
+    let driver = async {
+        eventually(
+            || h.mounted(),
+            Duration::from_secs(20),
+            "the mount to come up",
+        )
+        .await;
+        SyncDb::open(&h.db_path)
+            .expect("reopen db")
+            .set_residency_reading(true)
+            .expect("persist the residency reading");
+        let tally = sweep(&commands).await;
+        assert_eq!(
+            tally,
+            FreeSpaceTally {
+                running: false,
+                freed_files: 0,
+                freed_bytes: 0,
+                kept_unsynced: 1,
+                kept_pinned: 0,
+            }
+        );
         assert_eq!(std::fs::read(reach.path().join(REAL)).unwrap(), REAL_BYTES);
         assert_eq!(h.entry(REAL).expect("the row").state, SyncState::Synced);
     };

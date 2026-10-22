@@ -25,6 +25,7 @@ use fauna_nest::{
     admin_ws_handlers,
     bridge_method_allowlist::{CallerClass, is_permitted},
     db::CacheDb,
+    pending_actions::execute_ready_actions,
     routes::AppState,
     rpc_router::RpcRouter,
 };
@@ -78,6 +79,7 @@ use fauna_protocol::{
         AdminStatusReply,
         AdminStatusRequest,
         AdminTierCreateRequest,
+        AdminTierDeleteRequest,
         AdminTierUpdateRequest,
         AdminTiersListReply,
         AdminTiersListRequest,
@@ -135,7 +137,7 @@ async fn dispatch(
 
 /// Every admin kind — C1 user-management + C2 admin-management + C3 stats/ops
 /// + C5 folders/services (C4 pairings retired).
-const ADMIN_KINDS: [&str; 39] = [
+const ADMIN_KINDS: [&str; 40] = [
     // C1 — user management.
     "fauna.admin.users.list",
     "fauna.admin.users.get",
@@ -151,6 +153,7 @@ const ADMIN_KINDS: [&str; 39] = [
     "fauna.admin.tiers.list",
     "fauna.admin.tiers.create",
     "fauna.admin.tiers.update",
+    "fauna.admin.tiers.delete",
     // Membership designation (monetization.md § Pillar 4) — behavior covered by
     // `conformance_membership.rs`; listed here for the allowlist + replay sweeps.
     "fauna.admin.membership_tiers.list",
@@ -1483,6 +1486,154 @@ async fn tiers_update_unknown_is_not_found() {
     assert_eq!(err.code, "fauna.admin.not_found");
 }
 
+// ── tiers.delete (admin.md § 3. Settings → *Removing a tier*) ────────────────
+
+/// Create the throwaway tier `name` the removal tests act on.
+async fn create_spare_tier(router: &RpcRouter, state: &Arc<AppState>, admin: [u8; 32], name: &str) {
+    let _: AdminOkReply = decode(
+        &dispatch(
+            router,
+            state.clone(),
+            admin,
+            "fauna.admin.tiers.create",
+            encode(&AdminTierCreateRequest {
+                name: name.into(),
+                max_inbox_bytes: 1,
+                max_storage_bytes: 1,
+                max_devices: 1,
+                max_blob_size: 1,
+                max_feeds: 1,
+                extra: Default::default(),
+            }),
+        )
+        .await
+        .expect("create spare tier"),
+    )
+    .unwrap();
+}
+
+async fn delete_tier(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    admin: [u8; 32],
+    name: &str,
+) -> Result<Bytes, RpcError> {
+    dispatch(
+        router,
+        state.clone(),
+        admin,
+        "fauna.admin.tiers.delete",
+        encode(&AdminTierDeleteRequest {
+            name: name.into(),
+            extra: Default::default(),
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn tiers_delete_removes_a_tier_nobody_is_on() {
+    let (router, state) = router_and_state().await;
+    let admin = admin_actor(&state).await;
+    create_spare_tier(&router, &state, admin, "mistake").await;
+    let reply: AdminOkReply = decode(
+        &delete_tier(&router, &state, admin, "mistake")
+            .await
+            .expect("an unused tier is removable"),
+    )
+    .unwrap();
+    assert!(reply.ok);
+    assert!(state.db.get_tier("mistake").await.unwrap().is_none());
+}
+
+/// Each thing that names a tier — a member on it, an invite code admitting at
+/// it, a membership link pointing at it (either column) — refuses the removal
+/// with `conflict` and leaves the tier in place. Once that reference is gone
+/// the same request succeeds, so the refusal is the reference and nothing else.
+#[tokio::test]
+async fn tiers_delete_is_refused_while_anything_names_the_tier() {
+    for what in [
+        "a member",
+        "an invite code",
+        "a membership link's admitted tier",
+        "a membership link's lapse tier",
+    ] {
+        let (router, state) = router_and_state().await;
+        let admin = admin_actor(&state).await;
+        create_spare_tier(&router, &state, admin, "mistake").await;
+        let db = &state.db;
+        match what {
+            "a member" => db.create_user(&[41u8; 32], "mistake", "m").await.unwrap(),
+            "an invite code" => db.create_invite_code("CODE-M", "mistake", 1).await.unwrap(),
+            "a membership link's admitted tier" => db
+                .upsert_membership_tier(&admin, "supporter", "mistake", "free")
+                .await
+                .unwrap(),
+            _ => db
+                .upsert_membership_tier(&admin, "supporter", "personal", "mistake")
+                .await
+                .unwrap(),
+        }
+        let err = delete_tier(&router, &state, admin, "mistake")
+            .await
+            .expect_err(what);
+        assert_eq!(err.code, "fauna.admin.conflict", "{what}");
+        assert!(
+            db.get_tier("mistake").await.unwrap().is_some(),
+            "{what}: a refused removal leaves the tier"
+        );
+        match what {
+            "a member" => {
+                db.conn()
+                    .await
+                    .execute("UPDATE users SET tier = 'free' WHERE tier = 'mistake'", [])
+                    .unwrap();
+            }
+            "an invite code" => assert!(db.delete_invite_code("CODE-M").await.unwrap()),
+            _ => assert!(
+                db.delete_membership_tier(&admin, "supporter")
+                    .await
+                    .unwrap()
+            ),
+        }
+        delete_tier(&router, &state, admin, "mistake")
+            .await
+            .unwrap_or_else(|e| panic!("{what}: removable once nothing names it: {e:?}"));
+    }
+}
+
+/// `free` is the tier the nest itself names — a member who joins without an
+/// invite code lands on it and a membership's lapse tier defaults to it — so it
+/// is never removable, even with nobody on it.
+#[tokio::test]
+async fn tiers_delete_refuses_the_nests_default_tier() {
+    let (router, state) = router_and_state().await;
+    let admin = admin_actor(&state).await;
+    // Seat the admin first (dispatch seeds its `users` row), then empty `free`.
+    let _ = delete_tier(&router, &state, admin, "ghost").await;
+    state
+        .db
+        .conn()
+        .await
+        .execute("UPDATE users SET tier = 'personal' WHERE tier = 'free'", [])
+        .unwrap();
+    let err = delete_tier(&router, &state, admin, "free")
+        .await
+        .expect_err("free is the nest's own default");
+    assert_eq!(err.code, "fauna.admin.conflict");
+    assert!(state.db.get_tier("free").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn tiers_delete_unknown_is_not_found() {
+    let (router, state) = router_and_state().await;
+    let admin = admin_actor(&state).await;
+    let err = delete_tier(&router, &state, admin, "ghost")
+        .await
+        .expect_err("unknown tier → not_found");
+    assert_eq!(err.code, "fauna.admin.not_found");
+}
+
 // ── invite codes ───────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2121,6 +2272,65 @@ async fn admins_remove_with_two_superadmins_schedules() {
     .unwrap();
     assert_eq!(reply.status, "pending");
     assert!(reply.pending_action_id > 0);
+}
+
+/// The quorum floor (`nest/common.md` § Pending Actions System, ruled by the
+/// user 2026-09-24) held at the real door, not only in `effective_quorum`: on
+/// a two-admin nest, `admins.remove` stores one approval that only the target
+/// can give, so an unconsented removal expires and a consented one executes.
+/// Before the floor the row stored 0 and one admin removed the other on the
+/// delay alone.
+#[tokio::test]
+async fn admins_remove_on_two_admins_needs_the_targets_consent() {
+    let (router, state) = router_and_state().await;
+    let admin = admin_actor(&state).await;
+    let other = [0x56u8; 32];
+    state.db.add_admin_actor(&other[..]).await.unwrap();
+    let remove = |state: Arc<AppState>| {
+        let router = &router;
+        async move {
+            let reply: AdminPendingActionReply = decode(
+                &dispatch(
+                    router,
+                    state,
+                    admin,
+                    "fauna.admin.admins.remove",
+                    encode(&AdminAdminRemoveRequest {
+                        actor_id: ByteBuf::from(other.to_vec()),
+                        extra: Default::default(),
+                    }),
+                )
+                .await
+                .expect("remove schedules"),
+            )
+            .unwrap();
+            reply.pending_action_id
+        }
+    };
+
+    let id = remove(state.clone()).await;
+    let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+    assert_eq!(
+        row.requires_quorum, 1,
+        "the floor: one approval while another admin exists"
+    );
+    state.db.test_set_execute_after(id, 1).await.unwrap();
+    assert_eq!(execute_ready_actions(&state).await.unwrap(), 0);
+    let row = state.db.get_pending_action(id).await.unwrap().unwrap();
+    assert_eq!(row.status, "expired", "unconsented, it expires");
+    assert!(
+        state.db.is_admin(&other).await.unwrap(),
+        "the target keeps the role"
+    );
+
+    let id = remove(state.clone()).await;
+    state.db.approve_pending_action(id, &other).await.unwrap();
+    state.db.test_set_execute_after(id, 1).await.unwrap();
+    assert_eq!(execute_ready_actions(&state).await.unwrap(), 1);
+    assert!(
+        !state.db.is_admin(&other).await.unwrap(),
+        "the target consented: removed"
+    );
 }
 
 /// The door's floor is target-aware: removing a NON-superadmin admin
@@ -2907,6 +3117,12 @@ async fn folder_add_member_then_get_lists_it() {
     )
     .await
     .expect("create ok");
+    // A seat admits only a device the folder's owner registered.
+    state
+        .db
+        .register_sync_device(&[1u8; 32], &device, "laptop", None, "sync")
+        .await
+        .unwrap();
     let ok: AdminOkReply = decode(
         &dispatch(
             &router,
@@ -2946,6 +3162,68 @@ async fn folder_add_member_then_get_lists_it() {
     assert_eq!(got.members.len(), 1);
     assert_eq!(got.members[0].device_id.as_ref(), &device[..]);
     assert_eq!(got.members[0].flags.point(), (true, false, false));
+}
+
+/// The admin seat door applies the user door's rule (`devices.md` § Removing
+/// a Device, step 4): a seat admits only a device the FOLDER OWNER has
+/// registered. An id nobody registered, and one registered only to another
+/// account (a borrowed id), are refused `not_found` and seat nothing.
+#[tokio::test]
+async fn folder_add_member_refuses_a_device_the_owner_has_not_registered() {
+    let (router, state) = router_and_state().await;
+    let admin = admin_actor(&state).await;
+    let owner = [1u8; 32];
+    dispatch(
+        &router,
+        state.clone(),
+        admin,
+        "fauna.admin.folders.create",
+        encode(&AdminFolderCreateRequest {
+            name: "fs".into(),
+            actor_id: ByteBuf::from(owner.to_vec()),
+            node_cache: None,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("create ok");
+
+    let borrowed = [0x44u8; 32];
+    state
+        .db
+        .register_sync_device(&[2u8; 32], &borrowed, "theirs", None, "sync")
+        .await
+        .unwrap();
+
+    for device in [[0x33u8; 32], borrowed] {
+        let err = dispatch(
+            &router,
+            state.clone(),
+            admin,
+            "fauna.admin.folders.add_member",
+            encode(&AdminFolderAddMemberRequest {
+                name: "fs".into(),
+                actor_id: None,
+                device_id: ByteBuf::from(device.to_vec()),
+                flags: fauna_protocol::folders::PlaceFlags::new(true, false, false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect_err("a device the owner has not registered → not_found");
+        assert_eq!(err.code, "fauna.admin.not_found");
+    }
+
+    let fs = state
+        .db
+        .get_folder_for_actor("fs", &owner)
+        .await
+        .unwrap()
+        .expect("folder exists");
+    assert!(
+        state.db.get_folder_members(fs.id).await.unwrap().is_empty(),
+        "a refused seat writes no row"
+    );
 }
 
 #[tokio::test]
@@ -3091,7 +3369,13 @@ async fn folder_admin_kinds_disambiguate_same_named_sets_across_actors() {
     .expect_err("ambiguous add_member → invalid_params");
     assert_eq!(err.code, "fauna.admin.invalid_params");
 
-    // (a) scoped add_member lands on Bob's set only.
+    // (a) scoped add_member lands on Bob's set only (a seat admits only a
+    // device the set's owner registered).
+    state
+        .db
+        .register_sync_device(&bob, &[3u8; 32], "bob's laptop", None, "sync")
+        .await
+        .unwrap();
     dispatch(
         &router,
         state.clone(),
@@ -3505,6 +3789,71 @@ async fn logs_merges_the_sidecar_log_plane_into_the_admin_view() {
         ts.windows(2).all(|w| w[0] <= w[1]),
         "the merged reply is timestamp-ordered, got {ts:?}"
     );
+}
+
+/// The atproto bridge's leg of the plane, end to end through the real kind: an
+/// approved `atproto.pds` bridge reports a batch over
+/// `fauna.bridges.report_log_events`, and the admin reads it back as
+/// `atproto:<event>` — the source derived from the caller's authenticated class,
+/// never from the payload (`observability.md` § Admission, attribution).
+#[tokio::test]
+async fn an_atproto_bridge_batch_lands_under_the_atproto_target() {
+    use fauna_nest::db::bridge_service_users::BridgeRole;
+    use fauna_protocol::log_plane::{
+        KIND_BRIDGES_REPORT_LOG_EVENTS, ReportLogEventsRequest, SidecarLogEvent,
+    };
+
+    let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    let state = Arc::new(AppState::for_test(db));
+    let mut b = RpcRouter::builder();
+    admin_ws_handlers::register_admin_handlers(&mut b);
+    fauna_nest::bridge_blob_handlers::register_bridge_blob_handlers(&mut b);
+    let router = b.build();
+    let admin = admin_actor(&state).await;
+    let bridge = [0xa7u8; 32];
+    common::approve_bridge(&state.db, &bridge, BridgeRole::AtprotoPds, &[2u8; 32]).await;
+
+    let _ring = LOG_RING.lock().await;
+    fauna_log::clear();
+    dispatch(
+        &router,
+        state.clone(),
+        bridge,
+        KIND_BRIDGES_REPORT_LOG_EVENTS,
+        encode(&ReportLogEventsRequest {
+            events: vec![SidecarLogEvent {
+                timestamp_ms: 3_000,
+                level: "info".into(),
+                event: "ready".into(),
+                message: "atproto bridge ready (role atproto.pds)".into(),
+                ..Default::default()
+            }],
+            dropped: 0,
+            ..Default::default()
+        }),
+    )
+    .await
+    .expect("an approved atproto bridge may report");
+
+    let reply: AdminLogsReply = decode(
+        &dispatch(
+            &router,
+            state,
+            admin,
+            "fauna.admin.logs",
+            encode(&AdminLogsRequest::default()),
+        )
+        .await
+        .expect("logs ok"),
+    )
+    .unwrap();
+    let entry = reply
+        .entries
+        .iter()
+        .find(|e| e.message.contains("atproto bridge ready"))
+        .expect("the atproto bridge's event reaches the admin reply");
+    assert_eq!(entry.target, "atproto:ready");
+    assert_eq!(entry.level, AdminLogLevel::Info);
 }
 
 // C4 pairings RETIRED (per-user-pairing design) — the admin approve/list kinds

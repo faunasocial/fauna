@@ -273,6 +273,7 @@ RULE_LABELS = {
 #: by `tests/scripts/test_features_mode_audit.py`, which can import both.
 FACT_RULES = frozenset({
     RULE_MODE_MARKER,
+    RULE_LOCAL_NEST_FIXTURE,
     RULE_OWN_IMAGE,
     RULE_BRIDGE_SPAWN,
     RULE_LOOPBACK_KIND,
@@ -340,9 +341,9 @@ class Verdict(NamedTuple):
 #: STRUCTURAL reasons, neither of them "not got to yet": it spawns a HOST
 #: BRIDGE beside its own binary, and the docker shape of a mail nest is the
 #: image's own s6 bridges (`testing.md` § Default app and nest mode, ruling (3)).
-#: Arm 6 routed four such venues through `_start_mail_venue`; what is left is
-#: triaged, one disposition per resident, in `LOCAL_NEST_FIXTURE_DISPOSITIONS`
-#: below.
+#: Arm 6 routed four such venues through `_start_mail_venue`, and
+#: `dav_toggle_venue` followed as the fifth; what is left is triaged, one
+#: disposition per resident, in `LOCAL_NEST_FIXTURE_DISPOSITIONS` below.
 #:
 #: A name here is therefore a claim about the fixture's SHAPE, and the arm that
 #: removes it is named. Worth stating because the previous state of this list —
@@ -386,30 +387,19 @@ LOCAL_NEST_FIXTURE_DISPOSITIONS = {
         "nest's on-disk segments through the test-hooks content surface, which "
         "the `test_hooks` FACT holds out of every release image",
     "restartable_mta_nest":
-        "OPEN: both witnesses stop or restart the nest while its MTA stays up "
-        "as a separate process. In the image the nest and the bridges are s6 "
-        "services of ONE container, and the provider's stop is the "
-        "container's, which takes the MTA with it; the submission witness is "
-        "routable once the docker venue can stop the nest service alone "
-        "(`s6-svc -d`) and start it in place. The signing witness would stay "
-        "out regardless: it pokes the test-hooks outbound route and reads the "
-        "in-process stub MX",
+        "PREMISE: both witnesses read the relayed message out of the "
+        "in-process stub MX the fixture routes outside mail to, and both make "
+        "the MTA drain NOW through the test-hooks `outbound/poke_bridge` route "
+        "from their own bodies — the `test_hooks` FACT and a host-spawn "
+        "affordance the image's bridges never reach, so routing would free no "
+        "cell. (The nest-down submission witness would ALSO need the docker "
+        "venue to stop the nest service alone under s6, the question this "
+        "disposition no longer has to answer)",
     "certless_mta_nest":
         "PREMISE: it arms the nest's test-only `tls-cert-withhold` seam "
         "(test-hooks, compiled out of the image) BEFORE the MTA spawns, and in "
         "the image s6 starts the MTA at container start, before any seam can "
         "be armed",
-    "dav_toggle_venue":
-        "OPEN: deployment toggles set before the MDA's first `fetch_config` "
-        "are expressible in the image's own terms — its MDA run-script gates on "
-        "the `/data/*-enabled` flags the toggles write, which is how "
-        "`caldav_only` routed. Owes docker venue options for the "
-        "mail/caldav/carddav/webdav toggles and the `domainless` home-nest "
-        "shape, and its `rebind()` readers as per-test host-affordance readers "
-        "(s6 owns the rebind in the image, ruling (3)). And a FACTORY fixture: "
-        "its tests CALL it by name, so `kind_reach` walks into the host-bridge "
-        "spawn and grades every consumer `loopback_kind` — a routed factory "
-        "needs that reach to stop at the venue seam, or routing frees no cell",
     "dedicated_caldav_admin_port_nest":
         "PREMISE: it calls `mda.respawn()` for the admin-CalDAV-port rebind, "
         "and s6 owns the rebind in the image — standalone-only permanently, by "
@@ -501,7 +491,6 @@ FIXTURE_START_OPTIONS = {
     "certless_mta_nest": frozenset(),
     "contribute_nest": frozenset(),
     "crowded_nest": frozenset(),
-    "dav_toggle_venue": frozenset(),
     "dedicated_caldav_admin_port_nest": frozenset(),
     "dedicated_no_mail_nest": frozenset(),
     "delete_account_nest": frozenset(),
@@ -525,7 +514,12 @@ FIXTURE_START_OPTIONS = {
     "handled_nest": frozenset(),
     "labeler_grant_nest": frozenset(),
     "nest_instance": frozenset(),
-    "provision_target_nest": frozenset({"unclaimed", "cors_origins"}),
+    # The update-channel pair started with no image tag in the environment (a
+    # nest the image does not run): the UI journey's passes no knob, the API
+    # journey's points the nest at the harness registry through `extra_env`.
+    "packaged_channel_nest": frozenset(),
+    "packaged_nest": frozenset({"extra_env"}),
+    "provision_target_nest":frozenset({"unclaimed", "cors_origins"}),
     "reclaimable_nest": frozenset(),
     "registration_posture_nest": frozenset({"claim_domain"}),
     "rotatable_nest": frozenset(),
@@ -607,6 +601,13 @@ FIXTURE_START_OPTIONS = {
     "quota_nest": frozenset(),
     "rebuilt_box": frozenset({"extra_env", "unclaimed"}),
     "report_nest": frozenset(),
+    "updater_report_nest": frozenset({"extra_env"}),
+    "channel_nest": frozenset(),
+    "pinned_channel_nest": frozenset(),
+    "no_scanner_nest": frozenset(),
+    "overdue_nest": frozenset({"extra_env"}),
+    "plugin_nest": frozenset({"extra_env"}),
+    "unclaimed_social_only_real_domain_nest": frozenset({"handle_domain_seed", "unclaimed"}),
     "scenario": frozenset(),
     "schema_skew_nest": frozenset({"unclaimed"}),
     "sell_nest": frozenset(),
@@ -639,6 +640,10 @@ FIXTURE_START_OPTIONS = {
     "retry_nest": frozenset(),
     "scratch_nest": frozenset(),
     "two_admin_nest": frozenset(),
+    "two_admin_dns_nest": frozenset(),
+    # The updater witness's registry-redirect seams ride `extra_env`; renamed off
+    # `head_nest`, which the skew modules' option-less nests already wear.
+    "updater_head_nest": frozenset({"extra_env"}),
     "two_nest_custody_rig": frozenset({"handle_domain_seed", "serve_tls"}),
     "unclaimed_nest": frozenset({"handle_domain_seed", "serve_tls", "unclaimed"}),
     # `extra_env` from its `consent_nest_env` fixture, which a module overrides
@@ -838,6 +843,10 @@ MAIL_VENUE_FIXTURE_OPTIONS = {
     "dedicated_caldav_mailbox_less_nest": frozenset({"registration_open"}),
     "dedicated_caldav_only_nest": frozenset({"registration_open",
                                              "caldav_only"}),
+    # A FACTORY: each call names its own toggles, so the table records the
+    # whole vocabulary any call may pass — the safe over-approximation, since a
+    # mode honouring both honours every combination of them.
+    "dav_toggle_venue": frozenset({"dav_toggles", "domainless"}),
 }
 
 _UNSUPPORTED_VENUE_REASON = (
@@ -1064,18 +1073,21 @@ _NEST_BINARY_REASON = (
 )
 
 #: The tag every `tests/platform/docker/` fixture boots, through
-#: `tests/platform/docker/helpers.py::docker_build`. Named here so the deselect
-#: reason can say *which* image the test brings, and so the remedy below is one
-#: copy-pasteable line rather than a hunt.
-OWN_IMAGE_TAG = "fauna-nest-test:local"
+#: `tests/platform/docker/helpers.py::docker_build`: this tree's own image, its
+#: tag keyed on the tree's source inputs (`helpers/nest_test_image.py`). Named
+#: here — as the tag's form, since the key is the tree's — so the deselect
+#: reason can say *which* image the test brings.
+OWN_IMAGE_TAG = "fauna-nest-test:src-<source key>"
 
 #: Fixtures that stand up a nest from their OWN container IMAGE — the image twin
 #: of `NEST_BINARY_FIXTURES`, and the same defect one artifact along.
 #:
 #: `tests/platform/docker/` is a self-contained tier_4 venue: every fixture here
-#: boots `fauna-nest-test:local` — through `docker_build`, which since
-#: 2026-08-28 reuses whatever image carries that tag and refuses to build one,
-#: or through the container-start helpers that default to it. The run's
+#: boots this tree's keyed `OWN_IMAGE_TAG` (or the image the run names in
+#: `FAUNA_NEST_TEST_IMAGE`) — through `docker_build`, which builds only on an
+#: explicit opt-in, or through the container-start helpers that default to it.
+#: (The 2026-08-29 incident below was the one fixed `fauna-nest-test:local` tag
+#: the keyed tag replaced.) The run's
 #: `--nest` flag neither configures that container nor describes it, so such a
 #: test is **not a witness of the run's nest in any mode** — which would make all
 #: three of the ledger's run-level provenance fields false at once: `commit` (the
@@ -1119,9 +1131,12 @@ OWN_IMAGE_FIXTURES = frozenset({
     "abuse_nest",
     "accepting_nest",
     "acme_stack",
+    "ap_nest",
+    "atproto_serving_nest",
     "auto_dkim_nest",
     "autosched_nest",
     "bare_ip_caldav_nest",
+    "bench",
     "bidi_nest",
     "bidi_sidecars",
     "booted_nest",
@@ -1140,6 +1155,7 @@ OWN_IMAGE_FIXTURES = frozenset({
     "forged_nest",
     "forwarder_ndr_nest",
     "ip_bridge_stack",
+    "lateral_nest",
     "lenient_nest",
     "linked",
     "linked_one_admin",
@@ -1154,8 +1170,11 @@ OWN_IMAGE_FIXTURES = frozenset({
     "relay_nest",
     "relay_net",
     "relay_peers",
+    "relay_seats",
     "rename_stack",
+    "rename_mail_stack",
     "round_trip_nest",
+    "router_nest",
     "scanners",
     "self_signed_floor_nest",
     "serving_atproto",
@@ -1177,9 +1196,9 @@ _OWN_IMAGE_REASON = (
     "never named — its ledger record names the container it booted, never the "
     "run's commit, image digest or mode (feature-catalog.md § The ledger, "
     "own-artifact records). tests/platform/docker/ is its own tier_4 "
-    "venue: run it with `just e2e-tier-4-test`, and keep the tag current with "
-    f"`docker pull ghcr.io/faunasocial/nest:latest && docker tag "
-    f"ghcr.io/faunasocial/nest:latest {OWN_IMAGE_TAG}`"
+    "venue: run it with `just e2e-tier-4-test` (FAUNA_ALLOW_NEST_IMAGE_BUILD=1 "
+    "builds this tree's image when it is absent; FAUNA_NEST_TEST_IMAGE names a "
+    "pulled one instead)"
 )
 
 #: Fixtures that spawn a bridge process **on the host** — the mail MTA/MDA
@@ -1445,7 +1464,7 @@ _TEST_HOOK_REASON = (
 #: REGISTERS. Nest declares each one in a module `lib.rs` gates on
 #: `#[cfg(feature = "test-hooks")]` (`fauna.protocol.echo`, in `protocol_test`),
 #: so a release artifact answers it `fauna.protocol.unknown_kind` — measured on
-#: dev.example.com 2026-10-05, where it was recorded as a failed live cell.
+#: the dev nest 2026-10-05, where it was recorded as a failed live cell.
 #: Matched as a closed vocabulary through the call graph, like class (3)'s
 #: kinds (a kind is a rare string); pinned by equality to the string literals of
 #: the gated modules in `test_nest_mode_axis.py`.
@@ -1487,6 +1506,7 @@ GLOBAL_ADMIN_FIXTURES = frozenset({
     "caldav_cross_nest_peer",
     "cross_nest_foreign",
     "cross_nest_foreign_ephemeral",
+    "dav_toggle_venue",
     "dedicated_caldav_mailbox_less_nest",
     "dedicated_caldav_only_nest",
     "dedicated_mail_nest",
@@ -1498,6 +1518,7 @@ GLOBAL_ADMIN_FIXTURES = frozenset({
     "mail_bridge_inbound_to_imap",
     "mail_bridge_mda",
     "mail_bridge_mta",
+    "planted_bridges",
     "registration_posture_nest",
     "report_origin_nest",
     "two_nest_custody_rig",
@@ -1610,6 +1631,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.admin.audit.integrity",
     "fauna.admin.audit.list",
     "fauna.admin.cluster.status",
+    "fauna.admin.content_policy.get",
     "fauna.admin.deployment_seed.get",
     "fauna.admin.evictions.list",
     "fauna.admin.folders.add_member",
@@ -1665,6 +1687,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
     "fauna.bridges.delete_card",
     "fauna.bridges.delete_event",
     "fauna.bridges.discard_export_blob",
+    "fauna.bridges.discard_import_session",
     "fauna.bridges.enable_account_alias",
     "fauna.bridges.fail_export_session",
     "fauna.bridges.fail_import_session",
@@ -1783,6 +1806,7 @@ ACCOUNT_SCOPED_KINDS = frozenset({
 GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.admin.admins.add",
     "fauna.admin.admins.remove",
+    "fauna.admin.content_policy.set",
     "fauna.admin.deployment_seed.rotate",
     "fauna.admin.factory_reset",
     "fauna.admin.gc",
@@ -1807,6 +1831,7 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.admin.set_serving_port",
     "fauna.admin.set_subhandles",
     "fauna.admin.tiers.create",
+    "fauna.admin.tiers.delete",
     "fauna.admin.tiers.update",
     # Moves which builds the box's updater follows — deployment-wide.
     "fauna.admin.update_channel.set",
@@ -1928,6 +1953,7 @@ GLOBAL_ADMIN_KINDS = frozenset({
     "fauna.bridges.set_catch_all_actor",
     "fauna.bridges.set_dkim_rotation_days",
     "fauna.bridges.set_mail_enabled",
+    "fauna.bridges.set_microsoft_registration",
     "fauna.bridges.set_role_address",
     "fauna.bridges.set_webdav_enabled",
     "fauna.bridges.start_primary_domain_rename",
@@ -2092,7 +2118,7 @@ def admin_shell_element_ids() -> frozenset[str]:
 
 
 # ── The live-mode harness gaps (2026-10-05) ─────
-# A full tui sweep against dev.example.com recorded tests as failed live cells
+# A full tui sweep against the dev nest recorded tests as failed live cells
 # that live mode could never have passed: each needed something only a nest
 # this harness started can give. Every class below is decided at collection,
 # from the test's own code or its fixtures, so the run deselects instead of

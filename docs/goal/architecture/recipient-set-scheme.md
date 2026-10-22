@@ -719,10 +719,11 @@ ceremony itself is owned there.
   second-severance source, built the same day:** as first landed, the pass looked the snapshot up by stale
   cell alone, so it could re-admit each member once and the *next*
   authority-device removal stranded the scope with no member and no tip.
-  Now a stale cell is sourced from the ceremony snapshot **or** from
+  Then a stale cell was sourced from the ceremony snapshot **or** from
   `UserConfig::group_readmissions`
   (`fauna_core::group_ceremony::GroupReadmission`, a grow-only set,
-  union-merged in `format_user_config.rs`), to which the pass appends every
+  union-merged in the since-retired whole-record merge; the cell retired 2026-09-27
+  and the snapshot alone sources every severance now), to which the pass appends every
   fresh entry's identity core through its `RetainedRecord` seam BEFORE the
   plane write; the reception key is always the snapshot's member-signed one,
   found by the *recorded* member actor and never read off a roster row.
@@ -770,7 +771,8 @@ ceremony itself is owned there.
   *Severance, per axis* owns the rule this follows (the door's authority
   line is built from the evaluator's own merged
   `fauna.group.authority-revocation` rows). What is code: the production
-  `GroupRosterState` is `fauna_sync_engine::group_scope_view::GroupRosterSnapshot`
+  `GroupRosterState` is `group_roster_door::LiveGroupRoster`, answering from
+  its current `fauna_account_plane::group_scope_view::GroupRosterSnapshot`
   — every scope this device holds a machinery root for (the one held-root
   enumeration, `group_state_plane::held_group_roots`, shared with the pump
   legs' `held_authority_scopes`), each folded from its persisted rows by

@@ -68,6 +68,20 @@ pub fn build_find_result_row(
 
     let copy_btn = build_copy_actor_id_button(actor_id);
 
+    // Door (1) into the found actor's Profile: the lookup's nest URL — the same
+    // one the knock carries — rides in as the open target's home (`contacts.md`
+    // § Layout & flow region 3).
+    let open_profile_btn = gtk::Button::with_label(contacts_strings::find_user::OPEN_PROFILE);
+    crate::testid::set_test_id(&open_profile_btn, ids::CONTACT_ACTOR_ID_OPEN_PROFILE_BUTTON);
+    {
+        let c = Rc::clone(client);
+        let aid = actor_id.to_string();
+        let home = recipient_nest_url.clone();
+        open_profile_btn.connect_clicked(move |_| {
+            crate::views::profile::open_actor(&c, &aid, home.clone());
+        });
+    }
+
     let knock_btn = gtk::Button::with_label(contacts_strings::KNOCK);
     knock_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&knock_btn, ids::CONTACTS_ADD_BUTTON);
@@ -137,6 +151,7 @@ pub fn build_find_result_row(
     }
     hbox.append(&label);
     hbox.append(&copy_btn);
+    hbox.append(&open_profile_btn);
     hbox.append(&knock_btn);
     hbox.append(ask.widget());
 

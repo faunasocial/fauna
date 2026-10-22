@@ -27,7 +27,10 @@ use fauna_protocol::{
         ChannelListForActorRequest, ChannelSendReply, ChannelSendRequest,
     },
     decode_strict as decode, encode_canonical,
-    moderation::{ModerationLegalTakedownReply, ModerationLegalTakedownRequest},
+    moderation::{
+        ModerationActionsReply, ModerationActionsRequest, ModerationAppealReply,
+        ModerationAppealRequest, ModerationLegalTakedownReply, ModerationLegalTakedownRequest,
+    },
 };
 
 async fn router_with_db_only() -> (RpcRouter, Arc<AppState>) {
@@ -569,6 +572,47 @@ fn conv_takedown_payload(content_id: &str, legal_reference: &str, restore: bool)
     Bytes::from(encode_canonical(&req).unwrap().to_vec())
 }
 
+/// `caller`'s moderation-queue row for `content_id`, if any.
+async fn conv_queue_row(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    caller: [u8; 32],
+    content_id: &str,
+) -> Option<fauna_protocol::moderation::ObligationAction> {
+    let reply: ModerationActionsReply = decode(
+        &dispatch(
+            router,
+            state.clone(),
+            caller,
+            "fauna.moderation.actions",
+            Bytes::from(
+                encode_canonical(&ModerationActionsRequest::default())
+                    .unwrap()
+                    .to_vec(),
+            ),
+        )
+        .await
+        .expect("actions ok"),
+    )
+    .unwrap();
+    reply
+        .actions
+        .into_iter()
+        .find(|a| a.content_id == content_id)
+}
+
+fn conv_appeal_payload(content_id: &str) -> Bytes {
+    Bytes::from(
+        encode_canonical(&ModerationAppealRequest {
+            content_id: content_id.into(),
+            reason: "the message was lawful".into(),
+            extra: Default::default(),
+        })
+        .unwrap()
+        .to_vec(),
+    )
+}
+
 /// Send a message, then take it down under a legal obligation → `channel.fetch`
 /// withholds the sealed envelope (empty) and surfaces the tombstone reference in
 /// its place, keeping the message's seq slot. `restore` re-serves the original
@@ -641,6 +685,44 @@ async fn conversation_legal_takedown_withholds_from_fetch_and_restore_re_serves(
         "EU-DSA-2024/777"
     );
 
+    // The sender the nest attested on `channel.send` gets the post's queue row
+    // (`moderation.md` § Legal takedown → *Conversations*): the appeal leg of
+    // the triple, which every app already paints.
+    let row = conv_queue_row(&router, &state, member, &content_id)
+        .await
+        .expect("the attested author's queue carries the takedown");
+    assert_eq!(row.content_type, "conversation");
+    assert_eq!(
+        row.action,
+        fauna_core::obligation::ObligationAction::TakenDown as u8
+    );
+    assert_eq!(row.category, "illegal");
+
+    // The row names the author, so the appeal is theirs alone.
+    let reply: ModerationAppealReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            member,
+            "fauna.moderation.appeal",
+            conv_appeal_payload(&content_id),
+        )
+        .await
+        .expect("the author appeals their message"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, "appeal_recorded");
+    let err = dispatch(
+        &router,
+        state.clone(),
+        [0x5bu8; 32],
+        "fauna.moderation.appeal",
+        conv_appeal_payload(&content_id),
+    )
+    .await
+    .expect_err("a non-author cannot appeal an attested message");
+    assert_eq!(err.code, "fauna.moderation.permission_denied");
+
     // Restore (overturned appeal): the original sealed envelope re-serves.
     let bytes = dispatch(
         &router,
@@ -653,6 +735,12 @@ async fn conversation_legal_takedown_withholds_from_fetch_and_restore_re_serves(
     .expect("admin restore ok");
     let reply: ModerationLegalTakedownReply = decode(&bytes).unwrap();
     assert_eq!(reply.status, "restored");
+    assert!(
+        conv_queue_row(&router, &state, member, &content_id)
+            .await
+            .is_some(),
+        "a restore keeps the queue row as history"
+    );
 
     let reply_bytes = dispatch(
         &router,
@@ -861,4 +949,127 @@ async fn a_group_forked_thread_send_is_not_dm_fanout_scored() {
         profile.unique_dm_recipients_7d, 0,
         "a group-thread send must not count toward DM fanout"
     );
+}
+
+/// Decision 4's author arm, end to end (`moderation.md` § Admin block of a
+/// reported item): once the admin blocks a reported message, the local
+/// `channel.fetch` serves its attested author the sealed envelope with the
+/// block marker beside it, and every other member the withheld entry; a
+/// takedown on top withholds it from the author too.
+#[tokio::test]
+async fn conversation_admin_block_serves_the_author_and_withholds_other_members() {
+    use fauna_nest::db::moderation::{AbuseReportInsert, NewAbuseReport};
+    use fauna_protocol::moderation::{ModerationAdminBlockReply, ModerationAdminBlockRequest};
+
+    let (router, state) = router_with_moderation().await;
+    let author = [0x61u8; 32];
+    let member = [0x62u8; 32];
+    let admin = [0x6au8; 32];
+    state.db.add_admin_actor(&admin).await.unwrap();
+    let channel_id_hex = "c6".repeat(32);
+    let envelope = app_env(0xd6);
+    dispatch(
+        &router,
+        state.clone(),
+        author,
+        "fauna.conversations.channel.send",
+        send_payload(&channel_id_hex, envelope.clone()),
+    )
+    .await
+    .expect("send ok");
+    let content_id = hex::encode(
+        fauna_mls::segments::derive_record_cid(&envelope)
+            .expect("derive conv record cid")
+            .digest(),
+    );
+    let report = match state
+        .db
+        .insert_abuse_report(
+            NewAbuseReport {
+                reporter_actor: member,
+                subject_kind: "message".into(),
+                subject_id: content_id.clone(),
+                subject_channel: Some(channel_id_hex.clone()),
+                subject_actor: None,
+                reason: "harassment".into(),
+                note: None,
+                excerpt: None,
+                block_author: false,
+            },
+            100,
+            1,
+        )
+        .await
+        .unwrap()
+    {
+        AbuseReportInsert::Inserted(row) => row.id,
+        other => panic!("report not inserted: {other:?}"),
+    };
+    let reply: ModerationAdminBlockReply = decode(
+        &dispatch(
+            &router,
+            state.clone(),
+            admin,
+            "fauna.moderation.admin_block",
+            Bytes::from(
+                encode_canonical(&ModerationAdminBlockRequest {
+                    report_id: report,
+                    restore: false,
+                    extra: Default::default(),
+                })
+                .unwrap()
+                .to_vec(),
+            ),
+        )
+        .await
+        .expect("admin block ok"),
+    )
+    .unwrap();
+    assert_eq!(reply.status, "blocked");
+
+    let fetch_as = |caller: [u8; 32]| {
+        let router = &router;
+        let state = state.clone();
+        let channel_id_hex = channel_id_hex.clone();
+        async move {
+            let bytes = dispatch(
+                router,
+                state,
+                caller,
+                "fauna.conversations.channel.fetch",
+                fetch_payload(&channel_id_hex, 0, 100),
+            )
+            .await
+            .expect("fetch ok");
+            let reply: ChannelFetchReply = decode(&bytes).unwrap();
+            assert_eq!(reply.messages.len(), 1, "the message keeps its seq slot");
+            reply.messages.into_iter().next().unwrap()
+        }
+    };
+
+    let own = fetch_as(author).await;
+    assert_eq!(own.envelope, envelope, "the author's fetch keeps the body");
+    assert_eq!(
+        own.admin_block.expect("the marker rides beside it").reason,
+        fauna_protocol::moderation::AbuseReportReason::Harassment
+    );
+    let other = fetch_as(member).await;
+    assert!(other.envelope.is_empty(), "withheld from another member");
+    assert!(other.admin_block.is_some());
+
+    dispatch(
+        &router,
+        state.clone(),
+        admin,
+        "fauna.moderation.legal_takedown",
+        conv_takedown_payload(&content_id, "EU-DSA-2024/778", false),
+    )
+    .await
+    .expect("takedown ok");
+    let own = fetch_as(author).await;
+    assert!(
+        own.envelope.is_empty(),
+        "a takedown withholds from the author too"
+    );
+    assert!(own.legal_takedown.is_some());
 }

@@ -250,6 +250,7 @@ fn render_block_into(
             authoring_origin,
             legal_takedown_ref,
             not_found,
+            admin_block_reason,
             ..
         } => {
             // A quote with nothing to show paints one line in place of author +
@@ -263,11 +264,23 @@ fn render_block_into(
                 None if *not_found => {
                     Some(crate::i18n::strings::feed::post::POST_NOT_FOUND.to_string())
                 }
-                None => None,
+                // Admin-blocked (moderation.md § Admin block of a reported
+                // item): the shared notice stands in place of a withheld body,
+                // or — on its author's own read, which keeps the body — beside it.
+                None => match (admin_block_reason.as_deref(), body.is_empty()) {
+                    (Some(reason), true) => Some(crate::report::admin_block_notice(reason)),
+                    _ => None,
+                },
+            };
+            let body_text = match (admin_block_reason.as_deref(), body.is_empty()) {
+                (Some(reason), false) => {
+                    format!("{body}\n{}", crate::report::admin_block_notice(reason))
+                }
+                _ => body.clone(),
             };
             container.append(&build_quoted_post_card(
                 author,
-                body,
+                &body_text,
                 *verification,
                 *authoring_origin,
                 placeholder.as_deref(),

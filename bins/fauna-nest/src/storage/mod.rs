@@ -1329,6 +1329,8 @@ mod tests {
         "put_post_with_source_index_only(",
         "store_post(",
         "store_post_with_expiry(",
+        "store_delivered_post(",
+        "put_delivered_post_index_only(",
     ];
 
     /// Every production writer of `content.created_at`, keyed by
@@ -1359,9 +1361,25 @@ mod tests {
             "federation_handlers.rs",
             "post_forward_handler",
             CreatedAt::Bounded(
-                Gate::Calls(&["reject_future_created_at("]),
+                Gate::Via {
+                    hops: &[("federation_handlers.rs", "decode_forwarded_post")],
+                    gates: &["reject_future_created_at("],
+                },
                 "the federation forward leg verifies the envelope itself and never reaches \
-                 `Storage::ingest_post`, so it calls the bound directly",
+                 `Storage::ingest_post`, so the shared relayed-post decode applies the bound",
+            ),
+        ),
+        (
+            "follow_delivery.rs",
+            "deliver_handler",
+            CreatedAt::Bounded(
+                Gate::Via {
+                    hops: &[("federation_handlers.rs", "decode_forwarded_post")],
+                    gates: &["reject_future_created_at("],
+                },
+                "a federated follow's delivered envelope (`federated-follow.md` § Decision 3): \
+                 the same relayed-post decode as the forward applies the bound before the \
+                 follow gate and the store",
             ),
         ),
         (
@@ -1532,6 +1550,19 @@ mod tests {
         (
             "db/posts.rs",
             "put_post_with_source_index_only",
+            CreatedAt::Relay("the decoded post's own `created_at`"),
+        ),
+        (
+            "segments/post.rs",
+            "store_delivered_post",
+            CreatedAt::Relay(
+                "the delivered post body's own `created_at`, via \
+                 `put_delivered_post_index_only`",
+            ),
+        ),
+        (
+            "db/posts.rs",
+            "put_delivered_post_index_only",
             CreatedAt::Relay("the decoded post's own `created_at`"),
         ),
         (

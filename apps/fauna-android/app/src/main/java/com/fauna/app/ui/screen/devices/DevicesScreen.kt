@@ -353,6 +353,18 @@ private fun CustodyHeldCard(
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag(Ids.CUSTODY_HELD_BYTES),
             )
+            // A NEST-form hold carries the address the owner's cold device
+            // restores from — the accept's URL verbatim, handed over out of band
+            // (`devices.md` § Custody facet; the owner's half is `nests.md`
+            // § Trust facet — restore from a custodian nest).
+            row.custodianNestUrl?.let { address ->
+                Text(
+                    stringResource(R.string.devices_custody_held_restore_address)
+                        .replace("{address}", address),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag(Ids.CUSTODY_HELD_RESTORE_ADDRESS),
+                )
+            }
             // Commit on the keyboard's Done — a single-line field also performs
             // its IME action on a hardware Enter, which is the commit the e2e
             // driver presses (`drivers/android.py::COMMIT_ON_ENTER_INPUTS`).

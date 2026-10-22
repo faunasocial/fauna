@@ -159,6 +159,13 @@ public final class ConnectedAppsVM {
         await run { await $0.unblock(clientId: clientId) }
     }
 
+    /// The account's external-apps switch (`atproto-external-apps-enable`). The
+    /// machine writes it and the page paints the re-read snapshot, never a local
+    /// guess.
+    public func setExternalAppsEnabled(_ enabled: Bool) async {
+        await run { await $0.setExternalAppsEnabled(enabled: enabled) }
+    }
+
     public func armRevoke(_ key: String) { revokeArmed = key }
     public func cancelRevoke() { revokeArmed = nil }
 

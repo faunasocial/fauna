@@ -4,6 +4,11 @@ title: Share a link to a file
 section: your data and devices
 goal: docs/goal/behavior/share-links.md § Flows
 guide: docs/guides/app-tour.md § Media
+absences:
+  web (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+  ios (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+  android (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
+  tui (outcomes 28, 29, 30): "docs/goal/behavior/share-links.md § Windows Explorer's Share leaf"
 ---
 
 ## What a user gets
@@ -17,7 +22,7 @@ of them, after which it stops working for everyone.
 
 ## Coverage contract
 
-Stamped 2026-10-13 at 899b58ab1b.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] A file in a public folder offers a link; the link appears only once it is registered, a stranger opens it over plain HTTP, it is listed as active with its name, and revoking it from the list stops it working — `docs/goal/behavior/share-links.md` § Flows
    - `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link`
@@ -55,7 +60,7 @@ Stamped 2026-10-13 at 899b58ab1b.
     - `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key`
     - `tests/e2e-unified/tests/test_share_links.py::test_create_open_list_and_revoke_a_share_link`
     - `tests/e2e-unified/tests/test_media_upload_one_shape.py::test_a_media_upload_into_a_private_folder_takes_a_link_a_stranger_opens`
-18. [app] A file in a folder you share with named people offers no share link — `docs/goal/behavior/share-links.md` § The private-file extension
+18. [app] A file in a folder you share with named people offers no share link, unless the folder is public — `docs/goal/behavior/share-links.md` § The private-file extension
     - (none)
 19. [app] Making a link to a private file tells you that the link itself is the key: anyone who gets hold of it opens the file until it expires or you revoke it — `docs/goal/behavior/share-links.md` § The private-file extension
     - `tests/e2e-unified/tests/test_share_links_private.py::test_the_author_links_a_private_file_and_the_link_is_the_key`
@@ -75,6 +80,15 @@ Stamped 2026-10-13 at 899b58ab1b.
     - `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser`
 27. [nest] A service that fetches a private link to build a preview learns nothing about the file, not even its name — `docs/goal/behavior/share-links.md` § The private-file extension
     - `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke`
+28. [app] Choosing Share on a file in a public synced folder from the computer's file manager opens the app on that file, ready to make a link — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
+29. [app] The file manager offers Share on a file only when that file can carry a link — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
+30. [app] Choosing Share on a shared folder from the file manager opens that folder's member sharing in the app, and a sub-folder inside it offers no Share — `docs/goal/behavior/share-links.md` § Windows Explorer's Share leaf
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made`
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow`
+    - `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered`
 
 ## Status
 
@@ -120,4 +134,13 @@ Stamped 2026-10-13 at 899b58ab1b.
 | 25 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
 | 26 | app | `tests/e2e-unified/tests/test_share_links_private.py::test_a_stranger_opens_a_private_link_in_a_browser` | web (linux): passed |
 | 27 | nest | `tests/e2e-unified/tests/api/test_share_links_private_arm.py::test_the_nest_serves_a_private_link_blind_and_stops_on_revoke` | nest (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
+| 28 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
+| 28 | app | absent by design on web, ios, android, tui | — |
+| 29 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
+| 29 | app | absent by design on web, ios, android, tui | — |
+| 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_helper_answers_only_where_a_link_or_member_share_can_be_made` | linux (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_the_printed_routes_open_the_create_surface_and_the_member_share_flow` | linux (linux): passed |
+| 30 | app | `tests/e2e-unified/tests/platform/linux/test_file_manager_share.py::test_open_launches_the_route_only_where_share_is_offered` | linux (linux): passed |
+| 30 | app | absent by design on web, ios, android, tui | — |
 <!-- features-render:end -->

@@ -244,7 +244,11 @@ def test_a_toolkit_app_is_fully_covered_by_the_two_shape_invariants():
         }
     )
     assert violations == []
-    assert not_applicable == ["focus-fanout", "region-block-never-silent"]
+    assert not_applicable == [
+        "focus-fanout",
+        "region-block-never-silent",
+        "nest-block-never-silent",
+    ]
 
 
 def test_an_unobservable_frame_is_not_a_violation():
@@ -257,6 +261,7 @@ def test_an_unobservable_frame_is_not_a_violation():
             "nav-stack",
             "receive-loop-alive",
             "region-block-never-silent",
+            "nest-block-never-silent",
         ],
     )
 
@@ -287,6 +292,29 @@ def test_a_malformed_region_block_render_is_a_violation():
     assert _names({"region_block_render": None}) == ["region-block-never-silent"]
     assert _names({"region_block_render": {"blocked": "2", "placeholders": 2}}) == [
         "region-block-never-silent"
+    ]
+
+
+# ── nest-block-never-silent ─────────────────────────────────────────────────
+#
+# nest-rules.md § What the build owes in tests: a nest `Block` verdict never
+# renders silent — the region invariant's twin over the nest source.
+
+
+def test_a_nest_block_without_its_placeholder_is_caught():
+    frame = {"nest_block_render": {"blocked": 1, "placeholders": 0}}
+    assert _names(frame) == ["nest-block-never-silent"]
+
+
+def test_every_nest_block_with_its_placeholder_passes():
+    assert _names({"nest_block_render": {"blocked": 2, "placeholders": 2}}) == []
+    assert _names({"nest_block_render": {"blocked": 1, "placeholders": 3}}) == []
+
+
+def test_a_malformed_nest_block_render_is_a_violation():
+    assert _names({"nest_block_render": None}) == ["nest-block-never-silent"]
+    assert _names({"nest_block_render": {"blocked": True, "placeholders": 1}}) == [
+        "nest-block-never-silent"
     ]
 
 

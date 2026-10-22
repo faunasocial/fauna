@@ -40,8 +40,8 @@ android {
         // Owner: docs/goal/architecture/installers/android.md § Versioning.
         // versionName must equal [workspace.package] version in the root
         // Cargo.toml (product-version.md; version-lockstep merge gate).
-        versionCode = 104
-        versionName = "0.1.4"
+        versionCode = 105
+        versionName = "0.1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -123,9 +123,33 @@ android {
             // `offline-receive-*` ids out of this variant's dex.
             buildConfigField("boolean", "P2P_SHARE", "false")
             buildConfigField("boolean", "KIDS", "false")
-            // Distinguishes the outputs so a store-safe APK can never be
-            // mistaken for the shipping one on disk.
-            versionNameSuffix = "-storesafe"
+            // No `versionNameSuffix`: this artifact SHIPS — it was the `0.1.4`
+            // Play upload (installers/android.md § Goal,
+            // `just android-bundle-store-safe`), on the train at the fleet
+            // version; from `0.1.5` the Play upload is `storeNoPayments`, the
+            // next build type, which inherits the same no-suffix posture. The
+            // output directories (`apk/storeSafe/`, `bundle/storeSafe/`)
+            // already keep it apart from `release` on disk.
+        }
+        // The second store flavor (dynamic-features.md § The App-Store escape
+        // hatch → *The store flavors*): `release` minus `payments` (and `zaps`,
+        // its subset member), KEEPING `p2p-share`. `initWith(release)` for
+        // `storeSafe`'s no-drift reason; the two differ only in the
+        // `P2P_SHARE` field and the ceremony twin they take.
+        //
+        // Built by `just android-store-no-payments`, which stages a `fauna-ffi`
+        // compiled `--no-default-features --features store-safe,p2p-share,file-provider-host`
+        // into `src/storeNoPayments/`. Like `storeSafe` it carries no suffix:
+        // it is THE Play upload from `0.1.5` on (installers/android.md § Goal,
+        // owner-ruled 2026-10-18: no payments on Play until each app has made
+        // its first successful release in every store it ships through),
+        // built by `just android-bundle-store-no-payments` under the main
+        // identity.
+        create("storeNoPayments") {
+            initWith(getByName("release"))
+            buildConfigField("boolean", "PAYMENTS", "false")
+            buildConfigField("boolean", "P2P_SHARE", "true")
+            buildConfigField("boolean", "KIDS", "false")
         }
         // The F-Droid / direct-download artifact (installers/android.md
         // § Release channels): `release` minus every proprietary Google Play
@@ -168,8 +192,9 @@ android {
             // and strips every `if (!BuildConfig.KIDS)` branch, which is how
             // the excised surfaces' element ids leave the dex.
             buildConfigField("boolean", "KIDS", "true")
-            // `initWith(storeSafe)` copied "-storesafe"; this artifact SHIPS,
-            // on the train at the fleet version, so it carries no suffix.
+            // This artifact SHIPS, on the train at the fleet version, so it
+            // carries no suffix — stated here, not inherited, so a suffix ever
+            // put back on `storeSafe` cannot reach the kids listing.
             versionNameSuffix = null
         }
     }
@@ -217,6 +242,10 @@ android {
     // inert twin of only what `src/main` still names (`KidsExcisedApi`, the
     // `ApiClient` superclass; `KidsExcisedNav`; `CriticalAlertsHost`). `kids`
     // never takes `src/noKids`.
+    // `src/noKidsNoPayments` holds the payments twins that extend a feed-plane
+    // face (the post-tip resolver on `FfiFeedManager`): taken by the two build
+    // types with a feed and no payments, `storeSafe` and `storeNoPayments`, and
+    // never by `kids`, whose bindings carry no feed.
     sourceSets {
         getByName("debug") {
             java.srcDir("src/noKids/java")
@@ -234,7 +263,16 @@ android {
         getByName("storeSafe") {
             java.srcDir("src/noKids/java")
             java.srcDir("src/noPayments/java")
+            java.srcDir("src/noKidsNoPayments/java")
             java.srcDir("src/noP2pShare/java")
+            java.srcDir("src/noAgent/java")
+            java.srcDir("src/storeAge/java")
+        }
+        getByName("storeNoPayments") {
+            java.srcDir("src/noKids/java")
+            java.srcDir("src/noPayments/java")
+            java.srcDir("src/noKidsNoPayments/java")
+            java.srcDir("src/p2pShare/java")
             java.srcDir("src/noAgent/java")
             java.srcDir("src/storeAge/java")
         }
@@ -320,6 +358,14 @@ configurations.all {
             .using(module("com.google.crypto.tink:tink-android:1.17.0"))
             .because("one Tink: the Android build of the version the UnifiedPush connector needs")
     }
+}
+
+// `storeNoPayments` is Play-distributed like `storeSafe`, so it takes the same
+// Play client libraries (the store-age arm, `dependencies` below). It inherits
+// `storeSafe`'s configuration rather than repeating each coordinate, so the two
+// store flavors can never ship different Play libraries.
+configurations.named("storeNoPaymentsImplementation") {
+    extendsFrom(configurations.getByName("storeSafeImplementation"))
 }
 
 dependencies {

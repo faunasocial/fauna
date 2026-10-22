@@ -13,20 +13,20 @@
   // list is every account on the nest (`adminUsersListAll` — admin.md § 2 →
   // *Which accounts a picker offers*); the current designation + set/clear
   // ride the shared `WebClient` over the singleton WS-RPC client (the
-  // `webGet/SetApexActor` calls in `$lib/rpc`, the WASM twin of the linux native
+  // `webGet/SetApexActor` calls in `#lib/rpc`, the WASM twin of the linux native
   // `WebClient` + `fauna-ffi`'s `FfiWebClient`). The apex URL hint is the shared
   // `webApexUrl` projection (`fauna_core::web::apex_url`), one source of truth with
   // the nest's routing (priority #2). Per-user subdomain hosting is the user
   // `web-settings` page, not here. Lifts the linux lead
   // (apps/fauna-linux/src/settings/admin_web.rs). IDs: ui.yaml § admin-web.
-  import { identity } from '$lib/store';
-  import { webGetApexActor, webSetApexActor, webServingDomain, adminUsersListAll } from '$lib/rpc';
-  import { ensureWasm, webApexUrl, hexFull, adminPickerOption } from '$lib/wasm';
-  import { toBytes, actorHex } from '$lib/hex';
+  import { identity } from '#lib/store';
+  import { webGetApexActor, webSetApexActor, webServingDomain, adminUsersListAll } from '#lib/rpc';
+  import { ensureWasm, webApexUrl, hexFull, adminPickerOption } from '#lib/wasm';
+  import { toBytes, actorHex } from '#lib/hex';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   interface ActorOption { id: Uint8Array; label: string; hex: string }
 

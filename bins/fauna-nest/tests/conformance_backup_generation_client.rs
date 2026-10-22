@@ -73,18 +73,15 @@ struct Nest {
 }
 
 async fn nest() -> Arc<Nest> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "fauna-test-genclient-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
+    // The blob store sits under the state's scratch root, removed with it.
+    let base = AppState::for_test(db.clone());
+    let root = base.test_scratch_path("genclient");
     let state = Arc::new(AppState {
         backup_service: Some(Arc::new(
             BackupService::new(db.clone(), None, false, root, None).unwrap(),
         )),
-        ..AppState::for_test(db)
+        ..base
     });
     let mut b = RpcRouter::builder();
     backup_handlers::register_backup_handlers(&mut b);

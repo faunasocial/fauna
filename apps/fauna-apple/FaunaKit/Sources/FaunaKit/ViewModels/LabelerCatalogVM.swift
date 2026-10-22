@@ -67,6 +67,15 @@ public final class LabelerCatalogVM {
         return firstNonNil(connectError, machine?.snapshot().error.map(renderLocalizedText))
     }
 
+    /// Whether row `index`'s subscribe affordance is enabled — the shared machine's
+    /// one read (a labeler whose signature does not check out, or that cannot run,
+    /// is refused), never `verified` mirrored app-side
+    /// (content-moderation-and-ranking.md § Tier-3 community models).
+    public func subscribeEnabled(index: Int) -> Bool {
+        _ = _observerTick
+        return machine?.subscribeEnabled(index: UInt32(index)) ?? false
+    }
+
     public func refresh() async { await machine?.refresh() }
     public func inspect(index: Int) async { await machine?.inspect(index: UInt32(index)) }
     public func closeInspect() { machine?.closeInspect() }

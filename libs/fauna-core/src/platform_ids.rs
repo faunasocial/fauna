@@ -255,9 +255,121 @@ pub fn xdg_app_config_dir(
     Some(base.join(app))
 }
 
+/// The per-user, per-OS **sync state base** — the root the account store, the
+/// sync agent's state and the headless credential files live under
+/// (`fauna_account_store::root` has the table and the reasons):
+/// `%LOCALAPPDATA%\Fauna\sync` on windows,
+/// `~/Library/Application Support/Fauna/sync` on macOS,
+/// `$XDG_CONFIG_HOME/fauna/sync` (else `~/.config/fauna/sync`) on linux and
+/// other unix. Always absolute; `None` without an absolute home, never a
+/// `/tmp` fallback ([`NO_HOME_REFUSAL`]), and `None` on a target with no
+/// filesystem home (wasm). Lifted here from `fauna-account-store` so
+/// `fauna-credential-store`, which must resolve the account-store slot's
+/// headless file the same way for its writer and its erase, reads the same
+/// path without linking the store.
+pub fn sync_state_base() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\ProgramData".into());
+        Some(PathBuf::from(local).join("Fauna").join("sync"))
+    }
+    // `std::env::home_dir` (not `env::var("HOME")`) so an unset HOME falls
+    // back to the passwd database.
+    #[cfg(target_os = "macos")]
+    {
+        macos_sync_state_base(std::env::home_dir())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        unix_sync_state_base(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
+}
+
+/// Pure user-domain resolution of [`sync_state_base`] on macOS (home passed
+/// in, so tests never mutate process env):
+/// `<home>/Library/Application Support/Fauna/sync`. **Never the app-group
+/// container** — `~/Library/Group Containers` is TCC-protected on macOS 15+
+/// and a launchd-spawned agent is prompted on every instance there
+/// (`installers/macos.md` § Identifier domain, item 5).
+pub fn macos_sync_state_base(home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(apple_user_domain_home(home)?.join("Fauna").join("sync"))
+}
+
+/// Pure XDG resolution of [`sync_state_base`] on linux and other unix (env
+/// values passed in): `$XDG_CONFIG_HOME/fauna/sync`, else
+/// `$HOME/.config/fauna/sync`. An empty or relative value counts as unset.
+pub fn unix_sync_state_base(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    Some(
+        xdg_config_root(xdg_config_home, home)?
+            .join("fauna")
+            .join("sync"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_sync_state_base_prefers_xdg_then_home_and_is_always_absolute() {
+        // Value pin: the SAME `~/.config/fauna/sync` the in-app GTK
+        // `SyncDriver` (`apps/fauna-linux/src/sync.rs::sync_state_dir`) and
+        // the sync agent resolve — one root per user per machine.
+        assert_eq!(
+            unix_sync_state_base(Some("/run/user/1000/xdg".into()), None).unwrap(),
+            Path::new("/run/user/1000/xdg/fauna/sync")
+        );
+        assert_eq!(
+            unix_sync_state_base(None, Some("/home/alice".into())).unwrap(),
+            Path::new("/home/alice/.config/fauna/sync")
+        );
+        // Empty and relative values count as unset.
+        assert_eq!(
+            unix_sync_state_base(Some("".into()), Some("/home/alice".into())).unwrap(),
+            Path::new("/home/alice/.config/fauna/sync")
+        );
+    }
+
+    #[test]
+    fn unix_sync_state_base_refuses_a_missing_empty_or_relative_home_instead_of_tmp() {
+        // The old `/tmp/.config/fauna/sync` fallback is a
+        // world-writable base another local account can pre-create.
+        for home in [None, Some("".into()), Some("rel".into())] {
+            assert_eq!(unix_sync_state_base(None, home.clone()), None);
+            assert_eq!(unix_sync_state_base(Some("rel".into()), home), None);
+        }
+    }
+
+    #[test]
+    fn macos_sync_state_base_is_the_user_domain_sync_dir_and_always_absolute() {
+        assert_eq!(
+            macos_sync_state_base(Some("/Users/alice".into())).unwrap(),
+            Path::new("/Users/alice/Library/Application Support/Fauna/sync")
+        );
+        // The one place the base must NEVER resolve: the TCC-protected
+        // app-group container (a launchd agent is prompted per instance there,
+        // and no user decision binds the next one — the 2026-08-25 record).
+        assert!(
+            !macos_sync_state_base(Some("/Users/alice".into()))
+                .unwrap()
+                .to_string_lossy()
+                .contains("Group Containers")
+        );
+        // A missing/empty/relative home is refused — no `/tmp` base.
+        for home in [None, Some("".into()), Some("rel".into())] {
+            assert_eq!(macos_sync_state_base(home), None);
+        }
+    }
 
     #[test]
     fn app_groups_are_on_the_org_domain() {

@@ -39,13 +39,14 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use check_additive_evolution::enums::{
-    EnumLedger, EnumMap, EnumScan, check_enum_ledger, check_no_owed, diff_enum_maps,
-    parse_enum_ledger,
+    EnumLedger, EnumMap, EnumScan, check_enum_ledger, check_no_owed, diff_enum_breaks,
+    enum_revivals, parse_enum_ledger,
 };
 use check_additive_evolution::{
     RatifiedBreaks, StructMap, StructScan, Violation, check_catch_all_violations,
-    check_ratified_breaks_monotonic, diff_struct_maps_allowing, in_compat_free_window,
-    parse_catch_all_baseline, parse_ratified_breaks, product_version,
+    check_ratified_breaks_monotonic, diff_struct_breaks, in_compat_free_window,
+    parse_catch_all_baseline, parse_ratified_breaks, parse_ratified_breaks_lenient,
+    product_version, struct_revivals,
 };
 
 /// A crate whose serde structs are part of the frozen compatibility surface.
@@ -156,13 +157,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let base_ratified = match load_base_ratified_breaks(&base) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: {RATIFIED_BREAKS_PATH} at merge base: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    let base_ratified = load_base_ratified_breaks(&base);
     // The list only grows: a head whose own-gate entries drop one the merge
     // base carried is refused here, independently of whether the dropped
     // name is also revived (see `check_ratified_breaks_monotonic`'s doc).
@@ -198,7 +193,10 @@ fn main() -> ExitCode {
     let head_enums = build_head_enum_map(&crates);
     let base_enums = build_base_enum_map(&base, &crates);
     violations.extend(check_enum_ledger(&head_enums, &ledger));
-    breaks.extend(diff_enum_maps(
+    // A revival of a ratified removal violates the LIST's invariant, so it is
+    // refused whatever the version — only the breaks are window-softened.
+    violations.extend(enum_revivals(&head_enums, &base_ledger, &ledger, &ratified));
+    breaks.extend(diff_enum_breaks(
         &base_enums,
         &head_enums,
         &base_ledger,
@@ -215,7 +213,8 @@ fn main() -> ExitCode {
         }
         let head = build_head_map(spec.root);
         let base_map = build_base_map(&base, spec.root);
-        breaks.extend(diff_struct_maps_allowing(&base_map, &head, &ratified));
+        violations.extend(struct_revivals(&head, &ratified));
+        breaks.extend(diff_struct_breaks(&base_map, &head, &ratified));
         if spec.check_catch_all {
             violations.extend(check_catch_all_violations(
                 &head,
@@ -319,12 +318,18 @@ fn load_ratified_breaks() -> Result<RatifiedBreaks, String> {
 /// stood before this change, read via `git show` rather than the working
 /// tree. Absent at the base (a pre-allowlist commit, or a base predating the
 /// file) reads as empty — nothing to have dropped — same as a missing
-/// working-tree file does for HEAD.
-fn load_base_ratified_breaks(base: &str) -> Result<RatifiedBreaks, String> {
-    match git_show(base, RATIFIED_BREAKS_PATH) {
-        Some(text) => parse_ratified_breaks(&text),
-        None => Ok(RatifiedBreaks::new()),
+/// working-tree file does for HEAD. Read leniently: the base list feeds only
+/// the only-grows check, so a malformed base line is skipped with a warning
+/// rather than failing the commit that fixes it (HEAD's list stays strict).
+fn load_base_ratified_breaks(base: &str) -> RatifiedBreaks {
+    let Some(text) = git_show(base, RATIFIED_BREAKS_PATH) else {
+        return RatifiedBreaks::new();
+    };
+    let (entries, skipped) = parse_ratified_breaks_lenient(&text);
+    for e in skipped {
+        eprintln!("warn: {RATIFIED_BREAKS_PATH} at merge base: {e} — line skipped");
     }
+    entries
 }
 
 // ── catch-all baseline ───────────────────────────────────────────────────

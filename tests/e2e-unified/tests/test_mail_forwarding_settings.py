@@ -28,7 +28,14 @@ from i18n.strings import S
 
 # tui leads (the lead app); the other six apps join by adding their marker once
 # their run is green.
-pytestmark = [pytest.mark.tier_3, pytest.mark.tui, pytest.mark.web, pytest.mark.linux]
+pytestmark = [
+    pytest.mark.tier_3,
+    pytest.mark.tui,
+    pytest.mark.web,
+    pytest.mark.linux,
+    pytest.mark.macos,
+    pytest.mark.ios,
+]
 
 # A domain this nest hosts, so the hosted-address refusal has one to refuse.
 _HOSTED_DOMAIN = "forwarding-settings-e2e.test"

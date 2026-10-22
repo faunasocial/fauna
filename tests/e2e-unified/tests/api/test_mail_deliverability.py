@@ -251,9 +251,22 @@ def test_admin_reads_blocklist_self_check_history(nest_instance):
         rows = history.get("rows")
         assert isinstance(rows, list) and rows, f"expected a non-empty history: {history!r}"
         latest = rows[0]
-        assert latest["checked_at"] == run["checked_at"], (
-            f"newest-first row must be the run just recorded: {latest!r} vs {run!r}"
-        )
+        # Only the lists actually asked are recorded: a list the admin's
+        # one-a-minute refresh limit held back keeps its earlier answer
+        # standing (`mail-deliverability.md` § Blocklist self-check →
+        # *Admin-pane rendering*). On the shared nest a sibling test's refresh
+        # moments before can leave every list rate-limited, so this run records
+        # nothing and the newest row stays that earlier run — still newest-first.
+        asked = [r for r in run["results"] if "rate-limited" not in (r.get("error") or "")]
+        if asked:
+            assert latest["checked_at"] == run["checked_at"], (
+                f"newest-first row must be the run just recorded: {latest!r} vs {run!r}"
+            )
+        else:
+            assert latest["checked_at"] <= run["checked_at"], (
+                f"a wholly rate-limited run records nothing, so the newest row is an "
+                f"earlier run, never a later one: {latest!r} vs {run!r}"
+            )
         # The row reuses the live-run BlocklistServerResult shape, not a raw string.
         servers = {r["server"] for r in latest["results"]}
         assert servers == DEFAULT_DNSBLS, f"history row carries the DNSBL set: {latest!r}"

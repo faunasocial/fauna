@@ -390,6 +390,7 @@ mod reach_policy_format_tests {
             spam: ContentFloor::Inherit,
             phishing: ContentFloor::Collapse,
             commercial: ContentFloor::Inherit,
+            document: None,
         };
         let lines = content_policy_summary(&policy);
         let labels: Vec<&str> = lines.iter().map(|l| l.label.key.as_str()).collect();
@@ -402,9 +403,85 @@ mod reach_policy_format_tests {
         );
         let values: Vec<&str> = lines.iter().map(|l| l.value.key.as_str()).collect();
         assert_eq!(values, ["family.value_block", "family.value_collapse"]);
+        // A floor invents no reason.
+        assert!(lines.iter().all(|l| l.reason.is_none()));
 
         // An all-inherit policy (the default) renders no content lines.
         assert!(content_policy_summary(&ContentPolicy::default()).is_empty());
+    }
+
+    /// The guardian's rule document reads like the floors it supersedes: a
+    /// category rule is its category's line (the strictest of it and a floor
+    /// still set), a keywords rule a line named by its kind, and a document
+    /// this build cannot apply reads as `block` on all four categories.
+    #[test]
+    fn content_policy_summary_reads_the_guardians_rule_document() {
+        use crate::content_policy::{
+            BundledScorer, ContentPolicyDocument, ContentRule, ContentVerdict, Publisher,
+            REASON_DEFAULT_KEY, ScorerKind, scorer_factor,
+        };
+        use crate::obligation::{ContentFloor, ContentPolicy};
+        let rule = |factor: &str, verdict| ContentRule {
+            factor: factor.into(),
+            min_permille: 500,
+            verdict,
+            reason_code: "rule-1".into(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "Not here".to_string())].into(),
+            extra: Default::default(),
+        };
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(rule("spam", ContentVerdict::Collapse));
+        document.rules.push(rule("nsfw", ContentVerdict::Block));
+        document.scorers.push(BundledScorer {
+            name: "keywords".into(),
+            kind: ScorerKind::Keywords,
+            bytes: b"casino".to_vec(),
+            extra: Default::default(),
+        });
+        document.rules.push(rule(
+            &scorer_factor(&Publisher::Guardian, "keywords"),
+            ContentVerdict::Block,
+        ));
+        let policy = ContentPolicy {
+            // A floor still set beside the document: the stricter binds.
+            spam: ContentFloor::Block,
+            document: Some(document),
+            ..Default::default()
+        };
+        let lines = content_policy_summary(&policy);
+        let pairs: Vec<(&str, &str)> = lines
+            .iter()
+            .map(|l| (l.label.key.as_str(), l.value.key.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("family.policy_content_nsfw_label", "family.value_block"),
+                ("family.policy_content_spam_label", "family.value_block"),
+                ("rule_editor.kind.keywords", "family.value_block"),
+            ]
+        );
+        // nest-rules.md § The shared rule editor → The reason is the member's
+        // to read: a line a rule makes carries its reason; the spam line, made
+        // by the stricter floor over a collapsing rule, carries none.
+        let reasons: Vec<Option<&str>> = lines
+            .iter()
+            .map(|l| {
+                l.reason
+                    .as_ref()
+                    .and_then(|r| r.get(REASON_DEFAULT_KEY))
+                    .map(String::as_str)
+            })
+            .collect();
+        assert_eq!(reasons, [Some("Not here"), None, Some("Not here")]);
+
+        let unreadable = ContentPolicy {
+            document: Some(ContentPolicyDocument::unreadable()),
+            ..Default::default()
+        };
+        let unreadable_lines = content_policy_summary(&unreadable);
+        assert_eq!(unreadable_lines.len(), 4);
+        assert!(unreadable_lines.iter().all(|l| l.reason.is_none()));
     }
 
     #[test]
@@ -663,7 +740,7 @@ pub fn relative_time_display(now_ms: i64, then_ms: i64) -> RelativeTimeDisplay {
 /// The flattened display above stops one step short on purpose — it is the
 /// shape the FFI / wasm boundary can carry, and web deliberately renders its
 /// `absolute_epoch_ms` arm with the browser's locale-aware formatter
-/// (`$lib/value-format.ts`). The two **native Rust** apps have no such
+/// (`#lib/value-format.ts`). The two **native Rust** apps have no such
 /// divergence: both render the `≥ 7 d` arm as the shared plain
 /// [`format_unix_local_date_ms`] date, and both resolve the bucket arm through
 /// their own `strings::lookup`. That made the last step byte-identical in
@@ -1821,14 +1898,14 @@ pub fn quota_percent(used_bytes: i64, max_bytes: i64) -> u32 {
 /// as "the domain this link goes to" (link-preview chips, backup-destination
 /// labels, nest qualifiers). Splitting on `:` and `/` together used to stop at
 /// the first colon and never look for an `@`, so
-/// `https://example.com:x@evil.com/` rendered as **`example.com`** — a link to
+/// `https://example.net:x@evil.com/` rendered as **`example.net`** — a link to
 /// `evil.com` wearing a trusted domain's name, on all 7 apps at once.
 ///
 /// The authority is isolated via [`crate::web::generic_authority`] — shared
 /// with `fauna_onboarding_machine::helpers::nest_host` and
 /// `fauna_core::resolve::parse_node_address` — so it ends at the same four
 /// WHATWG terminators (`/ \ ? #`) those extractors do, not just `/`:
-/// `https://evil.example?@example.com/` used to render `example.com`, the same
+/// `https://evil.example?@example.net/` used to render `example.net`, the same
 /// display spoof as the userinfo case above.
 pub fn url_host_opt(url: &str) -> Option<String> {
     let authority = crate::web::generic_authority(url);
@@ -2106,7 +2183,7 @@ pub fn backup_last_upload_label(
 /// the *resolution* of that split, which was byte-identical in `fauna-linux`'s
 /// `i18n::backup_last_upload` and `fauna-tui`'s `format::backup_last_upload`.
 /// Native-only (`local-clock`) for [`relative_time_display_text`]'s reason; the
-/// wasm face composes the same two levels in `$lib/value-format.ts` with the
+/// wasm face composes the same two levels in `#lib/value-format.ts` with the
 /// browser's date formatter.
 #[cfg(feature = "local-clock")]
 pub fn backup_last_upload_text<F, S>(
@@ -2819,18 +2896,23 @@ pub fn media_sort_direction_label(descending: bool) -> LocalizedText {
 /// headline (`os_restart_pending`, "Restart pending — will restart automatically when
 /// idle"); else **pending security updates** (`os_updates_pending`, "Security updates
 /// pending" — the raw count renders separately in `nest-os-updates-count` from
-/// `os_security_updates_pending`); else **up to date** (`os_up_to_date`). A nest with
-/// no host maintenance channel (dev/desktop/older nest) reports the serde defaults
-/// (0/false), so this returns `os_up_to_date` — no false alarm on version skew.
+/// `os_security_updates_pending`); else **up to date** (`os_up_to_date`). Ahead of
+/// all three, a nest that read no `host-status` file (`os_host_status_present` false:
+/// a hand-built box, dev, desktop) gets **no host data** (`os_no_host_data`) — its
+/// 0/false are serde defaults, not a report, so "up to date" would vouch for a host
+/// the nest cannot see.
 ///
 /// Shared across all seven apps (priority #2) so the state→line decision can't drift.
 /// Authority: `installers/vps.md` § Host OS Maintenance § 4. Strings live in en.yaml
-/// (`admin.nest_page.os_{up_to_date,updates_pending,restart_pending}`).
+/// (`admin.nest_page.os_{no_host_data,up_to_date,updates_pending,restart_pending}`).
 pub fn os_maintenance_status_label(
+    host_status_present: bool,
     security_updates_pending: u32,
     reboot_pending: bool,
 ) -> LocalizedText {
-    if reboot_pending {
+    if !host_status_present {
+        LocalizedText::key("admin.nest_page.os_no_host_data")
+    } else if reboot_pending {
         LocalizedText::key("admin.nest_page.os_restart_pending")
     } else if security_updates_pending > 0 {
         LocalizedText::key("admin.nest_page.os_updates_pending")
@@ -3017,6 +3099,30 @@ pub struct PolicySummaryLine {
     pub label: LocalizedText,
     /// The knob's current value, already fail-closed for the two string knobs.
     pub value: LocalizedText,
+    /// The guardian's own reason (`{ lang → text }`, with a required `default`
+    /// entry), shown **verbatim** beside the line when a rule of the guardian's
+    /// document makes it (`nest-rules.md` § The shared rule editor → *The
+    /// reason is the member's to read*); pick the entry with
+    /// [`Self::reason_text`]. `None` on every other line — a reach knob, a
+    /// floor, an unreadable document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub reason: Option<std::collections::HashMap<String, String>>,
+}
+
+impl PolicySummaryLine {
+    /// The line's reason in `lang`, falling back to the required
+    /// [`crate::content_policy::REASON_DEFAULT_KEY`] entry — the
+    /// [`crate::content_policy::reason_text`] pick over this line's map.
+    /// `None` when the line carries no reason, or an empty one.
+    pub fn reason_text(&self, lang: &str) -> Option<&str> {
+        let reason = self.reason.as_ref()?;
+        reason
+            .get(lang)
+            .or_else(|| reason.get(crate::content_policy::REASON_DEFAULT_KEY))
+            .map(String::as_str)
+            .filter(|text| !text.is_empty())
+    }
 }
 
 /// i18n label key for an `unknown_sender_mail` value (`family.value_*`).
@@ -3190,22 +3296,27 @@ pub fn reach_policy_summary(
         PolicySummaryLine {
             label: LocalizedText::key("family.policy_contact_approval_label"),
             value: on_off(contact_approval),
+            reason: None,
         },
         PolicySummaryLine {
             label: LocalizedText::key("family.policy_unknown_sender_label"),
             value: unknown_sender_label(unknown_sender_mail),
+            reason: None,
         },
         PolicySummaryLine {
             label: LocalizedText::key("family.policy_federation_label"),
             value: on_off(federation_contact),
+            reason: None,
         },
         PolicySummaryLine {
             label: LocalizedText::key("family.policy_feed_sources_label"),
             value: feed_sources_label(feed_sources),
+            reason: None,
         },
         PolicySummaryLine {
             label: LocalizedText::key("family.policy_unknown_peer_dm_label"),
             value: unknown_peer_dm_label(unknown_peer_dm.unwrap_or(UnknownPeerDm::Allow.as_str())),
+            reason: None,
         },
     ]
 }
@@ -3276,15 +3387,96 @@ pub fn content_floor_label(value: &str) -> LocalizedText {
 /// ward's own preferences, so it is not a rule to display. Each value fails closed to
 /// `block` via [`content_floor_label`]. Appended after the reach-knob summary by
 /// `ReachPolicy::summary_lines()` (`fauna-protocol`).
+///
+/// The guardian's rule document (`nest-rules.md` § The shared rule editor (b))
+/// reads the same way: a category rule is a line for its category — the
+/// strictest of it and any floor still set, as the engine folds them — and a
+/// keywords, labeler or prompt rule is a line named by its kind. A document
+/// this build cannot apply binds as `block` on all four categories
+/// (`rules_from_guardian_policy`), so it reads that way.
+///
+/// A line a document rule makes carries that rule's reason, as the engine's
+/// guardian arm does: a category line the strictest document rule's for its
+/// category when no floor is stricter (a rule and a floor at one strictness
+/// show the rule's — a reason beats none), a kind-named line its rule's; a
+/// line a floor alone makes, and every line of an unreadable document, carries
+/// none.
 pub fn content_policy_summary(policy: &ContentPolicy) -> Vec<PolicySummaryLine> {
-    GUARDIAN_FLOOR_CATEGORIES
+    use crate::content_policy::{ContentVerdict, Publisher, ScorerKind};
+    let guardian = Publisher::Guardian;
+    let document = policy.document.as_ref();
+    let unapplied = document.is_some_and(|d| !d.status(&guardian).is_applied());
+    // 2 = block, 1 = collapse, 0 = nothing.
+    let rank = |verdict: ContentVerdict| match verdict {
+        ContentVerdict::Block => 2u8,
+        ContentVerdict::Collapse => 1,
+    };
+    let rules = document
+        .filter(|_| !unapplied)
+        .map(|d| d.rules.as_slice())
+        .unwrap_or_default();
+    let category_rank = |category: &str| {
+        rules
+            .iter()
+            .filter(|r| r.factor == category)
+            .map(|r| rank(r.verdict))
+            .max()
+            .unwrap_or(0)
+    };
+    let reason_of = |rule: &crate::content_policy::ContentRule| {
+        Some(
+            rule.reason
+                .clone()
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>(),
+        )
+    };
+    let value = |rank: u8| content_floor_label(if rank >= 2 { "block" } else { "collapse" });
+    let mut lines: Vec<PolicySummaryLine> = GUARDIAN_FLOOR_CATEGORIES
         .into_iter()
-        .filter(|c| policy.floor_for(c) != ContentFloor::Inherit)
-        .map(|c| PolicySummaryLine {
-            label: LocalizedText::key(content_category_label_key(c)),
-            value: content_floor_label(policy.floor_for(c).as_str()),
+        .filter_map(|c| {
+            let floor = match policy.floor_for(c) {
+                ContentFloor::Inherit => 0,
+                ContentFloor::Collapse => 1,
+                ContentFloor::Block | ContentFloor::Unknown => 2,
+            };
+            let strictest = floor
+                .max(category_rank(c))
+                .max(if unapplied { 2 } else { 0 });
+            // The last of equal rank, as the engine's fold keeps it.
+            let reason = rules
+                .iter()
+                .rfind(|r| r.factor == c && rank(r.verdict) == strictest)
+                .and_then(reason_of);
+            (strictest > 0).then(|| PolicySummaryLine {
+                label: LocalizedText::key(content_category_label_key(c)),
+                value: value(strictest),
+                reason,
+            })
         })
-        .collect()
+        .collect();
+    for rule in rules {
+        let factor = rule.factor.as_str();
+        if GUARDIAN_FLOOR_CATEGORIES.contains(&factor) {
+            continue;
+        }
+        let label = match document.and_then(|d| d.scorer_for_factor(&guardian, factor)) {
+            Some(scorer) => LocalizedText::key(match scorer.kind {
+                ScorerKind::Keywords => "rule_editor.kind.keywords",
+                ScorerKind::Wasm => "rule_editor.kind.labeler",
+                ScorerKind::Prompt => "rule_editor.kind.prompt",
+                ScorerKind::List => "rule_editor.kind.list",
+            }),
+            // Another label category the device's labelers produce.
+            None => LocalizedText::key(content_category_label_key(factor)),
+        };
+        lines.push(PolicySummaryLine {
+            label,
+            value: value(rank(rule.verdict)),
+            reason: reason_of(rule),
+        });
+    }
+    lines
 }
 
 /// The guardian's per-ward **Guardian Notify** readout line
@@ -3304,6 +3496,7 @@ pub fn content_notice_line(category: &str, count: u32) -> PolicySummaryLine {
             "count",
             count.to_string(),
         ),
+        reason: None,
     }
 }
 
@@ -3343,6 +3536,7 @@ pub fn usage_today_line(used_minutes: u32, budget_minutes: Option<u16>) -> Polic
     PolicySummaryLine {
         label: LocalizedText::key("family.ward_usage_today_label"),
         value,
+        reason: None,
     }
 }
 
@@ -5119,14 +5313,14 @@ mod value_format_tests {
     fn url_host_opt_does_not_show_userinfo_as_the_domain() {
         // The display spoof: this label is what every app shows as "where
         // this link goes". Splitting on `:` before looking for an `@` made a
-        // link to `evil.com` render under a trusted domain's name.
+        // link to `evil.test` render under a trusted domain's name.
         assert_eq!(
-            url_host_opt("https://example.com:x@evil.com/").as_deref(),
-            Some("evil.com")
+            url_host_opt("https://example.net:x@evil.test/").as_deref(),
+            Some("evil.test")
         );
         assert_eq!(
-            url_host_opt("https://example.com@evil.com/").as_deref(),
-            Some("evil.com")
+            url_host_opt("https://example.net@evil.test/").as_deref(),
+            Some("evil.test")
         );
         assert_eq!(
             url_host_opt("https://user:pass@example.com:8443/x").as_deref(),
@@ -5882,23 +6076,29 @@ mod value_format_tests {
 
     #[test]
     fn os_maintenance_status_label_priority() {
-        // Nothing pending (also the version-skew default) → up to date.
+        // No host-status file (a hand-built box, dev, desktop) → no host data,
+        // never "up to date": the nest cannot vouch for a host it does not see.
         assert_eq!(
-            os_maintenance_status_label(0, false).key,
+            os_maintenance_status_label(false, 0, false).key,
+            "admin.nest_page.os_no_host_data"
+        );
+        // Host data with nothing pending → up to date.
+        assert_eq!(
+            os_maintenance_status_label(true, 0, false).key,
             "admin.nest_page.os_up_to_date"
         );
         // Updates but no reboot → updates pending.
         assert_eq!(
-            os_maintenance_status_label(3, false).key,
+            os_maintenance_status_label(true, 3, false).key,
             "admin.nest_page.os_updates_pending"
         );
         // A pending reboot is the headline, regardless of the update count.
         assert_eq!(
-            os_maintenance_status_label(0, true).key,
+            os_maintenance_status_label(true, 0, true).key,
             "admin.nest_page.os_restart_pending"
         );
         assert_eq!(
-            os_maintenance_status_label(5, true).key,
+            os_maintenance_status_label(true, 5, true).key,
             "admin.nest_page.os_restart_pending"
         );
     }

@@ -2040,7 +2040,7 @@ def test_flicking_fast_past_a_post_teaches_nothing(
     # A browser tab or a phone app has no quit door a test can drive and wait
     # out; there the barrier is the scroll step itself — it acked only once
     # every exposure it ended was recorded, a train and its put included
-    # (web's `$lib/feed-cues-e2e`, android's TestAgent `feedCueCommand`).
+    # (web's `#lib/feed-cues-e2e`, android's TestAgent `feedCueCommand`).
     learned = ws_api.personalization_model_fetch(port, test_user, factor_key)
     assert not learned.get("sealed_blob"), f"a flick-through taught the topic: {learned!r}"
 

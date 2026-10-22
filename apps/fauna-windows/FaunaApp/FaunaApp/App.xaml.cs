@@ -4203,7 +4203,7 @@ public partial class App : Application
     /// writer), then every <c>auto_renew_poll_secs()</c>: the shared
     /// two-phase <c>AutoRenewScan()</c> (refresh + the at-risk ∧ auto-renew-on
     /// decision — one place all apps agree on *when*) then, if non-empty,
-    /// <c>AutoRenewIssue(domains, this_nest().id)</c> — the shared
+    /// <c>AutoRenewIssue(domains, bound_nest_id)</c> — the shared
     /// `fauna_client_dns::DnsManagementMachine` pair every hand-rolled
     /// per-app tick used to reimplement, now with no admin tap. Best-effort:
     /// a non-admin's admin-gated cert RPCs no-op (empty cert-status → an empty
@@ -4253,10 +4253,12 @@ public partial class App : Application
             {
                 var domains = await machine.AutoRenewScan();
                 if (domains.Length == 0) continue;
-                // The home nest the cert serves (the connected nest's identity).
+                // The home nest the cert serves: the identity the connection is bound
+                // to. A disagreeing claim makes BoundNestId() throw — no issuance, and
+                // the tick-failed warning below logs it.
                 using var linked = await rpc.BuildLinkedNestsMachineAsync();
-                var self = await linked.ThisNest();
-                var pass = await machine.AutoRenewIssue(domains, self.id);
+                var boundNestId = await linked.BoundNestId();
+                var pass = await machine.AutoRenewIssue(domains, boundNestId);
                 foreach (var failure in pass.@failed)
                 {
                     // One domain's issuance failure must not stop the rest —
@@ -5787,11 +5789,14 @@ public partial class App : Application
     /// (<c>account-data-plane.md</c> § The account store → <i>The client-side
     /// lifecycle</i>), so erasing the store out from under a live one lets the next
     /// pass re-create it — after the credential wipe has already taken its writer
-    /// key, leaving a store that refuses every later sign-in. On windows it does
+    /// key, leaving the signed-out user's store on disk for the next sign-in to
+    /// adopt (the lost-slot self-heal, since 2026-08-27; before it, that store
+    /// refused every later sign-in). On windows it does
     /// not even get that far: <c>remove_dir_all</c> cannot delete an open file, so
-    /// the erase fails outright with <c>ERROR_SHARING_VIOLATION</c> —
-    /// <c>os error 32</c> — and, being a swallowed WARN, leaves the signed-out
-    /// user's whole account store on disk in silence
+    /// the erase fails with <c>ERROR_SHARING_VIOLATION</c> —
+    /// <c>os error 32</c> — and leaves the signed-out user's whole account store
+    /// on disk (reported since 2026-10-02 as a survivor on the
+    /// <c>sign-out-residue</c> view, never a swallowed WARN)
     /// (<c>principles.md</c> § The user always controls their data). That is the
     /// SAME sharing-violation class <see cref="RetireConvSession"/> documents one
     /// seam over for <c>mls.db</c>; unix hides both, because <c>unlink</c> succeeds

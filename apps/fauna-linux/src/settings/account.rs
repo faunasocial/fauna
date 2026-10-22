@@ -514,6 +514,21 @@ pub fn build_account_page() -> (gtk::Box, std::rc::Rc<dyn Fn()>) {
     // stays insensitive until the field reads exactly "DELETE", matching
     // every other app's single-click-after-typing shape (priority #1;
     // ui.yaml carves out no dialog variant for this page).
+    // The confirmation's own sentence (settings.md item 14), incl. the
+    // export-first reminder — `settings-delete-confirm-text`.
+    let delete_confirm_text = gtk::Label::builder()
+        .label(ap::DELETE_CONFIRM_TEXT)
+        .wrap(true)
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(6)
+        .css_classes(["dim-label"])
+        .build();
+    crate::testid::set_test_id(&delete_confirm_text, ids::SETTINGS_DELETE_CONFIRM_TEXT);
+    danger_group.add(&delete_confirm_text);
+
     let delete_confirm_entry = adw::EntryRow::builder()
         .title(crate::i18n::strings::settings::DELETE_CONFIRM_PLACEHOLDER)
         .build();

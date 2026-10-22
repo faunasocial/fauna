@@ -33,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -501,7 +503,14 @@ private fun TrainedTopicRowItem(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
-            .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_ITEM),
+            .testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_ITEM)
+            // The `factor` test-attr (key hex only, one bare value so no pack):
+            // the e2e `topic_factor_key()` read; a row with no key publishes none.
+            .then(
+                topic.factorKey?.let { key ->
+                    Modifier.semantics { stateDescription = key.removePrefix("topic:") }
+                } ?: Modifier,
+            ),
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(topic.name, modifier = Modifier.testTag(Ids.PERSONALIZATION_TRAINED_FACTOR_NAME))

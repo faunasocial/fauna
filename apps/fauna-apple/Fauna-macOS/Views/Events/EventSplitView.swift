@@ -10,6 +10,7 @@ struct EventSplitView: View {
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
+                RefusedChangeList(vm: vm)
                 MacCalendarListView(vm: vm)
                 Divider()
                 MacEventListView(vm: vm)
@@ -64,6 +65,9 @@ struct EventSplitView: View {
         // Re-pull on a fauna.calendar.changed push — cuts the poll's latency
         // down to push latency; the poll above stays as backstop.
         .onCalendarChanged { await vm.refreshFromPush() }
+        // A refusal that lands while the page is open paints with no re-entry
+        // (events.md § Refused scheduling changes).
+        .onStoreChange { await vm.loadRefusedChanges() }
         // A dropped push (offline, or the socket flapped) is recovered on the
         // next reconnect — the same diff-before-swap refresh the push arm uses,
         // mirroring Contacts/Feed/Media's own `.onReconnect` (transport.md

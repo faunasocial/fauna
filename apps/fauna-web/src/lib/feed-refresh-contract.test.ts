@@ -37,7 +37,14 @@
 // genuinely differs site to site — some set `loadError`, some deliberately only
 // warn — and flattening that is its own bug.)
 
-const FEED_PAGE = new URL("../routes/feed/+page.svelte", import.meta.url);
+// The feed page AND the card host it shares with the profile's Posts tab
+// (`feed-post-host.svelte.ts` — the card's verbs moved there whole, the same
+// 2-space `function` declarations inside its factory, so one matcher reads both).
+const FEED_SOURCES = [
+  new URL("../routes/feed/+page.svelte", import.meta.url),
+  new URL("./feed-post-host.svelte.ts", import.meta.url),
+];
+const readAll = () => FEED_SOURCES.map((u) => Deno.readTextFileSync(u));
 
 // Comment stripping is non-negotiable before matching — the scar that proved
 // it lives with the shared helper (source-contract.ts, lifted from here when
@@ -59,8 +66,7 @@ function functionBodies(src: string): Array<{ name: string; body: string }> {
 }
 
 Deno.test("feed page — every handler that awaits the manager re-reads the snapshot", () => {
-  const src = Deno.readTextFileSync(FEED_PAGE);
-  const offenders = functionBodies(src)
+  const offenders = readAll().flatMap(functionBodies)
     .filter((f) => /await\s+manager[!?]?\./.test(f.body))
     .filter((f) => !f.body.includes("refreshFeed("))
     .map((f) => f.name);
@@ -82,8 +88,7 @@ Deno.test("feed page — every handler that awaits the manager re-reads the snap
 // checking nothing, which is the failure mode convention 7 and 17 both warn
 // about. Pin the shape it depends on instead of trusting it.
 Deno.test("feed page — the refresh-contract matcher still sees the handlers", () => {
-  const src = Deno.readTextFileSync(FEED_PAGE);
-  const awaiting = functionBodies(src).filter((f) =>
+  const awaiting = readAll().flatMap(functionBodies).filter((f) =>
     /await\s+manager[!?]?\./.test(f.body)
   );
   if (awaiting.length < 10) {

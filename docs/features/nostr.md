@@ -64,7 +64,7 @@ Stamped 2026-10-01 at f5dec3d933.
 19. [nest] A Nostr key already linked to another account on your nest cannot be linked to yours — `docs/goal/ui/nostr.md` § Errors & edge cases
    - `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_key_another_account_holds_cannot_be_linked_to_yours`
 20. [app] Your linked account says in plain words how it signs: with a key your nest made, a key you brought, or an outside signer — `docs/goal/ui/nostr.md` § User actions
-   - (none)
+   - `tests/e2e-unified/tests/test_nostr_signing_mode.py::test_the_signing_mode_reads_as_its_label`
 21. [nest] If you remove every relay, nothing of yours is published anywhere; your nest never falls back to relays you did not choose — `docs/goal/ui/nostr.md` § Errors & edge cases
    - `tests/e2e-unified/tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere`
 22. [nest] Unlinking your Nostr account disconnects every Nostr app that was using your nest as its signer — `docs/goal/ui/nostr.md` § The nest as the user's NIP-46 signer (bunker)
@@ -80,12 +80,12 @@ Stamped 2026-10-01 at f5dec3d933.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
-| linux | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
 | windows | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+d6ff0673 standalone |
+| tui | ✅ full | 0.1.2-dev+d6ff0673 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -117,9 +117,9 @@ Stamped 2026-10-01 at f5dec3d933.
 | 18 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_browser_extension_key_links_only_once_proven` | nest (linux): passed |
 | 18 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_remote_signer_key_links_only_once_its_bunker_proves_it` | nest (linux): passed |
 | 19 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_a_key_another_account_holds_cannot_be_linked_to_yours` | nest (linux): passed |
-| 20 | app | (none) | — |
+| 20 | app | `tests/e2e-unified/tests/test_nostr_signing_mode.py::test_the_signing_mode_reads_as_its_label` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 21 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_an_empty_relay_list_publishes_nowhere` | nest (linux): passed |
 | 22 | nest | `tests/e2e-unified/tests/api/test_nostr_nest.py::test_unlinking_disconnects_every_signer_app` | nest (linux): passed |
 | 23 | app | `tests/e2e-unified/tests/test_nostr_zap_signer_gate.py::test_a_named_zap_signer_stays_removable_when_zaps_are_turned_off` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 24 | app | `tests/e2e-unified/tests/test_bridged_conversation.py::test_a_nostr_gift_wrap_arrives_as_a_nostr_bridged_room` | web (linux): passed, linux (linux): passed, ios (macos): passed, tui (linux): passed |
 <!-- features-render:end -->

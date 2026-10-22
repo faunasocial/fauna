@@ -92,15 +92,19 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 
 	// Middleware chain (outermost → innermost):
 	//   accessLogMiddleware — one structured line per request.
-	//   w1Mitigations       — PROPFIND depth gate; XML-depth check; streaming PUT cap.
-	//   authDispatch        — `Authorization: DPoP` → the bearer door, else Basic:
+	//   authDispatch        — `Authorization: DPoP` → the bearer door, else Basic.
+	//     Authentication sits outside w1Mitigations on both arms on purpose:
+	//     an anonymous or unadmitted peer is refused before any body byte is read,
+	//     so the 16 MiB XML buffer is authenticated-only.
 	//     davauth.NewMiddleware — HTTP Basic → AEAD-unwrap → Session in ctx;
+	//       w1Mitigations       — PROPFIND depth gate; XML-depth check; streaming PUT cap.
 	//       quotaMiddleware     — RFC 4331 quota-used/available-bytes on PROPFIND
 	//                             (quota.go; needs the Session davauth injected).
 	//     bearerMiddleware      — a principal's token admitted through the nest
 	//                             (bearer.go): read methods only, its admitted
 	//                             folders and keys header in ctx; no quota (the
 	//                             owner's storage meter is not a principal's).
+	//       w1Mitigations       — the same gates, after admission.
 	//   webdav.Handler       — emersion's PROPFIND/GET/PUT/DELETE/MKCOL/COPY/MOVE.
 	//
 	// No PROPPATCH/REPORT interceptors (CalDAV/CardDAV-only — WebDAV props are
@@ -108,15 +112,13 @@ func NewServer(cfg ServerConfig, client wsrpc.Caller) *Server {
 	// FileSystem via emersion's CreateOptions/RemoveAllOptions and are enforced
 	// authoritatively at the nest (webdav_record_change → conflict → 412).
 	chain := accessLogMiddleware(
-		w1Mitigations(
-			authDispatch(
-				davauth.NewMiddleware(
-					webdavRealm,
-					quotaMiddleware(handler, logger),
-					client, logger, lockout, primaryDomain,
-				),
-				bearerMiddleware(handler, client, logger),
+		authDispatch(
+			davauth.NewMiddleware(
+				webdavRealm,
+				w1Mitigations(quotaMiddleware(handler, logger)),
+				client, logger, lockout, primaryDomain,
 			),
+			bearerMiddleware(w1Mitigations(handler), client, logger),
 		),
 		logger,
 	)

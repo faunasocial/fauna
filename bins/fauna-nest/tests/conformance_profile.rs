@@ -31,18 +31,17 @@ use fauna_protocol::{
 
 async fn router_with_db() -> (RpcRouter, Arc<AppState>) {
     let db = Arc::new(CacheDb::open_in_memory().unwrap());
-    // A real `BackupService` over a temp dir: `AppState::for_test` wires
-    // `backup_service: None`, and the blob-backed handlers refuse without one.
-    let dir = tempfile::tempdir().unwrap();
-    let dir_path = dir.path().to_path_buf();
-    std::mem::forget(dir); // outlive the test; the process is the harness
+    // A real `BackupService` over the state's scratch root: `AppState::for_test`
+    // wires `backup_service: None`, and the blob-backed handlers refuse without one.
+    let base = AppState::for_test(db.clone());
+    let dir_path = base.test_scratch_path("blobs");
     let backup_svc = Arc::new(
         fauna_nest::backup::service::BackupService::new(db.clone(), None, false, dir_path, None)
             .unwrap(),
     );
     let state = Arc::new(AppState {
         backup_service: Some(backup_svc),
-        ..AppState::for_test(db.clone())
+        ..base
     });
     let mut b = RpcRouter::builder();
     profile_handlers::register_profile_handlers(&mut b);
@@ -137,6 +136,7 @@ fn profile_named(actor: [u8; 32], display_name: &str, bio: &str) -> Profile {
         load_hint: None,
         inbox_mode: InboxMode::Open,
         recovery_head: None,
+        audience: fauna_core::data::ProfileAudience::ThisNest,
         updated_at: Timestamp(0),
     }
 }
@@ -419,6 +419,176 @@ async fn profile_set_prunes_superseded_keeps_latest() {
     assert_eq!(decoded.display_name.as_deref(), Some("Dave Updated"));
 }
 
+/// `profile`'s wire signed by the nest-held authoring sub-key under an
+/// identity-signed `UpdateProfile` cert — the shape an external app's edit
+/// arrives in through the PDS round-trip (`atproto-pds-full.md` § F2 detail).
+fn delegated_set_request(owner: &ActorKeypair, profile: &Profile) -> Bytes {
+    use fauna_core::data::{Capability, DeviceAuthorization};
+    use fauna_core::encoding::{EmbedAsBytes, canonical_encode, sign_envelope};
+    let sub = ActorKeypair::generate();
+    let cert = DeviceAuthorization {
+        actor_id: owner.actor_id(),
+        device_key: sub.actor_id().0,
+        capabilities: vec![Capability::UpdateProfile],
+        created_at: Timestamp(0),
+        expires_at: None,
+    };
+    let (cert_bytes, cert_env) = sign_envelope(owner, &cert).expect("the cert signs");
+    let (bytes, env) = sign_envelope(&sub, profile).expect("the sub-key signs");
+    let wire = EmbedAsBytes::from_signed(bytes, env)
+        .with_signer_auth(EmbedAsBytes::from_signed(cert_bytes, cert_env));
+    let body = canonical_encode(&wire).expect("the delegated wire encodes");
+    let req = encode_canonical(&ProfileSetRequest {
+        body: ByteBuf::from(body),
+        extra: Default::default(),
+    })
+    .unwrap();
+    Bytes::from(req.to_vec())
+}
+
+/// `fauna.profile.get` of `target` as `caller`, decoded.
+async fn get_as(
+    router: &RpcRouter,
+    state: &Arc<AppState>,
+    caller: [u8; 32],
+    target: [u8; 32],
+) -> ProfileGetReply {
+    let req = encode_canonical(&ProfileGetRequest {
+        actor_id: hex::encode(target),
+        extra: Default::default(),
+    })
+    .unwrap();
+    let got = dispatch(
+        router,
+        state.clone(),
+        caller,
+        "fauna.profile.get",
+        Bytes::from(req.to_vec()),
+    )
+    .await
+    .expect("get ok");
+    decode(&got).expect("decode reply")
+}
+
+/// The owner's last identity-signed word through the real handlers
+/// (`profile.md` § Where logic lives → *Profile publish/edit* → *Write
+/// semantics*): a delegated write keeps the owner's direct row beside it, the
+/// owner's own read serves that row as `last_direct_body`, nobody else's read
+/// does, and the owner's next direct write prunes back to one row.
+#[tokio::test]
+async fn a_delegated_write_keeps_the_owners_direct_row_for_the_owners_own_read() {
+    let (router, state) = router_with_db().await;
+    let kp = ActorKeypair::generate();
+    let actor = kp.actor_id().0;
+    state.db.create_user(&actor, "free", "erin").await.unwrap();
+    let other = ActorKeypair::generate().actor_id().0;
+    state.db.create_user(&other, "free", "frank").await.unwrap();
+
+    let mut direct = profile_named(actor, "Erin", "mine");
+    direct.audience = fauna_core::data::ProfileAudience::Everyone;
+    direct.updated_at = Timestamp(1);
+    let direct_req = set_request(&kp, &direct);
+    let direct_body: ProfileSetRequest = decode(&direct_req).unwrap();
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.profile.set",
+        direct_req,
+    )
+    .await
+    .expect("direct set ok");
+    assert!(
+        get_as(&router, &state, actor, actor)
+            .await
+            .last_direct_body
+            .is_none(),
+        "a direct latest is its own word: nothing rides beside it"
+    );
+
+    let mut edited = profile_named(actor, "Erin", "edited elsewhere");
+    edited.updated_at = Timestamp(2);
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.profile.set",
+        delegated_set_request(&kp, &edited),
+    )
+    .await
+    .expect("delegated set ok");
+    assert_eq!(
+        profile_row_count(&state, &actor).await,
+        2,
+        "a delegated write keeps the owner's direct row"
+    );
+
+    let own = get_as(&router, &state, actor, actor).await;
+    let (latest, origin) = decode_profile(own.body.as_ref()).unwrap();
+    assert_eq!(latest.bio.as_deref(), Some("edited elsewhere"));
+    assert!(matches!(
+        origin,
+        fauna_core::encoding::AuthoringOrigin::Delegated { .. }
+    ));
+    assert_eq!(
+        own.last_direct_body.as_ref().map(|b| b.as_slice()),
+        Some(direct_body.body.as_slice()),
+        "the owner's own read serves the direct row verbatim"
+    );
+    assert!(
+        get_as(&router, &state, other, actor)
+            .await
+            .last_direct_body
+            .is_none(),
+        "another actor's read never carries the owner's row"
+    );
+
+    // A second delegated write keeps the same direct row, never the first
+    // delegated one.
+    let mut edited_again = profile_named(actor, "Erin", "edited twice");
+    edited_again.updated_at = Timestamp(3);
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.profile.set",
+        delegated_set_request(&kp, &edited_again),
+    )
+    .await
+    .expect("second delegated set ok");
+    assert_eq!(profile_row_count(&state, &actor).await, 2);
+    assert_eq!(
+        get_as(&router, &state, actor, actor)
+            .await
+            .last_direct_body
+            .map(|b| b.into_vec()),
+        Some(direct_body.body.to_vec())
+    );
+
+    let mut again = profile_named(actor, "Erin", "mine again");
+    again.updated_at = Timestamp(4);
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.profile.set",
+        set_request(&kp, &again),
+    )
+    .await
+    .expect("second direct set ok");
+    assert_eq!(
+        profile_row_count(&state, &actor).await,
+        1,
+        "an identity-signed write prunes back to one row"
+    );
+    assert!(
+        get_as(&router, &state, actor, actor)
+            .await
+            .last_direct_body
+            .is_none()
+    );
+}
+
 /// The avatar/banner lifecycle across the **real** client builders and the
 /// **real** nest handlers — set → text-only re-edit → clear.
 ///
@@ -495,12 +665,14 @@ async fn avatar_survives_a_text_only_edit_and_can_be_cleared() {
     let first = build_edited_profile_with_images(
         &kp,
         None,
+        None,
         &[],
         Some("Eve".into()),
         None,
         vec![],
         ProfileImageEdit::set_from_hex(&avatar_hex).expect("valid hex"),
         ProfileImageEdit::Keep,
+        None,
     )
     .expect("build first");
     let stored = publish_and_read(&router, &state, actor, first).await;
@@ -517,6 +689,7 @@ async fn avatar_survives_a_text_only_edit_and_can_be_cleared() {
     let text_only = build_edited_profile(
         &kp,
         Some(&base),
+        None,
         &[],
         Some("Eve Updated".into()),
         None,
@@ -536,12 +709,14 @@ async fn avatar_survives_a_text_only_edit_and_can_be_cleared() {
     let cleared = build_edited_profile_with_images(
         &kp,
         Some(&base),
+        None,
         &[],
         Some("Eve Updated".into()),
         None,
         vec![],
         ProfileImageEdit::Clear,
         ProfileImageEdit::Keep,
+        None,
     )
     .expect("build cleared");
     let stored = publish_and_read(&router, &state, actor, cleared).await;
@@ -708,6 +883,7 @@ async fn the_shared_writer_mirrors_the_chain_head_through_the_real_handlers() {
     let edited = fauna_client_profile::build_edited_profile(
         &owner,
         Some(&encode_stored(&nest, actor).await),
+        None,
         &[],
         Some("Ada".into()),
         Some("counts things".into()),
@@ -918,3 +1094,182 @@ impl fauna_protocol::RpcRequester for SharedRouter {
 // routes through the owning impl above. (`RouterRequester` predates that and
 // implements the reference form directly, which is why the blanket does not
 // collide with it.)
+
+// ── the local native author's face on the feed (`docs/goal/behavior/bridges.md`
+//    § Unified feed ingestion → *Bridged authors* → *The local native author*) ──
+
+/// The `fauna.feed.local.posts` request every read below sends.
+fn local_posts_request() -> Bytes {
+    Bytes::from(
+        encode_canonical(&fauna_protocol::feed::FeedLocalPostsRequest {
+            cursor: None,
+            limit: Some(50),
+            search: None,
+            extra: Default::default(),
+        })
+        .unwrap()
+        .to_vec(),
+    )
+}
+
+/// The face the local-feed reply carries for the post `post_id`.
+fn face_on(reply: &[u8], post_id: &str) -> fauna_protocol::feed::AuthorDisplay {
+    let reply: fauna_protocol::feed::FeedLocalPostsReply = decode(reply).unwrap();
+    reply
+        .posts
+        .into_iter()
+        .find(|p| p.post_id == post_id)
+        .expect("the post is on the page")
+        .author_display
+        .expect("a local native author with a profile has a face")
+}
+
+/// A display name published through `fauna.profile.set` is the face the nest
+/// projects onto that author's posts: the local feed and the single-post read
+/// carry it beside the `users` handle, and an off-box principal session under
+/// `fauna:feed:read` reads the same face.
+#[tokio::test]
+async fn a_published_display_name_names_the_authors_posts_on_every_read() {
+    use fauna_nest::db::third_party_principals::{
+        AttestedKeys, ExecutionForm, PrincipalAttestation, PrincipalManifest,
+    };
+    let (_, state) = router_with_db().await;
+    fauna_nest::test_support::seat_own_deployment_seed(&state).await;
+    let mut b = RpcRouter::builder();
+    profile_handlers::register_profile_handlers(&mut b);
+    fauna_nest::feed_handlers::register_feed_handlers(&mut b);
+    fauna_nest::posts_handlers::register_posts_handlers(&mut b);
+    let router = b.build();
+    let kp = ActorKeypair::generate();
+    let actor = kp.actor_id().0;
+    state
+        .db
+        .create_user_with_handle(&actor, "free", "alice", None)
+        .await
+        .unwrap();
+    dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.profile.set",
+        set_request(&kp, &sample_profile(actor)),
+    )
+    .await
+    .expect("profile.set ok");
+
+    let post = fauna_core::data::Post {
+        author: kp.actor_id(),
+        created_at: Timestamp(1_700_000_000_000_000),
+        body: fauna_core::data::PostBody::Text {
+            content: "hello, neighbours".into(),
+            facets: vec![],
+        },
+        references: vec![],
+        expires_at: None,
+        gated: None,
+        content_warning: None,
+        origin: None,
+    };
+    let cid = fauna_core::encoding::compute_post_id(&post).unwrap();
+    let digest: [u8; 32] = cid.as_bytes()[4..].try_into().unwrap();
+    let bytes = sign_and_pack(&kp, &post).unwrap();
+    state.db.put_post(&digest, &bytes, None).await.unwrap();
+    let post_id = hex::encode(digest);
+
+    let reply = dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.feed.local.posts",
+        local_posts_request(),
+    )
+    .await
+    .expect("local feed ok");
+    let face = face_on(&reply, &post_id);
+    assert_eq!(face.display_name.as_deref(), Some("Alice"));
+    assert_eq!(face.handle.as_deref(), Some("alice"));
+    assert_eq!(face.avatar_url, None);
+
+    let got = dispatch(
+        &router,
+        state.clone(),
+        actor,
+        "fauna.posts.get",
+        Bytes::from(
+            encode_canonical(&fauna_protocol::posts::PostGetRequest {
+                post_id: post_id.clone(),
+                extra: Default::default(),
+            })
+            .unwrap()
+            .to_vec(),
+        ),
+    )
+    .await
+    .expect("posts.get ok");
+    let got: fauna_protocol::posts::PostGetReply = decode(&got).unwrap();
+    assert_eq!(
+        got.author_display,
+        Some(face.clone()),
+        "the single-post read"
+    );
+
+    // An off-box principal of another account, holding only the feed read.
+    let account = [0x5Au8; 32];
+    state
+        .db
+        .create_user(&account, "free", "reader")
+        .await
+        .unwrap();
+    let client = "https://reader.example/client";
+    state
+        .db
+        .record_atproto_oauth_grant(
+            &account,
+            client.as_bytes(),
+            client,
+            Some("Reader"),
+            "fauna:feed:read",
+            &[],
+            "jkt",
+            i64::MAX,
+            None,
+            fauna_nest::db::atproto_pds::OAUTH_GRANT_ISSUER_NEST,
+            &PrincipalAttestation {
+                keys: AttestedKeys {
+                    holder_x25519: Some([0x5Bu8; 32]),
+                    writer_ed25519: None,
+                },
+                execution_form: ExecutionForm::Remote,
+                manifest: Some(PrincipalManifest {
+                    publisher_key: [0x9B; 32],
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let principal_id = state
+        .db
+        .list_third_party_principals(&account)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|p| p.client_id == client)
+        .expect("the principal row")
+        .principal_id;
+    let binding = fauna_nest::principal_handlers::PrincipalBinding {
+        account,
+        principal_id,
+        token_scopes: vec!["fauna:feed:read".to_string()],
+        family_id: None,
+    };
+    let reply = fauna_nest::principal_handlers::dispatch_principal(
+        state.clone(),
+        &binding,
+        "fauna.feed.local.posts",
+        local_posts_request(),
+    )
+    .await
+    .expect("the principal's feed read");
+    assert_eq!(face_on(&reply, &post_id), face, "every reader class alike");
+}

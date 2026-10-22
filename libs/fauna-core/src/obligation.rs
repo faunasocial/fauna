@@ -56,6 +56,15 @@ pub enum ObligationAction {
     /// (`family-safety.md` § Content policy). Same ClientRender-only, additive-`9`
     /// rationale as [`Self::Collapse`].
     Block = 9,
+    /// The admin's **block of one reported item** (`moderation.md` § Admin
+    /// block of a reported item): withheld from everyone this nest serves but
+    /// the author, a notice naming the ground and the report's reason in its
+    /// place, appealable + audited, reversible, never a deletion. Like
+    /// [`Self::TakenDown`] it is a human's recorded act, never produced by
+    /// [`evaluate_obligations`] rule-matching, so its high discriminant never
+    /// meets the severity sort; appended at `10` for `#[repr(u8)]` wire
+    /// additivity. Distinct from [`Self::Block`] (`9`), the client render verb.
+    Blocked = 10,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +164,8 @@ pub fn evaluate_obligations(
 ///
 /// The discriminants are severity-ordered (lower = more severe):
 /// `0 Reject` / `1 Quarantine` / `2 SuppressFromFeeds` / `3 RateLimit` /
-/// `4 Notify` / `5 Log` / `6 LabelOnly`. `4 Notify` (a publisher callback with
+/// `4 Notify` / `5 Log` / `6 LabelOnly`, then the by-hand withholds `7
+/// TakenDown` and `10 Blocked`. `4 Notify` (a publisher callback with
 /// no user-visible content change) and any unrecognized discriminant fall back
 /// to the neutral "Flagged" label rather than panicking, keeping the queue
 /// forward-compatible if a new action lands.
@@ -168,6 +178,7 @@ pub fn obligation_action_label(action: u8) -> LocalizedText {
         5 => "moderation.action.logged",
         6 => "moderation.action.labeled",
         7 => "moderation.action.taken_down",
+        10 => "moderation.action.blocked",
         // 4 (Notify) and any unknown discriminant render as the neutral
         // "Flagged" — both are "the system acted, no visible content change".
         _ => "moderation.action.flagged",
@@ -191,6 +202,33 @@ pub fn legal_takedown_tombstone(reference: &str) -> LocalizedText {
         "moderation.legal_takedown.tombstone",
         "reference",
         reference,
+    )
+}
+
+/// The visible **admin-block notice** a client renders in the body position of
+/// a post or a conversation message an admin blocked after a report
+/// (`moderation.md` § Admin block of a reported item — "blocked by this nest's
+/// admin after a report: harassment"). Keyed on `moderation.admin_block.notice`
+/// with a single `{reason}` substitution whose VALUE is itself an i18n key —
+/// the report reason's localized name, `moderation.report.reason.<token>` — so
+/// a client resolves it through
+/// [`LocalizedText::resolve_nested`](crate::localized::LocalizedText::resolve_nested)
+/// (or its platform pipeline's nested lookup) and the reason reads in the
+/// viewer's language. `reason_token` is the wire token of the report reason
+/// (`AbuseReportReason::token`); an empty one reads as `other`. The single
+/// shared-Rust source of the notice text, beside [`legal_takedown_tombstone`]:
+/// the UniFFI (`fauna-ffi` `adminBlockNotice`) and wasm (`fauna-wasm`
+/// `adminBlockNotice`) faces wrap this one definition.
+pub fn admin_block_notice(reason_token: &str) -> LocalizedText {
+    let token = if reason_token.is_empty() {
+        "other"
+    } else {
+        reason_token
+    };
+    LocalizedText::key_arg(
+        "moderation.admin_block.notice",
+        "reason",
+        format!("moderation.report.reason.{token}"),
     )
 }
 
@@ -298,7 +336,12 @@ impl ContentFloor {
     pub const FAIL_CLOSED: Self = Self::Block;
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// It may also carry the guardian's **rule document** — the content-policy
+/// grammar the shared rule editor writes, publisher `guardian`
+/// (`nest-rules.md` § The shared rule editor, mounting (b)). Not `Copy` and not
+/// `Eq` for that reason (a document's catch-all may hold any dag-cbor value).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ContentPolicy {
     #[serde(default)]
     pub nsfw: ContentFloor,
@@ -308,6 +351,14 @@ pub struct ContentPolicy {
     pub phishing: ContentFloor,
     #[serde(default)]
     pub commercial: ContentFloor,
+    /// The guardian's rule document, when the guardian has authored one in the
+    /// shared editor. Its rules compose beside any floor still set — an older
+    /// app may still be writing floors, and a floor a guardian set must never
+    /// silently stop binding — so the editor shows a set floor as a rule and
+    /// the nest clears the floors when it stores a document (`nest-rules.md`
+    /// § Implementation status today). Absent on the wire means none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<crate::content_policy::ContentPolicyDocument>,
 }
 
 impl ContentPolicy {
@@ -345,6 +396,9 @@ impl ContentPolicy {
             spam: stricter(self.spam, other.spam),
             phishing: stricter(self.phishing, other.phishing),
             commercial: stricter(self.commercial, other.commercial),
+            // A floor merge carries the guardian's own document through; a compiled
+            // floor carries none.
+            document: self.document.clone().or_else(|| other.document.clone()),
         }
     }
 }
@@ -365,6 +419,7 @@ pub const KIDS_CONTENT_FLOOR: ContentPolicy = ContentPolicy {
     spam: ContentFloor::Block,
     phishing: ContentFloor::Block,
     commercial: ContentFloor::Block,
+    document: None,
 };
 
 /// The guardian policy a render composes once a build's **compiled-in floor**
@@ -374,10 +429,10 @@ pub const KIDS_CONTENT_FLOOR: ContentPolicy = ContentPolicy {
 ///
 /// The floor rides the guardian input of [`render_verdict_composed`] rather
 /// than adding a source of its own, so the render engine stays one engine and
-/// a floored item is attributed [`VerdictSource::GuardianFloor`] — the family
-/// policy placeholder, which is what a kids-flavor account (supervised by
-/// construction) sees. `compiled = None` (every non-kids build) returns the
-/// guardian policy unchanged; an unsupervised viewer in a floored build gets
+/// a floored item is attributed [`VerdictSource::Guardian`] with no reason — the
+/// family policy placeholder's frame alone, which is what a kids-flavor account
+/// (supervised by construction) sees. `compiled = None` (every non-kids build)
+/// returns the guardian policy unchanged; an unsupervised viewer in a floored build gets
 /// the floor alone — defense in depth on the device, never a substitute for
 /// the account's policy.
 pub fn with_compiled_floor(
@@ -386,7 +441,7 @@ pub fn with_compiled_floor(
 ) -> Option<ContentPolicy> {
     match (guardian, compiled) {
         (Some(g), Some(c)) => Some(g.strictest_with(c)),
-        (Some(p), None) | (None, Some(p)) => Some(*p),
+        (Some(p), None) | (None, Some(p)) => Some(p.clone()),
         (None, None) => None,
     }
 }
@@ -454,8 +509,58 @@ pub fn rules_from_preferences(
 /// no rule (the ward's own preferences decide), `collapse` → a `Collapse` rule,
 /// `block` (and the fail-closed [`ContentFloor::Unknown`]) → a `Block` rule, each
 /// keyed at the hard-coded [`GUARDIAN_FLOOR_TRIGGER_PERMILLE`].
+///
+/// When the policy carries the guardian's rule document (publisher `guardian`,
+/// [`ContentPolicy::document`]), its applied rules join — each with its own
+/// level — beside any floor still set (`nest-rules.md` § The shared rule
+/// editor). A guardian document this build cannot apply (malformed, or a
+/// grammar version it does not implement) is a rule value the client cannot
+/// parse, so it renders **fail-closed** — every canonical category at `block` —
+/// the same rule as an unknown floor (`family-client-enforcement.md` § Content
+/// policy).
 pub fn rules_from_guardian_policy(policy: &ContentPolicy) -> Vec<ObligationRule> {
+    guardian_rule_entries(policy)
+        .into_iter()
+        .map(|(rule, _)| rule)
+        .collect()
+}
+
+/// [`rules_from_guardian_policy`] with each rule's reason kept: `Some` for a
+/// rule of the guardian's applied document, `None` for a floor and for the
+/// fail-closed block of a document this build cannot apply — a floor never
+/// invents a reason (`nest-rules.md` § The shared rule editor → *The reason is
+/// the member's to read*).
+fn guardian_rule_entries(policy: &ContentPolicy) -> Vec<(ObligationRule, Option<RuleReason>)> {
     let mut rules = Vec::new();
+    if let Some(document) = &policy.document {
+        let assembled = crate::content_policy::assemble_rules(
+            document,
+            &crate::content_policy::Publisher::Guardian,
+        );
+        if assembled.status.is_applied() {
+            rules.extend(assembled.rules.into_iter().map(|r| {
+                (
+                    r.rule,
+                    Some(RuleReason {
+                        reason_code: r.reason_code,
+                        reason: r.reason,
+                    }),
+                )
+            }));
+        } else {
+            rules.extend(GUARDIAN_FLOOR_CATEGORIES.map(|category| {
+                (
+                    ObligationRule {
+                        category: category.to_string(),
+                        min_confidence_permille: GUARDIAN_FLOOR_TRIGGER_PERMILLE,
+                        action: ObligationAction::Block,
+                        requires_attestation: AttestationLevel::Any,
+                    },
+                    None,
+                )
+            }));
+        }
+    }
     for category in GUARDIAN_FLOOR_CATEGORIES {
         let action = match policy.floor_for(category) {
             // The ward's own preferences decide — the guardian adds no rule.
@@ -465,12 +570,15 @@ pub fn rules_from_guardian_policy(policy: &ContentPolicy) -> Vec<ObligationRule>
             // parse) both render blocked (family-safety.md § Content policy).
             ContentFloor::Block | ContentFloor::Unknown => ObligationAction::Block,
         };
-        rules.push(ObligationRule {
-            category: category.to_string(),
-            min_confidence_permille: GUARDIAN_FLOOR_TRIGGER_PERMILLE,
-            action,
-            requires_attestation: AttestationLevel::Any,
-        });
+        rules.push((
+            ObligationRule {
+                category: category.to_string(),
+                min_confidence_permille: GUARDIAN_FLOOR_TRIGGER_PERMILLE,
+                action,
+                requires_attestation: AttestationLevel::Any,
+            },
+            None,
+        ));
     }
     rules
 }
@@ -599,6 +707,7 @@ pub fn render_verdict_composed(
     guardian_policy: Option<&ContentPolicy>,
     own_thresholds: Option<ViewerThresholds>,
     region_policies: &[crate::region_policy::RegionRuleSet],
+    nest_policies: &[NestRuleSet],
 ) -> ComposedVerdict {
     // Each source is folded SEPARATELY rather than into one flattened rule
     // vector, because the verdict now has to say which source produced it and a
@@ -611,8 +720,23 @@ pub fn render_verdict_composed(
             &rules_from_preferences(own.spam_permille, own.phishing_permille),
         )
     });
-    let guardian_action = guardian_policy
-        .and_then(|policy| strongest_render_action(labels, &rules_from_guardian_policy(policy)));
+    // The guardian slice keeps the winning rule's reason in hand, as the nest
+    // slice does; on a tie of strictness a document rule's reason beats a
+    // floor's none.
+    let guardian_hit = guardian_policy.and_then(|policy| {
+        guardian_rule_entries(policy)
+            .into_iter()
+            .filter(|(rule, _)| {
+                labels.iter().any(|label| {
+                    label.category == rule.category
+                        && label.confidence_per_mille >= rule.min_confidence_permille
+                })
+            })
+            .filter(|(rule, _)| severity(&rule.action) > 0)
+            .max_by_key(|(rule, reason)| (severity(&rule.action), reason.is_some()))
+            .map(|(rule, reason)| (rule.action, reason))
+    });
+    let guardian_action = guardian_hit.as_ref().map(|(action, _)| *action);
     // Most specific first, as `RegionRegistry::chain` returns them.
     type RegionHit<'a> = (
         ObligationAction,
@@ -625,11 +749,20 @@ pub fn render_verdict_composed(
             strongest_region_rule(labels, set).map(|(action, rule)| (action, set, rule))
         })
         .collect();
+    // The nest(s) the item was read through — one, ordinarily
+    // (`nest-rules.md` § The nest source in the engine).
+    let nest_hits: Vec<(ObligationAction, &NestRuleSet, &NestRule)> = nest_policies
+        .iter()
+        .filter_map(|set| {
+            strongest_published_rule(labels, &set.rules).map(|(action, rule)| (action, set, rule))
+        })
+        .collect();
 
     let strictest = [
         own_action,
         guardian_action,
         region_hits.iter().map(|(a, _, _)| *a).max_by_key(severity),
+        nest_hits.iter().map(|(a, _, _)| *a).max_by_key(severity),
     ]
     .into_iter()
     .flatten()
@@ -649,9 +782,12 @@ pub fn render_verdict_composed(
     // Attribution among sources that tie at the winning strictness. A region
     // takes it first: a region block carries an authority's own reason the user
     // is entitled to read verbatim (region-blocking.md invariant 1), where the
-    // family placeholder carries no such external obligation and the viewer's
-    // own threshold is the viewer's own choice. Within the regions, the most
-    // specific on the chain — the authority closest to the user.
+    // family placeholder's reason is the guardian's own, read inside the
+    // household, and the viewer's own threshold is the viewer's own choice.
+    // Within the regions, the most specific on the chain — the authority
+    // closest to the user. Then the nest
+    // — the party the user accepted at joining — and then the household
+    // (`nest-rules.md` decision 3).
     let source = if let Some((_, set, rule)) = region_hits.iter().find(|(a, _, _)| *a == winning) {
         Some(VerdictSource::Region(RegionAttribution {
             region: set.region.clone(),
@@ -659,8 +795,16 @@ pub fn render_verdict_composed(
             reason_code: rule.reason_code.clone(),
             reason: rule.reason.clone(),
         }))
-    } else if guardian_action == Some(winning) {
-        Some(VerdictSource::GuardianFloor)
+    } else if let Some((_, set, rule)) = nest_hits.iter().find(|(a, _, _)| *a == winning) {
+        Some(VerdictSource::Nest(NestAttribution {
+            domain: set.domain.clone(),
+            reason_code: rule.reason_code.clone(),
+            reason: rule.reason.clone(),
+        }))
+    } else if let Some((_, reason)) = guardian_hit.filter(|(a, _)| *a == winning) {
+        Some(VerdictSource::Guardian(GuardianAttribution {
+            rule: reason,
+        }))
     } else {
         Some(VerdictSource::OwnThresholds)
     };
@@ -713,7 +857,16 @@ fn strongest_region_rule<'a>(
     labels: &[crate::content_category::ContentLabelEntry],
     set: &'a crate::region_policy::RegionRuleSet,
 ) -> Option<(ObligationAction, &'a crate::region_policy::RegionRule)> {
-    set.rules
+    strongest_published_rule(labels, &set.rules)
+}
+
+/// The strictest firing rule among one publisher's published rules, with the
+/// rule itself so its reason can be attributed.
+fn strongest_published_rule<'a>(
+    labels: &[crate::content_category::ContentLabelEntry],
+    rules: &'a [crate::content_policy::PublishedRule],
+) -> Option<(ObligationAction, &'a crate::content_policy::PublishedRule)> {
+    rules
         .iter()
         .filter(|entry| {
             labels.iter().any(|label| {
@@ -738,12 +891,15 @@ pub enum VerdictSource {
     /// The viewer's own spam/phishing thresholds
     /// (`moderation.md` § Categories & enforcement item 1).
     OwnThresholds,
-    /// The guardian's per-category floor
+    /// The guardian's policy — a rule of the guardian's document, or a floor
     /// (`family-client-enforcement.md` § Content policy).
-    GuardianFloor,
+    Guardian(GuardianAttribution),
     /// A region's published content policy
     /// (`region-blocking.md` § The content plane).
     Region(RegionAttribution),
+    /// The published rules of the nest the item was read through
+    /// (`nest-rules.md` § The nest content policy).
+    Nest(NestAttribution),
     /// The viewer reported this item, or its author, and so hid it for
     /// themselves (`moderation.md` § Corollary — block also hides): painted as
     /// the "you reported this" placeholder
@@ -768,6 +924,90 @@ pub struct RegionAttribution {
     pub reason: std::collections::BTreeMap<String, String>,
 }
 
+/// What a nest-sourced verdict shows the user: the nest's domain and the
+/// admin's own reason, shown **verbatim** under the app's frame
+/// ([`nest_rule_notice`]) exactly as an authority's is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestAttribution {
+    pub domain: String,
+    pub reason_code: String,
+    pub reason: std::collections::BTreeMap<String, String>,
+}
+
+/// What a guardian-sourced verdict shows the ward: the family-policy frame, and
+/// beside it the guardian's own reason **verbatim** when a rule of the
+/// guardian's document drove the verdict (`nest-rules.md` § The shared rule
+/// editor → *The reason is the member's to read*).
+///
+/// `rule` is `None` when a floor drove it — a retiring per-category select,
+/// the fail-closed block of a document this build cannot apply, or the kids
+/// compiled floor ([`with_compiled_floor`]): those paint the frame alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardianAttribution {
+    pub rule: Option<RuleReason>,
+}
+
+/// A published rule's reason, as an attribution carries it: the rule's
+/// `reason_code` and its `{ lang → text }` map, the entry for the viewer's
+/// language picked with [`crate::content_policy::reason_text`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleReason {
+    pub reason_code: String,
+    pub reason: std::collections::BTreeMap<String, String>,
+}
+
+/// One nest rule, ready for the fold — the one published-rule shape every
+/// publisher shares.
+pub type NestRule = crate::content_policy::PublishedRule;
+
+/// Everything one nest's published rules contribute to a render decision —
+/// the nest-side twin of [`crate::region_policy::RegionRuleSet`]
+/// (`nest-rules.md` § The nest source in the engine). Serde for the web face,
+/// which hands it to the SPA and takes it back, as a region's set crosses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NestRuleSet {
+    /// The nest's domain, as the member's app knows the nest.
+    pub domain: String,
+    pub status: crate::content_policy::PolicyStatus,
+    /// Empty unless `status` is applied; never holds a rule this build cannot
+    /// enforce.
+    pub rules: Vec<NestRule>,
+    /// Indices into the document's rules that are inert on this build (a
+    /// `prompt` rule with no on-device runtime).
+    #[serde(default)]
+    pub inert_rules: Vec<usize>,
+}
+
+/// Assemble a nest's published document into the rule set the composed render
+/// call folds — the mirror of [`crate::region_policy::rules_from_region_policy`].
+pub fn rules_from_nest_policy(
+    document: &crate::content_policy::ContentPolicyDocument,
+    nest_domain: &str,
+) -> NestRuleSet {
+    let assembled = crate::content_policy::assemble_rules(
+        document,
+        &crate::content_policy::Publisher::Nest(nest_domain.to_string()),
+    );
+    NestRuleSet {
+        domain: nest_domain.to_string(),
+        status: assembled.status,
+        rules: assembled.rules,
+        inert_rules: assembled.inert_rules,
+    }
+}
+
+/// The frame a nest-blocked item renders under, naming the nest; the rule's
+/// reason is shown verbatim beside it and is never an i18n string
+/// (`nest-rules.md` § Element IDs — `nest_rules.blocked_notice`). Keyed beside
+/// [`legal_takedown_tombstone`] so no app hand-rolls the string.
+pub fn nest_rule_notice(domain: &str, verdict: RenderVerdict) -> LocalizedText {
+    let key = match verdict {
+        RenderVerdict::Collapse => "nest_rules.collapsed_notice",
+        _ => "nest_rules.blocked_notice",
+    };
+    LocalizedText::key_arg(key, "nest", domain)
+}
+
 /// A render verdict together with the source that drove it.
 ///
 /// `source` is `None` exactly when no rule fired — a [`RenderVerdict::Show`] or
@@ -783,6 +1023,22 @@ impl ComposedVerdict {
     pub fn region(&self) -> Option<&RegionAttribution> {
         match &self.source {
             Some(VerdictSource::Region(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// The nest attribution, when a nest rule drove this verdict.
+    pub fn nest(&self) -> Option<&NestAttribution> {
+        match &self.source {
+            Some(VerdictSource::Nest(a)) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// The guardian attribution, when the guardian's policy drove this verdict.
+    pub fn guardian(&self) -> Option<&GuardianAttribution> {
+        match &self.source {
+            Some(VerdictSource::Guardian(a)) => Some(a),
             _ => None,
         }
     }
@@ -816,7 +1072,10 @@ pub fn reported_by_viewer(
 ///
 /// A region's own `Block` keeps its attribution: the authority's reason is the
 /// user's to read verbatim (`region-blocking.md` invariant 1), and a
-/// placeholder of the viewer's own adds nothing it lacks.
+/// placeholder of the viewer's own adds nothing it lacks. A nest rule's `Block`
+/// keeps its attribution for the same reason (`nest-rules.md` § Additive,
+/// never loosenable).
+#[allow(clippy::too_many_arguments)] // the item, its labels and the four render sources, each its own input
 pub fn render_verdict_for_item(
     hidden_content: &[String],
     item_id: &str,
@@ -825,10 +1084,20 @@ pub fn render_verdict_for_item(
     guardian_policy: Option<&ContentPolicy>,
     own_thresholds: Option<ViewerThresholds>,
     region_policies: &[crate::region_policy::RegionRuleSet],
+    nest_policies: &[NestRuleSet],
 ) -> ComposedVerdict {
-    let composed =
-        render_verdict_composed(labels, guardian_policy, own_thresholds, region_policies);
-    if composed.verdict == RenderVerdict::Block && composed.region().is_some() {
+    let composed = render_verdict_composed(
+        labels,
+        guardian_policy,
+        own_thresholds,
+        region_policies,
+        nest_policies,
+    );
+    // A published rule's `Block` — a region's or the nest's — keeps its
+    // attribution: its reason is the user's to read verbatim.
+    if composed.verdict == RenderVerdict::Block
+        && (composed.region().is_some() || composed.nest().is_some())
+    {
         return composed;
     }
     if reported_by_viewer(hidden_content, item_id, author_id) {
@@ -866,25 +1135,23 @@ pub fn guardian_enforced_categories(
     labels: &[crate::content_category::ContentLabelEntry],
     policy: &ContentPolicy,
 ) -> Vec<&'static str> {
+    // The guardian's own rules only — a floor's (an `inherit` floor adds none:
+    // the ward's own preferences decide, not Notify's subject) and the rule
+    // document's — so counting reads exactly what the guardian source renders.
+    let rules = rules_from_guardian_policy(policy);
     let mut out = Vec::new();
     for category in GUARDIAN_FLOOR_CATEGORIES {
-        // Only a collapse/block/unknown floor is the guardian "acting"; an
-        // `inherit` floor adds no guardian rule (the ward's own preferences decide
-        // — not Notify's subject).
-        let enforces = matches!(
-            policy.floor_for(category),
-            ContentFloor::Collapse | ContentFloor::Block | ContentFloor::Unknown
-        );
-        if !enforces {
-            continue;
-        }
-        // A label in this category at or above the guardian trigger threshold is
-        // what makes the floor bite — the exact predicate render_verdict_entries
-        // uses, so an item is counted for precisely the categories whose guardian
-        // floor also drove its render collapse/block.
-        let bites = labels.iter().any(|l| {
-            l.category.as_str() == category
-                && l.confidence_per_mille >= GUARDIAN_FLOOR_TRIGGER_PERMILLE
+        // A rule in this category whose trigger a label meets is what makes the
+        // guardian bite — the exact predicate render_verdict_entries uses, so an
+        // item is counted for precisely the categories whose guardian rule also
+        // drove its render collapse/block.
+        let bites = rules.iter().any(|rule| {
+            rule.category == category
+                && severity(&rule.action) > 0
+                && labels.iter().any(|l| {
+                    l.category == rule.category
+                        && l.confidence_per_mille >= rule.min_confidence_permille
+                })
         });
         if bites {
             out.push(category);
@@ -1048,6 +1315,10 @@ pub struct ContentPolicyState {
     /// Held here rather than passed per render for the same reason the guardian
     /// floor is: it changes on a policy refresh, not on a frame.
     region_policies: Vec<crate::region_policy::RegionRuleSet>,
+    /// The published rules of the nest this state's items are read through —
+    /// the **fourth** strictest-wins source (`nest-rules.md` § The nest source
+    /// in the engine). Empty until an app feeds it the nest's signed document.
+    nest_policies: Vec<NestRuleSet>,
     /// What the viewer hid by reporting it — their sealed
     /// `fauna.state.moderation` hidden-content list (`moderation.md` § Corollary —
     /// block also hides), hydrated at login and replaced by each hide the
@@ -1075,6 +1346,16 @@ impl ContentPolicyState {
         self.ward_policy = policy;
     }
 
+    /// The supervised viewer's guardian content policy in force, if any.
+    pub fn ward_content_policy(&self) -> Option<&ContentPolicy> {
+        self.ward_policy.as_ref()
+    }
+
+    /// The viewer's own spam/phishing thresholds in force, if read.
+    pub fn own_thresholds(&self) -> Option<ViewerThresholds> {
+        self.own_thresholds
+    }
+
     /// Set whether the guardian's **Guardian Notify** knob (`content_notify`)
     /// is on. Ward-side counting runs only while on; turning it off drops
     /// future counting, pending counts included ([`NotifyAccumulator::set_enabled`]).
@@ -1094,6 +1375,7 @@ impl ContentPolicyState {
             self.ward_policy.as_ref(),
             self.own_thresholds,
             &self.region_policies,
+            &self.nest_policies,
         )
     }
 
@@ -1117,6 +1399,7 @@ impl ContentPolicyState {
             self.ward_policy.as_ref(),
             self.own_thresholds,
             &self.region_policies,
+            &self.nest_policies,
         )
     }
 
@@ -1143,6 +1426,18 @@ impl ContentPolicyState {
     /// applied or inert).
     pub fn region_policies(&self) -> &[crate::region_policy::RegionRuleSet] {
         &self.region_policies
+    }
+
+    /// Set the published rules of the nest this state's items are read through
+    /// (each assembled by [`rules_from_nest_policy`]). Replaces the whole set,
+    /// as [`Self::set_region_policies`] does.
+    pub fn set_nest_policies(&mut self, policies: Vec<NestRuleSet>) {
+        self.nest_policies = policies;
+    }
+
+    /// The nest rules currently in force, for the rules surface.
+    pub fn nest_policies(&self) -> &[NestRuleSet] {
+        &self.nest_policies
     }
 
     /// Record any **guardian-floor** render-enforcement on `item_id` for
@@ -1314,6 +1609,10 @@ mod tests {
             obligation_action_label(ObligationAction::TakenDown as u8).key,
             "moderation.action.taken_down"
         );
+        assert_eq!(
+            obligation_action_label(ObligationAction::Blocked as u8).key,
+            "moderation.action.blocked"
+        );
         // Notify (4) and any unknown discriminant → neutral "Flagged", no panic.
         assert_eq!(
             obligation_action_label(ObligationAction::Notify as u8).key,
@@ -1338,6 +1637,38 @@ mod tests {
             t.resolve(|k| (k == "moderation.legal_takedown.tombstone")
                 .then_some("Removed under legal obligation ({reference})")),
             "Removed under legal obligation (EU-DSA-2024/12345)"
+        );
+    }
+
+    #[test]
+    fn admin_block_notice_names_the_reason_as_a_nested_key() {
+        assert_eq!(ObligationAction::Blocked as u8, 10);
+        let n = admin_block_notice("harassment");
+        assert_eq!(n.key, "moderation.admin_block.notice");
+        assert_eq!(
+            n.args.get("reason").map(String::as_str),
+            Some("moderation.report.reason.harassment")
+        );
+        // The reason is translated too: a nested resolve reads it in the
+        // viewer's language.
+        let lookup = |k: &str| match k {
+            "moderation.admin_block.notice" => {
+                Some("Blocked by this nest's admin after a report: {reason}")
+            }
+            "moderation.report.reason.harassment" => Some("Harassment"),
+            _ => None,
+        };
+        assert_eq!(
+            n.resolve_nested(lookup),
+            "Blocked by this nest's admin after a report: Harassment"
+        );
+        // An absent reason never renders a dangling key.
+        assert_eq!(
+            admin_block_notice("")
+                .args
+                .get("reason")
+                .map(String::as_str),
+            Some("moderation.report.reason.other")
         );
     }
 
@@ -1366,6 +1697,7 @@ mod tests {
             spam: ContentFloor::Block,
             phishing: ContentFloor::Inherit,
             commercial: ContentFloor::Unknown,
+            document: None,
         };
         let rules = rules_from_guardian_policy(&policy);
         // phishing (inherit) contributes no rule.
@@ -1513,6 +1845,299 @@ mod tests {
         )
     }
 
+    /// One nest's assembled rule set, as [`rules_from_nest_policy`] produces it.
+    fn nest_set(
+        domain: &str,
+        factor: &str,
+        permille: u16,
+        verdict: crate::content_policy::ContentVerdict,
+    ) -> NestRuleSet {
+        use crate::content_policy::{ContentPolicyDocument, ContentRule};
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(ContentRule {
+            factor: factor.into(),
+            min_permille: permille,
+            verdict,
+            reason_code: "HOUSE-1".into(),
+            reason: std::collections::BTreeMap::from([(
+                crate::content_policy::REASON_DEFAULT_KEY.to_string(),
+                format!("Not on {domain}."),
+            )]),
+            extra: Default::default(),
+        });
+        rules_from_nest_policy(&document, domain)
+    }
+
+    #[test]
+    fn a_nest_policy_is_the_fourth_strictest_wins_source() {
+        // nest-rules.md § The nest source in the engine: the viewer's own
+        // threshold would only collapse, the guardian defers, no region rule
+        // fires, and the nest blocks — so the item is blocked, attributed to the
+        // nest by domain with the admin's own reason.
+        use crate::content_policy::ContentVerdict;
+        let labels = [make_entry("spam", 900)];
+        let own = ViewerThresholds {
+            spam_permille: 500,
+            phishing_permille: 500,
+        };
+        let regions = [region_set("NO", "nsfw", 800, ContentVerdict::Block)];
+        let nests = [nest_set("example.org", "spam", 800, ContentVerdict::Block)];
+        let composed = render_verdict_composed(
+            &labels,
+            Some(&ContentPolicy::default()),
+            Some(own),
+            &regions,
+            &nests,
+        );
+        assert_eq!(composed.verdict, RenderVerdict::Block);
+        let nest = composed.nest().expect("attributed to the nest");
+        assert_eq!(nest.domain, "example.org");
+        assert_eq!(nest.reason_code, "HOUSE-1");
+
+        // The member cannot loosen it: their own threshold below the nest's
+        // changes nothing, and with no nest the same item only collapses.
+        let without_nest = render_verdict_composed(&labels, None, Some(own), &regions, &[]);
+        assert_eq!(without_nest.verdict, RenderVerdict::Collapse);
+        assert_eq!(without_nest.source, Some(VerdictSource::OwnThresholds));
+    }
+
+    #[test]
+    fn strictest_wins_across_all_four_sources_and_a_tie_goes_region_nest_guardian() {
+        // nest-rules.md decision 3: on a tie at the winning strictness the
+        // placeholder names the region, then the nest, then the household.
+        use crate::content_policy::ContentVerdict;
+        let labels = [make_entry("spam", 900)];
+        let guardian_blocks = ContentPolicy {
+            spam: ContentFloor::Block,
+            ..Default::default()
+        };
+        let region_blocks = [region_set("NO", "spam", 100, ContentVerdict::Block)];
+        let nest_blocks = [nest_set("example.org", "spam", 100, ContentVerdict::Block)];
+        let nest_collapses = [nest_set(
+            "example.org",
+            "spam",
+            100,
+            ContentVerdict::Collapse,
+        )];
+
+        let all = render_verdict_composed(
+            &labels,
+            Some(&guardian_blocks),
+            None,
+            &region_blocks,
+            &nest_blocks,
+        );
+        assert_eq!(all.verdict, RenderVerdict::Block);
+        assert!(all.region().is_some(), "region first");
+
+        let nest_and_guardian =
+            render_verdict_composed(&labels, Some(&guardian_blocks), None, &[], &nest_blocks);
+        assert_eq!(nest_and_guardian.verdict, RenderVerdict::Block);
+        assert!(nest_and_guardian.nest().is_some(), "then the nest");
+
+        // Strictness still outranks the tie order: a nest that only collapses
+        // loses to the guardian's block.
+        let stricter_guardian =
+            render_verdict_composed(&labels, Some(&guardian_blocks), None, &[], &nest_collapses);
+        assert_eq!(stricter_guardian.verdict, RenderVerdict::Block);
+        assert_eq!(
+            stricter_guardian.source,
+            Some(VerdictSource::Guardian(GuardianAttribution { rule: None }))
+        );
+
+        // And a nest collapse alone collapses, attributed to the nest.
+        let alone = render_verdict_composed(&labels, None, None, &[], &nest_collapses);
+        assert_eq!(alone.verdict, RenderVerdict::Collapse);
+        assert!(alone.nest().is_some());
+    }
+
+    #[test]
+    fn a_nest_block_keeps_its_attribution_over_the_viewers_own_report() {
+        use crate::content_policy::ContentVerdict;
+        let nests = [nest_set("example.org", "spam", 100, ContentVerdict::Block)];
+        let hidden = vec!["item".to_string()];
+        let composed = render_verdict_for_item(
+            &hidden,
+            "item",
+            None,
+            &[make_entry("spam", 900)],
+            None,
+            None,
+            &[],
+            &nests,
+        );
+        assert!(composed.nest().is_some());
+        // A nest collapse yields to the viewer's own report.
+        let collapses = [nest_set(
+            "example.org",
+            "spam",
+            100,
+            ContentVerdict::Collapse,
+        )];
+        let reported = render_verdict_for_item(
+            &hidden,
+            "item",
+            None,
+            &[make_entry("spam", 900)],
+            None,
+            None,
+            &[],
+            &collapses,
+        );
+        assert!(reported.reported());
+    }
+
+    fn guardian_document(
+        factor: &str,
+        permille: u16,
+        verdict: crate::content_policy::ContentVerdict,
+    ) -> crate::content_policy::ContentPolicyDocument {
+        let mut document = crate::content_policy::ContentPolicyDocument::empty();
+        document.rules.push(crate::content_policy::ContentRule {
+            factor: factor.into(),
+            min_permille: permille,
+            verdict,
+            reason_code: "family".into(),
+            reason: std::collections::BTreeMap::from([(
+                crate::content_policy::REASON_DEFAULT_KEY.to_string(),
+                "Family rule".to_string(),
+            )]),
+            extra: Default::default(),
+        });
+        document
+    }
+
+    #[test]
+    fn the_guardian_document_binds_at_its_own_level() {
+        // nest-rules.md § The shared rule editor, mounting (b): the guardian's
+        // rule document is read when present, with the level control the floors
+        // never had.
+        use crate::content_policy::ContentVerdict;
+        let policy = ContentPolicy {
+            document: Some(guardian_document("nsfw", 200, ContentVerdict::Block)),
+            ..Default::default()
+        };
+        let low = [make_entry("nsfw", 300)];
+        let composed = render_verdict_composed(&low, Some(&policy), None, &[], &[]);
+        assert_eq!(composed.verdict, RenderVerdict::Block);
+        let rule = composed
+            .guardian()
+            .and_then(|a| a.rule.as_ref())
+            .expect("the document rule drove the block, with its reason");
+        assert_eq!(rule.reason_code, "family");
+        assert_eq!(
+            crate::content_policy::reason_text(&rule.reason, "nb"),
+            "Family rule"
+        );
+        // The same item under the floor alone: the hard-coded trigger is higher.
+        let floor_only = ContentPolicy {
+            nsfw: ContentFloor::Block,
+            ..Default::default()
+        };
+        assert_eq!(
+            render_verdict_composed(&low, Some(&floor_only), None, &[], &[]).verdict,
+            RenderVerdict::Badge
+        );
+        // Guardian Notify counts what the document enforces.
+        assert_eq!(guardian_enforced_categories(&low, &policy), vec!["nsfw"]);
+    }
+
+    #[test]
+    fn a_floor_still_set_beside_the_document_keeps_binding() {
+        // A floor an older app set never silently stops binding: strictest wins.
+        use crate::content_policy::ContentVerdict;
+        let policy = ContentPolicy {
+            spam: ContentFloor::Block,
+            document: Some(guardian_document("nsfw", 200, ContentVerdict::Collapse)),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_verdict_composed(&[make_entry("spam", 900)], Some(&policy), None, &[], &[])
+                .verdict,
+            RenderVerdict::Block
+        );
+        assert_eq!(
+            render_verdict_composed(&[make_entry("nsfw", 900)], Some(&policy), None, &[], &[])
+                .verdict,
+            RenderVerdict::Collapse
+        );
+    }
+
+    #[test]
+    fn a_guardian_document_this_build_cannot_apply_fails_closed() {
+        // A list scorer is not a guardian's instrument — the document is
+        // malformed, and an unreadable guardian rule renders block.
+        use crate::content_policy::{BundledScorer, ContentVerdict, ScorerKind};
+        let mut document = guardian_document("guardian:ids", 500, ContentVerdict::Collapse);
+        document.scorers.push(BundledScorer {
+            name: "ids".into(),
+            kind: ScorerKind::List,
+            bytes: vec![1],
+            extra: Default::default(),
+        });
+        let policy = ContentPolicy {
+            document: Some(document),
+            ..Default::default()
+        };
+        for category in GUARDIAN_FLOOR_CATEGORIES {
+            assert_eq!(
+                render_verdict_composed(
+                    &[make_entry(category, 900)],
+                    Some(&policy),
+                    None,
+                    &[],
+                    &[]
+                )
+                .verdict,
+                RenderVerdict::Block,
+                "{category}"
+            );
+        }
+        // And a document at another grammar version is the same unreadable value.
+        let mut future = guardian_document("nsfw", 900, ContentVerdict::Collapse);
+        future.version += 1;
+        let policy = ContentPolicy {
+            document: Some(future),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_verdict_composed(&[make_entry("spam", 900)], Some(&policy), None, &[], &[])
+                .verdict,
+            RenderVerdict::Block
+        );
+    }
+
+    #[test]
+    fn the_guardian_document_round_trips_and_is_absent_on_the_wire_when_none() {
+        use crate::content_policy::ContentVerdict;
+        let floors = ContentPolicy {
+            spam: ContentFloor::Collapse,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&floors).unwrap();
+        assert!(json.get("document").is_none());
+        let with_doc = ContentPolicy {
+            document: Some(guardian_document("nsfw", 200, ContentVerdict::Block)),
+            ..floors
+        };
+        let bytes = fauna_cbor::encode_canonical(&with_doc).unwrap();
+        let back: ContentPolicy = fauna_cbor::decode_strict(&bytes).unwrap();
+        assert_eq!(back, with_doc);
+    }
+
+    #[test]
+    fn a_nest_rule_notice_names_the_nest() {
+        let notice = nest_rule_notice("example.org", RenderVerdict::Block);
+        assert_eq!(
+            notice,
+            LocalizedText::key_arg("nest_rules.blocked_notice", "nest", "example.org")
+        );
+        assert_eq!(
+            nest_rule_notice("example.org", RenderVerdict::Collapse),
+            LocalizedText::key_arg("nest_rules.collapsed_notice", "nest", "example.org")
+        );
+    }
+
     #[test]
     fn a_region_policy_is_the_third_strictest_wins_source() {
         // The case region-blocking.md § Where it composes turns on: the viewer's
@@ -1530,7 +2155,7 @@ mod tests {
         let regions = [region_set("NO", "nsfw", 800, ContentVerdict::Block)];
 
         let composed =
-            render_verdict_composed(&labels, Some(&guardian_inherits), Some(own), &regions);
+            render_verdict_composed(&labels, Some(&guardian_inherits), Some(own), &regions, &[]);
         assert_eq!(composed.verdict, RenderVerdict::Block);
         let attribution = composed.region().expect("attributed to the region source");
         assert_eq!(attribution.region.as_str(), "NO");
@@ -1540,6 +2165,89 @@ mod tests {
             attribution.reason.get("default").map(String::as_str),
             Some("Restricted in NO.")
         );
+    }
+
+    #[test]
+    fn a_guardian_rules_reason_rides_the_guardian_arm_and_a_floor_invents_none() {
+        // nest-rules.md § The shared rule editor → The reason is the member's
+        // to read: the ward reads a guardian rule's reason; a floor, or the
+        // fail-closed block of an unreadable document, paints the frame alone.
+        use crate::content_policy::ContentVerdict;
+        let labels = [make_entry("spam", 900)];
+        let reason_of = |policy: &ContentPolicy| {
+            let composed = render_verdict_composed(&labels, Some(policy), None, &[], &[]);
+            assert_eq!(composed.verdict, RenderVerdict::Block);
+            composed
+                .guardian()
+                .expect("the guardian drove the block")
+                .rule
+                .as_ref()
+                .map(|r| r.reason_code.clone())
+        };
+
+        let rule_only = ContentPolicy {
+            document: Some(guardian_document("spam", 100, ContentVerdict::Block)),
+            ..Default::default()
+        };
+        assert_eq!(reason_of(&rule_only).as_deref(), Some("family"));
+
+        let floor_only = ContentPolicy {
+            spam: ContentFloor::Block,
+            ..Default::default()
+        };
+        assert_eq!(reason_of(&floor_only), None);
+
+        let unreadable = ContentPolicy {
+            document: Some(crate::content_policy::ContentPolicyDocument::unreadable()),
+            ..Default::default()
+        };
+        assert_eq!(reason_of(&unreadable), None);
+
+        // A rule and a floor at one strictness on one category: a reason beats
+        // none.
+        let both = ContentPolicy {
+            spam: ContentFloor::Block,
+            document: Some(guardian_document("spam", 100, ContentVerdict::Block)),
+            ..Default::default()
+        };
+        assert_eq!(reason_of(&both).as_deref(), Some("family"));
+
+        // A stricter floor beats a collapsing rule, and brings no reason.
+        let stricter_floor = ContentPolicy {
+            spam: ContentFloor::Block,
+            document: Some(guardian_document("spam", 100, ContentVerdict::Collapse)),
+            ..Default::default()
+        };
+        assert_eq!(reason_of(&stricter_floor), None);
+
+        // The kids compiled floor over an empty guardian policy: no reason.
+        let floored = with_compiled_floor(None, Some(&KIDS_CONTENT_FLOOR)).unwrap();
+        assert_eq!(reason_of(&floored), None);
+    }
+
+    #[test]
+    fn a_region_or_nest_still_wins_the_tie_over_a_guardian_rule() {
+        // nest-rules.md decision 3: region > nest > guardian, a guardian
+        // reason notwithstanding.
+        use crate::content_policy::ContentVerdict;
+        let labels = [make_entry("spam", 900)];
+        let guardian = ContentPolicy {
+            document: Some(guardian_document("spam", 100, ContentVerdict::Block)),
+            ..Default::default()
+        };
+        let nests = [nest_set("example.org", "spam", 100, ContentVerdict::Block)];
+        let regions = [region_set(
+            "NO",
+            "spam",
+            100,
+            crate::region_policy::ContentVerdict::Block,
+        )];
+        let composed = render_verdict_composed(&labels, Some(&guardian), None, &[], &nests);
+        assert!(composed.nest().is_some());
+        assert!(composed.guardian().is_none());
+        let composed = render_verdict_composed(&labels, Some(&guardian), None, &regions, &nests);
+        assert!(composed.region().is_some());
+        assert!(composed.guardian().is_none());
     }
 
     #[test]
@@ -1564,19 +2272,28 @@ mod tests {
             Some(&guardian_blocks),
             Some(own),
             &region_collapses,
+            &[],
         );
         assert_eq!(composed.verdict, RenderVerdict::Block);
-        assert_eq!(composed.source, Some(VerdictSource::GuardianFloor));
+        assert_eq!(
+            composed.source,
+            Some(VerdictSource::Guardian(GuardianAttribution { rule: None }))
+        );
 
         // A region alone still collapses.
-        let composed = render_verdict_composed(&labels, None, None, &region_collapses);
+        let composed = render_verdict_composed(&labels, None, None, &region_collapses, &[]);
         assert_eq!(composed.verdict, RenderVerdict::Collapse);
         assert!(composed.region().is_some());
 
         // No source fires: a present-but-unescalated label still badges, and
         // there is nothing to attribute.
-        let composed =
-            render_verdict_composed(&[make_entry("nsfw", 10)], None, None, &region_collapses);
+        let composed = render_verdict_composed(
+            &[make_entry("nsfw", 10)],
+            None,
+            None,
+            &region_collapses,
+            &[],
+        );
         assert_eq!(composed.verdict, RenderVerdict::Badge);
         assert_eq!(composed.source, None);
     }
@@ -1595,7 +2312,8 @@ mod tests {
         };
         let regions = [region_set("NO", "spam", 100, ContentVerdict::Block)];
 
-        let composed = render_verdict_composed(&labels, Some(&guardian_blocks), None, &regions);
+        let composed =
+            render_verdict_composed(&labels, Some(&guardian_blocks), None, &regions, &[]);
         assert_eq!(composed.verdict, RenderVerdict::Block);
         assert_eq!(composed.region().map(|a| a.region.as_str()), Some("NO"));
     }
@@ -1611,7 +2329,7 @@ mod tests {
             region_set("NO-03", "nsfw", 100, ContentVerdict::Block),
             region_set("NO", "nsfw", 100, ContentVerdict::Block),
         ];
-        let composed = render_verdict_composed(&labels, None, None, &regions);
+        let composed = render_verdict_composed(&labels, None, None, &regions, &[]);
         assert_eq!(composed.region().map(|a| a.region.as_str()), Some("NO-03"));
 
         // …but strictness still outranks specificity: a subdivision that merely
@@ -1620,7 +2338,7 @@ mod tests {
             region_set("NO-03", "nsfw", 100, ContentVerdict::Collapse),
             region_set("NO", "nsfw", 100, ContentVerdict::Block),
         ];
-        let composed = render_verdict_composed(&labels, None, None, &regions);
+        let composed = render_verdict_composed(&labels, None, None, &regions, &[]);
         assert_eq!(composed.verdict, RenderVerdict::Block);
         assert_eq!(composed.region().map(|a| a.region.as_str()), Some("NO"));
     }
@@ -1648,6 +2366,7 @@ mod tests {
             None,
             None,
             std::slice::from_ref(&set),
+            &[],
         );
         assert_eq!(composed.verdict, RenderVerdict::Badge);
         assert_eq!(composed.source, None);
@@ -1770,7 +2489,7 @@ mod tests {
     fn a_reported_item_or_author_blocks_for_the_reporter() {
         let hidden = vec!["abcd".to_string(), "a1a1".to_string()];
         let reported = |item: &str, author: Option<&str>| {
-            render_verdict_for_item(&hidden, item, author, &[], None, None, &[])
+            render_verdict_for_item(&hidden, item, author, &[], None, None, &[], &[])
         };
         for v in [reported("ABCD", None), reported("zz", Some("A1A1"))] {
             assert_eq!(v.verdict, RenderVerdict::Block);
@@ -1778,7 +2497,7 @@ mod tests {
             assert_eq!(v.region(), None);
         }
         let other = reported("zz", Some("b2b2"));
-        assert_eq!(other, render_verdict_composed(&[], None, None, &[]));
+        assert_eq!(other, render_verdict_composed(&[], None, None, &[], &[]));
         assert!(!other.reported());
         assert!(!reported_by_viewer(&[], "abcd", None));
     }
@@ -1811,10 +2530,49 @@ mod tests {
                     phishing_permille: 600,
                 }),
                 &[],
+                &[],
             )
             .verdict,
             render_verdict_entries(&labels, &hand),
         );
+
+        // With all four sources in, the verdict is still exactly the
+        // hand-assembly over the union of their rules.
+        use crate::content_policy::ContentVerdict;
+        let regions = [region_set("NO", "nsfw", 650, ContentVerdict::Block)];
+        let nests = [nest_set(
+            "example.org",
+            "phishing",
+            100,
+            ContentVerdict::Collapse,
+        )];
+        for labels in [
+            vec![make_entry("spam", 900), make_entry("nsfw", 700)],
+            vec![make_entry("nsfw", 600)],
+            vec![make_entry("phishing", 200)],
+            vec![make_entry("commercial", 900)],
+            vec![],
+        ] {
+            let mut hand = rules_from_preferences(800, 600);
+            hand.extend(rules_from_guardian_policy(&policy));
+            hand.extend(regions[0].rules.iter().map(|r| r.rule.clone()));
+            hand.extend(nests[0].rules.iter().map(|r| r.rule.clone()));
+            assert_eq!(
+                render_verdict_composed(
+                    &labels,
+                    Some(&policy),
+                    Some(ViewerThresholds {
+                        spam_permille: 800,
+                        phishing_permille: 600,
+                    }),
+                    &regions,
+                    &nests,
+                )
+                .verdict,
+                render_verdict_entries(&labels, &hand),
+                "{labels:?}"
+            );
+        }
     }
 
     #[test]
@@ -1831,22 +2589,23 @@ mod tests {
 
         // Neither half → no rule fires; a present-but-unescalated label badges.
         assert_eq!(
-            render_verdict_composed(&labels, None, None, &[]).verdict,
+            render_verdict_composed(&labels, None, None, &[], &[]).verdict,
             RenderVerdict::Badge
         );
         // Own thresholds only (the every-user half, moderation.md § item 1) → Collapse.
         assert_eq!(
-            render_verdict_composed(&labels, None, Some(own), &[]).verdict,
+            render_verdict_composed(&labels, None, Some(own), &[], &[]).verdict,
             RenderVerdict::Collapse
         );
         // Guardian floor only (an unsupervised-preferences ward) → Block.
         assert_eq!(
-            render_verdict_composed(&labels, Some(&guardian_blocks_spam), None, &[]).verdict,
+            render_verdict_composed(&labels, Some(&guardian_blocks_spam), None, &[], &[]).verdict,
             RenderVerdict::Block
         );
         // Both → strictest wins: the guardian's Block over the own Collapse.
         assert_eq!(
-            render_verdict_composed(&labels, Some(&guardian_blocks_spam), Some(own), &[]).verdict,
+            render_verdict_composed(&labels, Some(&guardian_blocks_spam), Some(own), &[], &[])
+                .verdict,
             RenderVerdict::Block
         );
     }
@@ -1857,8 +2616,14 @@ mod tests {
         // renders fail-closed (block)" — the composed path must not soften it.
         let policy: ContentPolicy = serde_json::from_str(r#"{"phishing":"restrict"}"#).unwrap();
         assert_eq!(
-            render_verdict_composed(&[make_entry("phishing", 900)], Some(&policy), None, &[])
-                .verdict,
+            render_verdict_composed(
+                &[make_entry("phishing", 900)],
+                Some(&policy),
+                None,
+                &[],
+                &[]
+            )
+            .verdict,
             RenderVerdict::Block
         );
     }
@@ -1887,17 +2652,24 @@ mod tests {
         );
         for category in GUARDIAN_FLOOR_CATEGORIES {
             assert_eq!(
-                render_verdict_composed(&[make_entry(category, 900)], floored.as_ref(), None, &[]),
+                render_verdict_composed(
+                    &[make_entry(category, 900)],
+                    floored.as_ref(),
+                    None,
+                    &[],
+                    &[]
+                ),
                 ComposedVerdict {
                     verdict: RenderVerdict::Block,
-                    source: Some(VerdictSource::GuardianFloor),
+                    source: Some(VerdictSource::Guardian(GuardianAttribution { rule: None })),
                 },
                 "{category}: an inherit or collapse guardian floor renders at the compiled block"
             );
         }
         // Below the trigger, the floor does not bite: the label only badges.
         assert_eq!(
-            render_verdict_composed(&[make_entry("nsfw", 10)], floored.as_ref(), None, &[]).verdict,
+            render_verdict_composed(&[make_entry("nsfw", 10)], floored.as_ref(), None, &[], &[])
+                .verdict,
             RenderVerdict::Badge
         );
     }
@@ -1913,10 +2685,16 @@ mod tests {
             ..ContentPolicy::default()
         };
         let composed = with_compiled_floor(Some(&guardian_blocks_spam), Some(&collapse_floor));
-        assert_eq!(composed.unwrap().spam, ContentFloor::Block);
+        assert_eq!(composed.as_ref().unwrap().spam, ContentFloor::Block);
         assert_eq!(
-            render_verdict_composed(&[make_entry("spam", 900)], composed.as_ref(), None, &[])
-                .verdict,
+            render_verdict_composed(
+                &[make_entry("spam", 900)],
+                composed.as_ref(),
+                None,
+                &[],
+                &[]
+            )
+            .verdict,
             RenderVerdict::Block
         );
         // A fail-closed floor the client cannot parse stays block under any floor.
@@ -1954,7 +2732,7 @@ mod tests {
         let labels = [make_entry("nsfw", 900)];
         let floored = with_compiled_floor(Some(&inherit), Some(&KIDS_CONTENT_FLOOR));
         assert_eq!(
-            render_verdict_composed(&labels, floored.as_ref(), None, &[]).verdict,
+            render_verdict_composed(&labels, floored.as_ref(), None, &[], &[]).verdict,
             RenderVerdict::Block
         );
         assert!(guardian_enforced_categories(&labels, &inherit).is_empty());
@@ -2123,6 +2901,7 @@ mod tests {
             spam: ContentFloor::Collapse,
             phishing: ContentFloor::Inherit,
             commercial: ContentFloor::Block,
+            document: None,
         };
         let labels = vec![
             make_entry("commercial", 800),

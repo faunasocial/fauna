@@ -7,7 +7,7 @@
 // `EmailClient<R>` wrappers); this module is the thin TS seam.
 //
 // Carries **both** directions: request/reply, and the server-initiated push
-// stream (`onPushEvent` below). It fully replaced `$lib/ws.ts`, a second raw
+// stream (`onPushEvent` below). It fully replaced `#lib/ws.ts`, a second raw
 // WebSocket that still spoke the retired `?token=` query-auth form — which the
 // nest answers with 401, so it never delivered a push and simply reconnected
 // every 3s forever.
@@ -39,16 +39,21 @@ import {
   type PolicyEditorHandle,
   type PolicyEditorVerdict,
   type LogEntry,
+  openAuditLog,
+  type AuditLogHandle,
   type BackupAuditAlertReason,
   type StaleSurfaces,
   type RegionPlaneHandle,
+  type NestRulesBookHandle,
+  type NestRulesReadResult,
   type ReportTarget,
   type ReportForm,
   type ReportLedgerRow,
   type ReportQueueRow,
+  type BlockedRow,
 } from './wasm';
 import { guardSingletonBuild } from './singleton-build';
-import { resetActorScopedState } from './actorScope';
+import { portIsStale, resetActorScopedState } from './actorScope';
 import { nodeUrl, storedNestUrl, getAuthToken } from './api';
 import { mailExportSavePort } from './mail-export-save';
 import { AppOutdatedError, NestOutdatedError, SignInRefusedError } from './auth-errors';
@@ -56,7 +61,7 @@ import { escalateIfTerminalAuthVerdict } from './post-auth-escalation';
 import { hexToBytes } from './hex';
 import type { SharedRpcPort } from '../../static/fauna_wasm.js';
 import { identity, reconnectTick, connectionStatus } from './store';
-import type { LocalizedText } from '$lib/i18n/localized';
+import type { LocalizedText } from '#lib/i18n/localized';
 import type { SupervisionSnapshotValue } from './supervisionRestore';
 import type { BlockedPeer, ContactAsk, FeedAsk } from './ward-asks';
 import type { FilterRule } from './types';
@@ -75,6 +80,7 @@ import type {
   WasmMailListsMachine,
   WasmMailListMembersMachine,
   WasmMailPolicyMachine,
+  WasmDmarcReportsMachine,
   WasmCaldavPolicyMachine,
   WasmCarddavPolicyMachine,
   WasmWebdavPolicyMachine,
@@ -90,8 +96,8 @@ import type {
   FolderDestinationPlace,
   FolderDevice,
   FolderMember,
-} from '$lib/devices-machine';
-import type { IssuerForcedArm, IssuerKeyView } from '$lib/admin-oauth-keys';
+} from '#lib/devices-machine';
+import type { IssuerForcedArm, IssuerKeyView } from '#lib/admin-oauth-keys';
 
 // ── Wire types (mirror fauna_protocol::bridges_ui / email) ──────────
 
@@ -142,6 +148,8 @@ export interface BridgeStatus {
   mode: string | null;
   settings: BridgeSetting[];
   supports_follows: boolean;
+  // Gates the card's Follow requests section (bridges.md § Follow requests).
+  supports_follow_requests: boolean;
   link_modes: BridgeLinkMode[] | null;
   // Present (a provider `status(...)` error string) only on failure; the
   // typed wire always carries the slot, unlike the HTTP twin's omit-on-none.
@@ -153,6 +161,15 @@ export interface BridgeFollow {
   petname: string | null;
   created_at: number | null;
   extra: Record<string, unknown> | null;
+}
+
+/** One row of the Follow requests list — the shared `follow_request_row` model
+ *  (`display` is the one line a row paints; `id` is what Approve / Refuse hand back). */
+export interface BridgeFollowRequestRow {
+  id: string;
+  address: string;
+  name: string | null;
+  display: string;
 }
 
 export interface BridgeLinkReply {
@@ -189,6 +206,8 @@ export interface EmailFilter {
   combination: string;
   action: string | Record<string, unknown>;
   priority: number;
+  // The rule's `continue` flag: keep checking later rules after it matches.
+  continue_on_match: boolean;
   created_at: number;
 }
 
@@ -201,7 +220,7 @@ export interface SendEmailReply {
 // ── Wire types (mirror fauna_protocol::nostr bunker control plane) ──
 // The NIP-46 bunker *Connected apps* roster (`fauna.nostr.bunker.*`,
 // `docs/goal/ui/nostr.md` § The nest as the user's NIP-46 signer). Consumed by
-// NostrSettingsSection's Connected apps card via `$lib/nostr.ts`.
+// NostrSettingsSection's Connected apps card via `#lib/nostr.ts`.
 
 /** Reply for `fauna.nostr.bunker.create_invite` — the one-time reveal. The
  *  `connect_string` (`bunker://…&secret=…`) is composed nest-side and shown
@@ -231,7 +250,7 @@ export interface BunkerApp {
 // zap receipt is signed by the payee's LNURL/wallet server and is plain
 // signed JSON anyone may mint, so its own signature proves nothing — this
 // roster is what makes one believable. Consumed by NostrSettingsSection's
-// Zap signers card via `$lib/nostr.ts`.
+// Zap signers card via `#lib/nostr.ts`.
 
 /** One designated zap signer (`nostr-zap-signer-item`). */
 export interface ZapSignerEntry {
@@ -314,7 +333,7 @@ export interface PostInteractReply {
 // ── Wire types (mirror fauna_protocol::contacts / notifications) ────
 //
 // The knock + contact rows are field-identical to the SPA's `Knock` / `Contact`
-// (`$lib/types`), so `api.ts` returns them directly (structural assignment); the
+// (`#lib/types`), so `api.ts` returns them directly (structural assignment); the
 // notification row carries `notif_type`, which `notifications.ts` renames to
 // `type` for the SPA's `UnifiedNotification`.
 
@@ -708,7 +727,7 @@ async function call<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>): P
 }
 
 /** `call` for a seam that must live OUTSIDE this file. The one caller today is
- *  `$lib/payments`, whose functions are here-shaped but may not be *here*: this
+ *  `#lib/payments`, whose functions are here-shaped but may not be *here*: this
  *  module is unconditionally in the bundle, so a `payments*` function left in it
  *  would ship its own name into the store-safe artifact even with every caller
  *  folded away (`dynamic-features.md` § Platform-family surface excision — the
@@ -718,12 +737,84 @@ export function rpcCall<T>(secretHex: string, fn: (c: WsRpcClient) => Promise<T>
   return call(secretHex, fn);
 }
 
+/** A foreign-homed post's own bytes, read DIRECT from the nest they rest on
+ *  (`transport-trust.md` § The post arm → *The browser's leg*): the shared
+ *  anonymous plane, capped and verified against the content address. `home`
+ *  is `postBlobHome`'s answer handed back unchanged — never a URL this file
+ *  builds. A home serving a self-signed certificate is unreachable from a
+ *  browser (no pin): the declared browser residual, a rejection here. */
+export function postBlobGet(secretHex: string, home: unknown, hash: string): Promise<Uint8Array> {
+  return call(secretHex, (c) => c.postBlobHosts().get(home, hash) as Promise<Uint8Array>);
+}
+
 /** Ask the session's nest (the relay, `fauna.region.artifact.get`) for every
  *  policy on the region plane's declared chain — the plane folds and verifies
  *  in shared Rust and resolves to the new device record, or `null` when
- *  nothing changed (`$lib/region.svelte`). */
+ *  nothing changed (`#lib/region.svelte`). */
 export function regionRefresh(secretHex: string, plane: RegionPlaneHandle): Promise<Uint8Array | null> {
   return call(secretHex, (c) => plane.refresh(c));
+}
+
+/** Read the session nest's self-description past any memo and fold it into the
+ *  member's nest-rules book — in shared Rust (`WasmNestRulesBook.refresh`).
+ *  Resolves which nest was read and what the read did (`nest-rules.md`
+ *  § Acceptance at joining, and a change of rules). */
+export function nestRulesRefresh(
+  secretHex: string,
+  book: NestRulesBookHandle,
+): Promise<{ nestId: string; domain: string; read: NestRulesReadResult }> {
+  return call(secretHex, (c) => book.refresh(c));
+}
+
+/** `fauna.admin.content_policy.get` — the nest's rules as last accepted
+ *  (`document` is the canonical bytes for `openRuleEditorForNest`; `null` on a
+ *  fresh install). */
+export interface AdminContentPolicy {
+  document: Uint8Array | null;
+  sequence: number;
+  issuedAt: number;
+}
+
+export function adminContentPolicy(secretHex: string): Promise<AdminContentPolicy> {
+  return call(secretHex, (c) => c.adminContentPolicy() as Promise<AdminContentPolicy>);
+}
+
+/** `fauna.admin.content_policy.set` — replace the nest's whole rules document
+ *  (`RuleEditorHandle.documentBytes()`). A refusal is `defect`, the shared
+ *  validator's sentence, never a throw. */
+export function adminSetContentPolicy(
+  secretHex: string,
+  document: Uint8Array,
+): Promise<AdminContentPolicy & { accepted: boolean; defect: string | null }> {
+  return call(
+    secretHex,
+    (c) =>
+      c.adminSetContentPolicy(document) as Promise<
+        AdminContentPolicy & { accepted: boolean; defect: string | null }
+      >,
+  );
+}
+
+/** The guardian mounting's save (`WasmFamilyClient.familySaveContentRules`):
+ *  the ward's fresh entry, or `null` when the caller no longer guards it. */
+export function familySaveContentRules(
+  secretHex: string,
+  ward: Uint8Array,
+  document: Uint8Array,
+): Promise<unknown | null> {
+  return call(secretHex, (c) => c.familySaveContentRules(ward, document) as Promise<unknown | null>);
+}
+
+/** The labeler picker's list: the caller's subscribed `wasm` labelers over
+ *  posts, as hex ids (`RuleEditorHandle.labelerChoices`'s argument). */
+export function ruleLabelers(secretHex: string): Promise<string[]> {
+  return call(secretHex, (c) => c.ruleLabelers() as Promise<string[]>);
+}
+
+/** One subscribed labeler's module for a rule to bundle, or `null` when it is
+ *  not a `wasm` module over posts. */
+export function ruleModule(secretHex: string, labelerIdHex: string): Promise<Uint8Array | null> {
+  return call(secretHex, (c) => c.ruleModule(hexToBytes(labelerIdHex)) as Promise<Uint8Array | null>);
 }
 
 /** Connection state for status surfaces, or `'disconnected'` if no client yet. */
@@ -732,6 +823,15 @@ export function connectionState(): string {
 }
 
 export type { SharedRpcPort };
+
+/** The CURRENT identity's actor id (`get(identity)`), or `null` before one
+ *  exists. The stale-port refusal's identity operand: the only guard in the
+ *  post-`retireRpcClient` window, so its source is pinned by name in
+ *  `shared-rpc-port-contract.test.ts`. */
+export function currentActorId(): string | null {
+  const current = get(identity);
+  return current ? actorIdFromSecret(current.secretHex) : null;
+}
 
 /**
  * The singleton's socket, lent to another wasm chunk — the ONE way a
@@ -768,11 +868,7 @@ export async function sharedRpcPort(secretHex: string): Promise<SharedRpcPort> {
       // the singleton back to the retired actor, retiring the CURRENT
       // identity's client (and its canonical drop) and dialling the old one.
       const mine = actorIdFromSecret(secretHex);
-      const current = get(identity);
-      if (
-        (clientActorId !== null && clientActorId !== mine) ||
-        (current && actorIdFromSecret(current.secretHex) !== mine)
-      ) {
+      if (portIsStale(mine, clientActorId, currentActorId())) {
         throw new Error('shared rpc port refused: it was built for an identity that is no longer current');
       }
       const c = await getClient(secretHex);
@@ -838,7 +934,7 @@ export function webGetApexActor(secretHex: string): Promise<Uint8Array | null> {
 //    Published-posts section + the feed ⋯-overflow verbs. ──────────────────
 //
 // `postId` is whatever byte shape the caller already holds — the feed's own
-// `PostSummary.post_id` is hex (decode with `$lib/hex`'s `hexToBytes` first);
+// `PostSummary.post_id` is hex (decode with `#lib/hex`'s `hexToBytes` first);
 // `webPublishedSite`'s rows carry `post_id` as the plain byte array the wire
 // reply already deserializes to, passed straight back through unchanged.
 
@@ -955,6 +1051,68 @@ export function bridgesSetSettings(
   return call(secretHex, (c) => c.bridgesSetSettings(bridgeId, settings));
 }
 
+// ── fauna.plugins.* — the admin's half (`bridges.md` § Hosted plugins on this page) ──
+
+/** One installed plugin as the Bridges page paints it — composed once in
+ *  shared Rust (`fauna_client_bridges::installed_plugin_text`): the publisher
+ *  and status lines are `LocalizedText` each app resolves through its own
+ *  string table. `principal_id_hex` is what Uninstall takes. */
+export interface InstalledPluginText {
+  principal_id_hex: string;
+  name: string;
+  client_id: string;
+  /** The runner's state (`running` | `restarting` | `stopped`, or one this app
+   *  does not know) — the status leaf's `state` attr. */
+  state: string;
+  publisher: LocalizedText;
+  status: LocalizedText[];
+}
+
+/** `fauna.plugins.list` — ADMIN: every installed plugin with its runner's state. */
+export function pluginsList(secretHex: string): Promise<InstalledPluginText[]> {
+  return call(secretHex, (c) => c.pluginsList());
+}
+
+/** One installed plugin as this account's settings card on the Bridges page —
+ *  composed once in shared Rust (`fauna_client_bridges::plugin_card_text`).
+ *  `principal_id_hex` is what *Connect* (`bindPlugin`) and a settings edit
+ *  (`pluginsSetSetting`) take; `binding_principal_id_hex` (bound only) is what
+ *  *Disconnect* (`revokePrincipal`) takes. */
+export interface PluginCardText {
+  principal_id_hex: string;
+  name: string;
+  client_id: string;
+  badge: LocalizedText;
+  publisher: LocalizedText;
+  bound: boolean;
+  binding_principal_id_hex: string | null;
+  /** The account's own values — empty while unbound. */
+  settings: BridgeSetting[];
+}
+
+/** `fauna.plugins.available` — every installed plugin as this account's settings card. */
+export function pluginsAvailable(secretHex: string): Promise<PluginCardText[]> {
+  return call(secretHex, (c) => c.pluginsAvailable());
+}
+
+/** `fauna.plugins.set_settings` — set one of this account's own settings for a
+ *  plugin it has bound. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function pluginsSetSetting(secretHex: string, principalIdHex: string, key: string, value: any): Promise<void> {
+  return call(secretHex, (c) => c.pluginsSetSetting(principalIdHex, key, value));
+}
+
+/** `fauna.plugins.install` — ADMIN: the nest opens the install card in
+ *  Connected apps → Requests. */
+export function pluginsInstall(secretHex: string, documentUrl: string): Promise<void> {
+  return call(secretHex, (c) => c.pluginsInstall(documentUrl));
+}
+
+/** `fauna.plugins.uninstall` — ADMIN: every user's binding ends. */
+export function pluginsUninstall(secretHex: string, principalIdHex: string): Promise<void> {
+  return call(secretHex, (c) => c.pluginsUninstall(principalIdHex));
+}
+
 export function bridgesListFollows(secretHex: string, bridgeId: string): Promise<BridgeFollow[]> {
   return call(secretHex, (c) => c.bridgesListFollows(bridgeId));
 }
@@ -969,6 +1127,29 @@ export function bridgesAddFollow(
   return call(secretHex, (c) =>
     c.bridgesAddFollow(bridgeId, id, petname ?? null, extra ?? null),
   );
+}
+
+export function bridgesListFollowRequests(
+  secretHex: string,
+  bridgeId: string,
+): Promise<BridgeFollowRequestRow[]> {
+  return call(secretHex, (c) => c.bridgesListFollowRequests(bridgeId));
+}
+
+export function bridgesApproveFollowRequest(
+  secretHex: string,
+  bridgeId: string,
+  id: string,
+): Promise<void> {
+  return call(secretHex, (c) => c.bridgesApproveFollowRequest(bridgeId, id));
+}
+
+export function bridgesRefuseFollowRequest(
+  secretHex: string,
+  bridgeId: string,
+  id: string,
+): Promise<void> {
+  return call(secretHex, (c) => c.bridgesRefuseFollowRequest(bridgeId, id));
 }
 
 export function bridgesRemoveFollow(
@@ -1009,8 +1190,9 @@ export function emailFiltersCreate(
   combination: string,
   action: string | Record<string, unknown>,
   priority: number,
+  continueOnMatch: boolean,
 ): Promise<number> {
-  return call(secretHex, (c) => c.emailFiltersCreate(name, rules, combination, action, priority));
+  return call(secretHex, (c) => c.emailFiltersCreate(name, rules, combination, action, priority, continueOnMatch));
 }
 
 export function emailFiltersGet(secretHex: string, id: number): Promise<EmailFilter> {
@@ -1025,8 +1207,9 @@ export function emailFiltersUpdate(
   combination: string,
   action: string | Record<string, unknown>,
   priority: number,
+  continueOnMatch: boolean,
 ): Promise<void> {
-  return call(secretHex, (c) => c.emailFiltersUpdate(id, name, rules, combination, action, priority));
+  return call(secretHex, (c) => c.emailFiltersUpdate(id, name, rules, combination, action, priority, continueOnMatch));
 }
 
 export function emailFiltersDelete(secretHex: string, id: number): Promise<void> {
@@ -1310,7 +1493,7 @@ export function inboxSend(
  *  `docs/goal/architecture/api-layers.md` § Contacts & Knocks.
  *
  *  A supervised ward whose new contacts need guardian approval gets a rejection
- *  `isGuardianApprovalRequired` recognises (`$lib/guardian-refusal`). */
+ *  `isGuardianApprovalRequired` recognises (`#lib/guardian-refusal`). */
 export function sendKnock(
   secretHex: string,
   peerId: string,
@@ -1337,6 +1520,20 @@ export function notificationsMarkRead(
   upTo?: number,
 ): Promise<{ marked_read: number }> {
   return call(secretHex, (c) => c.notificationsMarkRead(upTo ?? null));
+}
+
+export function notificationsDismiss(
+  secretHex: string,
+  id: number,
+): Promise<{ dismissed: boolean }> {
+  return call(secretHex, (c) => c.notificationsDismiss(id));
+}
+
+export function notificationsClear(
+  secretHex: string,
+  upTo?: number,
+): Promise<{ cleared: number }> {
+  return call(secretHex, (c) => c.notificationsClear(upTo ?? null));
 }
 
 // ── fauna.account.* / fauna.quota.get / fauna.profile.handle.change ─
@@ -1402,7 +1599,7 @@ export function featuresRows(secretHex: string): Promise<FeatureRow[]> {
 //
 // `ui/status.md` § State & data shape: the nest's own `fauna.nest.info` reply
 // narrowed to `{domain, version}` by the shared `StatusClient::node()`. The
-// element texts come from `statusTextRaw` (`$lib/wasm`), never derived here.
+// element texts come from `statusTextRaw` (`#lib/wasm`), never derived here.
 
 /** Mirrors shared Rust `fauna_client_status::NodeLeg`. */
 export interface NodeLeg {
@@ -1540,8 +1737,10 @@ export interface SetupStatus {
   // security updates / a pending reboot on the host Ubuntu box, read from the
   // `/data/maintenance` channel. The admin-nest page renders the
   // `nest-os-maintenance-status` line + `nest-os-updates-count` badge from these.
-  // All additive (`#[serde(default)]`); a nest with no host channel (dev/desktop)
-  // reads 0/false/null → "OS up to date", no false alarm.
+  // All additive (`#[serde(default)]`); a nest with no host channel (a hand-built
+  // box, dev, desktop) reads `os_host_status_present` false → "OS status not
+  // reported by this host", never "OS up to date".
+  os_host_status_present: boolean;
   os_security_updates_pending: number;
   os_reboot_pending: boolean;
   os_reboot_deferred_since: number | null;
@@ -1563,14 +1762,31 @@ export function profileHandleChange(
 //
 // The text-only edit form's read-modify-write + sign + decode lives in shared
 // Rust (`fauna-client-profile`, surfaced via wasm `buildEditedProfile` /
-// `decodeProfileDisplay` in $lib/wasm); these two only carry bytes over the
+// `decodeProfileDisplay` in #lib/wasm); these two only carry bytes over the
 // wire. profile.md § Where logic lives → Profile publish/edit.
 
-/** `fauna.profile.get` → the raw stored signed profile bytes for `actorIdHex`
- *  (decode client-side with `decodeProfileDisplay`). Rejects with
+/** The Profile header's read (the shared `ProfileClient::profile_header_read`):
+ *  `actorIdHex`'s stored signed profile bytes (decode client-side with
+ *  `decodeProfileDisplay`) and the nest that answered — `relayedFrom` is
+ *  `null` when this nest served the profile, whose blob route then serves the
+ *  header's pictures, else the relayed-to `home`, with `homeNestActorId` the
+ *  home's identity this nest stamped (the foreign picture plane's pin). `home` is the page's
+ *  actor-home slot (`null` = this nest, no relay). Rejects with
  *  `fauna.profile.not_found` when the actor hasn't published a profile yet. */
-export function profileGet(secretHex: string, actorIdHex: string): Promise<Uint8Array> {
-  return call(secretHex, (c) => c.profileGet(actorIdHex) as Promise<Uint8Array>);
+export function profileHeaderRead(
+  secretHex: string,
+  actorIdHex: string,
+  home: string | null,
+): Promise<{ body: Uint8Array; relayedFrom: string | null; homeNestActorId: string | null }> {
+  return call(
+    secretHex,
+    (c) =>
+      c.profileHeaderRead(actorIdHex, home ?? undefined) as Promise<{
+        body: Uint8Array;
+        relayedFrom: string | null;
+        homeNestActorId: string | null;
+      }>,
+  );
 }
 
 /** The edit form's base load: the caller's OWN stored profile bytes, read
@@ -1579,8 +1795,17 @@ export function profileGet(secretHex: string, actorIdHex: string): Promise<Uint8
  *  (profile.md § After an identity succession → the linkless bullet). `null`
  *  is a never-published profile (first publish); rejects only when the read
  *  itself fails. */
-export function loadProfileEditBase(secretHex: string): Promise<Uint8Array | null> {
-  return call(secretHex, (c) => c.loadProfileEditBase(secretHex) as Promise<Uint8Array | null>);
+export async function loadProfileEditBase(secretHex: string): Promise<Uint8Array | null> {
+  // The face also hands back the owner's last identity-signed row
+  // (`last_direct_body`); web does not thread it into its form yet.
+  const base = await call(
+    secretHex,
+    (c) =>
+      c.loadProfileEditBase(secretHex) as Promise<
+        { body: Uint8Array; last_direct_body: Uint8Array | null } | null
+      >,
+  );
+  return base?.body ?? null;
 }
 
 /** `fauna.profile.set` — publish/replace the caller's own profile. `body` is
@@ -1775,7 +2000,7 @@ export function runSuccessionAftermath(
  *  so this is a synchronous local read with no round trip; it skips `call`'s
  *  connection wait rather than block Settings render on a socket this read
  *  never touches. `false` on every ordinary sign-in and on a successor's
- *  *second* one. The roster itself is the caller's own `$lib/member-reviews`
+ *  *second* one. The roster itself is the caller's own `#lib/member-reviews`
  *  read — this answers only "was a sweep the reason it's non-empty now". */
 export async function ephemeralReviewPassActive(secretHex: string): Promise<boolean> {
   const c = await getClient(secretHex);
@@ -1902,7 +2127,7 @@ export interface StolenOutcome {
  *  post-succession group sweep can run from the retired identity's own engine —
  *  the only moment in the page's life where it and the successor's exist at
  *  once. It is a parameter rather than a `conversationsManagerIfReady()` call
- *  here because `$lib/conversations` imports this module, and the caller (the
+ *  here because `#lib/conversations` imports this module, and the caller (the
  *  settings page) already has both. ⚠ Pass only an ALREADY-BUILT manager: a
  *  freshly built one has no restored state, and sweeping it would report a sweep
  *  that moved nothing. Omitting it is the honest `no-engine` outcome — the
@@ -2091,6 +2316,13 @@ export function adminLogs(secretHex: string): Promise<LogEntry[]> {
   return call(secretHex, (c) => c.adminLogs() as Promise<LogEntry[]>);
 }
 
+/** The admin audit log section on `admin-logs` (`admin.md` § The admin audit
+ *  log on `admin-logs`): the rows, the chain check and the more cursor are all
+ *  shared Rust (`WasmAuditLog`); the page calls `load()` then `more()`. */
+export function adminAuditLog(secretHex: string): Promise<AuditLogHandle> {
+  return call(secretHex, async (c) => openAuditLog(c));
+}
+
 export function adminUsersEvict(
   secretHex: string,
   actorId: Uint8Array,
@@ -2137,9 +2369,9 @@ export function adminUsersCreate(
   tier: string,
   handle?: string,
   guardianActor?: Uint8Array,
+  ageBand?: string,
 ): Promise<void> {
-  // No age band from the Admit section (`admin-users-admit-age-band-select` is unapproved).
-  return call(secretHex, (c) => c.adminUsersCreate(actorId, tier, handle, guardianActor, undefined) as Promise<void>);
+  return call(secretHex, (c) => c.adminUsersCreate(actorId, tier, handle, guardianActor, ageBand) as Promise<void>);
 }
 
 // Grant/revoke the admin role (`admin-users-make-admin-button` /
@@ -2240,8 +2472,8 @@ export function rotateDeploymentSeed(secretHex: string): Promise<LocalizedText> 
 // Outside-app sign-in keys (`admin-nest-oauth-*`, authorization-server.md §
 // The issuer → Two rotation arms) — the nest-held OAuth issuer key set and its
 // second signer, the refresh-token secret. The view types mirror shared Rust
-// `fauna_client_admin` and live in `$lib/admin-oauth-keys` beside the
-// section's pure guards; the pure word folds are `$lib/wasm`'s.
+// `fauna_client_admin` and live in `#lib/admin-oauth-keys` beside the
+// section's pure guards; the pure word folds are `#lib/wasm`'s.
 
 /** `fauna.oauth.issuer_key_status` folded through the shared `issuer_key_view`
  *  — the one read `admin-nest-oauth-section` paints its key rows from. REJECTS
@@ -2287,7 +2519,7 @@ export interface ModerationLegalTakedownReply {
  *  takedown/overturn (`moderation.md` § Legal takedown → Invocation surface).
  *  `conversation` selects the MLS relay-withhold kind, else post; `restore`
  *  overturns (the reference becomes the optional note). Gate the dispatch
- *  through `takedownFormView` (`$lib/wasm`) so a citation-less takedown is
+ *  through `takedownFormView` (`#lib/wasm`) so a citation-less takedown is
  *  refused before it bounces off the nest's `invalid_params`. Fired on
  *  `admin-nest-takedown-confirm-button`, once the caller has disarmed the
  *  form (disarm-before-dispatch: a double click must not dispatch a second
@@ -2319,7 +2551,7 @@ export interface ModerationAppealReply {
 /** `fauna.moderation.appeal` — appeal the enforcement decision recorded against
  *  `contentId` (a moderation-queue server row's own id, captured when the form
  *  opened; `moderation.md` § Legal takedown — the transparency triple's second
- *  leg). Gate the dispatch through `appealFormView` (`$lib/wasm`). The reply is
+ *  leg). Gate the dispatch through `appealFormView` (`#lib/wasm`). The reply is
  *  recorded for review, never granted; a refusal rejects for `appealVerdict` to
  *  word. */
 export function moderationAppeal(
@@ -2335,7 +2567,7 @@ export function moderationAppeal(
 
 // ── User-initiated reporting (`moderation.md` § User-initiated reporting) —
 // the five client calls and the reporter-side hide. The sheet's decisions are
-// `$lib/wasm`'s `reportSheetView` & co.; these only dispatch.
+// `#lib/wasm`'s `reportSheetView` & co.; these only dispatch.
 
 /** `fauna.moderation.abuse_report.submit`, built from the sheet by the shared
  *  `report_request` (a sheet the view would not let send rejects before
@@ -2348,7 +2580,7 @@ export function moderationAbuseReportSubmit(
 ): Promise<{
   report_id: string;
   routed_to: string[];
-  acknowledgement: import('$lib/i18n/localized').LocalizedText;
+  acknowledgement: import('#lib/i18n/localized').LocalizedText;
 }> {
   return call(secretHex, (c) => c.moderationAbuseReportSubmit(target, form) as Promise<never>);
 }
@@ -2378,6 +2610,23 @@ export function adminAbuseReportResolve(
   acted: boolean,
 ): Promise<void> {
   return call(secretHex, (c) => c.adminAbuseReportResolve(reportId, acted) as Promise<void>);
+}
+
+/** `fauna.moderation.admin_block` — block the item an open report names, or
+ *  with `restore` unblock it (Admin-class). Gate through `reportBlockFormView`;
+ *  errors reject for `reportBlockVerdict` to word. */
+export function moderationAdminBlock(
+  secretHex: string,
+  reportId: string,
+  restore: boolean,
+): Promise<void> {
+  return call(secretHex, (c) => c.moderationAdminBlock(reportId, restore) as Promise<void>);
+}
+
+/** `fauna.moderation.admin_block.list` — every blocked item, newest first,
+ *  worded by the shared `blocked_row_view` (Admin-class). */
+export function moderationAdminBlockList(secretHex: string): Promise<BlockedRow[]> {
+  return call(secretHex, (c) => c.moderationAdminBlockList() as Promise<BlockedRow[]>);
 }
 
 /** The ids the owner hid by reporting them (`moderation.md` § Corollary). */
@@ -2422,6 +2671,15 @@ export function adminTiersUpdate(
         maxFeeds,
       ) as Promise<void>,
   );
+}
+
+/** `fauna.admin.tiers.delete` — remove a tier by name (the admin-settings
+ *  per-row delete button; admin.md § 3 → *Removing a tier*). The nest refuses
+ *  while anything still names the tier (`fauna.admin.conflict`); the wasm face
+ *  rejects with that refusal already worded, so the caller shows the error
+ *  text as is. The caller refetches `adminTiersList` after. */
+export function adminTiersDelete(secretHex: string, name: string): Promise<void> {
+  return call(secretHex, (c) => c.adminTiersDelete(name) as Promise<void>);
 }
 
 /** `fauna.admin.tiers.create` — define a new tier (the admin-settings add-a-tier
@@ -2665,6 +2923,39 @@ export function adminSetWebAppOrigin(
   return call(secretHex, (c) => c.adminSetWebAppOrigin(mode) as Promise<AdminWebAppOriginView>);
 }
 
+/** One `admin-nest-update-channel-{stable,test,dev}-radio`: the channel and the
+ *  wizard's own label and description, resolved by the shared fold. */
+export interface AdminUpdateChannelOption {
+  channel: 'stable' | 'test' | 'dev';
+  label: LocalizedText;
+  description: LocalizedText;
+}
+
+/** Every word `admin-nest-update-channel-*` paints, already chosen by the shared
+ *  `fauna_client_admin::admin_update_channel_view` fold (`nest/update-channel.md`
+ *  § The UI). Mirrors `AdminUpdateChannelView` field-by-field. */
+export interface AdminUpdateChannelView {
+  selected: 'stable' | 'test' | 'dev' | null;
+  status: LocalizedText;
+  can_set: boolean;
+  options: AdminUpdateChannelOption[];
+}
+
+/** `fauna.admin.update_channel.get` folded through the shared view — an older
+ *  nest's unknown-kind answer resolves the "predates the choice" view. */
+export function adminUpdateChannelStatus(secretHex: string): Promise<AdminUpdateChannelView> {
+  return call(secretHex, (c) => c.adminUpdateChannelStatus() as Promise<AdminUpdateChannelView>);
+}
+
+/** `fauna.admin.update_channel.set` (`admin-nest-update-channel-save-button`) —
+ *  resolves the fold of a fresh read, so the save repaints from the nest. */
+export function adminSetUpdateChannel(
+  secretHex: string,
+  channel: 'stable' | 'test' | 'dev',
+): Promise<AdminUpdateChannelView> {
+  return call(secretHex, (c) => c.adminSetUpdateChannel(channel) as Promise<AdminUpdateChannelView>);
+}
+
 // Invite codes (Section 2 — mint/list/delete).
 
 export function adminInviteCodesList(secretHex: string): Promise<AdminInviteCode[]> {
@@ -2862,7 +3153,7 @@ export function mailSpamMachine(secretHex: string): Promise<WasmMailSpamMachine>
 // MSEK) — so like `mailSpamMachine` it passes the 32-byte secret + the
 // deployment node URL, plus the user's handle (the archive's root directory)
 // and the save port, the browser half of the download
-// (`$lib/mail-export-save`). No export logic in the SPA (#2): the page renders
+// (`#lib/mail-export-save`). No export logic in the SPA (#2): the page renders
 // `snapshot()`, dispatches actions and spawns `runExport()` after a
 // Start/Resume that lands a running session.
 export function mailExportMachine(secretHex: string, handle: string): Promise<WasmMailExportMachine> {
@@ -2898,7 +3189,7 @@ export function mailImportMachine(secretHex: string): Promise<WasmMailImportMach
 // (participants.md § The assignment picker). No delegation logic in the SPA (#2).
 //
 // `deviceIdHex` is this browser's device identity for the account
-// (`$lib/device-id`'s `getDeviceId(actorId)`), passed in by the caller — the same
+// (`#lib/device-id`'s `getDeviceId(actorId)`), passed in by the caller — the same
 // id the push registration keys this browser's row under.
 export function taskDelegationView(
   secretHex: string,
@@ -2925,6 +3216,16 @@ export function syncDevicesList(secretHex: string): Promise<DeviceSummary[]> {
 // rejection until it lands (UI precedes backend — not faked green).
 export function mailListsMachine(secretHex: string): Promise<WasmMailListsMachine> {
   return call(secretHex, (c) => Promise.resolve(c.mailListsMachine()));
+}
+
+// Admin `admin-mail-reports` page — the DMARC aggregate reports peer mail
+// servers send about this nest's domains (dmarc-reporting.md § Admin pane
+// summary surface), WASM twin of the shared `DmarcReportsMachine`
+// (`libs/fauna-client-mail-settings::dmarc_reports`). Admin-class, connection
+// only; totals, shares, top lists and the raw view's gunzip are all the
+// machine's — no report logic in the SPA (priority #2).
+export function dmarcReportsMachine(secretHex: string): Promise<WasmDmarcReportsMachine> {
+  return call(secretHex, (c) => Promise.resolve(c.dmarcReportsMachine()));
 }
 
 // User-facing `mail-list-members` drill-down off a `mail-lists` row — add /
@@ -2958,14 +3259,14 @@ export function conversationsManager(
 
 // Start this tab's account runtime over this connection and register the
 // account-plane conversations seams on `manager` at its store-ready edge
-// (`$lib/account-runtime` owns the lifecycle). The nest URL is the session's
+// (`#lib/account-runtime` owns the lifecycle). The nest URL is the session's
 // own — the key its identity pin rests under, which the runtime's escrow trust
 // reads. The peer-token factory is the Nests page's own (`linkedNestsMachine`
 // below): the runtime connects to each linked replica nest with it
 // (`account-sync-plane.md` § The bind leg, ruling 4).
 // `stillWanted` is asked right before the call enters wasm — after the
 // connection wait, where a stop can land — so a start a stop superseded never
-// claims an install (`$lib/account-runtime`, *Order is the contract*).
+// claims an install (`#lib/account-runtime`, *Order is the contract*).
 export function startAccountRuntime(
   secretHex: string,
   manager: WasmConversationsManager,
@@ -2986,7 +3287,7 @@ export function startAccountRuntime(
 // renders entirely from its `snapshot()` and forwards gestures to its async
 // methods — one page, one shared post-list/compose/feed-rule state
 // (`docs/goal/ui/feed.md` § State & data shape). Built once the identity is
-// known (`$lib/feed.ts`).
+// known (`#lib/feed.ts`).
 export function feedManager(secretHex: string): Promise<WasmFeedManager> {
   return call(secretHex, (c) => Promise.resolve(c.feedManager(hexToBytes(secretHex))));
 }
@@ -2997,7 +3298,7 @@ export function feedManager(secretHex: string): Promise<WasmFeedManager> {
 // face carries the five `event-form` inputs while the canonical encoding, the
 // seal, the WS calls and the launch gate stay in Rust. The 32-byte secret seeds
 // the at-rest `BackupKey` only — drafts are owner-only and sign nothing. Built
-// once the identity is known (`$lib/event-drafts.ts`).
+// once the identity is known (`#lib/event-drafts.ts`).
 export function eventDrafts(secretHex: string): Promise<WasmEventDrafts> {
   return call(secretHex, (c) => Promise.resolve(c.eventDrafts(hexToBytes(secretHex))));
 }
@@ -3008,7 +3309,7 @@ export function eventDrafts(secretHex: string): Promise<WasmEventDrafts> {
 // searching signs nothing. The Search page renders entirely from its
 // `snapshot()` and forwards gestures to its async methods
 // (`docs/goal/ui/search.md` § State & data shape). Built once the identity is
-// known (`$lib/search.ts`).
+// known (`#lib/search.ts`).
 export function searchManager(secretHex: string): Promise<WasmSearchManager> {
   return call(secretHex, (c) => Promise.resolve(c.searchManager()));
 }
@@ -3065,6 +3366,16 @@ export interface InboxMessage {
    *  `undefined` from any nest that doesn't serve references (and from every
    *  nest for a message under the frame). */
   body_ref?: MailBodyRef;
+  /** Set only on a **Sent** message the fresh-IP warm-up is still holding back
+   *  (mail-deliverability.md § Enforcement at submission time): when it goes out
+   *  (`release_at`, epoch seconds) and how many held messages are ahead of it.
+   *  Additive — absent on INBOX and on every message nothing holds. */
+  warmup_hold?: WarmupHold;
+}
+/** The warm-up's hold on one sent message (`InboxMessage.warmup_hold`). */
+export interface WarmupHold {
+  release_at: number;
+  messages_ahead: number;
 }
 /** The ordered chunk hashes a large sealed body was staged under, plus the
  *  length they must rejoin to. `total_bytes` arrives as a plain number (a mail
@@ -3085,7 +3396,7 @@ export interface InboxFetchReply {
 
 /** Fetch one page of sealed INBOX records with `uid > afterUid` (`limit` 0 =
  *  source default). The conversations receive poll drains pages, decrypting +
- *  ingesting each (`$lib/conversations.ts`). */
+ *  ingesting each (`#lib/conversations.ts`). */
 export function emailInboxFetch(
   secretHex: string,
   afterUid: number,
@@ -3098,7 +3409,7 @@ export function emailInboxFetch(
  *  `emailInboxFetch` (same `InboxFetchReply` wire shape; the mailbox is chosen
  *  server-side). Surfaces mail the user sent from an external MUA; the
  *  conversations receive poll drains a separate Sent cursor, decrypting +
- *  ingesting each as an outbound message (`$lib/conversations.ts`). */
+ *  ingesting each as an outbound message (`#lib/conversations.ts`). */
 export function emailSentFetch(
   secretHex: string,
   afterUid: number,
@@ -3205,6 +3516,68 @@ export function forwardPerHourGet(secretHex: string): Promise<ForwardPerHour> {
 /** `fauna.bridges.set_forward_per_hour` → the persisted `{ value, ceiling }`. */
 export function forwardPerHourSet(secretHex: string, value: number): Promise<ForwardPerHour> {
   return call(secretHex, (c) => c.forwardPerHourSet(value) as Promise<ForwardPerHour>);
+}
+
+// ── Per-account switches, automatic reply and quotas (mail-policy-config.md
+// § Tier 3; email-filters.md § The auto-respond setting; imap-server.md
+// § Composition with submission quota) — the mail-settings page's rows. ──
+
+/** The caller's own receive, send and scan-result-row switches (all on by default). */
+export interface MailSwitches {
+  receive_enabled: boolean;
+  send_enabled: boolean;
+  scan_result_visible: boolean;
+}
+
+/** `fauna.bridges.get_mail_switches` → `{ receive_enabled, send_enabled, scan_result_visible }`. */
+export function mailSwitchesGet(secretHex: string): Promise<MailSwitches> {
+  return call(secretHex, (c) => c.mailSwitchesGet() as Promise<MailSwitches>);
+}
+
+/** `fauna.bridges.set_mail_switches` (a `null` switch keeps its stored value)
+ *  → the persisted switches the nest confirmed on the re-read. */
+export function mailSwitchesSet(
+  secretHex: string,
+  receiveEnabled: boolean | null,
+  sendEnabled: boolean | null,
+): Promise<MailSwitches> {
+  return call(
+    secretHex,
+    (c) => c.mailSwitchesSet(receiveEnabled ?? undefined, sendEnabled ?? undefined) as Promise<MailSwitches>,
+  );
+}
+
+/** The per-account "show the scan-result row" switch, then the confirming
+ *  re-read of all three switches. */
+export function mailScanResultVisibleSet(secretHex: string, visible: boolean): Promise<MailSwitches> {
+  return call(secretHex, (c) => c.mailScanResultVisibleSet(visible) as Promise<MailSwitches>);
+}
+
+/** The automatic reply, read from the caller's match-all `AutoReply` rule. */
+export interface AutoRespond {
+  enabled: boolean;
+  message: string;
+}
+
+/** `EmailClient::autorespond_get` → `{ enabled, message }`. */
+export function emailAutorespondGet(secretHex: string): Promise<AutoRespond> {
+  return call(secretHex, (c) => c.emailAutorespondGet() as Promise<AutoRespond>);
+}
+
+/** `EmailClient::autorespond_set` — on with `message` (checked first with
+ *  `autorespondMessageDraftOutcome`); `null` turns it off. Then a confirming
+ *  re-read, so the page reflects the persisted reply, never the local edit. */
+export function emailAutorespondSetAndReload(secretHex: string, message: string | null): Promise<AutoRespond> {
+  return call(secretHex, async (c) => {
+    await (message === null ? c.emailAutorespondClear() : c.emailAutorespondSet(message));
+    return (await c.emailAutorespondGet()) as AutoRespond;
+  });
+}
+
+/** `fauna.bridges.get_mail_quotas` → the six counts, the input of
+ *  `mailQuotaDisplay` / `mailOverQuotaNotice` (opaque to the page). */
+export function mailQuotasGet(secretHex: string): Promise<unknown> {
+  return call(secretHex, (c) => c.mailQuotasGet() as Promise<unknown>);
 }
 
 /** `fauna.email.apply_spam_disposition` → `{ watermarked, moved_to_junk }`.
@@ -3576,13 +3949,16 @@ export interface ObligationAction {
   confidence_per_mille: number;
   action: number;
   timestamp: number;
+  /** The handle domain of the nest whose admin decided, on a row another nest
+   *  delivered; absent on this nest's own decision. */
+  issuer_nest?: string;
 }
 
 /** `fauna.moderation.actions` — the caller's own server-issued moderation queue
  * (obligation-action records: mail-ingest/admin quarantine·reject·label + appeals,
  * plus plaintext-mode social labels). These are the queue's **server half**: the
  * `moderationQueue` wasm face unions them with the session's post-decrypt local
- * detections (`$lib/conversations` `moderationLocalDetections`) through the shared
+ * detections (`#lib/conversations` `moderationLocalDetections`) through the shared
  * `merge_queue`, so the superset — and its dedupe rule — is one shared impl, not a
  * TS hand-roll (`moderation.md` § State & data shape). No moderation logic in the
  * SPA (priority #2). */
@@ -3597,7 +3973,7 @@ export function moderationActions(secretHex: string): Promise<ObligationAction[]
 // `fauna_client_push::registration` machine (the install opt-in bit, the
 // which-actor record, the leave-shape drops), keyed under this browser's device
 // id for the session's actor wasm-side. The browser `serviceWorker`/
-// `PushManager` work that produces a subscription stays in `$lib/push.ts`.
+// `PushManager` work that produces a subscription stays in `#lib/push.ts`.
 export function pushVapidKey(secretHex: string): Promise<string> {
   return call(secretHex, async (c) => {
     const reply = (await c.pushVapidKey()) as { public_key: string };
@@ -3742,7 +4118,7 @@ export function webdavPolicyMachine(secretHex: string): Promise<WasmWebdavPolicy
 // ── The Backups page's snapshot half is NOT here ────────────────────
 //
 // It moved onto the shared `BackupsMachine` (`libs/fauna-backups-machine`, WASM
-// twin `libs/fauna-wasm-backups`, loaded via `$lib/wasm-backups`) on 2026-08-05,
+// twin `libs/fauna-wasm-backups`, loaded via `#lib/wasm-backups`) on 2026-08-05,
 // which is what retired this seam's eight `fauna.filesync.snapshot.*` /
 // `fauna.sync.backup_status` wrappers: the machine composes those kinds in Rust
 // over `SnapshotsClient<R>` and hands the page one renderable snapshot. Nothing
@@ -4083,6 +4459,12 @@ export interface MutedKeyword {
   weight: number;
 }
 
+/** A muted term's level — `fauna_core::scoring::MutedKeywordLevel`'s own
+ *  spelling (serde kebab-case), which is also the `muted-word-level-select`
+ *  option value. The weights behind the two live in Rust; classify a stored
+ *  weight with `mutedKeywordLevel` (wasm.ts), never by comparing numbers. */
+export type MutedKeywordLevel = 'hide' | 'show-less';
+
 /** The `muted-words` page in one record — mirrors
  *  `fauna_client_config::MutedWordsSnapshot` (serde JSON, snake_case). */
 export interface MutedWordsSnapshot {
@@ -4124,6 +4506,17 @@ export function mutedKeywordsAdd(secretHex: string, word: string): Promise<Muted
  *  gone is a success no-op (convergence, not an error). */
 export function mutedKeywordsRemove(secretHex: string, word: string): Promise<MutedWordsSnapshot> {
   return call(secretHex, (c) => c.removeMutedWord(word));
+}
+
+/** Set one term's level as a DELTA — `mutedKeywordsAdd`'s sibling; a term the
+ *  list does not hold is a success no-op. Returns the stored page record, each
+ *  row's level read back through `mutedKeywordLevel`. */
+export function mutedKeywordsSetLevel(
+  secretHex: string,
+  word: string,
+  level: MutedKeywordLevel,
+): Promise<MutedWordsSnapshot> {
+  return call(secretHex, (c) => c.setMutedWordLevel(word, level));
 }
 
 // ── Trained topic factors (topic-factors.md § Authoring surface & picker).
@@ -4373,7 +4766,7 @@ export interface DestinationAuditRow {
    *  `backup-audit-alert` answer (`DestinationAuditRecord::alert_reasons`): the
    *  standing verdict's reason, then at most one `SourceRegressed`. Paint each
    *  entry; each is **opaque**, straight into `backupAuditAlertText`. Read it
-   *  through `auditAlertReasons` (`$lib/backup-audit-alerts`). */
+   *  through `auditAlertReasons` (`#lib/backup-audit-alerts`). */
   alert_reasons: BackupAuditAlertReason[];
   /** Whether this row's fifth-reason banner carries
    *  `backup-audit-recover-button` — the shared `recover_offered` answer at the
@@ -4406,6 +4799,35 @@ export function backupRecoverFromDestination(
   destinationId: string,
 ): Promise<RecoveryResult> {
   return call(secretHex, (c) => c.backupRecoverFromDestination(secretHex, destinationId));
+}
+
+/** How a nest-held pull-back ended — the wasm twin of the ffi `FfiReseedResult`.
+ *  `stopped` set: the ceremony stopped before its verdict, nothing was made live,
+ *  and every other field is empty (render it in `backups.backup_reseed_failed`).
+ *  Otherwise `resultLines` are `backup-destination-reseed-result`'s lines, verdict
+ *  first, each resolved with `resolveLocalizedNested`; `isWhole` is the one bit
+ *  that may read as "restored"; `reenrollError` says the data IS back but the
+ *  destination is not yet backing this nest up. */
+export interface ReseedResult {
+  stopped: string | null;
+  resultLines: LocalizedText[];
+  isWhole: boolean;
+  reenrollError: string | null;
+}
+
+/**
+ * Restore this nest from a surviving nest-kind destination's copy — the confirm
+ * of `backup-destination-reseed-button` on that row (`ui/backups.md` § Restore
+ * after losing the nest). One call into shared Rust: the shared pull-back leg
+ * lands the destination's custody here over this page's own sessions, the shared
+ * driver materializes it, and a whole outcome re-enrolls the destination. A stop
+ * resolves with `stopped`; this rejects only for a malformed secret.
+ */
+export function backupPullBackFromDestination(
+  secretHex: string,
+  destinationId: string,
+): Promise<ReseedResult> {
+  return call(secretHex, (c) => c.backupPullBackFromDestination(secretHex, destinationId));
 }
 
 /**
@@ -4475,6 +4897,19 @@ export function refreshMailEpochSchedule(secretHex: string): Promise<void> {
   return mailSettingsMachine(secretHex).then((m) => m.refreshEpochSchedule());
 }
 
+// ── mail submission-token refresh ──────────────────────────────────────
+// The web twin of the native connect-time trigger's token pass
+// (`rpc_glue::refresh_epoch_schedule_on_every_connect`;
+// `mail-credentials.md` § Architectural rules, rule 10): re-mints every live
+// credential's submission token once it is a cadence old, on the shared token
+// clock. Resolves the number re-minted. Best-effort — the caller catches and
+// logs, never surfaces it.
+export function refreshMailSubmissionTokens(secretHex: string): Promise<number> {
+  return mailSettingsMachine(secretHex).then(
+    (m) => m.refreshSubmissionTokens() as Promise<number>,
+  );
+}
+
 // ── fauna.dns.set_host_address (client host-address reporting) ────────
 // The admin client reports the nest's PUBLIC IP so the nest gates ACME HTTP-01
 // on the strong resolve-check + assembles the apex/`mail.` records. The web twin
@@ -4539,7 +4974,7 @@ export function runSealBackfillSweep(secretHex: string): Promise<void> {
  * byte-identical command. Unlike the box list, the seed IS surfaced here by
  * design — it is the installer input the admin pastes (box-recovery.md § Trust &
  * audience). Rejects if the nest cannot be reached (the caller then falls back to
- * `$lib/wasm`'s `recoverSelfhostedCommandLocal`) or no source custodies that
+ * `#lib/wasm`'s `recoverSelfhostedCommandLocal`) or no source custodies that
  * box. */
 export function recoverSelfhostedCommand(
   secretHex: string,
@@ -4567,7 +5002,7 @@ export type DeploymentSeedBox = {
  * either-or, because a surviving device's stored nest may be the dead box).
  * Superseded boxes excluded. Empty when no box is custodied; **rejects** when no
  * nest is reachable at all — callers gate on a stored nest URL
- * (`storedNestUrlOrNull`) and fall back to `$lib/wasm`'s local-only
+ * (`storedNestUrlOrNull`) and fall back to `#lib/wasm`'s local-only
  * `recoveryBoxesLocal`. The list is public ids; the seed never crosses into JS. */
 export async function deploymentSeeds(secretHex: string): Promise<DeploymentSeedBox[]> {
   const raw = (await call(secretHex, (c) => c.deploymentSeeds(secretHex))) as Array<{
@@ -4632,6 +5067,9 @@ export interface SubscriptionRequest {
    *  a redeemed claim code) rather than it being a plain manual subscribe —
    *  drives the §2 paid badge (monetization.md § Pillar 3). */
   payment_entitled: boolean;
+  /** Where a remote subscriber lives (`handle@domain`, or their home nest's
+   *  URL); null for a subscriber on this nest. Display only. */
+  home?: string | null;
 }
 
 /** One confirmed subscriber of the selected tier (§3 Subscribers). */
@@ -4793,6 +5231,9 @@ export interface SubscriptionMine {
   // `subscriptionAuthorLabel(handle, author_id)` — never derived here
   // (`docs/goal/behavior/value-formatting.md` § Subscription author label).
   handle: string | null;
+  /** The creator's home nest URL when they live on another nest; null when
+   *  they are on this one (`federated-follow.md` § Decision 2). */
+  home_nest_url?: string | null;
 }
 
 /** The calling actor's subscriptions across every creator (`mine.list`). */
@@ -4882,7 +5323,7 @@ export function subscriptionsStatusGet(
   );
 }
 
-// ── fauna.payments.* — MOVED to `$lib/payments` (2026-08-16) ────────────────
+// ── fauna.payments.* — MOVED to `#lib/payments` (2026-08-16) ────────────────
 //
 // The Pillar-3 client seam lived here until the web `payments` excision leg.
 // It is not here any more because THIS module is unconditionally in the
@@ -4891,7 +5332,7 @@ export function subscriptionsStatusGet(
 // `__FAUNA_PAYMENTS__` (`dynamic-features.md` § Platform-family surface
 // excision — the isolated-module pattern; `just web-store-safe-check` greps
 // exactly those names). It reaches the client through `rpcCall` above.
-// Add a new payments call to `$lib/payments`, never back here.
+// Add a new payments call to `#lib/payments`, never back here.
 
 // ── fauna.family.* (family-safety.md § App surface) ──────────────
 //
@@ -4902,7 +5343,7 @@ export function subscriptionsStatusGet(
 //
 // ONE `familyStatus()` read answers both roles (guardian + supervised), and the
 // approvals queue is NOT ward-scoped — `familyApprovalsList()` returns every
-// ward's entries. Actor ids ride as raw bytes (`$lib/hex` normalizes the two
+// ward's entries. Actor ids ride as raw bytes (`#lib/hex` normalizes the two
 // serde_wasm_bindgen wire shapes); policies ride as the wire `ReachPolicy`.
 
 /** The ward's reach-policy document (`fauna_protocol::family::ReachPolicy`).
@@ -5336,7 +5777,7 @@ function bytesToHex(bytes: Uint8Array): string {
 /** Install `window.__fauna_rpcEcho(dataHex)` — the `fauna.protocol.echo`
  *  round-trip probe that `tests/e2e-unified/tests/test_web_ws_rpc_echo.py`
  *  drives. Resolves `{ok, data_hex}` or `{ok:false, error}`. Called only from
- *  `$lib/e2e-automation` (test builds — testing.md § Test-agent build
+ *  `#lib/e2e-automation` (test builds — testing.md § Test-agent build
  *  exclusion), so production bundles tree-shake it out entirely. */
 export function installRpcTestHooks(): void {
   if (typeof window === 'undefined') return;

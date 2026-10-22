@@ -101,6 +101,73 @@ impl DestinationPlacesCache {
     }
 }
 
+/// The owner folder list the signed-in window last rendered, as (set id, row
+/// title) pairs — what a `folder-share` route resolves its set id against.
+type OwnerRows = (gtk::glib::WeakRef<gtk::ListBox>, Vec<(i64, String)>);
+
+thread_local! {
+    static OWNER_ROWS: RefCell<OwnerRows> =
+        RefCell::new((gtk::glib::WeakRef::new(), Vec::new()));
+    /// A `folder-share` route waiting for the folder list's next render.
+    static PENDING_SHARE: RefCell<Option<(i64, crate::routes::Then)>> = const { RefCell::new(None) };
+}
+
+/// The `folder-share` route's landing (`apps/linux.md` § The file manager's
+/// Share entry (GNOME Files), link 4; the Windows Folders page's
+/// `PendingFolderShare` is the same shape): stage the set, `navigate` to the
+/// Folders page, and open that owner row with its `folder-share-button` flow —
+/// the share dialog — open. Applied at once when the list is already rendered,
+/// else on its next render; a set this account does not own leaves the page
+/// with nothing open. `then` runs once the attempt is made. Navigation only:
+/// the dialog's Share button stays the user's act.
+pub fn open_share_route(folder_id: i64, then: crate::routes::Then, navigate: impl FnOnce()) {
+    let superseded = PENDING_SHARE.with(|p| p.borrow_mut().replace((folder_id, then)));
+    if let Some((_, older)) = superseded {
+        older();
+    }
+    navigate();
+    let rendered = OWNER_ROWS.with(|rows| {
+        let rows = rows.borrow();
+        rows.0.upgrade().filter(|_| !rows.1.is_empty())
+    });
+    if let Some(list_box) = rendered {
+        apply_pending_share(&list_box);
+    }
+}
+
+/// Apply a staged `folder-share` route against the rendered list.
+fn apply_pending_share(list_box: &gtk::ListBox) {
+    let Some((folder_id, then)) = PENDING_SHARE.with(|p| p.borrow_mut().take()) else {
+        return;
+    };
+    let title = OWNER_ROWS.with(|rows| {
+        rows.borrow()
+            .1
+            .iter()
+            .find(|(id, _)| *id == folder_id)
+            .map(|(_, name)| name.clone())
+    });
+    let mut child = list_box.first_child();
+    while let (Some(name), Some(w)) = (title.as_deref(), child) {
+        if let Some(row) = w.downcast_ref::<adw::ExpanderRow>()
+            && row.title() == name
+        {
+            row.set_expanded(true);
+            if let Some(button) = crate::testid::find_by_test_id(
+                row.upcast_ref::<gtk::Widget>(),
+                ids::FOLDER_SHARE_BUTTON,
+            )
+            .and_then(|w| w.downcast::<gtk::Button>().ok())
+            {
+                button.emit_clicked();
+            }
+            break;
+        }
+        child = w.next_sibling();
+    }
+    then();
+}
+
 thread_local! {
     /// The page's [`DestinationPlacesCache`], tied to the folder list it was
     /// filled for: a settings shell rebuilt on sign-out or an actor switch has
@@ -271,6 +338,21 @@ pub fn update_folder_list(
     for scope in group_scopes {
         list_box.append(&build_group_scope_row(scope));
     }
+
+    // The owner rows a `folder-share` route can land on — only the owner
+    // shares, so a member row is no target — and a route staged before this
+    // render lands now.
+    OWNER_ROWS.with(|rows| {
+        *rows.borrow_mut() = (
+            list_box.downgrade(),
+            folders
+                .iter()
+                .filter(|fs| fs.role.as_deref() != Some("member"))
+                .map(|fs| (fs.id, fs.name.clone()))
+                .collect(),
+        )
+    });
+    apply_pending_share(list_box);
 }
 
 /// One thin, read-only `folder-row` for a shared set this device holds the
@@ -1133,15 +1215,15 @@ fn build_folder_row(
             // Say *why* it is insensitive, inline — the tooltip alone is not
             // discoverable on a control the user cannot focus (same intent as the
             // webdav "set up mail first" hint).
-            paywall_row.append(
-                &gtk::Label::builder()
-                    .label(strings::devices::PAYWALL_TIER_NEEDS_TIER)
-                    .halign(gtk::Align::Start)
-                    .xalign(0.0)
-                    .wrap(true)
-                    .css_classes(["dim-label", "caption"])
-                    .build(),
-            );
+            let paywall_hint_label = gtk::Label::builder()
+                .label(strings::devices::PAYWALL_TIER_NEEDS_TIER)
+                .halign(gtk::Align::Start)
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["dim-label", "caption"])
+                .build();
+            set_test_id(&paywall_hint_label, ids::FOLDER_PAYWALL_HINT);
+            paywall_row.append(&paywall_hint_label);
         }
         row.add_row(&paywall_row);
     }
@@ -4214,9 +4296,158 @@ fn find_tagged_widget(list_box: &gtk::ListBox, name: &str, tag: &str) -> Option<
     None
 }
 
+/// The `error-message` texts the folder-row reads put up, one slot per (read,
+/// set) — so a later good answer of the same read retires exactly that text and
+/// never a gesture's (`folders.md` § Errors & edge cases; tui's
+/// `PageErrors::retire_own` is the same rule over its own page map).
+///
+/// The rows' device, member, actor and destination reads fire on expand and on
+/// every list rebuild, and a reconnect re-runs them (`StaleSurfaces::devices`).
+/// Without the slot their failure — "the connection to the nest was lost",
+/// painted while the nest is down — stood on the banner after the nest came
+/// back and the same reads answered.
+#[derive(Default)]
+pub struct RowReadErrors(std::collections::HashMap<(&'static str, String), String>);
+
+impl RowReadErrors {
+    /// Remember that `read` for `set` put `message` on the banner.
+    pub fn put(&mut self, read: &'static str, set: &str, message: String) {
+        self.0.insert((read, set.to_owned()), message);
+    }
+
+    /// `read` answered for `set`: forget its error, and answer whether the
+    /// banner — now showing `shown` — should be cleared. Only when it still
+    /// shows that read's own text, and no other row read still owns the same
+    /// text (two open rows failing one read paint identical words).
+    pub fn retire(&mut self, read: &'static str, set: &str, shown: &str) -> bool {
+        let Some(own) = self.0.remove(&(read, set.to_owned())) else {
+            return false;
+        };
+        own == shown && !self.0.values().any(|m| m == shown)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The `folder-share` route's landing (apps/linux.md § The file
+    //    manager's Share entry (GNOME Files), link 4) ──
+
+    /// A list holding one owner row `name` whose `folder-share-button` counts
+    /// its clicks, registered as the rendered list for set `id`.
+    fn rendered_owner_row(id: i64, name: &str) -> (gtk::ListBox, adw::ExpanderRow, Rc<Cell<u32>>) {
+        let list_box = gtk::ListBox::new();
+        let row = adw::ExpanderRow::builder().title(name).build();
+        let share = gtk::Button::with_label("Share");
+        set_test_id(&share, ids::FOLDER_SHARE_BUTTON);
+        let clicks = Rc::new(Cell::new(0));
+        {
+            let clicks = Rc::clone(&clicks);
+            share.connect_clicked(move |_| clicks.set(clicks.get() + 1));
+        }
+        row.add_row(&share);
+        list_box.append(&row);
+        OWNER_ROWS
+            .with(|rows| *rows.borrow_mut() = (list_box.downgrade(), vec![(id, name.into())]));
+        (list_box, row, clicks)
+    }
+
+    #[test]
+    fn a_folder_share_route_opens_that_owner_rows_share_flow() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (_list, row, clicks) = rendered_owner_row(7, "Photos");
+            let (navigated, released) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+            let (n, r) = (Rc::clone(&navigated), Rc::clone(&released));
+            open_share_route(7, Box::new(move || r.set(true)), move || n.set(true));
+            assert!(navigated.get() && released.get());
+            assert!(row.is_expanded(), "the set's row opens");
+            assert_eq!(clicks.get(), 1, "its folder-share-button flow opens, once");
+        });
+    }
+
+    #[test]
+    fn a_folder_share_route_for_a_set_not_owned_here_opens_nothing() {
+        crate::testid::run_on_gtk_thread(|| {
+            let (_list, row, clicks) = rendered_owner_row(7, "Photos");
+            let released = Rc::new(Cell::new(false));
+            let r = Rc::clone(&released);
+            open_share_route(99, Box::new(move || r.set(true)), || {});
+            assert!(released.get(), "the caller is released, never stalled");
+            assert!(!row.is_expanded());
+            assert_eq!(clicks.get(), 0);
+        });
+    }
+
+    /// Staged before the list has rendered, the route lands on the render.
+    #[test]
+    fn a_folder_share_route_staged_before_the_list_renders_lands_on_it() {
+        crate::testid::run_on_gtk_thread(|| {
+            OWNER_ROWS.with(|rows| *rows.borrow_mut() = (gtk::glib::WeakRef::new(), Vec::new()));
+            let released = Rc::new(Cell::new(false));
+            let r = Rc::clone(&released);
+            open_share_route(7, Box::new(move || r.set(true)), || {});
+            assert!(!released.get(), "held for the list's render");
+            let (list, row, clicks) = rendered_owner_row(7, "Photos");
+            apply_pending_share(&list);
+            assert!(released.get() && row.is_expanded());
+            assert_eq!(clicks.get(), 1);
+        });
+    }
+
+    // ── A row read retires only its own banner text ──
+
+    #[test]
+    fn a_good_row_read_retires_the_error_it_put_up() {
+        let mut own = RowReadErrors::default();
+        let lost = "fauna.backup.destination.list: The connection to the nest was lost.";
+        own.put("fauna.backup.destination.list", "Photos", lost.into());
+        assert!(own.retire("fauna.backup.destination.list", "Photos", lost));
+        // Forgotten once retired: a second answer clears nothing.
+        assert!(!own.retire("fauna.backup.destination.list", "Photos", lost));
+    }
+
+    #[test]
+    fn a_good_row_read_leaves_a_gesture_error_standing() {
+        let mut own = RowReadErrors::default();
+        own.put(
+            "fauna.folders.members.list",
+            "Photos",
+            "fauna.folders.members.list: lost".into(),
+        );
+        assert!(!own.retire(
+            "fauna.folders.members.list",
+            "Photos",
+            "Couldn't save the paths."
+        ));
+    }
+
+    #[test]
+    fn a_good_row_read_leaves_another_reads_error_standing() {
+        let mut own = RowReadErrors::default();
+        let members = "fauna.folders.members.list: lost";
+        let places = "fauna.backup.destination.list: lost";
+        own.put("fauna.folders.members.list", "Photos", members.into());
+        own.put("fauna.backup.destination.list", "Photos", places.into());
+        assert!(!own.retire("fauna.folders.members.list", "Photos", places));
+        assert!(own.retire("fauna.backup.destination.list", "Photos", places));
+    }
+
+    #[test]
+    fn a_good_row_read_leaves_the_same_text_another_open_row_still_owns() {
+        let mut own = RowReadErrors::default();
+        let lost = "fauna.folders.devices: lost";
+        own.put("fauna.folders.devices", "Photos", lost.into());
+        own.put("fauna.folders.devices", "Notes", lost.into());
+        assert!(!own.retire("fauna.folders.devices", "Photos", lost));
+        assert!(own.retire("fauna.folders.devices", "Notes", lost));
+    }
+
+    #[test]
+    fn a_read_that_never_failed_clears_nothing() {
+        let mut own = RowReadErrors::default();
+        assert!(!own.retire("fauna.folders.devices", "Photos", ""));
+    }
 
     // ── Destination places across a list rebuild (`backup-destinations.md`
     // § Ordinary-folder coverage) ──

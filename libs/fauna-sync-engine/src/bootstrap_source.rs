@@ -1,240 +1,46 @@
-//! The production [`BootstrapSource`] — a fresh replica pulling one content
-//! scope's segments off a real nest.
-//!
-//! Owner: `docs/goal/architecture/account-data-plane.md` § Store logical
-//! schema → *How nest CARv2 segments map onto the local log (the bootstrap
-//! contract)*: a fresh replica bootstraps per scope by adopting pulled segment
-//! files verbatim, rebuilding its record index from each sidecar's
-//! `record_order`, then walking the scope's feed from a zero frontier.
-//!
-//! # It lives here, not in the store
-//!
-//! `fauna-account-store` is a shared floor that must keep compiling for
-//! wasm32, so it may hold no network dependency and declares the seam instead
-//! ([`BootstrapSource`]). This crate may hold one. Nothing in this module is
-//! adoption *policy* — every check that decides whether bytes are admissible
-//! is [`fauna_account_store::segments::admit`]'s, behind
-//! [`AccountStore::adopt_segment`](fauna_account_store::store::AccountStore::adopt_segment).
-//!
-//! # It adapts the custodian-pull mechanics; it does not fork them
-//!
-//! Enumeration is the same `fauna.segments.list` control plane the backup arm
-//! reads ([`crate::segment_backup::SEGMENTS_LIST_KIND`]), and bytes come off
-//! the same [`SyncClient`] byte plane ([`SyncClient::segment_body`] +
-//! [`SyncClient::segment_meta_body`] — the same pair the custodian pull
-//! ships, since 2026-08-29). What differs is the *sink*: a backup pass seals
-//! the opaque pair for elsewhere; this streams the pair, a chunk at a time,
-//! into the store's staging slot, which verifies it and becomes a replica.
-//!
-//! # Why this is not [`crate::segment_backup::SegmentSource`]
-//!
-//! That trait is the backup arm's: keyed `(kind, scope_hex)`, the pair opaque.
-//! Adoption is keyed on the plane's **scope** — a unit of subscription that
-//! spans kinds — and *opens* the `.meta`, because the sidecar's `record_order`
-//! is what rebuilds the index in append order. The two seams are
-//! cross-referenced at both sites and stay apart.
-//!
-//! # The scope string is ratified; this seam predates it
-//!
-//! A content scope's string is now ratified as `content:<kind>:<scope-id-hex>`
-//! (charter § Feeds and cursors → *The scope string*; constructor/parser
-//! `fauna_protocol::scope`). This source still takes the `(kind, scope_id)`
-//! mapping **from its caller** ([`ScopeBinding`]) — it was built before the
-//! ruling, when minting a convention here would have frozen an unratified
-//! name into at-rest journal rows. The production caller the feed-walk slice
-//! builds should derive the binding from a
-//! [`ContentScope`](fauna_protocol::scope::ContentScope) rather than spelling
-//! strings by hand (the charter's § Implementation status names this gap). A
-//! source still refuses any scope but the one it was built for, so a caller
-//! that mixes two scopes gets an error instead of a scope's records filed
-//! under its neighbour's name.
+//! The production [`BootstrapSource`](fauna_account_store::store::BootstrapSource)
+//! over a native nest — the shared source
+//! ([`fauna_account_plane::bootstrap_source`], which owns the listing and the
+//! in-transit check) over this crate's byte plane ([`SyncClient`] as its
+//! [`SegmentBytes`]). Re-exported at its old path, so
+//! `bootstrap_source::NestBootstrapSource::new(rpc, &sync_client, binding)`
+//! reads unchanged.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 use fauna_account_store::segments::{SegmentHalf, SegmentSink};
-use fauna_account_store::store::{BootstrapSource, SegmentOffer};
-use fauna_protocol::RpcRequester;
-use fauna_protocol::segments::{SegmentRef, SegmentsListReply, SegmentsListRequest};
+
+pub use fauna_account_plane::bootstrap_source::{ScopeBinding, SegmentBytes};
 
 use crate::nest_client::{SegmentBody, SyncClient};
-use crate::segment_backup::SEGMENTS_LIST_KIND;
 
-// The binding moved with the feed-walk half that derives it
-// (`content_scope_plane::binding_for`) into the wasm-capable plane crate;
-// re-exported so `bootstrap_source::ScopeBinding` reads unchanged.
-pub use fauna_account_plane::content_scope_plane::ScopeBinding;
+/// The shared source over the native byte plane.
+pub type NestBootstrapSource<'a, R> =
+    fauna_account_plane::bootstrap_source::NestBootstrapSource<'a, R, SyncClient>;
 
-/// A [`BootstrapSource`] over one nest, for one scope.
-pub struct NestBootstrapSource<'a, R: RpcRequester> {
-    /// The nest's WS-RPC surface — `fauna.segments.list`.
-    rpc: &'a R,
-    /// The nest's byte plane — the segment pair.
-    bytes: &'a SyncClient,
-    binding: ScopeBinding,
-    /// What the last enumeration advertised, keyed `(kind, segment_id)`.
-    ///
-    /// [`SegmentOffer`] deliberately carries only what the *store* reads (the
-    /// hydration axis and an advisory size), so the listed BLAKE3 — which is
-    /// what makes the in-transit check possible — is kept here instead of
-    /// widening a type the store owns. Listed segments are finalized by
-    /// construction (the list handler finalizes before it reports, and a
-    /// further append rotates a new segment), so a digest recorded here stays
-    /// true for the fetch that follows it.
-    listed: Mutex<HashMap<(String, u32), SegmentRef>>,
-}
-
-impl<'a, R: RpcRequester> NestBootstrapSource<'a, R> {
-    pub fn new(rpc: &'a R, bytes: &'a SyncClient, binding: ScopeBinding) -> Self {
-        Self {
-            rpc,
-            bytes,
-            binding,
-            listed: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn check_scope(&self, scope: &str) -> Result<()> {
-        if scope != self.binding.scope {
-            bail!(
-                "this source serves scope {:?}, asked for {scope:?} — a source is built for \
-                 one scope's (kind, scope_id) mapping and cannot guess another's",
-                self.binding.scope
-            );
-        }
-        Ok(())
-    }
-}
-
-impl<R: RpcRequester> BootstrapSource for NestBootstrapSource<'_, R> {
-    async fn list_segments(&self, scope: &str) -> Result<Vec<SegmentOffer>> {
-        self.check_scope(scope)?;
-
-        let mut offers = Vec::new();
-        let mut listed = HashMap::new();
-        for kind in &self.binding.kinds {
-            let req = SegmentsListRequest {
-                kind: kind.clone(),
-                actor_id: self.binding.actor_hex.clone(),
-                extra: Default::default(),
-            };
-            let reply: SegmentsListReply = self
-                .rpc
-                .request(SEGMENTS_LIST_KIND, req)
-                .await
-                .map_err(|e| anyhow!("{SEGMENTS_LIST_KIND} (kind={kind}): {e}"))?;
-            for seg in reply.segments {
-                offers.push(SegmentOffer {
-                    kind: kind.clone(),
-                    segment_id: seg.segment_id,
-                    dat_size: Some(seg.size_bytes),
-                });
-                listed.insert((kind.clone(), seg.segment_id), seg);
-            }
-        }
-        *self.listed.lock().expect("listed map is never poisoned") = listed;
-        Ok(offers)
-    }
-
-    async fn fetch_segment(
+/// The native byte plane ([`SyncClient::segment_body`] +
+/// [`SyncClient::segment_meta_body`] — the same pair the custodian pull ships)
+/// as the shared source's seam.
+impl SegmentBytes for SyncClient {
+    async fn fetch_half(
         &self,
-        scope: &str,
-        offer: &SegmentOffer,
+        kind: &str,
+        actor_hex: &str,
+        segment_id: u32,
+        half: SegmentHalf,
         max_bytes: u64,
         into: &mut impl SegmentSink,
     ) -> Result<()> {
-        self.check_scope(scope)?;
-
-        // The `.dat` is bounded by its own listing too: the nest declared its
-        // size, and a body longer than that is refused mid-stream — the
-        // declared size is the one ceiling a segment has
-        // (`message-segment-store.md` § Segment size).
-        let dat_bound = offer
-            .dat_size
-            .map_or(max_bytes, |declared| declared.min(max_bytes));
-
-        // `.dat` first: the route finalizes the open segment on read, and the
-        // sidecar only exists once a segment is finalized. Fetching the pair
-        // in the other order would be a race against a scope still being
-        // appended to on the nest.
-        let dat = self
-            .bytes
-            .segment_body(
-                &offer.kind,
-                &self.binding.actor_hex,
-                offer.segment_id,
-                0,
-                dat_bound,
-            )
-            .await;
-        let dat_hash = stream_half(dat, SegmentHalf::Dat, into)
-            .await
-            .with_context(|| {
-                format!(
-                    "bootstrap fetch .dat (kind={}, segment={})",
-                    offer.kind, offer.segment_id
-                )
-            })?;
-
-        // The in-transit check the charter asks for ("CID-verified"). Adoption
-        // re-verifies every block against its own CID afterwards, so this is
-        // not the security boundary — it is what makes a *truncated or
-        // substituted transfer* say so at the transport, where the fix is a
-        // re-fetch, instead of surfacing as "this container is malformed".
-        if let Some(expected) = self
-            .listed
-            .lock()
-            .expect("listed map is never poisoned")
-            .get(&(offer.kind.clone(), offer.segment_id))
-            .map(|seg| seg.blake3_hex.clone())
-            && dat_hash != expected
-        {
-            bail!(
-                "bootstrap fetch (kind={}, segment={}): the .dat this nest served hashes to \
-                 {dat_hash}, but its own listing advertised {expected}",
-                offer.kind,
-                offer.segment_id
-            );
-        }
-
-        let meta = self
-            .bytes
-            .segment_meta_body(
-                &offer.kind,
-                &self.binding.actor_hex,
-                offer.segment_id,
-                max_bytes,
-            )
-            .await;
-        let meta_hash = stream_half(meta, SegmentHalf::Meta, into)
-            .await
-            .with_context(|| {
-                format!(
-                    "bootstrap fetch .meta (kind={}, segment={})",
-                    offer.kind, offer.segment_id
-                )
-            })?;
-
-        // The sidecar's own in-transit check (`SegmentRef.meta_blake3_hex`).
-        // Same reasoning as the `.dat` above.
-        if let Some(expected) = self
-            .listed
-            .lock()
-            .expect("listed map is never poisoned")
-            .get(&(offer.kind.clone(), offer.segment_id))
-            .map(|seg| seg.meta_blake3_hex.clone())
-            && meta_hash != expected
-        {
-            bail!(
-                "bootstrap fetch (kind={}, segment={}): the .meta this nest served hashes to \
-                 {meta_hash}, but its own listing advertised {expected}",
-                offer.kind,
-                offer.segment_id
-            );
-        }
-
-        Ok(())
+        let body = match half {
+            SegmentHalf::Dat => {
+                self.segment_body(kind, actor_hex, segment_id, 0, max_bytes)
+                    .await
+            }
+            SegmentHalf::Meta => {
+                self.segment_meta_body(kind, actor_hex, segment_id, max_bytes)
+                    .await
+            }
+        };
+        stream_half(body, half, into).await.map(drop)
     }
 }
 
@@ -260,6 +66,10 @@ pub(crate) async fn stream_half(
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    use fauna_account_store::store::{BootstrapSource, SegmentOffer};
+    use fauna_protocol::RpcRequester;
+    use fauna_protocol::segments::{SegmentRef, SegmentsListReply};
 
     use fauna_nest_http::StaticBearer;
     use wiremock::matchers::{method, path};

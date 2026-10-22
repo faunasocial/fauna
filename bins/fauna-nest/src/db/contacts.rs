@@ -35,8 +35,26 @@ impl CacheDb {
         peer_id: &[u8; 32],
         status: &str,
     ) -> Result<()> {
+        self.upsert_contact_from(actor_id, peer_id, status, None)
+            .await
+    }
+
+    /// [`Self::upsert_contact`], also recording the edge's peer nest — the
+    /// VERIFIED origin of the federation arrival that formed it
+    /// (`contacts.peer_nest_id`, `docs/goal/ui/contacts.md` § State & data
+    /// shape). `None` leaves a recorded origin in place, so a later local
+    /// status change (accept, confirm, block) keeps the peer's home; a newer
+    /// verified origin replaces it.
+    pub async fn upsert_contact_from(
+        &self,
+        actor_id: &[u8; 32],
+        peer_id: &[u8; 32],
+        status: &str,
+        peer_nest_id: Option<&[u8; 32]>,
+    ) -> Result<()> {
         let actor_id = *actor_id;
         let peer_id = *peer_id;
+        let peer_nest_id: Option<Vec<u8>> = peer_nest_id.map(|n| n.to_vec());
         let status = status.to_string();
         let conn = self.conn.lock().await;
         let now = now_epoch_secs();
@@ -46,13 +64,43 @@ impl CacheDb {
             None
         };
         conn.execute(
-            "INSERT INTO contacts (actor_id, peer_id, status, accepted_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(actor_id, peer_id) DO UPDATE SET status = excluded.status, accepted_at = COALESCE(excluded.accepted_at, contacts.accepted_at)",
-            rusqlite::params![actor_id.as_slice(), peer_id.as_slice(), status, accepted_at, now],
+            "INSERT INTO contacts (actor_id, peer_id, status, accepted_at, created_at, peer_nest_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(actor_id, peer_id) DO UPDATE SET status = excluded.status, accepted_at = COALESCE(excluded.accepted_at, contacts.accepted_at), peer_nest_id = COALESCE(excluded.peer_nest_id, contacts.peer_nest_id)",
+            rusqlite::params![
+                actor_id.as_slice(),
+                peer_id.as_slice(),
+                status,
+                accepted_at,
+                now,
+                peer_nest_id
+            ],
         )
         .context("upsert contact")?;
         Ok(())
+    }
+
+    /// The edge's recorded peer nest (`contacts.peer_nest_id`), when the edge
+    /// exists and one was recorded. A malformed (non-32-byte) value reads as
+    /// none.
+    pub async fn contact_peer_nest_id(
+        &self,
+        actor_id: &[u8; 32],
+        peer_id: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>> {
+        let actor_id = *actor_id;
+        let peer_id = *peer_id;
+        let conn = self.conn.lock().await;
+        let result = conn.query_row(
+            "SELECT peer_nest_id FROM contacts WHERE actor_id = ?1 AND peer_id = ?2",
+            rusqlite::params![actor_id.as_slice(), peer_id.as_slice()],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        );
+        match result {
+            Ok(id) => Ok(id.and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok())),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context("get contact peer nest"),
+        }
     }
 
     /// Accept a contact (shorthand for upsert with status "accepted").
@@ -148,7 +196,8 @@ impl CacheDb {
         // One query keeps the list read cheap (the contacts-page-open path).
         let mut stmt = conn
             .prepare(
-                "SELECT c.peer_id, c.status, c.accepted_at, c.created_at, u.handle
+                "SELECT c.peer_id, c.status, c.accepted_at, c.created_at, u.handle,
+                        c.peer_nest_id
                  FROM contacts c
                  LEFT JOIN users u ON u.actor_id = c.peer_id
                  WHERE c.actor_id = ?1 ORDER BY c.created_at",
@@ -162,6 +211,9 @@ impl CacheDb {
                     accepted_at: row.get(2)?,
                     created_at: row.get(3)?,
                     handle: row.get(4)?,
+                    peer_nest_id: row
+                        .get::<_, Option<Vec<u8>>>(5)?
+                        .and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok()),
                 })
             })
             .context("query contacts_full")?;

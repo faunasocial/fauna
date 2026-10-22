@@ -102,6 +102,37 @@ class ProfilePrivateSectionContentTest {
     }
 
     @Test
+    fun suggestionsPaintOnlyOnceSomethingIsTypedAndAPickStagesTheLabel() {
+        val asked = mutableListOf<String>()
+        composeTestRule.setContent {
+            ProfilePrivateSection(
+                nickname = "",
+                notes = "",
+                labels = emptyList(),
+                saving = false,
+                onNicknameChange = {},
+                onNotesChange = {},
+                onAddLabel = { asked += it; true },
+                onRemoveLabel = {},
+                onSave = {},
+                labelSuggestions = { typed -> listOf("Book club").filter { it.startsWith(typed, ignoreCase = true) } },
+            )
+        }
+        // Nothing until the field holds text.
+        composeTestRule.onNodeWithTag("profile-label-suggestion").assertDoesNotExist()
+
+        composeTestRule.onNodeWithTag("profile-label-field").performTextInput("boo")
+        composeTestRule.onAllNodesWithTag("profile-label-suggestion").assertCountEquals(1)
+        composeTestRule.onAllNodesWithTag("profile-label-suggestion")[0].assertTextEquals("Book club")
+
+        // A pick stages exactly as typing it and pressing add does, and empties the field.
+        composeTestRule.onAllNodesWithTag("profile-label-suggestion")[0].performClick()
+        assertEquals(listOf("Book club"), asked)
+        composeTestRule.onNodeWithTag("profile-label-field").assert(hasText(""))
+        composeTestRule.onNodeWithTag("profile-label-suggestion").assertDoesNotExist()
+    }
+
+    @Test
     fun editsAndSaveReachTheirCallbacksAndSaveIsDisabledWhileSaving() {
         val nicknames = mutableListOf<String>()
         val notes = mutableListOf<String>()

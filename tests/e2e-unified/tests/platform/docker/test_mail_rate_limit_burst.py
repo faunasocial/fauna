@@ -120,12 +120,12 @@ def serving_nest(docker_image):
     the other. Plaintext storage — the rate limiter + auth-material cache are
     storage-mode-independent (the blob fetch + the CalDAV AUTH middleware), and
     plaintext is the lighter, deterministic deploy default for cert provisioning."""
-    http_port, router_port, *mail = find_free_ports(6)
+    http_port, *mail = find_free_ports(5)
     mail_ports = dict(zip((25, 465, 587, 993), mail))  # container_port -> host_port
     name = f"fauna-rate-burst-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port, 443: router_port, **mail_ports},
+        {443: http_port, **mail_ports},
         env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
     )
     try:
@@ -134,7 +134,7 @@ def serving_nest(docker_image):
         nest = {
             "name": name,
             "port": http_port,
-            "router_port": router_port,
+            "router_port": http_port,
             "url": f"https://127.0.0.1:{http_port}",
             "admin": admin,
             "mail_ports": mail_ports,

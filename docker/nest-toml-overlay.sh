@@ -8,9 +8,9 @@
 # `just entrypoint-test`) is the gate this file exists to enable; see its module
 # docstring for the eleven-day production regression that motivated it.
 #
-# Both keys are values NOT chosen by any human — product-invariant bucket (1)
+# Every key is a value NOT chosen by any human — product-invariant bucket (1)
 # (docs/goal/principles.md § One configuration surface). They differ in lifetime,
-# which is why they are two subcommands rather than one overlay:
+# which is why each is its own subcommand rather than one overlay:
 #
 #   • static_dir   — a hard-coded artifact constant: where this image's
 #                    Dockerfile put the bundled web SPA. Reconciled on EVERY
@@ -19,6 +19,11 @@
 #                    self-heal the moment it pulls a fixed image — a first-run-
 #                    only write would leave every such box serving the info page
 #                    at /app forever (works-out-of-the-box invariant).
+#   • listen       — the nest's bind address + port, the artifact's IPC wiring
+#                    (loopback in the image: every dialer is co-resident).
+#                    Reconciled on EVERY boot, like static_dir, so a box
+#                    first-booted on an all-interfaces image narrows on its
+#                    next pull (deployment-threat-model.md § Concern 1a).
 #   • cors_origins — the artifact's boot SEED for a client-set choice
 #                    (docs/goal/architecture/installers/docker.md § Environment
 #                    Variables). First run only: once the admin's client writes
@@ -189,6 +194,7 @@ usage() {
 usage: $0 <subcommand> <nest.toml> [args]
 
   ensure-static-dir  <nest.toml>              reconcile the SPA path (every boot)
+  ensure-listen      <nest.toml> <host:port>  reconcile the bind address (every boot)
   seed-cors-origins  <nest.toml> <toml-array> seed CORS origins (first run only)
 EOF
     exit 1
@@ -200,6 +206,10 @@ case "$1" in
     ensure-static-dir)
         [ $# -eq 2 ] || usage
         _upsert_nest_key "$2" static_dir "\"${STATIC_DIR}\""
+        ;;
+    ensure-listen)
+        [ $# -eq 3 ] || usage
+        _upsert_nest_key "$2" listen "\"$3\""
         ;;
     seed-cors-origins)
         [ $# -eq 3 ] || usage

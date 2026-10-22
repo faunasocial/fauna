@@ -333,69 +333,100 @@ impl KeyEnvelope {
     }
 }
 
+/// The one extension <-> content-type table: [`content_type_for_filename`] reads
+/// it forwards and [`extension_for_content_type`] backwards, so the two
+/// directions can never drift. Extensions are lowercase; where several
+/// extensions share a type, the FIRST listed is the canonical one the reverse
+/// lookup answers (`jpg` before `jpeg`, `html` before `htm`).
+const EXTENSION_CONTENT_TYPES: &[(&str, &str)] = &[
+    // Text
+    ("txt", "text/plain"),
+    ("html", "text/html"),
+    ("htm", "text/html"),
+    ("css", "text/css"),
+    ("csv", "text/csv"),
+    ("xml", "text/xml"),
+    ("md", "text/markdown"),
+    // Application
+    ("json", "application/json"),
+    ("pdf", "application/pdf"),
+    ("zip", "application/zip"),
+    ("gz", "application/gzip"),
+    ("tar", "application/x-tar"),
+    ("wasm", "application/wasm"),
+    ("js", "application/javascript"),
+    ("doc", "application/msword"),
+    (
+        "docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ("xls", "application/vnd.ms-excel"),
+    (
+        "xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ),
+    ("ppt", "application/vnd.ms-powerpoint"),
+    (
+        "pptx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ),
+    // Image
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("svg", "image/svg+xml"),
+    ("webp", "image/webp"),
+    ("ico", "image/x-icon"),
+    ("bmp", "image/bmp"),
+    // Audio
+    ("mp3", "audio/mpeg"),
+    ("ogg", "audio/ogg"),
+    ("flac", "audio/flac"),
+    ("wav", "audio/wav"),
+    ("m4a", "audio/mp4"),
+    // Video
+    ("mp4", "video/mp4"),
+    ("webm", "video/webm"),
+    ("ogv", "video/ogg"),
+    ("mov", "video/quicktime"),
+    // Font
+    ("ttf", "font/ttf"),
+    ("otf", "font/otf"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+];
+
 /// Return a MIME content-type string for the given filename based on its
 /// extension. The lookup is case-insensitive. Returns `"application/octet-stream"`
 /// for unknown or missing extensions.
 pub fn content_type_for_filename(filename: &str) -> &'static str {
     let ext = filename
         .rfind('.')
-        .map(|i| &filename[i + 1..])
-        .unwrap_or("");
+        .map(|i| filename[i + 1..].to_ascii_lowercase())
+        .unwrap_or_default();
+    EXTENSION_CONTENT_TYPES
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map_or("application/octet-stream", |(_, content_type)| content_type)
+}
 
-    match ext.to_ascii_lowercase().as_str() {
-        // Text
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "csv" => "text/csv",
-        "xml" => "text/xml",
-        "md" => "text/markdown",
-
-        // Application
-        "json" => "application/json",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        "gz" => "application/gzip",
-        "tar" => "application/x-tar",
-        "wasm" => "application/wasm",
-        "js" => "application/javascript",
-        "doc" => "application/msword",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xls" => "application/vnd.ms-excel",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-
-        // Image
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "bmp" => "image/bmp",
-
-        // Audio
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "m4a" => "audio/mp4",
-
-        // Video
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "ogv" => "video/ogg",
-        "mov" => "video/quicktime",
-
-        // Font
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-
-        _ => "application/octet-stream",
-    }
+/// The inverse of [`content_type_for_filename`]: the canonical extension (no
+/// dot) for a content type, read from the same table, or `None` for a type the
+/// table does not name. Parameters (`; codecs=...`) and case are ignored. The
+/// tui feed-video handoff names its temp file by it (`apps/tui.md` § External
+/// media handoff: the OS resolves the handler by extension).
+pub fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    EXTENSION_CONTENT_TYPES
+        .iter()
+        .find(|(_, t)| *t == essence)
+        .map(|(ext, _)| *ext)
 }
 
 /// Whether `filename` names an audio or video file — derived from
@@ -731,5 +762,30 @@ mod tests {
             content_type_for_filename("report.docx"),
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         );
+    }
+
+    #[test]
+    fn extension_for_content_type_inverts_the_map() {
+        assert_eq!(extension_for_content_type("video/mp4"), Some("mp4"));
+        assert_eq!(extension_for_content_type("video/webm"), Some("webm"));
+        // The first-listed extension is the canonical answer.
+        assert_eq!(extension_for_content_type("image/jpeg"), Some("jpg"));
+        assert_eq!(extension_for_content_type("text/html"), Some("html"));
+        // Parameters and case are not part of the type.
+        assert_eq!(
+            extension_for_content_type("Video/MP4; codecs=avc1"),
+            Some("mp4")
+        );
+        assert_eq!(extension_for_content_type("application/octet-stream"), None);
+        assert_eq!(extension_for_content_type(""), None);
+        // Round trip: every type the forward map names comes back to an
+        // extension that maps to it again.
+        for (_, content_type) in EXTENSION_CONTENT_TYPES {
+            let ext = extension_for_content_type(content_type).unwrap();
+            assert_eq!(
+                content_type_for_filename(&format!("f.{ext}")),
+                *content_type
+            );
+        }
     }
 }

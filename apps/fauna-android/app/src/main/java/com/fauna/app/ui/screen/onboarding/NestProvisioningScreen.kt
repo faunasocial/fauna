@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -17,7 +18,9 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavController
 import com.fauna.app.R
 import com.fauna.app.core.OnboardingHost
+import com.fauna.app.core.downloadsDir
 import com.fauna.app.ui.components.DisabledControlReasonText
+import com.fauna.app.ui.util.shareFileBytes
 import com.fauna.app.ui.util.localized
 import com.fauna.app.ui.util.stringResourceFmt
 import com.fauna.ffi.provisioningStepLabel
@@ -66,6 +69,10 @@ class NestProvisioningVM @Inject constructor(
     }
 
     fun continueAction(): OnboardingStep = host.machine.continueFromProvisioning()
+
+    /** `provisioning-ssh-door-save-key-button`: the door's private key, handed
+     * over ONCE (a phone has no `~/.ssh`) — the machine drops its copy. */
+    fun takeSshDoorPrivateKey(): String? = host.machine.takeSshDoorPrivateKey()
 }
 
 @Composable
@@ -82,6 +89,21 @@ fun NestProvisioningScreen(
     // libs/fauna-onboarding-machine/src/machine.rs) — no FFI wrapper needed.
     val continueBlockedReason = remember(tick) { vm.host.machine.provisioningContinueBlockedReason() }
     val coroutineScope = rememberCoroutineScope()
+    // The SSH door after a door run (onboarding-provisioning.md § 5): the
+    // command, and the key file handed over once through the share sheet.
+    val sshDoor = remember(tick) { vm.host.machine.sshDoorReadout() }
+    var sshDoorKeySaved by remember { mutableStateOf(false) }
+    var sshDoorSaveError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    // The share sheet reads the key from the app's download cache, so the file
+    // goes when the page does: the app keeps no copy of the door key
+    // (`installers/vps.md` § The SSH door → *The key*).
+    DisposableEffect(sshDoor?.domain) {
+        val domain = sshDoor?.domain
+        onDispose {
+            if (domain != null) java.io.File(context.downloadsDir(), "fauna-$domain").delete()
+        }
+    }
 
     // Update elapsed-time display every second while running.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -106,6 +128,10 @@ fun NestProvisioningScreen(
 
         ProvisioningPriceBom(remember(tick) { vm.host.machine.billOfMaterials() })
         Spacer(Modifier.height(8.dp))
+
+        // By-continuing notice: below the price recap, before the charge
+        // (Buy and set up is the acceptance gesture; onboarding-provisioning.md §6).
+        TermsNotice()
 
         // Top region: start CTA before running, elapsed timer once started.
         when (snap.overall) {
@@ -139,7 +165,38 @@ fun NestProvisioningScreen(
             StepRow(index, step)
         }
 
-        snap.finalError?.let {
+        if (snap.overall == OverallStatus.SUCCEEDED && sshDoor != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                stringResourceFmt(
+                    R.string.onboarding_nest_provisioning_ssh_door_command_no_path_template,
+                    sshDoor.command,
+                    sshDoor.admittedFrom
+                        ?: stringResource(R.string.onboarding_nest_provisioning_ssh_door_address_unknown),
+                    sshDoor.fingerprint,
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.testTag(Ids.PROVISIONING_SSH_DOOR_COMMAND),
+            )
+            if (!sshDoorKeySaved) {
+                OutlinedButton(
+                    onClick = {
+                        val key = vm.takeSshDoorPrivateKey() ?: return@OutlinedButton
+                        sshDoorKeySaved = true
+                        sshDoorSaveError = runCatching {
+                            context.shareFileBytes(
+                                "fauna-${sshDoor.domain}",
+                                key.toByteArray(Charsets.UTF_8),
+                                mimeType = "application/x-pem-file",
+                            )
+                        }.exceptionOrNull()?.message
+                    },
+                    modifier = Modifier.testTag(Ids.PROVISIONING_SSH_DOOR_SAVE_KEY_BUTTON),
+                ) { Text(stringResource(R.string.onboarding_nest_provisioning_ssh_door_save_key_button)) }
+            }
+        }
+
+        (snap.finalError ?: sshDoorSaveError)?.let {
             Spacer(Modifier.height(8.dp))
             Text(
                 it,

@@ -58,7 +58,6 @@ import time
 
 import pytest
 from cryptography.hazmat.primitives import serialization
-from helpers.tls_spki import served_leaf
 
 from .helpers import (
     IMAGE_TAG,
@@ -68,6 +67,7 @@ from .helpers import (
     get_repo_root,
     install_acme_default_cert,
     make_ca_issued_leaf_pem,
+    nest_served_leaf,
     register_primary_domain,
     remove_container,
     sni_https_request,
@@ -114,7 +114,7 @@ def mta_sts_nest(docker_image):
     name = f"fauna-mtasts-{http_port}"
     start_container_with_ports(
         name,
-        {3000: http_port},
+        {443: http_port},
         env={"FAUNA_CLAIM_CODE": CLAIM_CODE, "FAUNA_PORT": "3000"},
         add_hosts={"host.docker.internal": "host-gateway"},
     )
@@ -150,9 +150,9 @@ def _served_mode(port: int) -> str:
     return modes[0]
 
 
-def _presented_leaf_der(port: int) -> bytes:
-    """The DER of the leaf the listener presents for the MX SNI (verify-off)."""
-    return served_leaf("127.0.0.1", port, MX_SNI).public_bytes(
+def _presented_leaf_der(name: str) -> bytes:
+    """The DER of the leaf the nest presents for the MX SNI (verify-off)."""
+    return nest_served_leaf(name, MX_SNI).public_bytes(
         serialization.Encoding.DER
     )
 
@@ -179,7 +179,7 @@ def test_mta_sts_never_enforces_on_the_floor_or_inside_the_window(mta_sts_nest):
     )
     install_acme_default_cert(name, fullchain, key)
     deadline = time.monotonic() + 30
-    while _presented_leaf_der(port) != installed_leaf:
+    while _presented_leaf_der(name) != installed_leaf:
         assert time.monotonic() < deadline, (
             "the listener never presented the installed CA-issued leaf for "
             f"{MX_SNI}"

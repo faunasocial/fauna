@@ -26,7 +26,6 @@ import com.fauna.ffi.onboarding.FieldTypePlain
 import com.fauna.ffi.onboarding.OnboardingStep
 import com.fauna.ffi.onboarding.WizardOutcome
 import com.fauna.ffi.onboarding.serverTypeAllowedForMail
-import com.fauna.ffi.onboarding.updateChannelDescriptionKey
 import com.fauna.ffi.provisioning.UpdateChannel
 import uniffi.fauna_core.LocalizedText
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -45,6 +44,7 @@ class VpsConfigVM @Inject constructor(
     fun selectLocation(id: String) = host.machine.selectVpsLocation(id)
     fun selectServerType(id: String) = host.machine.selectVpsServerType(id)
     fun setProvisionMailMode(enabled: Boolean) = host.machine.setProvisionMailMode(enabled)
+    fun setProvisionSshDoor(enabled: Boolean) = host.machine.setProvisionSshDoor(enabled)
     fun setUpdateChannel(channel: UpdateChannel) = host.machine.setProvisionUpdateChannel(channel)
     fun verify() = viewModelScope.launch { host.machine.verifyVps() }
     fun continueAction(onStep: (OnboardingStep) -> Unit) = viewModelScope.launch {
@@ -71,7 +71,11 @@ fun VpsConfigScreen(
     val continueBlockedReason = remember(tick) { vm.host.machine.vpsContinueBlockedReason() }
     val visibleFields = remember(tick) { vm.host.machine.visibleVpsFields() }
     val mailOn = remember(tick) { vm.host.machine.provisionMailModeEnabled() }
+    val sshDoorOn = remember(tick) { vm.host.machine.provisionSshDoorEnabled() }
     val updateChannel = remember(tick) { vm.host.machine.provisionUpdateChannel() }
+    val channelDescriptionKeys = remember(tick) {
+        UpdateChannel.entries.associateWith { vm.host.machine.updateChannelDescriptionKeyForRow(it) }
+    }
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     // Twin of DnsConfigScreen's hosted-auth derivation — the CredentialsForm
@@ -211,6 +215,31 @@ fun VpsConfigScreen(
                 }
             }
 
+            // ── The SSH door ─────────────────────────────────────────────
+            // Beside the mail mode and default off; its warning shows only
+            // while it is on, directly under it (onboarding-provisioning.md § 5).
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = sshDoorOn,
+                    onCheckedChange = { vm.setProvisionSshDoor(it) },
+                    modifier = Modifier.testTag(Ids.VPS_CONFIG_SSH_DOOR_TOGGLE),
+                )
+                Text(
+                    stringResource(R.string.onboarding_vps_config_ssh_door_label),
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
+            if (sshDoorOn) {
+                Text(
+                    stringResource(R.string.onboarding_vps_config_ssh_door_warning),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(Ids.VPS_CONFIG_SSH_DOOR_WARNING),
+                )
+            }
+
             // serverTypes are already curated to <= 5 by the machine; the
             // mail-mode RAM gate filters them before indexing so the radio
             // test-ids stay 0-based over the shown set (shared gate helper,
@@ -257,10 +286,11 @@ fun VpsConfigScreen(
                     UpdateChannel.TEST -> stringResource(R.string.onboarding_vps_config_update_channel_test_label)
                     UpdateChannel.DEV -> stringResource(R.string.onboarding_vps_config_update_channel_dev_label)
                 }
-                // The shared getter picks the description key (the compat-line
-                // wording for Test / Dev while the product major is 0); the
-                // screen only resolves it.
-                val desc = localized(LocalizedText(updateChannelDescriptionKey(channel), emptyMap())) ?: ""
+                // The shared row getter picks the description key (the no-build
+                // wording when the registry has no build on the channel, else the
+                // compat-line wording for Test / Dev while the product major is
+                // 0); the screen only resolves it.
+                val desc = localized(LocalizedText(channelDescriptionKeys.getValue(channel), emptyMap())) ?: ""
                 val selected = channel == updateChannel
                 Row(
                     modifier = Modifier

@@ -2,7 +2,7 @@
 // (`ui/conversations.md` § Errors & edge cases), extracted as a pure function
 // so it is unit-testable directly rather than only through the page's own
 // `<script>` — and kept import-free so `deno test` can load it without
-// pulling in `$lib/conversations`'s whole (svelte-store, wasm) module graph.
+// pulling in `#lib/conversations`'s whole (svelte-store, wasm) module graph.
 //
 // Order, highest first: the engine-role refusal, a stalled receive rail, a
 // membership/label wire-op failure, a failed compose-send, then the page's

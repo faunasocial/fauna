@@ -39,6 +39,7 @@ import social.fauna.generated.Ids
  */
 @Composable
 fun LocalRestoreSection(
+    snapshotsChanged: Int = 0,
     vm: LocalRestoreVM = hiltViewModel(),
 ) {
     val snapshots by vm.snapshots.collectAsState()
@@ -50,6 +51,10 @@ fun LocalRestoreSection(
 
     LaunchedEffect(errorMessage) { appMessages.showError(errorMessage) }
     LaunchedEffect(Unit) { vm.refresh() }
+    // A snapshot gesture above changed which snapshots exist: re-read the
+    // picker so a kind snapshot just taken is offered here (`ui/backups.md`
+    // § Snapshot-list shape → *Kind entries*).
+    LaunchedEffect(snapshotsChanged) { if (snapshotsChanged > 0) vm.rereadSnapshots() }
 
     LocalRestoreContent(
         snapshots = snapshots,

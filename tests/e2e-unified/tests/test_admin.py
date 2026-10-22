@@ -7,9 +7,9 @@ import pytest
 from nacl.signing import SigningKey
 
 from clients.ws_rpc_admin_client import WsRpcAdminClient
-from common.auth import register_user
+from common.auth import create_actor_and_register, ensure_tier, register_user, set_user_tier
 from helpers import budgets
-from helpers.app_surface import skip_environment
+from helpers.app_surface import app_name, skip_environment, skip_unbuilt
 from helpers.rpc_hold import refuse_rpc, release_rpc_hold
 from helpers.waiting import wait_until
 from i18n.strings import S
@@ -74,6 +74,11 @@ def test_settings_tier_edit(admin_app):
         f"(got {admin_app.admin.tier_cap_value('inbox', index=0)!r}). "
         f"error: {admin_app.error_text()!r}"
     )
+
+
+# Apps that paint `admin-settings-tier-delete-button` (admin.md § 3 — *Removing
+# a tier*): tui leads, the other six follow in the batched trickle-down.
+_TIER_DELETE_BUILT_APPS = {"tui", "linux", "web", "android"}
 
 
 def _wait_for_tier_rows(admin_app, at_least: int = 1) -> None:
@@ -158,6 +163,66 @@ def test_settings_tier_define_refuses_empty_and_duplicate_names(admin_app):
         "a taken tier name was refused silently (or with the empty-name text)"
     )
     assert admin_app.admin.tier_definition_count() == before
+
+
+@pytest.mark.feature("admin-tiers")
+def test_settings_tier_delete(admin_app, nest_instance):
+    """An admin deletes a tier from the Tiers page (admin.md § 3 — *Removing a
+    tier*): `admin-settings-tier-delete-button` fires `fauna.admin.tiers.delete`,
+    with no confirm dialog.
+
+    Deleting a tier a member is on is the nest's refusal (`fauna.admin.conflict`)
+    and must read on `error-message` with the row still listed; deleting a tier
+    nobody is on drops the row after the refetch. The two tiers and the member
+    are precondition setup through the nest's admin API (defining a tier from
+    the page is `test_settings_tier_define_new`); both deletes go through the UI.
+    """
+    if app_name(admin_app.driver) not in _TIER_DELETE_BUILT_APPS:
+        skip_unbuilt(
+            admin_app.driver,
+            surface="admin-settings-tier-delete-button",
+            detail="deleting a tier from the Tiers page is not built on this app yet",
+            tracked="admin.md § 3. Settings → Removing a tier",
+        )
+    port, url = nest_instance["port"], nest_instance["url"]
+    sk = nest_instance["admin"]["signing_key"]
+    # Per-run names: the nest outlives one app of a cross-app sweep.
+    suffix = secrets.token_hex(3)
+    in_use, unused = f"e2e-in-use-{suffix}", f"e2e-unused-{suffix}"
+    ensure_tier(port, admin_signing_key=sk, name=in_use, base_url=url)
+    ensure_tier(port, admin_signing_key=sk, name=unused, base_url=url)
+    member = create_actor_and_register(port, admin_signing_key=sk, base_url=url)
+    set_user_tier(port, member["actor_id_hex"], in_use, admin_signing_key=sk, base_url=url)
+
+    admin_app.admin.navigate_settings()
+    wait_until(
+        lambda: {in_use, unused} <= set(admin_app.admin.tier_names()),
+        budgets.UI_SETTLE_S,
+        diagnose=lambda: f"rows: {admin_app.admin.tier_names()!r}; "
+        f"error: {admin_app.error_text()!r}",
+    )
+
+    # A tier a member is on: refused, the refusal readable, the row kept.
+    admin_app.admin.delete_tier(index=admin_app.admin.tier_names().index(in_use))
+    refusal = wait_until(
+        lambda: admin_app.error_text().strip(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"rows: {admin_app.admin.tier_names()!r}",
+    )
+    assert S.admin.settings_page.delete_tier_error_in_use in refusal, (
+        f"the in-use refusal does not say why: {refusal!r}"
+    )
+    assert in_use in admin_app.admin.tier_names(), "a refused delete removed the row"
+
+    # A tier nobody is on: the row leaves the list after the refetch.
+    admin_app.admin.delete_tier(index=admin_app.admin.tier_names().index(unused))
+    wait_until(
+        lambda: unused not in admin_app.admin.tier_names(),
+        budgets.RPC_ROUNDTRIP_S,
+        diagnose=lambda: f"rows: {admin_app.admin.tier_names()!r}; "
+        f"error: {admin_app.error_text()!r}",
+    )
+    assert in_use in admin_app.admin.tier_names()
 
 
 @pytest.mark.feature("admin-dashboard")

@@ -438,6 +438,25 @@ impl AadBinding {
         }
     }
 
+    /// AAD (used as HPKE info) for the conversations oracle's possession
+    /// proof (`conversations-oracle.md` § The custodian and the door): the
+    /// custodian seals a fresh nonce to the principal's attested holder key,
+    /// bound to the account and the principal, so a challenge one door issued
+    /// can never be opened as another account's or another principal's, nor
+    /// as any other wrapped-blob shape sealed to the same holder key (a
+    /// grant's wraps).
+    pub fn for_oracle_door_proof(actor_id: &[u8; 32], principal_id: &[u8]) -> Self {
+        Self {
+            inner: build_aad(
+                "oracle-door-proof",
+                &[
+                    CborValue::Bytes(actor_id.to_vec()),
+                    CborValue::Bytes(principal_id.to_vec()),
+                ],
+            ),
+        }
+    }
+
     /// AAD (used as HPKE info) for a per-user ATProto identity-key blob
     /// ([`AtprotoIdentityBlob`]), indexed by the owning user's actor id. The
     /// kind tag domain-separates it from every other wrapped-blob shape; the
@@ -1312,6 +1331,30 @@ impl ScopeTuple {
     #[must_use]
     pub fn licenses_factor(&self, factor: Option<&str>) -> bool {
         self.factor.as_deref() == factor
+    }
+
+    /// Is this tuple one only a device app or nest-hosted code may hold — a
+    /// key-bearing class (`content.read` / `content.write`) over any kind but
+    /// an `ext.*` kind (TP4, `encryption-at-rest.md` § Capability tiering →
+    /// *Third-party holders*: a remote principal is grantable only over the
+    /// kinds it created)? The predicate the nest's form gate reads at
+    /// `fauna.capabilities.mint` and the principal fetch. A keyless class and
+    /// a kind-less tuple are never reserved.
+    ///
+    /// The base kind is `kind` up to any folded factor's separator — the fold
+    /// `fauna_core::grant_event::GrantEventScope::base_kind` documents — but a
+    /// lone `<ns>:<hex>` token is read as a kind here, never as a factor-only
+    /// tuple, so no spelling un-reserves a key-bearing tuple.
+    #[must_use]
+    pub fn reserved_for_device_or_hosted(&self) -> bool {
+        if self.class != Self::CLASS_CONTENT_READ && self.class != Self::CLASS_CONTENT_WRITE {
+            return false;
+        }
+        let Some(kind) = self.kind.as_deref() else {
+            return false;
+        };
+        let base = kind.split(' ').next().unwrap_or_default();
+        !base.is_empty() && !fauna_core::ext_kind::is_ext_kind(base)
     }
 }
 
@@ -2308,6 +2351,45 @@ mod tests {
     fn unknown_version_rejected() {
         let err = FormatVersion(99).check_supported().unwrap_err();
         assert!(matches!(err, UnwrapError::UnsupportedVersion(99)));
+    }
+
+    /// TP4's predicate: key-bearing tuples over a non-`ext.*` kind are kept
+    /// from a remote holder; an `ext.*` read or write and every keyless class
+    /// are not.
+    #[test]
+    fn reserved_for_device_or_hosted_is_the_key_bearing_non_ext_tuple() {
+        const EXT: &str = "ext.app.example.notes";
+        assert!(!ScopeTuple::ext_kind_read(EXT).reserved_for_device_or_hosted());
+        assert!(!ScopeTuple::content_write(EXT, &[7; 32]).reserved_for_device_or_hosted());
+        for reserved in [
+            ScopeTuple::mail(),
+            ScopeTuple::mail_for_factor("labeler:00"),
+            ScopeTuple::folder_read(&[1; 32]),
+            ScopeTuple::delegable_kind_read("fauna.state.personalization"),
+            ScopeTuple::delegable_kind_read("fauna.personalization.model"),
+            ScopeTuple::content_write("fauna.state.personalization", &[7; 32]),
+            // A kind spelled like a lone factor is still a kind.
+            ScopeTuple::delegable_kind_read("labeler:00"),
+            // A folded factor is stripped before the `ext.*` test.
+            ScopeTuple::delegable_kind_read("mail writer:00"),
+        ] {
+            assert!(reserved.reserved_for_device_or_hosted(), "{reserved:?}");
+        }
+        let identity_op = ScopeTuple {
+            class: ScopeTuple::CLASS_IDENTITY_OP.to_string(),
+            ..ScopeTuple::delegable_kind_read("nostr.sign")
+        };
+        for keyless in [
+            ScopeTuple::folder_deposit(3),
+            ScopeTuple::label_write(None),
+            identity_op,
+            ScopeTuple {
+                kind: None,
+                ..ScopeTuple::mail()
+            },
+        ] {
+            assert!(!keyless.reserved_for_device_or_hosted(), "{keyless:?}");
+        }
     }
 
     /// **The `ladder` ground at the blob** (`transport.md` § Schema and

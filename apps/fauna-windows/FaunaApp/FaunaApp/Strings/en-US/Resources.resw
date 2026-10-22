@@ -216,6 +216,7 @@
     <data name="onboarding/welcome/subtitle" xml:space="preserve"><value>Your personal, private communications nest.</value></data>
     <data name="onboarding/welcome/tagline" xml:space="preserve"><value>Private messaging and file sync,
 built on your own server.</value></data>
+    <data name="onboarding/terms/notice" xml:space="preserve"><value>By continuing you agree to the Fauna terms and content guidelines</value></data>
     <data name="onboarding/launch/transient_error" xml:space="preserve"><value>Couldn't reach your nest. Check your connection and try again.</value></data>
     <data name="onboarding/launch/use_different_nest" xml:space="preserve"><value>Use a different nest</value></data>
     <data name="onboarding/launch/launch_failed" xml:space="preserve"><value>Startup hit a problem. Your data is safe — you can retry, or continue setup below.</value></data>
@@ -257,9 +258,9 @@ built on your own server.</value></data>
     <data name="onboarding/identity_choice/emergency_lockout_entry" xml:space="preserve"><value>Lock my account for 24 hours</value></data>
     <data name="onboarding/add_account/cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="onboarding/identity_created/title" xml:space="preserve"><value>Identity Created</value></data>
-    <data name="onboarding/identity_created/desc" xml:space="preserve"><value>Your new identity has been generated. Save this secret key — it's your only way to recover your account.</value></data>
+    <data name="onboarding/identity_created/desc" xml:space="preserve"><value>Your new identity has been generated. Save this secret key — it's how you sign in on another device.</value></data>
     <data name="onboarding/identity_created/secret_key_label" xml:space="preserve"><value>Your secret key:</value></data>
-    <data name="onboarding/identity_created/warning" xml:space="preserve"><value>Write this down or save it in a password manager. If you lose it, your account cannot be recovered.</value></data>
+    <data name="onboarding/identity_created/warning" xml:space="preserve"><value>Write this down or save it in a password manager. Without it or a recovery kit, your account cannot be recovered.</value></data>
     <data name="onboarding/identity_created/continue" xml:space="preserve"><value>Continue</value></data>
     <data name="onboarding/identity_created/not_generated" xml:space="preserve"><value>Identity not generated yet</value></data>
     <data name="onboarding/recovery_kit/title" xml:space="preserve"><value>Your Recovery Kit</value></data>
@@ -275,7 +276,7 @@ built on your own server.</value></data>
     <data name="onboarding/recovery_entry/submit" xml:space="preserve"><value>Restore</value></data>
     <data name="onboarding/recovery_entry/invalid_kit" xml:space="preserve"><value>That isn't a recovery phrase. Paste the fauna://recovery link or the 64-character recovery code — not your secret key.</value></data>
     <data name="onboarding/recovery_entry/account_needed" xml:space="preserve"><value>Enter the handle of the account you're restoring (user@domain) — this phrase doesn't say which account it belongs to.</value></data>
-    <data name="onboarding/recovery_entry/account_malformed" xml:space="preserve"><value>Enter the full handle including the domain, like alice@fauna.social — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.</value></data>
+    <data name="onboarding/recovery_entry/account_malformed" xml:space="preserve"><value>Enter the full handle including the domain, like alice@example.com — or, if that domain is gone, your handle followed by your nest's address, like alice@192.0.2.10.</value></data>
     <data name="onboarding/recovery_entry/account_unknown" xml:space="preserve"><value>No account named {account} exists on that nest.</value></data>
     <data name="onboarding/recovery_entry/no_escrow" xml:space="preserve"><value>This account has no sealed backup to restore from. Create a new recovery kit from a device that's still signed in.</value></data>
     <data name="onboarding/recovery_entry/superseded" xml:space="preserve"><value>This identity was replaced after it was compromised. Import the new identity to continue.</value></data>
@@ -313,8 +314,8 @@ built on your own server.</value></data>
     <data name="onboarding/recovery/method_cloud" xml:space="preserve"><value>Re-provision on a cloud host</value></data>
     <data name="onboarding/recovery/method_selfhosted" xml:space="preserve"><value>Install on my own server</value></data>
     <data name="onboarding/recovery/selfhosted_title" xml:space="preserve"><value>Install on your own server</value></data>
-    <data name="onboarding/recovery/selfhosted_desc" xml:space="preserve"><value>Run the installer below on a fresh box. It carries your saved deployment identity, so the rebuilt box re-presents the same nest identity and your pinned devices reconnect automatically once its DNS is re-pointed.</value></data>
-    <data name="onboarding/recovery/selfhosted_command_pending" xml:space="preserve"><value>The installer command with your recovery seed will appear here.</value></data>
+    <data name="onboarding/recovery/selfhosted_desc" xml:space="preserve"><value>Put your server's key, from the line below, into the setup file of a fresh box before you start it for the first time — the setup guide's section on rebuilding after a total loss shows where it goes and how to write it. The rebuilt box is then the same nest, and your installed Fauna apps reconnect to it automatically once it's back online, with no warning that its identity changed.</value></data>
+    <data name="onboarding/recovery/selfhosted_command_pending" xml:space="preserve"><value>The line with your server's key will appear here.</value></data>
     <data name="onboarding/recovery/selfhosted_continue" xml:space="preserve"><value>Done</value></data>
     <data name="onboarding/recovery/restore_cta" xml:space="preserve"><value>Restore your data</value></data>
     <data name="onboarding/retire/title" xml:space="preserve"><value>Retire a server</value></data>
@@ -465,8 +466,13 @@ built on your own server.</value></data>
     <data name="onboarding/vps_config/update_channel_dev_label" xml:space="preserve"><value>Dev</value></data>
     <data name="onboarding/vps_config/update_channel_dev_desc" xml:space="preserve"><value>The newest development builds, before any checking, for people who build the apps from source. Expect breakage.</value></data>
     <data name="onboarding/vps_config/update_channel_dev_desc_same_version" xml:space="preserve"><value>The newest development builds, before any checking. For now the server works only with apps built from the same source. Expect breakage.</value></data>
+    <data name="onboarding/vps_config/update_channel_stable_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
+    <data name="onboarding/vps_config/update_channel_test_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
+    <data name="onboarding/vps_config/update_channel_dev_desc_no_build" xml:space="preserve"><value>No build has been published on this channel yet — choose another channel.</value></data>
     <data name="onboarding/vps_config/mail_mode_label" xml:space="preserve"><value>Run mail on this box</value></data>
     <data name="onboarding/vps_config/mail_mode_desc" xml:space="preserve"><value>A mail box runs email (SMTP, IMAP) and calendar, which needs the spam and virus scanners and at least 2 GB of RAM. Turn this off for a social-only box: it runs lean and works on the cheapest 1 GB plan, but cannot add mail later without resizing the VPS.</value></data>
+    <data name="onboarding/vps_config/ssh_door_label" xml:space="preserve"><value>Keep an SSH door to this server</value></data>
+    <data name="onboarding/vps_config/ssh_door_warning" xml:space="preserve"><value>This reduces your server's security. An SSH door is a second way into the server that Fauna never needs. The key is made on this device and Fauna keeps no copy; the door admits only the address you set the server up from. You alone are responsible for the key, that address and anything done through the door — changes made through it are not supported and may be undone by updates. The door cannot be added later.</value></data>
     <data name="onboarding/nest_provisioning/title" xml:space="preserve"><value>Setting up your nest…</value></data>
     <data name="onboarding/nest_provisioning/start_button" xml:space="preserve"><value>Buy and set up</value></data>
     <data name="onboarding/nest_provisioning/elapsed_template" xml:space="preserve"><value>{seconds}s elapsed</value></data>
@@ -479,6 +485,10 @@ built on your own server.</value></data>
     <data name="onboarding/nest_provisioning/bom_line" xml:space="preserve"><value>{label}: {price}</value></data>
     <data name="onboarding/nest_provisioning/bom_line_recurring" xml:space="preserve"><value>{label}: {price}/month</value></data>
     <data name="onboarding/nest_provisioning/bom_line_domain" xml:space="preserve"><value>{label}: {price} for the first year, then {renewal}/year</value></data>
+    <data name="onboarding/nest_provisioning/ssh_door_command_template" xml:space="preserve"><value>SSH door: {command} (admits only {address}; key {path}, fingerprint {fingerprint})</value></data>
+    <data name="onboarding/nest_provisioning/ssh_door_command_no_path_template" xml:space="preserve"><value>SSH door: {command} (admits only {address}; fingerprint {fingerprint})</value></data>
+    <data name="onboarding/nest_provisioning/ssh_door_address_unknown" xml:space="preserve"><value>the address you set the server up from</value></data>
+    <data name="onboarding/nest_provisioning/ssh_door_save_key_button" xml:space="preserve"><value>Save the key file</value></data>
     <data name="onboarding/dns_post_instructions/title" xml:space="preserve"><value>DNS setup instructions</value></data>
     <data name="onboarding/dns_post_instructions/description" xml:space="preserve"><value>Add these records at your DNS provider so your handle starts working.</value></data>
     <data name="onboarding/dns_post_instructions/copy_button" xml:space="preserve"><value>Copy all</value></data>
@@ -585,10 +595,10 @@ built on your own server.</value></data>
     <data name="launch/recovery_custody_mismatch" xml:space="preserve"><value>Off-box recovery isn't protected: this box handed off an inconsistent recovery key.</value></data>
     <data name="launch/recovery_custody_failed" xml:space="preserve"><value>Off-box recovery custody wasn't saved — this box's recovery key couldn't be confirmed. Your nest still works, but it isn't protected against total box loss yet; the app tries again on the next connection.</value></data>
     <data name="credential_store/section_title" xml:space="preserve"><value>Credential store</value></data>
-    <data name="credential_store/status_sealed" xml:space="preserve"><value>Your sign-in keys rest in a file on this device, sealed under your passphrase.</value></data>
+    <data name="credential_store/status_sealed" xml:space="preserve"><value>Your sign-in keys are kept on this device, encrypted with your passphrase.</value></data>
     <data name="credential_store/rekey_button" xml:space="preserve"><value>Change passphrase…</value></data>
     <data name="credential_store/rekey_title" xml:space="preserve"><value>Change passphrase</value></data>
-    <data name="credential_store/seed_nudge" xml:space="preserve"><value>Back up your recovery seed first (Identity export, above). The sealed store has no recovery path of its own — if the new passphrase is forgotten, the seed is the only way back into your account.</value></data>
+    <data name="credential_store/seed_nudge" xml:space="preserve"><value>Back up your identity first (Export Identity, above). Nobody can reset a forgotten passphrase — if you forget the new one and nothing else opens the store, your identity comes back only from another device where you're signed in, an exported copy of your key, or your recovery kit.</value></data>
     <data name="credential_store/current_label" xml:space="preserve"><value>Current passphrase</value></data>
     <data name="credential_store/new_label" xml:space="preserve"><value>New passphrase</value></data>
     <data name="credential_store/confirm_label" xml:space="preserve"><value>Confirm new passphrase</value></data>
@@ -596,20 +606,31 @@ built on your own server.</value></data>
     <data name="credential_store/success" xml:space="preserve"><value>Passphrase changed.</value></data>
     <data name="credential_store/error_empty" xml:space="preserve"><value>Enter your current passphrase and choose a new one</value></data>
     <data name="credential_store/error_mismatch" xml:space="preserve"><value>The two new entries don't match</value></data>
-    <data name="credential_store/error_wrong" xml:space="preserve"><value>Wrong passphrase, or the store file is corrupt</value></data>
+    <data name="credential_store/error_wrong" xml:space="preserve"><value>Wrong passphrase, or the stored identity is damaged</value></data>
     <data name="credential_store/error_failed" xml:space="preserve"><value>Could not change the passphrase: {message}</value></data>
-    <data name="tui_unlock/unlock_title" xml:space="preserve"><value>Unlock your credentials</value></data>
-    <data name="tui_unlock/unlock_prompt" xml:space="preserve"><value>Your credentials are protected by a passphrase on this machine. Enter it to sign in.</value></data>
-    <data name="tui_unlock/create_title" xml:space="preserve"><value>Protect your credentials</value></data>
-    <data name="tui_unlock/create_prompt" xml:space="preserve"><value>No secure OS key store is reachable here, so your sign-in keys will rest in a file protected by a passphrase. Choose one to continue — you'll need it at every launch.</value></data>
-    <data name="tui_unlock/passphrase_label" xml:space="preserve"><value>Passphrase</value></data>
-    <data name="tui_unlock/confirm_label" xml:space="preserve"><value>Confirm passphrase</value></data>
-    <data name="tui_unlock/unlock_button" xml:space="preserve"><value>Unlock</value></data>
-    <data name="tui_unlock/create_button" xml:space="preserve"><value>Set passphrase</value></data>
-    <data name="tui_unlock/error_empty" xml:space="preserve"><value>Enter a passphrase</value></data>
-    <data name="tui_unlock/error_mismatch" xml:space="preserve"><value>The two entries don't match</value></data>
-    <data name="tui_unlock/error_wrong" xml:space="preserve"><value>Wrong passphrase, or the store file is corrupt</value></data>
-    <data name="tui_unlock/error_failed" xml:space="preserve"><value>Could not open the credential store: {message}</value></data>
+    <data name="credential_store/passkey_add_button" xml:space="preserve"><value>Add a passkey</value></data>
+    <data name="credential_store/passkey_remove_button" xml:space="preserve"><value>Remove the passkey</value></data>
+    <data name="credential_store/passkey_error" xml:space="preserve"><value>Could not change the passkey: {message}</value></data>
+    <data name="credential_store/passkey_status" xml:space="preserve"><value>A passkey also unlocks your encrypted sign-in keys in this browser. Your passphrase still works.</value></data>
+    <data name="credential_store/passkey_explainer" xml:space="preserve"><value>Add a passkey to unlock this browser's encrypted sign-in keys with your device's screen lock or a security key instead of typing your passphrase. Your passphrase keeps working, and your nest isn't involved.</value></data>
+    <data name="unlock/unlock_title" xml:space="preserve"><value>Unlock your credentials</value></data>
+    <data name="unlock/unlock_prompt" xml:space="preserve"><value>Your credentials are protected by a passphrase on this machine. Enter it to sign in.</value></data>
+    <data name="unlock/create_title" xml:space="preserve"><value>Protect your credentials</value></data>
+    <data name="unlock/create_prompt" xml:space="preserve"><value>There is no secure key store here that Fauna can use, so your sign-in keys will be kept on this device, encrypted with a passphrase you choose. Choose one to continue — you'll need it to unlock them from now on, and a forgotten passphrase cannot be recovered.</value></data>
+    <data name="unlock/passphrase_label" xml:space="preserve"><value>Passphrase</value></data>
+    <data name="unlock/confirm_label" xml:space="preserve"><value>Confirm passphrase</value></data>
+    <data name="unlock/unlock_button" xml:space="preserve"><value>Unlock</value></data>
+    <data name="unlock/create_button" xml:space="preserve"><value>Set passphrase</value></data>
+    <data name="unlock/error_empty" xml:space="preserve"><value>Enter a passphrase</value></data>
+    <data name="unlock/error_mismatch" xml:space="preserve"><value>The two entries don't match</value></data>
+    <data name="unlock/error_wrong" xml:space="preserve"><value>Wrong passphrase, or the stored identity is damaged</value></data>
+    <data name="unlock/error_failed" xml:space="preserve"><value>Could not open the credential store: {message}</value></data>
+    <data name="unlock/reset_button" xml:space="preserve"><value>Forgot the passphrase? Start over</value></data>
+    <data name="unlock/reset_confirm_button" xml:space="preserve"><value>Erase this browser's sign-in keys and start over</value></data>
+    <data name="unlock/reset_explainer" xml:space="preserve"><value>Starting over erases this browser's copy of your sign-in keys and nothing else. You can sign in again from another device where you're signed in, from an exported copy of your key, or with your recovery kit.</value></data>
+    <data name="unlock/passkey_button" xml:space="preserve"><value>Unlock with a passkey</value></data>
+    <data name="unlock/passkey_error" xml:space="preserve"><value>Could not open with the passkey: {message}</value></data>
+    <data name="unlock/passkey_unavailable" xml:space="preserve"><value>This browser or authenticator can't use a passkey to unlock your sign-in keys. Your passphrase still works.</value></data>
     <data name="tui_nav_hints/pane" xml:space="preserve"><value>{keys} pane</value></data>
     <data name="tui_nav_hints/move_focus" xml:space="preserve"><value>{keys} move</value></data>
     <data name="tui_nav_hints/open" xml:space="preserve"><value>{keys} open</value></data>
@@ -622,6 +643,7 @@ built on your own server.</value></data>
     <data name="tui_settings/external_media_always" xml:space="preserve"><value>Always open</value></data>
     <data name="tui_settings/external_media_never" xml:space="preserve"><value>Never open (show details only)</value></data>
     <data name="feed/compose_empty" xml:space="preserve"><value>Post cannot be empty</value></data>
+    <data name="feed/video_external_open_confirm_title" xml:space="preserve"><value>Open this video externally?</value></data>
     <data name="feed/compose_gate_preview_empty" xml:space="preserve"><value>Add a public teaser for a gated post</value></data>
     <data name="feed/compose_gate_no_key" xml:space="preserve"><value>This device does not hold the key for tier {tier}</value></data>
     <data name="feed/compose_room_no_key" xml:space="preserve"><value>This device does not hold the key for that room yet</value></data>
@@ -734,6 +756,7 @@ built on your own server.</value></data>
     <data name="feed/post/sell_asking_price_placeholder" xml:space="preserve"><value>Machine price in sats (optional)</value></data>
     <data name="feed/post/sell_subscribers_free" xml:space="preserve"><value>Subscribers get it free</value></data>
     <data name="feed/post/buy_button" xml:space="preserve"><value>Buy</value></data>
+    <data name="feed/post/purchase_pending" xml:space="preserve"><value>Purchase pending — waiting for the author's approval</value></data>
     <data name="feed/post/open_rich_compose" xml:space="preserve"><value>Open rich compose dialog</value></data>
     <data name="feed/post/posting" xml:space="preserve"><value>Posting…</value></data>
     <data name="feed/post/post_detail" xml:space="preserve"><value>Post detail</value></data>
@@ -815,6 +838,11 @@ built on your own server.</value></data>
     <data name="conversations/unified/error_set_room_policy" xml:space="preserve"><value>Could not change this room's settings: {message}</value></data>
     <data name="conversations/unified/error_room_invitation" xml:space="preserve"><value>Could not answer this invitation: {message}</value></data>
     <data name="conversations/unified/error_withdraw_room_invite" xml:space="preserve"><value>Could not withdraw this invitation: {message}</value></data>
+    <data name="conversations/unified/error_room_search" xml:space="preserve"><value>Could not search this room: {message}</value></data>
+    <data name="conversations/unified/room_search_hit_pending" xml:space="preserve"><value>Not on this device yet</value></data>
+    <data name="conversations/unified/room_search_no_results" xml:space="preserve"><value>Nothing in this room matches.</value></data>
+    <data name="conversations/unified/room_search" xml:space="preserve"><value>Search this room</value></data>
+    <data name="conversations/unified/room_search_placeholder" xml:space="preserve"><value>Search this room's messages and posts</value></data>
     <data name="conversations/unified/room_class_end_to_end" xml:space="preserve"><value>End-to-end encrypted</value></data>
     <data name="conversations/unified/room_class_community" xml:space="preserve"><value>Community — searched and labelled by the home nest</value></data>
     <data name="conversations/unified/room_class_transport_only" xml:space="preserve"><value>Transport-only</value></data>
@@ -824,6 +852,12 @@ built on your own server.</value></data>
     <data name="conversations/unified/bridged_no_recipient_key" xml:space="preserve"><value>This account has no mail key yet, so a copy of the message cannot be kept. Set up mail, then send again.</value></data>
     <data name="conversations/unified/room_notice_moderation_unverified" xml:space="preserve"><value>Some moderation in this room couldn't be verified on this device, so the affected messages are still shown.</value></data>
     <data name="conversations/unified/room_notice_awaiting_key" xml:space="preserve"><value>Waiting for a room key — messages will appear once an owner or admin keys you in.</value></data>
+    <data name="conversations/unified/room_notice_bridge_disconnected" xml:space="preserve"><value>The app that carried this conversation is no longer connected. You can still read it, but you can't send.</value></data>
+    <data name="conversations/unified/dm_message_undelivered" xml:space="preserve"><value>Not delivered — the app that carried this conversation was disconnected before it went out.</value></data>
+    <data name="conversations/unified/dm_message_warmup_deferred" xml:space="preserve"><value>Delivery deferred until {date} per IP warm-up schedule.</value></data>
+    <data name="conversations/unified/dm_message_warmup_queue_next" xml:space="preserve"><value>Next in the queue.</value></data>
+    <data name="conversations/unified/dm_message_warmup_queue_one" xml:space="preserve"><value>1 message ahead in the queue.</value></data>
+    <data name="conversations/unified/dm_message_warmup_queue" xml:space="preserve"><value>{count} messages ahead in the queue.</value></data>
     <data name="conversations/unified/room_role_owner" xml:space="preserve"><value>owner</value></data>
     <data name="conversations/unified/room_role_admin" xml:space="preserve"><value>admin</value></data>
     <data name="conversations/unified/room_join_rule_label" xml:space="preserve"><value>Who can invite</value></data>
@@ -875,18 +909,34 @@ built on your own server.</value></data>
     <data name="conversations/unified/to_line_label" xml:space="preserve"><value>To:</value></data>
     <data name="conversations/unified/topic_input_placeholder" xml:space="preserve"><value>Topic (optional)</value></data>
     <data name="conversations/unified/topic_toggle_add" xml:space="preserve"><value>+ topic</value></data>
+    <data name="conversations/scan_result/clamav_clean" xml:space="preserve"><value>ClamAV: clean</value></data>
+    <data name="conversations/scan_result/clamav_infected" xml:space="preserve"><value>ClamAV: infected ({signature})</value></data>
+    <data name="conversations/scan_result/clamav_error" xml:space="preserve"><value>ClamAV: the scan failed</value></data>
+    <data name="conversations/scan_result/clamav_bypassed_oversize" xml:space="preserve"><value>ClamAV: not scanned (too large)</value></data>
+    <data name="conversations/scan_result/clamav_not_scanned" xml:space="preserve"><value>ClamAV: not scanned</value></data>
+    <data name="conversations/scan_result/clamav_unknown" xml:space="preserve"><value>ClamAV: unrecognised verdict</value></data>
+    <data name="conversations/scan_result/rspamd_score" xml:space="preserve"><value>Rspamd score: {score}</value></data>
+    <data name="conversations/scan_result/rspamd_score_rules" xml:space="preserve"><value>Rspamd score: {score} ({rules})</value></data>
+    <data name="conversations/scan_result/rspamd_not_scanned" xml:space="preserve"><value>Rspamd: not scanned</value></data>
+    <data name="conversations/scan_result/action_delivered" xml:space="preserve"><value>Action: delivered to Inbox</value></data>
+    <data name="conversations/scan_result/action_junked" xml:space="preserve"><value>Action: delivered to Junk</value></data>
+    <data name="conversations/scan_result/action_tagged" xml:space="preserve"><value>Action: delivered with scan headers added</value></data>
+    <data name="conversations/scan_result/action_rejected_malware" xml:space="preserve"><value>Action: rejected as malware</value></data>
+    <data name="conversations/scan_result/action_unknown" xml:space="preserve"><value>Action: unrecognised</value></data>
     <data name="contacts/title" xml:space="preserve"><value>Contacts</value></data>
     <data name="contacts/detail_title" xml:space="preserve"><value>Contact</value></data>
     <data name="contacts/sign_in_prompt" xml:space="preserve"><value>Sign in to view your contacts.</value></data>
     <data name="contacts/find_user/title" xml:space="preserve"><value>Find User</value></data>
-    <data name="contacts/find_user/description" xml:space="preserve"><value>Enter a handle (e.g. alice@fauna.social) or actor ID hex to find a user.</value></data>
-    <data name="contacts/find_user/placeholder" xml:space="preserve"><value>alice@fauna.social or actor ID hex</value></data>
+    <data name="contacts/find_user/description" xml:space="preserve"><value>Enter a handle (e.g. alice@example.com) or actor ID hex to find a user.</value></data>
+    <data name="contacts/find_user/placeholder" xml:space="preserve"><value>alice@example.com or actor ID hex</value></data>
     <data name="contacts/find_user/find" xml:space="preserve"><value>Find</value></data>
+    <data name="contacts/find_user/open_profile" xml:space="preserve"><value>View profile</value></data>
     <data name="contacts/message" xml:space="preserve"><value>Message</value></data>
     <data name="contacts/handle_not_found" xml:space="preserve"><value>Handle not found</value></data>
     <data name="contacts/guardian_approval_required" xml:space="preserve"><value>This account can only message approved contacts.</value></data>
     <data name="contacts/ask_guardian" xml:space="preserve"><value>Ask your guardian</value></data>
     <data name="contacts/contact_request_pending" xml:space="preserve"><value>Asked — waiting for your guardian</value></data>
+    <data name="contacts/knock_guardian_pending" xml:space="preserve"><value>Waiting for your guardian's approval</value></data>
     <data name="contacts/message_requests/title" xml:space="preserve"><value>Message Requests</value></data>
     <data name="contacts/message_requests/none" xml:space="preserve"><value>No pending message requests.</value></data>
     <data name="contacts/message_requests/count" xml:space="preserve"><value>Message Requests ({count})</value></data>
@@ -1052,7 +1102,7 @@ built on your own server.</value></data>
     <data name="groups/loading_group" xml:space="preserve"><value>Loading group...</value></data>
     <data name="groups/members" xml:space="preserve"><value>Members</value></data>
     <data name="groups/invite_member" xml:space="preserve"><value>Invite Member</value></data>
-    <data name="groups/invite_placeholder" xml:space="preserve"><value>alice@fauna.social or actor ID</value></data>
+    <data name="groups/invite_placeholder" xml:space="preserve"><value>alice@example.com or actor ID</value></data>
     <data name="groups/invite_nest_url_placeholder" xml:space="preserve"><value>Nest URL (optional, for cross-nest)</value></data>
     <data name="groups/node_url_placeholder" xml:space="preserve"><value>Node URL (for cross-nest invites)</value></data>
     <data name="groups/replying_to" xml:space="preserve"><value>Replying to</value></data>
@@ -1090,12 +1140,14 @@ built on your own server.</value></data>
     <data name="atproto_settings/app_credentials_heading" xml:space="preserve"><value>App credentials</value></data>
     <data name="atproto_settings/app_credentials_empty" xml:space="preserve"><value>No app credentials yet.</value></data>
     <data name="atproto_settings/mint_button" xml:space="preserve"><value>New app credential</value></data>
+    <data name="atproto_settings/mint_dm_access_label" xml:space="preserve"><value>Let this app password read and send my Bluesky direct messages</value></data>
     <data name="atproto_settings/default_credential_label" xml:space="preserve"><value>App credential {count}</value></data>
     <data name="atproto_settings/reveal_button" xml:space="preserve"><value>Reveal</value></data>
     <data name="atproto_settings/revoke_button" xml:space="preserve"><value>Revoke</value></data>
     <data name="atproto_settings/credential_created_prefix" xml:space="preserve"><value>Created {date}</value></data>
     <data name="atproto_settings/credential_last_used_prefix" xml:space="preserve"><value>Last used {date}</value></data>
     <data name="atproto_settings/credential_never_used" xml:space="preserve"><value>Never used</value></data>
+    <data name="atproto_settings/credential_dm_access" xml:space="preserve"><value>Direct messages allowed</value></data>
     <data name="atproto_settings/connected_apps_heading" xml:space="preserve"><value>Connected apps</value></data>
     <data name="atproto_settings/connected_apps_empty" xml:space="preserve"><value>No connected apps yet.</value></data>
     <data name="atproto_settings/session_created_prefix" xml:space="preserve"><value>Connected {date}</value></data>
@@ -1234,6 +1286,9 @@ built on your own server.</value></data>
     <data name="bridges/detail_title" xml:space="preserve"><value>Bridge</value></data>
     <data name="bridges/follows" xml:space="preserve"><value>Follows</value></data>
     <data name="bridges/remove_follow" xml:space="preserve"><value>Remove Follow</value></data>
+    <data name="bridges/follow_requests" xml:space="preserve"><value>Follow requests ({count})</value></data>
+    <data name="bridges/approve_follow_request" xml:space="preserve"><value>Approve</value></data>
+    <data name="bridges/refuse_follow_request" xml:space="preserve"><value>Refuse</value></data>
     <data name="bridges/refresh_list" xml:space="preserve"><value>Refresh bridge list</value></data>
     <data name="bridges/link_action" xml:space="preserve"><value>Link</value></data>
     <data name="bridges/unlink_action" xml:space="preserve"><value>Unlink</value></data>
@@ -1276,6 +1331,28 @@ built on your own server.</value></data>
     <data name="bridges/source_request_button" xml:space="preserve"><value>Ask your guardian</value></data>
     <data name="bridges/source_request_pending" xml:space="preserve"><value>Asked — waiting for your guardian</value></data>
     <data name="bridges/source_request_approved" xml:space="preserve"><value>Approved — try again</value></data>
+    <data name="bridges/plugins_heading" xml:space="preserve"><value>Plugins on this nest</value></data>
+    <data name="bridges/plugins_empty" xml:space="preserve"><value>No plugins installed.</value></data>
+    <data name="bridges/plugin_install_label" xml:space="preserve"><value>Plugin document URL</value></data>
+    <data name="bridges/plugin_install_submit" xml:space="preserve"><value>Install</value></data>
+    <data name="bridges/plugin_install_opened" xml:space="preserve"><value>Review the install card in Settings → Connected apps → Requests.</value></data>
+    <data name="bridges/plugin_publisher" xml:space="preserve"><value>{domain} — {key}</value></data>
+    <data name="bridges/plugin_publisher_development" xml:space="preserve"><value>Development plugin</value></data>
+    <data name="bridges/plugin_state_running" xml:space="preserve"><value>Running</value></data>
+    <data name="bridges/plugin_state_restarting" xml:space="preserve"><value>Restarting</value></data>
+    <data name="bridges/plugin_state_stopped" xml:space="preserve"><value>Stopped</value></data>
+    <data name="bridges/plugin_state_other" xml:space="preserve"><value>{state}</value></data>
+    <data name="bridges/plugin_faults" xml:space="preserve"><value>Faults since it started: {count}</value></data>
+    <data name="bridges/plugin_last_fault" xml:space="preserve"><value>Last fault: {text}</value></data>
+    <data name="bridges/plugin_reason" xml:space="preserve"><value>Why: {text}</value></data>
+    <data name="bridges/plugin_uninstall" xml:space="preserve"><value>Uninstall</value></data>
+    <data name="bridges/plugin_uninstall_confirm" xml:space="preserve"><value>Uninstall now</value></data>
+    <data name="bridges/plugin_uninstall_cancel" xml:space="preserve"><value>Keep</value></data>
+    <data name="bridges/plugin_uninstall_prompt" xml:space="preserve"><value>Uninstall {name}? Every account's connection to it ends and its stored data is deleted.</value></data>
+    <data name="bridges/plugin_card_badge" xml:space="preserve"><value>Plugin · {form}</value></data>
+    <data name="bridges/plugin_connect" xml:space="preserve"><value>Connect</value></data>
+    <data name="bridges/plugin_disconnect" xml:space="preserve"><value>Disconnect</value></data>
+    <data name="bridges/plugin_bind_opened" xml:space="preserve"><value>Review the request in Settings → Connected apps → Requests.</value></data>
     <data name="media/title" xml:space="preserve"><value>Media</value></data>
     <data name="media/view_list" xml:space="preserve"><value>List</value></data>
     <data name="media/view_grid" xml:space="preserve"><value>Grid</value></data>
@@ -1377,6 +1454,14 @@ built on your own server.</value></data>
     <data name="backups/snapshot_title" xml:space="preserve"><value>Snapshot</value></data>
     <data name="backups/select_snapshot" xml:space="preserve"><value>Select a snapshot to view files.</value></data>
     <data name="backups/no_files_in_snapshot" xml:space="preserve"><value>No files in this snapshot.</value></data>
+    <data name="backups/kind_snapshot_restores_below" xml:space="preserve"><value>This snapshot holds messages, not files. Restore it from the Restore section below.</value></data>
+    <data name="backups/snapshot_restore_destination_placeholder" xml:space="preserve"><value>Folder to restore into, e.g. ~/Restored</value></data>
+    <data name="backups/snapshot_restore_button" xml:space="preserve"><value>Restore all files</value></data>
+    <data name="backups/snapshot_restore_progress" xml:space="preserve"><value>Restoring snapshot #{id} into {path}…</value></data>
+    <data name="backups/snapshot_restore_done" xml:space="preserve"><value>Restored {files} files ({size}) into {path}</value></data>
+    <data name="backups/snapshot_restore_partial" xml:space="preserve"><value>Restored {files} files into {path}; {failed} failed their integrity check and were not written: {paths}</value></data>
+    <data name="backups/snapshot_restore_failed" xml:space="preserve"><value>Restore failed: {message}</value></data>
+    <data name="backups/snapshot_restore_destination_not_absolute" xml:space="preserve"><value>Enter the full path of a folder to restore into (starting with / or ~/), not {path}</value></data>
     <data name="backups/create_snapshot" xml:space="preserve"><value>Create Snapshot</value></data>
     <data name="backups/snapshots_title" xml:space="preserve"><value>Snapshots</value></data>
     <data name="backups/last_backed_up_never" xml:space="preserve"><value>Last backed up: never</value></data>
@@ -1508,6 +1593,9 @@ built on your own server.</value></data>
     <data name="backups/backup_reseed_no_agent" xml:space="preserve"><value>This device runs no backup service, so it holds no copy to restore from.</value></data>
     <data name="backups/backup_reseed_failed" xml:space="preserve"><value>The restore stopped before anything was made live: {reason}</value></data>
     <data name="backups/backup_reseed_reenroll_failed" xml:space="preserve"><value>Your data is back on this nest, but this device could not sign up again as its backup: {reason}. Add this device as a backup destination to keep a copy here.</value></data>
+    <data name="backups/backup_reseed_pull_back_confirm_title" xml:space="preserve"><value>Restore the copy on {name} to this nest?</value></data>
+    <data name="backups/backup_reseed_pull_back_confirm_body" xml:space="preserve"><value>This copies the backup {name} holds onto this nest and makes it live again. Nothing is deleted, here or on {name}. If this nest already holds your data, it stops rather than mixing the two.</value></data>
+    <data name="backups/backup_reseed_pull_back_reenroll_failed" xml:space="preserve"><value>Your data is back on this nest, but {name} could not be set up again as its backup: {reason}. Add {name} as a backup destination again to keep a copy there.</value></data>
     <data name="backups/reseed_result_whole" xml:space="preserve"><value>Your data is back on this nest.</value></data>
     <data name="backups/reseed_result_incomplete" xml:space="preserve"><value>The restore is not complete yet. Run it again to finish what is missing.</value></data>
     <data name="backups/reseed_set_mail" xml:space="preserve"><value>Mail</value></data>
@@ -1739,23 +1827,24 @@ built on your own server.</value></data>
     <data name="devices/nest_save" xml:space="preserve"><value>Save Nest Settings</value></data>
     <data name="devices/keyless_posture_badge" xml:space="preserve"><value>Relay only — holds no keys</value></data>
     <data name="devices/custody_holder_section" xml:space="preserve"><value>Custodians — who holds sealed copies of your data</value></data>
-    <data name="devices/custody_holder_scope" xml:space="preserve"><value>Trusted to hold sealed copies — cannot read them</value></data>
+    <data name="devices/custody_holder_scope" xml:space="preserve"><value>Trusted to hold sealed copies — cannot read them, apart from what you published to everyone</value></data>
     <data name="devices/custody_receipt_fresh" xml:space="preserve"><value>Last confirmed {when}</value></data>
     <data name="devices/custody_receipt_stale" xml:space="preserve"><value>Stale — last confirmed {when}. Treat this copy as degraded.</value></data>
     <data name="devices/custody_receipt_none" xml:space="preserve"><value>No confirmation yet</value></data>
     <data name="devices/custody_held_bytes" xml:space="preserve"><value>Holding {held} of {cap}</value></data>
     <data name="devices/custody_revoke" xml:space="preserve"><value>Stop trusting this custodian</value></data>
-    <data name="devices/custody_revoke_bound_note" xml:space="preserve"><value>Stops future copies and serving on honest devices. Copies already held stay held — and stay sealed forever.</value></data>
+    <data name="devices/custody_revoke_bound_note" xml:space="preserve"><value>Stops future copies and serving on honest devices. Copies already held stay where they are, no more readable to the holder than before.</value></data>
     <data name="devices/custody_held_section" xml:space="preserve"><value>Held for others — sealed copies this device keeps</value></data>
     <data name="devices/custody_held_owner" xml:space="preserve"><value>Holding for {owner}</value></data>
-    <data name="devices/custody_held_scope_account" xml:space="preserve"><value>Their account's sealed planes — unreadable on this device</value></data>
+    <data name="devices/custody_held_scope_account" xml:space="preserve"><value>Their account's sealed data — unreadable on this device, apart from what they published to everyone</value></data>
+    <data name="devices/custody_held_restore_address" xml:space="preserve"><value>If they lose every device, they can restore from this nest at {address} — give them this address yourself.</value></data>
     <data name="devices/custody_budget_label" xml:space="preserve"><value>Keep at most (bytes)</value></data>
     <data name="devices/custody_stop" xml:space="preserve"><value>Stop holding</value></data>
     <data name="devices/custody_stopped_bytes_remain" xml:space="preserve"><value>Stopped — stored bytes remain until removed</value></data>
     <data name="devices/custody_remove" xml:space="preserve"><value>Remove and free the space</value></data>
     <data name="devices/custody_remove_done" xml:space="preserve"><value>Removed — the space is free.</value></data>
     <data name="devices/custody_offer_title" xml:space="preserve"><value>{owner} asks this device to hold sealed copies</value></data>
-    <data name="devices/custody_offer_floor" xml:space="preserve"><value>This device would store sealed data it cannot read. It would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.</value></data>
+    <data name="devices/custody_offer_floor" xml:space="preserve"><value>This device would store sealed data it cannot read, apart from what they have published to everyone. Of the rest it would see only the shape: which scopes exist, how much is stored, and when it changes — never the content.</value></data>
     <data name="devices/custody_offer_accept" xml:space="preserve"><value>Hold for them</value></data>
     <data name="devices/custody_offer_decline" xml:space="preserve"><value>Decline</value></data>
     <data name="devices/custody_offer_target_label" xml:space="preserve"><value>Where to hold</value></data>
@@ -1765,7 +1854,7 @@ built on your own server.</value></data>
     <data name="devices/custody_mint_button" xml:space="preserve"><value>Ask a friend to hold sealed copies</value></data>
     <data name="devices/custody_mint_host_label" xml:space="preserve"><value>Who to ask</value></data>
     <data name="devices/custody_mint_host_placeholder" xml:space="preserve"><value>Choose a contact</value></data>
-    <data name="devices/custody_mint_floor" xml:space="preserve"><value>Their device will store sealed copies it cannot read. They will see the shape of your data — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.</value></data>
+    <data name="devices/custody_mint_floor" xml:space="preserve"><value>Their device will store sealed copies it cannot read, apart from what you have published to everyone. Of the rest they will see only the shape — which scopes exist, how much is stored, and when it changes — never the content. Choosing custodians is choosing who sees that shape.</value></data>
     <data name="devices/custody_mint_confirm" xml:space="preserve"><value>Send the request</value></data>
     <data name="devices/custody_mint_no_contacts" xml:space="preserve"><value>Start a conversation with them first — the request travels over it.</value></data>
     <data name="devices/paths_placeholder" xml:space="preserve"><value>e.g. Documents, Photos</value></data>
@@ -1988,6 +2077,12 @@ built on your own server.</value></data>
     <data name="devices/sync_locations/on_demand_unavailable" xml:space="preserve"><value>On-demand isn't available here.</value></data>
     <data name="devices/sync_locations/on_demand_mount_refused" xml:space="preserve"><value>On-demand can't be used in this location, so only files already on this device are kept in sync. Choose a folder inside your home folder, or turn on-demand off.</value></data>
     <data name="devices/sync_locations/on_demand_mount_failed" xml:space="preserve"><value>On-demand couldn't start for this folder, so only files already on this device are kept in sync. Turn on-demand off to keep every file here.</value></data>
+    <data name="devices/sync_locations/free_space_button" xml:space="preserve"><value>Free up space</value></data>
+    <data name="devices/sync_locations/free_space_running" xml:space="preserve"><value>Freeing up space…</value></data>
+    <data name="devices/sync_locations/free_space_on_device" xml:space="preserve"><value>{on_device} of {total} on this device</value></data>
+    <data name="devices/sync_locations/free_space_result" xml:space="preserve"><value>Freed {files} files ({size}).</value></data>
+    <data name="devices/sync_locations/free_space_result_kept" xml:space="preserve"><value>Freed {files} files ({size}). Kept {kept} files because this device may hold the only copy.</value></data>
+    <data name="devices/sync_locations/free_space_kept_pinned" xml:space="preserve"><value>Kept {count} files you chose to keep on this device.</value></data>
     <data name="devices/sync_locations/remove" xml:space="preserve"><value>Remove</value></data>
     <data name="devices/sync_locations/helper_unavailable" xml:space="preserve"><value>Sync service is not running. Start it and try again.</value></data>
     <data name="sessions/title" xml:space="preserve"><value>Sessions</value></data>
@@ -2111,6 +2206,7 @@ built on your own server.</value></data>
     <data name="settings/up_to_date" xml:space="preserve"><value>Up to date</value></data>
     <data name="settings/check_failed" xml:space="preserve"><value>Check failed</value></data>
     <data name="settings/update_available_notice" xml:space="preserve"><value>Version {version} is available. Get it at {url}</value></data>
+    <data name="settings/terms_link" xml:space="preserve"><value>Terms and content guidelines</value></data>
     <data name="settings/mls_available" xml:space="preserve"><value>MLS encryption: Available</value></data>
     <data name="settings/mls_not_available" xml:space="preserve"><value>MLS encryption: Not available</value></data>
     <data name="settings/push_notifications/title" xml:space="preserve"><value>Push Notifications</value></data>
@@ -2120,6 +2216,7 @@ built on your own server.</value></data>
     <data name="settings/push_notifications/opt_in_label" xml:space="preserve"><value>Notify me on this device</value></data>
     <data name="settings/push_notifications/agent_unreachable" xml:space="preserve"><value>The Fauna sync agent is not running on this computer, so it cannot show notifications while Fauna is closed.</value></data>
     <data name="settings/push_notifications/no_sink" xml:space="preserve"><value>This computer has no desktop notification service, so notifications cannot be shown here.</value></data>
+    <data name="settings/push_notifications/no_distributor" xml:space="preserve"><value>This phone has no push service app, such as ntfy, so notifications cannot reach it while Fauna is closed.</value></data>
     <data name="settings/configuration" xml:space="preserve"><value>Configuration</value></data>
     <data name="settings/privacy" xml:space="preserve"><value>Privacy</value></data>
     <data name="settings/moderation" xml:space="preserve"><value>Moderation</value></data>
@@ -2164,7 +2261,7 @@ built on your own server.</value></data>
     <data name="settings/mail/strength_strong" xml:space="preserve"><value>Strong</value></data>
     <data name="settings/mail/autogenerate" xml:space="preserve"><value>Auto-generate a strong password</value></data>
     <data name="settings/mail/weak_password_warning" xml:space="preserve"><value>A password you choose yourself limits how strongly your stored mail is protected at rest on an encrypted nest. Letting Fauna generate one is recommended.</value></data>
-    <data name="settings/mail/token_warning" xml:space="preserve"><value>Copy this token into your mail app now — it is shown only once.</value></data>
+    <data name="settings/mail/token_warning" xml:space="preserve"><value>Copy this token into your mail app now. You can show it again later from its row under Connected apps.</value></data>
     <data name="settings/mail/copy_token" xml:space="preserve"><value>Copy token</value></data>
     <data name="settings/mail/copied" xml:space="preserve"><value>Copied</value></data>
     <data name="settings/mail/rotate_title" xml:space="preserve"><value>Rotate mail keys</value></data>
@@ -2300,6 +2397,15 @@ built on your own server.</value></data>
     <data name="settings/privacy_page/action" xml:space="preserve"><value>Action</value></data>
     <data name="settings/privacy_page/forward_address" xml:space="preserve"><value>Forward to</value></data>
     <data name="settings/privacy_page/keep_local_copy" xml:space="preserve"><value>Keep a local copy</value></data>
+    <data name="settings/privacy_page/file_into_mailbox" xml:space="preserve"><value>Move to folder</value></data>
+    <data name="settings/privacy_page/add_label" xml:space="preserve"><value>Label</value></data>
+    <data name="settings/privacy_page/auto_reply_subject" xml:space="preserve"><value>Reply subject</value></data>
+    <data name="settings/privacy_page/auto_reply_body" xml:space="preserve"><value>Reply message</value></data>
+    <data name="settings/privacy_page/auto_reply_interval_hours" xml:space="preserve"><value>Reply at most once per sender every (hours)</value></data>
+    <data name="settings/privacy_page/header_value" xml:space="preserve"><value>Header contains</value></data>
+    <data name="settings/privacy_page/spam_score" xml:space="preserve"><value>Spam score at least</value></data>
+    <data name="settings/privacy_page/priority" xml:space="preserve"><value>Order (lower runs first)</value></data>
+    <data name="settings/privacy_page/continue_matching" xml:space="preserve"><value>Keep checking later rules after this one matches</value></data>
     <data name="settings/privacy_page/spam_preferences" xml:space="preserve"><value>Spam Preferences</value></data>
     <data name="settings/privacy_page/inbox_mode_description" xml:space="preserve"><value>Control who can send you messages</value></data>
     <data name="settings/privacy_page/inbox_mode_subtitle" xml:space="preserve"><value>Who can message you directly</value></data>
@@ -2366,7 +2472,7 @@ built on your own server.</value></data>
     <data name="settings/configure_nest" xml:space="preserve"><value>Configure Nest</value></data>
     <data name="settings/configure_nest_desc" xml:space="preserve"><value>Change the nest URL this app connects to.</value></data>
     <data name="settings/new_nest_url" xml:space="preserve"><value>New Nest URL</value></data>
-    <data name="settings/new_nest_url_placeholder" xml:space="preserve"><value>https://nest.fauna.social</value></data>
+    <data name="settings/new_nest_url_placeholder" xml:space="preserve"><value>https://nest.example.com</value></data>
     <data name="settings/update_button" xml:space="preserve"><value>Update</value></data>
     <data name="settings/storage_desc" xml:space="preserve"><value>Account storage usage.</value></data>
     <data name="settings/about" xml:space="preserve"><value>About</value></data>
@@ -2401,6 +2507,19 @@ built on your own server.</value></data>
     <data name="nests/not_trusted" xml:space="preserve"><value>This nest is not trusted to read any of your content.</value></data>
     <data name="nests/escrow_holder_badge" xml:space="preserve"><value>Holds your recovery escrow</value></data>
     <data name="nests/custody_nest_label" xml:space="preserve"><value>{host}'s nest — trusted to hold sealed copies</value></data>
+    <data name="nests/custody_restore_button" xml:space="preserve"><value>Restore from a custodian nest…</value></data>
+    <data name="nests/custody_restore_input_label" xml:space="preserve"><value>The custodian nest's address, as its host gave it to you (for example https://nest.example)</value></data>
+    <data name="nests/custody_restore_submit" xml:space="preserve"><value>Restore</value></data>
+    <data name="nests/custody_restore_cancel" xml:space="preserve"><value>Cancel</value></data>
+    <data name="nests/custody_restore_row_button" xml:space="preserve"><value>Restore from this nest now</value></data>
+    <data name="nests/custody_restore_running" xml:space="preserve"><value>Restoring from the custodian nest…</value></data>
+    <data name="nests/custody_restore_refused" xml:space="preserve"><value>That address can't be used: {reason}</value></data>
+    <data name="nests/custody_restore_revoked" xml:space="preserve"><value>you revoked this nest's custody</value></data>
+    <data name="nests/custody_restore_not_admitted" xml:space="preserve"><value>That nest didn't let this device in. The address may be wrong, the nest may be down, or it may hold nothing for this account — this device can't tell which.</value></data>
+    <data name="nests/custody_restore_restored" xml:space="preserve"><value>Restored {count} of your account's records.</value></data>
+    <data name="nests/custody_restore_sealed" xml:space="preserve"><value>{count} came back sealed and stay unreadable until this device has their key.</value></data>
+    <data name="nests/custody_restore_nothing_new" xml:space="preserve"><value>Nothing new — this device already has everything that nest holds for you.</value></data>
+    <data name="nests/custody_restore_mismatch" xml:space="preserve"><value>Restored — but the nest that answered is not the one your records name for this address. Your records stand; check the address with whoever runs that nest.</value></data>
     <data name="nests/trusted_to_read" xml:space="preserve"><value>Trusted to read:</value></data>
     <data name="nests/scope_mail" xml:space="preserve"><value>Mail — and the spam-filter model and training history derived from it</value></data>
     <data name="nests/scope_calendar" xml:space="preserve"><value>Calendar</value></data>
@@ -2441,6 +2560,7 @@ built on your own server.</value></data>
     <data name="nests/generation_expires" xml:space="preserve"><value>Can be restored until {when}, and counts against your storage until then</value></data>
     <data name="nests/generation_status_listed" xml:space="preserve"><value>Can be restored</value></data>
     <data name="nests/generation_status_unreachable" xml:space="preserve"><value>Could not reach this destination</value></data>
+    <data name="nests/holders_status_unreachable" xml:space="preserve"><value>Could not ask this nest which services it trusts</value></data>
     <data name="nests/generation_restore" xml:space="preserve"><value>Restore this version</value></data>
     <data name="nests/generation_restored" xml:space="preserve"><value>That version has been restored.</value></data>
     <data name="nests/generation_past_window" xml:space="preserve"><value>That version is past the recovery window, so it can no longer be restored.</value></data>
@@ -2489,6 +2609,7 @@ built on your own server.</value></data>
     <data name="logs/clear_button" xml:space="preserve"><value>Clear</value></data>
     <data name="logs/empty" xml:space="preserve"><value>No log entries yet.</value></data>
     <data name="mail_settings/title" xml:space="preserve"><value>Mail &amp; Calendar</value></data>
+    <data name="mail_settings/unavailable_notice" xml:space="preserve"><value>Mail can't be turned on for this server: it was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.</value></data>
     <data name="mail_settings/keys_info" xml:space="preserve"><value>Your mail is protected by an encryption key held on your Fauna devices. Each app password or token you add unlocks that same key for one email app (Thunderbird, Apple Mail, …). Rotate your keys if a password or token may have leaked, or if a device that had your mail set up was lost or stolen — rotating replaces the key so the exposed credential can no longer read your mail (messages you've already received stay readable). If you're just retiring an app you no longer use, revoke that one credential instead — you don't need to rotate.</value></data>
     <data name="mail_settings/credentials_on_connected_apps" xml:space="preserve"><value>Your app passwords are listed under Settings → Connected apps — copy, reveal or disconnect each one there.</value></data>
     <data name="mail_settings/serve_here_label" xml:space="preserve"><value>Serve my mail &amp; calendar over IMAP/CalDAV on this nest</value></data>
@@ -2502,6 +2623,20 @@ built on your own server.</value></data>
     <data name="mail_settings/forward_per_hour_not_a_number" xml:space="preserve"><value>Enter the hourly forwarding limit as a whole number.</value></data>
     <data name="mail_settings/forward_per_hour_zero" xml:space="preserve"><value>The hourly forwarding limit must be at least 1.</value></data>
     <data name="mail_settings/forward_per_hour_above_ceiling" xml:space="preserve"><value>The hourly forwarding limit can't be more than {ceiling}.</value></data>
+    <data name="mail_settings/receive_label" xml:space="preserve"><value>Receive mail</value></data>
+    <data name="mail_settings/receive_subtitle" xml:space="preserve"><value>When off, mail sent to your addresses is refused. Mail you already have stays.</value></data>
+    <data name="mail_settings/send_label" xml:space="preserve"><value>Send mail</value></data>
+    <data name="mail_settings/send_subtitle" xml:space="preserve"><value>When off, you can't send mail from your account. Automatic replies and forwards you have set up still go out.</value></data>
+    <data name="mail_settings/scan_result_visible_label" xml:space="preserve"><value>Show scan results on received mail</value></data>
+    <data name="mail_settings/scan_result_visible_subtitle" xml:space="preserve"><value>When off, received messages don't show the spam and virus check line. The check still runs.</value></data>
+    <data name="mail_settings/autorespond_label" xml:space="preserve"><value>Automatic reply</value></data>
+    <data name="mail_settings/autorespond_subtitle" xml:space="preserve"><value>Answers each sender once a week while it is on.</value></data>
+    <data name="mail_settings/autorespond_message_label" xml:space="preserve"><value>Automatic reply message</value></data>
+    <data name="mail_settings/autorespond_message_empty" xml:space="preserve"><value>Write the automatic reply's message first.</value></data>
+    <data name="mail_settings/mailbox_quota" xml:space="preserve"><value>{used} of {limit} · {messages} of {message_limit} messages</value></data>
+    <data name="mail_settings/submission_quota" xml:space="preserve"><value>{used} of {limit} recipients today</value></data>
+    <data name="mail_settings/over_quota_mailbox" xml:space="preserve"><value>Your mailbox is full. New mail is refused until you delete some.</value></data>
+    <data name="mail_settings/over_quota_sending" xml:space="preserve"><value>You've sent to today's limit of {limit} recipients. Sending resumes tomorrow.</value></data>
     <data name="web_settings/title" xml:space="preserve"><value>Web</value></data>
     <data name="web_settings/subdomain_toggle_label" xml:space="preserve"><value>Publish my website</value></data>
     <data name="web_settings/subdomain_toggle_subtitle" xml:space="preserve"><value>When on, this nest serves your Web files and web-published posts at your personal address. Off by default.</value></data>
@@ -2548,6 +2683,8 @@ built on your own server.</value></data>
     <data name="mail_aliases/delete" xml:space="preserve"><value>Delete</value></data>
     <data name="mail_aliases/edit" xml:space="preserve"><value>Edit</value></data>
     <data name="mail_aliases/show_audit" xml:space="preserve"><value>Show audit</value></data>
+    <data name="mail_aliases/hide_audit" xml:space="preserve"><value>Hide audit</value></data>
+    <data name="mail_aliases/audit_empty" xml:space="preserve"><value>Nothing has arrived on this address yet.</value></data>
     <data name="mail_aliases/disabled_badge" xml:space="preserve"><value>disabled</value></data>
     <data name="mail_aliases/active_toggle_label" xml:space="preserve"><value>Active</value></data>
     <data name="mail_aliases/active_toggle_tooltip" xml:space="preserve"><value>When on, this address receives mail. Turn off to bounce mail to it without deleting the address — you can turn it back on anytime.</value></data>
@@ -2561,9 +2698,13 @@ built on your own server.</value></data>
     <data name="mail_aliases/kind_catchall" xml:space="preserve"><value>Catch-all</value></data>
     <data name="mail_aliases/kind_forwarder" xml:space="preserve"><value>Forwarder</value></data>
     <data name="mail_aliases/kind_other" xml:space="preserve"><value>Alias</value></data>
+    <data name="mail_aliases/delivered_to" xml:space="preserve"><value>Delivered to: {address} [{label}]</value></data>
     <data name="mail_aliases/no_default_domain" xml:space="preserve"><value>Enable mail before adding aliases.</value></data>
     <data name="mail_aliases/hits" xml:space="preserve"><value>{count} hits</value></data>
     <data name="mail_aliases/hits_with_last" xml:space="preserve"><value>{count} hits · last {date}</value></data>
+    <data name="mail_aliases/expires_on" xml:space="preserve"><value>Expires {date}</value></data>
+    <data name="mail_aliases/expired" xml:space="preserve"><value>Expired</value></data>
+    <data name="mail_aliases/extend" xml:space="preserve"><value>Extend</value></data>
     <data name="mail_aliases/import_button" xml:space="preserve"><value>Import addresses</value></data>
     <data name="mail_aliases/import_title" xml:space="preserve"><value>Import addresses</value></data>
     <data name="mail_aliases/import_subtitle" xml:space="preserve"><value>Paste one address per line. Each becomes an exact alias that delivers to you; addresses you already have are skipped.</value></data>
@@ -2688,6 +2829,7 @@ built on your own server.</value></data>
     <data name="mail_import/source_app_password_help_icloud" xml:space="preserve"><value>Requires 2FA on your Apple ID. Generate one at appleid.apple.com and paste it here.</value></data>
     <data name="mail_import/source_oauth_button" xml:space="preserve"><value>Sign in with Microsoft</value></data>
     <data name="mail_import/source_outlook_address_label" xml:space="preserve"><value>Your Outlook address</value></data>
+    <data name="mail_import/source_forget_button" xml:space="preserve"><value>Forget saved server details</value></data>
     <data name="mail_import/microsoft_code_fmt" xml:space="preserve"><value>Go to {url} and enter the code {code}.</value></data>
     <data name="mail_import/microsoft_open_browser" xml:space="preserve"><value>Open in browser</value></data>
     <data name="mail_import/microsoft_waiting" xml:space="preserve"><value>Waiting for you to finish signing in with Microsoft…</value></data>
@@ -2723,6 +2865,7 @@ built on your own server.</value></data>
     <data name="mail_import/scope_date_from_placeholder" xml:space="preserve"><value>From date (optional, YYYY-MM-DD)</value></data>
     <data name="mail_import/scope_max_size_label" xml:space="preserve"><value>Max message size (MB)</value></data>
     <data name="mail_import/scope_mailbox_mapping_label" xml:space="preserve"><value>Mailboxes map 1:1 by name — INBOX to INBOX, Sent to Sent, and so on. Mailboxes with no matching Fauna mailbox are created, named after the source.</value></data>
+    <data name="mail_import/scope_import_duplicates_label" xml:space="preserve"><value>Import duplicates anyway (advanced) — mail you already have is stored a second time and counts against your storage.</value></data>
     <data name="mail_import/confirm_title" xml:space="preserve"><value>Step 3 — Confirm</value></data>
     <data name="mail_import/confirm_summary_fmt" xml:space="preserve"><value>{source} · {mailboxes} mailbox(es) · {messages} messages</value></data>
     <data name="mail_import/confirm_summary_sized_fmt" xml:space="preserve"><value>{source} · {mailboxes} mailbox(es) · {messages} messages · about {size}</value></data>
@@ -2734,8 +2877,17 @@ built on your own server.</value></data>
     <data name="mail_import/pause_button" xml:space="preserve"><value>Pause</value></data>
     <data name="mail_import/resume_button" xml:space="preserve"><value>Resume</value></data>
     <data name="mail_import/cancel_button" xml:space="preserve"><value>Cancel</value></data>
+    <data name="mail_import/dismiss_failed_button" xml:space="preserve"><value>Dismiss</value></data>
+    <data name="mail_import/failed_import_control" xml:space="preserve"><value>This import failed — it can no longer be paused, resumed or cancelled. Dismiss it and start a new import.</value></data>
+    <data name="mail_import/cancelled_import_control" xml:space="preserve"><value>This import was cancelled — it can no longer be paused, resumed or cancelled.</value></data>
+    <data name="mail_import/dismiss_live_import" xml:space="preserve"><value>This import is still under way — cancel it first. Mail already imported is kept.</value></data>
     <data name="mail_import/paused_mailbox_full" xml:space="preserve"><value>Import paused: your Fauna mailbox is full. Ask your admin for more room, then resume — the import picks up from the first message that did not fit.</value></data>
+    <data name="mail_import/quota_notice" xml:space="preserve"><value>Your Fauna mailbox is full. Ask your admin for more room, then resume. Or skip the messages not imported yet, or cancel the import.</value></data>
+    <data name="mail_import/quota_skip_rest_button" xml:space="preserve"><value>Skip the rest</value></data>
     <data name="mail_import/paused_connection_lost" xml:space="preserve"><value>Import paused: the connection was lost and did not come back after several tries. Check your network, then resume — the import picks up where it stopped.</value></data>
+    <data name="mail_import/mailbox_rebuilt_fmt" xml:space="preserve"><value>{mailbox}: your old provider rebuilt this mailbox since the import began, so the place the import had reached no longer points at the right messages. It was not imported further.</value></data>
+    <data name="mail_import/paused_mailbox_rebuilt" xml:space="preserve"><value>Import paused: your old provider rebuilt a mailbox since the import began. Restart it to import it again from its first message — mail that already arrived is skipped.</value></data>
+    <data name="mail_import/restart_button" xml:space="preserve"><value>Restart rebuilt mailbox</value></data>
     <data name="mail_import/error_log_title" xml:space="preserve"><value>Skipped / errored messages</value></data>
     <data name="mail_import/done_title" xml:space="preserve"><value>Step 5 — Done</value></data>
     <data name="mail_import/done_summary_fmt" xml:space="preserve"><value>{imported} imported · {skipped} skipped · {errored} errored</value></data>
@@ -3070,6 +3222,27 @@ built on your own server.</value></data>
     <data name="admin/users_page/age_verification_required_label" xml:space="preserve"><value>Accept only signups carrying app age verification</value></data>
     <data name="admin/users_page/cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/users_page/delete" xml:space="preserve"><value>Delete</value></data>
+    <data name="admin/mail_reports_page/title" xml:space="preserve"><value>Mail reports</value></data>
+    <data name="admin/mail_reports_page/description" xml:space="preserve"><value>Other mail servers send daily reports about mail that claims to come from your domains: how much they saw, and whether it passed the checks that prove it is really yours.</value></data>
+    <data name="admin/mail_reports_page/refresh" xml:space="preserve"><value>Refresh</value></data>
+    <data name="admin/mail_reports_page/window_label" xml:space="preserve"><value>Period</value></data>
+    <data name="admin/mail_reports_page/window_days" xml:space="preserve"><value>Last {days} days</value></data>
+    <data name="admin/mail_reports_page/domain_label" xml:space="preserve"><value>Domain</value></data>
+    <data name="admin/mail_reports_page/every_domain" xml:space="preserve"><value>All domains</value></data>
+    <data name="admin/mail_reports_page/summary_title" xml:space="preserve"><value>Summary</value></data>
+    <data name="admin/mail_reports_page/messages" xml:space="preserve"><value>{messages} messages reported · {reports} reports · {peers} reporting servers</value></data>
+    <data name="admin/mail_reports_page/alignment" xml:space="preserve"><value>DMARC pass {dmarc} ({dmarc_share}%) · DKIM aligned {dkim} ({dkim_share}%) · SPF aligned {spf} ({spf_share}%)</value></data>
+    <data name="admin/mail_reports_page/dispositions" xml:space="preserve"><value>Delivered {none} · Quarantined {quarantine} · Rejected {reject}</value></data>
+    <data name="admin/mail_reports_page/truncated" xml:space="preserve"><value>Only the newest 1,000 reports in this period are counted.</value></data>
+    <data name="admin/mail_reports_page/empty" xml:space="preserve"><value>No DMARC reports yet. Peer mail servers usually send the first report one to seven days after the policy was published.</value></data>
+    <data name="admin/mail_reports_page/sources_title" xml:space="preserve"><value>Top sources by reported messages</value></data>
+    <data name="admin/mail_reports_page/senders_title" xml:space="preserve"><value>Top senders by reported messages</value></data>
+    <data name="admin/mail_reports_page/reports_title" xml:space="preserve"><value>Reports</value></data>
+    <data name="admin/mail_reports_page/row_messages" xml:space="preserve"><value>{count} messages</value></data>
+    <data name="admin/mail_reports_page/report_period" xml:space="preserve"><value>{begin} – {end}</value></data>
+    <data name="admin/mail_reports_page/report_pass" xml:space="preserve"><value>{passed} of {count} passed DMARC</value></data>
+    <data name="admin/mail_reports_page/view" xml:space="preserve"><value>View</value></data>
+    <data name="admin/mail_reports_page/raw_title" xml:space="preserve"><value>Report XML</value></data>
     <data name="admin/aliases_page/title" xml:space="preserve"><value>External Forwarders</value></data>
     <data name="admin/aliases_page/loading" xml:space="preserve"><value>Loading aliases...</value></data>
     <data name="admin/aliases_page/local_part" xml:space="preserve"><value>Local part</value></data>
@@ -3123,6 +3296,9 @@ built on your own server.</value></data>
     <data name="admin/settings_page/add_tier_error" xml:space="preserve"><value>Failed to add tier: {message}</value></data>
     <data name="admin/settings_page/add_tier_error_empty_name" xml:space="preserve"><value>Can't add this tier — give it a name.</value></data>
     <data name="admin/settings_page/add_tier_error_invalid_cap" xml:space="preserve"><value>Can't add this tier — every limit must be a whole number.</value></data>
+    <data name="admin/settings_page/delete_tier" xml:space="preserve"><value>Delete</value></data>
+    <data name="admin/settings_page/delete_tier_error" xml:space="preserve"><value>Failed to delete tier: {message}</value></data>
+    <data name="admin/settings_page/delete_tier_error_in_use" xml:space="preserve"><value>A member, an invite code or a paid membership still uses this tier, or it's the nest's default tier — move them off it first.</value></data>
     <data name="admin/settings_page/membership_section" xml:space="preserve"><value>Membership</value></data>
     <data name="admin/settings_page/loading_membership" xml:space="preserve"><value>Loading membership designations...</value></data>
     <data name="admin/settings_page/no_membership_tiers" xml:space="preserve"><value>You have no subscription tiers yet — create one in your Tiers tab, then designate it here for paid nest access.</value></data>
@@ -3184,6 +3360,21 @@ built on your own server.</value></data>
     <data name="admin/nest_page/web_app_origin_scope" xml:space="preserve"><value>This changes only what this server's own address answers. Anyone who opens {origin} directly loads the app from there either way, and an address someone types or bookmarks always wins.</value></data>
     <data name="admin/nest_page/web_app_origin_load_error" xml:space="preserve"><value>Failed to load the web app choice: {message}</value></data>
     <data name="admin/nest_page/web_app_origin_save_error" xml:space="preserve"><value>Failed to save the web app choice: {message}</value></data>
+    <data name="admin/nest_page/update_channel_label" xml:space="preserve"><value>Updates</value></data>
+    <data name="admin/nest_page/update_channel_desc" xml:space="preserve"><value>Which builds this server installs on its own. A server never moves to an older version: switching to a channel that is behind waits until it catches up.</value></data>
+    <data name="admin/nest_page/update_channel_save" xml:space="preserve"><value>Save update channel</value></data>
+    <data name="admin/nest_page/update_channel_loading" xml:space="preserve"><value>Loading the update channel…</value></data>
+    <data name="admin/nest_page/update_channel_status_following_stable" xml:space="preserve"><value>Following Stable — new releases are picked up within the hour. This server runs {version}.</value></data>
+    <data name="admin/nest_page/update_channel_status_following_test" xml:space="preserve"><value>Following Test — new builds are picked up within about a minute. This server runs {version}.</value></data>
+    <data name="admin/nest_page/update_channel_status_following_dev" xml:space="preserve"><value>Following Dev — new builds are picked up within about a minute. This server runs {version}.</value></data>
+    <data name="admin/nest_page/update_channel_status_hold_stable" xml:space="preserve"><value>Following Stable from the next Stable release that is at least {running}; this server runs {running}, and Stable is at {head}.</value></data>
+    <data name="admin/nest_page/update_channel_status_hold_test" xml:space="preserve"><value>Following Test from the next Test build that is at least {running}; this server runs {running}, and Test is at {head}.</value></data>
+    <data name="admin/nest_page/update_channel_status_hold_dev" xml:space="preserve"><value>Following Dev from the next Dev build that is at least {running}; this server runs {running}, and Dev is at {head}.</value></data>
+    <data name="admin/nest_page/update_channel_status_pinned" xml:space="preserve"><value>This server runs {version} and follows no channel until one is chosen.</value></data>
+    <data name="admin/nest_page/update_channel_status_not_from_image" xml:space="preserve"><value>This server runs {version}. It was not installed from Fauna's container image, so it follows no update channel: update it the same way it was installed.</value></data>
+    <data name="admin/nest_page/update_channel_status_unknown" xml:space="preserve"><value>This server follows an update channel this app doesn't recognize ({channel}). Update the app to change it.</value></data>
+    <data name="admin/nest_page/update_channel_status_predates" xml:space="preserve"><value>This server is too old to choose its update channel from the app. Update the server to change it.</value></data>
+    <data name="admin/nest_page/os_no_host_data" xml:space="preserve"><value>OS status not reported by this host</value></data>
     <data name="admin/nest_page/os_up_to_date" xml:space="preserve"><value>OS up to date</value></data>
     <data name="admin/nest_page/os_updates_pending" xml:space="preserve"><value>Security updates pending</value></data>
     <data name="admin/nest_page/os_restart_pending" xml:space="preserve"><value>Restart pending — will restart automatically when idle</value></data>
@@ -3219,7 +3410,7 @@ built on your own server.</value></data>
     <data name="admin/nest_page/rotate_seed_mismatch" xml:space="preserve"><value>This nest reported a different identity than the one that was sent. Nothing further was changed; check the nest before trying again.</value></data>
     <data name="admin/nest_page/rotate_seed_failed" xml:space="preserve"><value>Couldn't rotate the deployment identity: {cause}</value></data>
     <data name="admin/nest_page/takedown_label" xml:space="preserve"><value>Legal takedown</value></data>
-    <data name="admin/nest_page/takedown_desc" xml:space="preserve"><value>The one nest-wide content removal, for legal compulsion only (a court order, a statutory demand). Every takedown serves a visible tombstone in place of the content, can be appealed by the author, and writes a permanent audit record. It is never a policy or opinion lever.</value></data>
+    <data name="admin/nest_page/takedown_desc" xml:space="preserve"><value>One of two by-hand withholds, for legal compulsion only (a court order, a statutory demand — and, on the nest its publisher runs, an app store's or an authority's request to remove an item); the other is an admin's block of a reported item. Every takedown serves a visible tombstone in place of the content, can be appealed by the author of a post, and writes a permanent audit record. It is never a policy or opinion lever.</value></data>
     <data name="admin/nest_page/takedown_content_id_label" xml:space="preserve"><value>Content id</value></data>
     <data name="admin/nest_page/takedown_type_post" xml:space="preserve"><value>Post</value></data>
     <data name="admin/nest_page/takedown_type_conversation" xml:space="preserve"><value>Conversation message</value></data>
@@ -3229,17 +3420,17 @@ built on your own server.</value></data>
     <data name="admin/nest_page/takedown_arm_restore" xml:space="preserve"><value>Restore…</value></data>
     <data name="admin/nest_page/takedown_blocked_no_content" xml:space="preserve"><value>Enter the content id of the item named by the legal obligation.</value></data>
     <data name="admin/nest_page/takedown_blocked_no_reference" xml:space="preserve"><value>A legal reference is required — a takedown without one is refused.</value></data>
-    <data name="admin/nest_page/takedown_confirm_takedown" xml:space="preserve"><value>Take down {content_type} {content_id}, citing "{reference}"? A visible tombstone will be served in its place, the author can appeal, and a permanent audit row records this action.</value></data>
+    <data name="admin/nest_page/takedown_confirm_takedown" xml:space="preserve"><value>Take down {content_type} {content_id}, citing "{reference}"? A visible tombstone will be served in its place, the author of a post can appeal, and a permanent audit row records this action.</value></data>
     <data name="admin/nest_page/takedown_confirm_restore" xml:space="preserve"><value>Overturn the takedown of {content_type} {content_id}? The content serves again; the takedown record remains as history.</value></data>
     <data name="admin/nest_page/takedown_confirm_button_takedown" xml:space="preserve"><value>Confirm takedown</value></data>
     <data name="admin/nest_page/takedown_confirm_button_restore" xml:space="preserve"><value>Confirm restore</value></data>
     <data name="admin/nest_page/takedown_cancel_button" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/nest_page/takedown_working" xml:space="preserve"><value>Submitting…</value></data>
-    <data name="admin/nest_page/takedown_done" xml:space="preserve"><value>Taken down. A tombstone is served in its place and the author can appeal.</value></data>
+    <data name="admin/nest_page/takedown_done" xml:space="preserve"><value>Taken down. A tombstone is served in its place and the author of a post can appeal.</value></data>
     <data name="admin/nest_page/takedown_restored" xml:space="preserve"><value>Restored. The content is served again; the takedown stays on record.</value></data>
     <data name="admin/nest_page/takedown_failed" xml:space="preserve"><value>The nest refused the request: {error}</value></data>
     <data name="admin/nest_page/reports_label" xml:space="preserve"><value>Reports</value></data>
-    <data name="admin/nest_page/reports_desc" xml:space="preserve"><value>Reports from users of this nest, and reports forwarded from other nests about accounts hosted here. A report is evidence for you to weigh; it removes nothing by itself. Acting means the legal-takedown console or a suspension — resolving a row only records what you decided.</value></data>
+    <data name="admin/nest_page/reports_desc" xml:space="preserve"><value>Reports from users of this nest, and reports forwarded from other nests about accounts hosted here. A report is evidence for you to weigh; it removes nothing by itself. Acting means the legal-takedown console, a suspension or, where this page offers it, blocking the reported item — resolving a row only records what you decided.</value></data>
     <data name="admin/nest_page/reports_loading" xml:space="preserve"><value>Loading reports…</value></data>
     <data name="admin/nest_page/reports_empty" xml:space="preserve"><value>No open reports.</value></data>
     <data name="admin/nest_page/reports_origin_local" xml:space="preserve"><value>Reported by {handle}</value></data>
@@ -3250,6 +3441,24 @@ built on your own server.</value></data>
     <data name="admin/nest_page/reports_resolved_acted" xml:space="preserve"><value>Recorded as acted on. The reporter is told the outcome, nothing more.</value></data>
     <data name="admin/nest_page/reports_resolved_dismissed" xml:space="preserve"><value>Dismissed. The reporter is told the outcome, nothing more.</value></data>
     <data name="admin/nest_page/reports_failed" xml:space="preserve"><value>Could not update the report: {error}</value></data>
+    <data name="admin/nest_page/block_arm_block" xml:space="preserve"><value>Block…</value></data>
+    <data name="admin/nest_page/block_arm_unblock" xml:space="preserve"><value>Unblock…</value></data>
+    <data name="admin/nest_page/block_blocked_not_item" xml:space="preserve"><value>A block is of one post or message. An account report has the account levers — suspension on the users page.</value></data>
+    <data name="admin/nest_page/block_item_post" xml:space="preserve"><value>post</value></data>
+    <data name="admin/nest_page/block_item_message" xml:space="preserve"><value>message</value></data>
+    <data name="admin/nest_page/block_confirm_block" xml:space="preserve"><value>Block {item} {content_id} for everyone this nest serves? Reason: {reason}. A notice is shown in its place, the author of a post keeps their view of it and can appeal, and a permanent audit row records this action. Nothing is deleted.</value></data>
+    <data name="admin/nest_page/block_confirm_unblock" xml:space="preserve"><value>Unblock {item} {content_id} (blocked for: {reason})? It is served again exactly as it was; the block stays on record.</value></data>
+    <data name="admin/nest_page/block_confirm_button_block" xml:space="preserve"><value>Confirm block</value></data>
+    <data name="admin/nest_page/block_confirm_button_unblock" xml:space="preserve"><value>Confirm unblock</value></data>
+    <data name="admin/nest_page/block_done" xml:space="preserve"><value>Blocked. A notice is shown in its place, the author of a post can appeal, and the report is recorded as acted on.</value></data>
+    <data name="admin/nest_page/block_restored" xml:space="preserve"><value>Unblocked. The item is served again; the block stays on record.</value></data>
+    <data name="admin/nest_page/block_failed" xml:space="preserve"><value>The nest refused the request: {error}</value></data>
+    <data name="admin/nest_page/block_cancel_button" xml:space="preserve"><value>Cancel</value></data>
+    <data name="admin/nest_page/block_working" xml:space="preserve"><value>Submitting…</value></data>
+    <data name="admin/nest_page/blocked_label" xml:space="preserve"><value>Blocked items</value></data>
+    <data name="admin/nest_page/blocked_desc" xml:space="preserve"><value>Posts and messages this nest's admins blocked after a report. Each is withheld from everyone this nest serves — a post except from its author — with a notice in its place. Unblock serves it again exactly as it was.</value></data>
+    <data name="admin/nest_page/blocked_loading" xml:space="preserve"><value>Loading blocked items…</value></data>
+    <data name="admin/nest_page/blocked_empty" xml:space="preserve"><value>Nothing is blocked.</value></data>
     <data name="admin/nest_page/oauth_label" xml:space="preserve"><value>Outside-app sign-in keys</value></data>
     <data name="admin/nest_page/oauth_desc" xml:space="preserve"><value>The keys this nest signs outside apps' sign-in passes with, and the secret behind their saved sign-ins. Replacing them is a response to an exposure, never routine upkeep.</value></data>
     <data name="admin/nest_page/oauth_keys_loading" xml:space="preserve"><value>Checking which sign-in keys this nest uses…</value></data>
@@ -3325,6 +3534,16 @@ built on your own server.</value></data>
     <data name="admin/logs_page/title" xml:space="preserve"><value>Nest Logs</value></data>
     <data name="admin/logs_page/description" xml:space="preserve"><value>Recent activity recorded on the nest, newest first. No message contents or secrets are logged — only what happened, when, and where.</value></data>
     <data name="admin/logs_page/empty" xml:space="preserve"><value>No nest log entries yet.</value></data>
+    <data name="admin/logs_page/audit_title" xml:space="preserve"><value>Admin actions</value></data>
+    <data name="admin/logs_page/audit_empty" xml:space="preserve"><value>No admin actions recorded yet.</value></data>
+    <data name="admin/logs_page/audit_entry" xml:space="preserve"><value>{who} — {action} on {target}</value></data>
+    <data name="admin/logs_page/audit_entry_no_target" xml:space="preserve"><value>{who} — {action}</value></data>
+    <data name="admin/logs_page/audit_entry_system" xml:space="preserve"><value>The nest — {action} on {target}</value></data>
+    <data name="admin/logs_page/audit_entry_system_no_target" xml:space="preserve"><value>The nest — {action}</value></data>
+    <data name="admin/logs_page/audit_more" xml:space="preserve"><value>Show older</value></data>
+    <data name="admin/logs_page/audit_verified" xml:space="preserve"><value>The record checks out through the {count} entries shown.</value></data>
+    <data name="admin/logs_page/audit_uncheckable" xml:space="preserve"><value>The record checks out through the entries shown, except {count} this app cannot check.</value></data>
+    <data name="admin/logs_page/audit_broken" xml:space="preserve"><value>Entry {id} does not check out — the record may have been altered.</value></data>
     <data name="admin/custody_hosting/title" xml:space="preserve"><value>Held Custody</value></data>
     <data name="admin/custody_hosting/description" xml:space="preserve"><value>Data this nest holds on behalf of other people's accounts, at the request of an account holder here. Each row makes this nest dial an outside address on a schedule and keep what it serves.</value></data>
     <data name="admin/custody_hosting/empty" xml:space="preserve"><value>No account here has asked this nest to hold data for anyone.</value></data>
@@ -3372,6 +3591,10 @@ built on your own server.</value></data>
     <data name="admin/bridges_rotate/warning" xml:space="preserve"><value>The bridge will be marked revoked and will exit; the supervisor restarts it with a fresh key. On a mail-enabled box the new key is approved automatically.</value></data>
     <data name="admin/bridges_rotate/confirm" xml:space="preserve"><value>Rotate key</value></data>
     <data name="admin/bridges_rotate/cancel" xml:space="preserve"><value>Cancel</value></data>
+    <data name="admin/bridges_reject/title" xml:space="preserve"><value>Reject this bridge?</value></data>
+    <data name="admin/bridges_reject/warning" xml:space="preserve"><value>It will not be able to connect again until an admin re-approves a fresh keypair.</value></data>
+    <data name="admin/bridges_reject/confirm" xml:space="preserve"><value>Reject bridge</value></data>
+    <data name="admin/bridges_reject/cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="admin/mail_page/title" xml:space="preserve"><value>Mail</value></data>
     <data name="admin/mail_page/description" xml:space="preserve"><value>Box-wide mail policy — enable mail and tune the inbound perimeter and authentication enforcement. DKIM, TLS, and DNS records are managed automatically.</value></data>
     <data name="admin/mail_page/enabled_label" xml:space="preserve"><value>Enable mail</value></data>
@@ -3399,11 +3622,34 @@ built on your own server.</value></data>
     <data name="admin/mail_page/health_never" xml:space="preserve"><value>Never</value></data>
     <data name="admin/mail_page/health_status_line" xml:space="preserve"><value>{state} — last delivered: {delivered} · last received: {received}</value></data>
     <data name="admin/mail_page/health_delist" xml:space="preserve"><value>Request removal from the blocklist</value></data>
+    <data name="admin/mail_page/health_sender_dashboards_note" xml:space="preserve"><value>Gmail Postmaster Tools and Outlook SNDS are externally managed dashboards on the receiver's website. Sign up at postmaster.google.com and sendersms.outlook.com if you want their per-receiver-side view; Fauna doesn't integrate with these APIs (none exist).</value></data>
+    <data name="admin/mail_page/health_sender_dashboard_gmail" xml:space="preserve"><value>Gmail Postmaster Tools</value></data>
+    <data name="admin/mail_page/health_sender_dashboard_outlook" xml:space="preserve"><value>Outlook SNDS</value></data>
     <data name="admin/mail_page/health_recheck" xml:space="preserve"><value>Check again</value></data>
     <data name="admin/mail_page/health_warmup_reset" xml:space="preserve"><value>Restart warm-up</value></data>
     <data name="admin/mail_page/health_warmup_reset_confirm" xml:space="preserve"><value>Restart the sending warm-up at day 1? Do this only after the server's outgoing IP address changed.</value></data>
+    <data name="admin/mail_page/secrets_group_title" xml:space="preserve"><value>Secrets</value></data>
+    <data name="admin/mail_page/secrets_group_desc" xml:space="preserve"><value>Rotate a secret only when it may have leaked. Its value is never shown.</value></data>
+    <data name="admin/mail_page/list_unsubscribe_secret_rotate" xml:space="preserve"><value>Rotate the newsletter unsubscribe secret</value></data>
+    <data name="admin/mail_page/list_unsubscribe_secret_rotate_confirm" xml:space="preserve"><value>Rotate the unsubscribe secret? Unsubscribe links in newsletters already sent will stop working.</value></data>
+    <data name="admin/mail_page/list_unsubscribe_secret_rotated" xml:space="preserve"><value>Unsubscribe secret rotated — {count} subscriptions now have new links. New issues carry them.</value></data>
+    <data name="admin/mail_page/forward_srs_secret_rotate" xml:space="preserve"><value>Rotate the forwarding secret</value></data>
+    <data name="admin/mail_page/forward_srs_secret_rotate_confirm" xml:space="preserve"><value>Rotate the forwarding secret? Bounces to mail forwarded before still come back while the old secret is kept.</value></data>
+    <data name="admin/mail_page/forward_srs_secret_rotated" xml:space="preserve"><value>Forwarding secret rotated. The previous one is still honoured for bounces to mail already forwarded.</value></data>
     <data name="admin/mail_page/auto_enable_new_users_label" xml:space="preserve"><value>Auto-enable mail for new users</value></data>
     <data name="admin/mail_page/auto_enable_new_users_subtitle" xml:space="preserve"><value>New users automatically get a mailbox at their handle on first sign-in. Each user can still turn their own mail off.</value></data>
+    <data name="admin/mail_page/microsoft_group_title" xml:space="preserve"><value>Microsoft sign-in for the Outlook import</value></data>
+    <data name="admin/mail_page/microsoft_group_desc" xml:space="preserve"><value>The Outlook import signs in to Microsoft through the default app registration. To use your organisation's own registration instead, enter its application (client) ID and, if you like, its directory. Leave both empty to go back to the default.</value></data>
+    <data name="admin/mail_page/microsoft_requirements" xml:space="preserve"><value>The registration needs: public client flows turned on; the delegated permissions IMAP.AccessAsUser.All (Office 365 Exchange Online) and offline_access; and supported account types that match the directory.</value></data>
+    <data name="admin/mail_page/microsoft_client_id_label" xml:space="preserve"><value>Application (client) ID</value></data>
+    <data name="admin/mail_page/microsoft_tenant_label" xml:space="preserve"><value>Directory (tenant)</value></data>
+    <data name="admin/mail_page/microsoft_tenant_subtitle" xml:space="preserve"><value>A tenant ID, a verified domain name, or common, organizations or consumers. Empty means common.</value></data>
+    <data name="admin/mail_page/microsoft_save" xml:space="preserve"><value>Save Microsoft registration</value></data>
+    <data name="admin/mail_page/microsoft_using_default" xml:space="preserve"><value>Using the default registration.</value></data>
+    <data name="admin/mail_page/microsoft_using_own" xml:space="preserve"><value>Using your organisation's registration.</value></data>
+    <data name="admin/mail_page/microsoft_client_id_invalid" xml:space="preserve"><value>The application (client) ID must be a GUID, such as 00000000-0000-0000-0000-000000000000.</value></data>
+    <data name="admin/mail_page/microsoft_tenant_invalid" xml:space="preserve"><value>The directory must be a tenant ID, a domain name, or common, organizations or consumers.</value></data>
+    <data name="admin/mail_page/microsoft_tenant_needs_client_id" xml:space="preserve"><value>Enter the application (client) ID that goes with this directory.</value></data>
     <data name="admin/mail_page/spam_group_title" xml:space="preserve"><value>Spam and inbound perimeter</value></data>
     <data name="admin/mail_page/spam_group_desc" xml:space="preserve"><value>How inbound mail is scored, rate-limited, and gated before delivery.</value></data>
     <data name="admin/mail_page/threshold_junk_label" xml:space="preserve"><value>Junk threshold</value></data>
@@ -3439,6 +3685,7 @@ built on your own server.</value></data>
     <data name="admin/mail_page/unlisted_recipient_penalty_subtitle" xml:space="preserve"><value>Extra spam points added when mail arrives at an address that isn't one of a user's aliases (delivered via catch-all). 0 = off; a large value (e.g. 1000) forces such mail to Junk.</value></data>
     <data name="admin/mail_page/spam_save" xml:space="preserve"><value>Save spam policy</value></data>
     <data name="admin/mail_page/publish_spam_baseline_button" xml:space="preserve"><value>Publish deployment baseline</value></data>
+    <data name="admin/mail_page/publish_spam_baseline_confirm" xml:space="preserve"><value>Publish the baseline? It reflects the spam training of the members who opted in, and new users' filters start from it.</value></data>
     <data name="admin/mail_page/publish_spam_baseline_subtitle" xml:space="preserve"><value>Aggregate every opted-in user's spam training into a baseline that new users start from. Never reveals who contributed, and needs at least 3 contributors.</value></data>
     <data name="admin/mail_page/spam_baseline_published" xml:space="preserve"><value>Published from {contributors} contributors ({samples} samples).</value></data>
     <data name="admin/mail_page/spam_baseline_withheld" xml:space="preserve"><value>Not published — too few contributors ({contributors}); at least 3 must opt in.</value></data>
@@ -3511,6 +3758,15 @@ built on your own server.</value></data>
     <data name="admin/mail_page/alias_wildcard_prefix_label" xml:space="preserve"><value>Wildcard-prefix aliases</value></data>
     <data name="admin/mail_page/alias_wildcard_prefix_subtitle" xml:space="preserve"><value>Allow name-prefixed aliases that route to the same user.</value></data>
     <data name="admin/mail_page/alias_save" xml:space="preserve"><value>Save alias policy</value></data>
+    <data name="admin/mail_page/dmarc_group_title" xml:space="preserve"><value>DMARC reports</value></data>
+    <data name="admin/mail_page/dmarc_group_desc" xml:space="preserve"><value>The reports peer mail servers send about mail claiming to be from your domains, and how long they are kept.</value></data>
+    <data name="admin/mail_page/dmarc_ruf_publish_label" xml:space="preserve"><value>Ask for forensic reports</value></data>
+    <data name="admin/mail_page/dmarc_ruf_warning" xml:space="preserve"><value>Forensic reports carry recipient email addresses from third-party senders. Enable only if your security team needs forensic-level signal.</value></data>
+    <data name="admin/mail_page/dmarc_fo_mode_label" xml:space="preserve"><value>Report a message when</value></data>
+    <data name="admin/mail_page/dmarc_aggregate_retention_label" xml:space="preserve"><value>Keep aggregate reports (days, 1–365)</value></data>
+    <data name="admin/mail_page/dmarc_forensic_retention_label" xml:space="preserve"><value>Keep forensic reports (days, 1–90)</value></data>
+    <data name="admin/mail_page/dmarc_forensic_retention_warning" xml:space="preserve"><value>Forensic reports hold third-party addresses — keeping them longer than 30 days keeps that personal data longer.</value></data>
+    <data name="admin/mail_page/dmarc_save" xml:space="preserve"><value>Save DMARC policy</value></data>
     <data name="admin/dns/title" xml:space="preserve"><value>DNS</value></data>
     <data name="admin/dns/description" xml:space="preserve"><value>Every DNS record each of your domains needs, with the exact value to set and a live check against public DNS.</value></data>
     <data name="admin/dns/empty" xml:space="preserve"><value>No domains yet.</value></data>
@@ -3531,6 +3787,9 @@ built on your own server.</value></data>
     <data name="admin/dns/add_domain_primary_warning" xml:space="preserve"><value>This becomes your nest's primary domain and can never be removed — undoing it later requires renaming onto a different domain.</value></data>
     <data name="admin/dns/primary_badge" xml:space="preserve"><value>Primary</value></data>
     <data name="admin/dns/remove" xml:space="preserve"><value>Remove</value></data>
+    <data name="admin/dns/remove_confirm_title" xml:space="preserve"><value>Remove {domain}?</value></data>
+    <data name="admin/dns/remove_confirm_body" xml:space="preserve"><value>{domain} will stop receiving mail: the addresses your members have on it stop working, and mail sent to them is refused. You can restore the domain for 30 days, and those addresses come back with it. After 30 days the domain, its signing key and the aliases on it are gone for good, and adding it again starts with a new key. Mail already on its way may still arrive.</value></data>
+    <data name="admin/dns/remove_confirm" xml:space="preserve"><value>Remove domain</value></data>
     <data name="admin/dns/removed_title" xml:space="preserve"><value>Recently removed</value></data>
     <data name="admin/dns/removed_desc" xml:space="preserve"><value>Restorable for 30 days.</value></data>
     <data name="admin/dns/restore" xml:space="preserve"><value>Restore</value></data>
@@ -3570,6 +3829,9 @@ built on your own server.</value></data>
     <data name="admin/dns/cert/remove_delegation" xml:space="preserve"><value>Remove delegation</value></data>
     <data name="admin/dns/cert/renewals_automated" xml:space="preserve"><value>Renewals automated</value></data>
     <data name="admin/dns/cert/delegate_no_zones" xml:space="preserve"><value>Add a DNS-provider credential first to delegate renewals.</value></data>
+    <data name="admin/dns/cert/issuance_failed_domain" xml:space="preserve"><value>Certificate request failed ({date}): {error}</value></data>
+    <data name="admin/dns/cert/issuance_failed_ip" xml:space="preserve"><value>IP address certificate request failed ({date}): {error}</value></data>
+    <data name="admin/dns/cert/issuance_failed" xml:space="preserve"><value>Certificate request failed ({date}): {error}</value></data>
     <data name="admin/dns/rename/button" xml:space="preserve"><value>Rename primary domain</value></data>
     <data name="admin/dns/rename/promote" xml:space="preserve"><value>Promote to primary</value></data>
     <data name="admin/dns/rename/renaming_to" xml:space="preserve"><value>Renaming to</value></data>
@@ -3647,6 +3909,7 @@ built on your own server.</value></data>
     <data name="moderation/appeal_blocked_reason_too_long" xml:space="preserve"><value>The reason is too long. Shorten it before submitting the appeal.</value></data>
     <data name="moderation/appeal_recorded" xml:space="preserve"><value>Appeal recorded. An administrator will review it.</value></data>
     <data name="moderation/appeal_failed" xml:space="preserve"><value>Appeal failed: {error}</value></data>
+    <data name="moderation/queue/issued_by" xml:space="preserve"><value>decided by {nest}</value></data>
     <data name="moderation/report/title" xml:space="preserve"><value>Report</value></data>
     <data name="moderation/report/reason_label" xml:space="preserve"><value>Why are you reporting this?</value></data>
     <data name="moderation/report/reason/spam" xml:space="preserve"><value>Spam</value></data>
@@ -3677,7 +3940,7 @@ built on your own server.</value></data>
     <data name="moderation/report/outcome_acted" xml:space="preserve"><value>Acted on</value></data>
     <data name="moderation/report/outcome_dismissed" xml:space="preserve"><value>Dismissed</value></data>
     <data name="moderation/report/withdraw" xml:space="preserve"><value>Withdraw</value></data>
-    <data name="moderation/report/withdrawn" xml:space="preserve"><value>Report withdrawn. Your note and any attached text were deleted everywhere they went.</value></data>
+    <data name="moderation/report/withdrawn" xml:space="preserve"><value>Report withdrawn. Your note and any attached text were deleted here, and every nest the report went to is asked to delete them too.</value></data>
     <data name="moderation/category/spam" xml:space="preserve"><value>Spam</value></data>
     <data name="moderation/category/trusted" xml:space="preserve"><value>Trusted</value></data>
     <data name="moderation/category/nsfw" xml:space="preserve"><value>NSFW</value></data>
@@ -3691,13 +3954,19 @@ built on your own server.</value></data>
     <data name="moderation/action/labeled" xml:space="preserve"><value>Labeled</value></data>
     <data name="moderation/action/flagged" xml:space="preserve"><value>Flagged</value></data>
     <data name="moderation/action/taken_down" xml:space="preserve"><value>Removed under legal obligation</value></data>
+    <data name="moderation/action/blocked" xml:space="preserve"><value>Blocked by this nest's admin</value></data>
     <data name="moderation/legal_takedown/tombstone" xml:space="preserve"><value>Removed under legal obligation ({reference})</value></data>
+    <data name="moderation/admin_block/notice" xml:space="preserve"><value>Blocked by this nest's admin after a report: {reason}</value></data>
     <data name="muted_words/title" xml:space="preserve"><value>Muted words</value></data>
-    <data name="muted_words/description" xml:space="preserve"><value>Conversation messages containing one of these words are collapsed behind a “Show anyway” button. This list stays on your devices — the server never sees it.</value></data>
+    <data name="muted_words/description" xml:space="preserve"><value>A new word is set to “Hide”, so posts and messages containing it collapse behind “Show anyway” and matching posts sink in ranked feeds. A word set to “Show less” only sinks matching posts in ranked feeds — messages show as usual. This list is stored encrypted on your nest, and only your devices can read it.</value></data>
     <data name="muted_words/input_placeholder" xml:space="preserve"><value>Add a word to mute</value></data>
     <data name="muted_words/add" xml:space="preserve"><value>Mute word</value></data>
     <data name="muted_words/empty" xml:space="preserve"><value>You haven’t muted any words yet.</value></data>
     <data name="muted_words/remove" xml:space="preserve"><value>Un-mute</value></data>
+    <data name="muted_words/level_hide" xml:space="preserve"><value>Hide</value></data>
+    <data name="muted_words/level_show_less" xml:space="preserve"><value>Show less</value></data>
+    <data name="muted_words/collapsed" xml:space="preserve"><value>Muted word</value></data>
+    <data name="muted_words/reveal" xml:space="preserve"><value>Show anyway</value></data>
     <data name="personalization/title" xml:space="preserve"><value>Personalization</value></data>
     <data name="personalization/feeds_link" xml:space="preserve"><value>Feeds</value></data>
     <data name="personalization/muted_words_link" xml:space="preserve"><value>Muted words</value></data>
@@ -3857,6 +4126,7 @@ built on your own server.</value></data>
     <data name="features/no_effect_self" xml:space="preserve"><value>No effect: your own setting already limits this to {limit}.</value></data>
     <data name="features/no_effect_other" xml:space="preserve"><value>No effect: another rule-setter already limits this to {limit}.</value></data>
     <data name="family/title" xml:space="preserve"><value>Family</value></data>
+    <data name="family/kids_ineligible_message" xml:space="preserve"><value>Fauna Kids is for supervised accounts, and this account is not supervised. Sign out to use a different account.</value></data>
     <data name="family/supervised_indicator" xml:space="preserve"><value>This account is supervised by {guardian}</value></data>
     <data name="family/supervised_notice_onboarding" xml:space="preserve"><value>This account will be supervised by {guardian}</value></data>
     <data name="family/supervised_notice_onboarding_band" xml:space="preserve"><value>This account will be supervised by {guardian} as a {band} account</value></data>
@@ -3873,6 +4143,7 @@ built on your own server.</value></data>
     <data name="family/policy_content_phishing_label" xml:space="preserve"><value>Phishing and scams</value></data>
     <data name="family/policy_content_commercial_label" xml:space="preserve"><value>Ads and promotions</value></data>
     <data name="family/policy_content_notify_label" xml:space="preserve"><value>Notify me about flagged content</value></data>
+    <data name="family/policy_content_hint" xml:space="preserve"><value>The apps themselves don't detect adult content or ads and promotions yet. A limit you set on them is saved, and applies as soon as a post or message is labelled that way.</value></data>
     <data name="family/policy_screen_heading" xml:space="preserve"><value>Screen time</value></data>
     <data name="family/policy_screen_window_start_label" xml:space="preserve"><value>Usable from (HH:MM)</value></data>
     <data name="family/policy_screen_window_end_label" xml:space="preserve"><value>Usable until (HH:MM)</value></data>
@@ -3904,6 +4175,14 @@ built on your own server.</value></data>
     <data name="family/screen_lock_window" xml:space="preserve"><value>Your screen time starts again at {resumes}. Set by {guardian}.</value></data>
     <data name="family/screen_lock_budget" xml:space="preserve"><value>You have used today's {minutes} minutes. Set by {guardian}.</value></data>
     <data name="family/screen_lock_family_hint" xml:space="preserve"><value>You can still open Family to see your settings.</value></data>
+    <data name="family/store_consent_lock/title" xml:space="preserve"><value>A change to this app needs your parent's approval</value></data>
+    <data name="family/store_consent_lock/what_changed" xml:space="preserve"><value>What changed:</value></data>
+    <data name="family/store_consent_lock/rating_changed" xml:space="preserve"><value>This app's age rating changed.</value></data>
+    <data name="family/store_consent_lock/state_pending" xml:space="preserve"><value>Waiting for your parent to say yes.</value></data>
+    <data name="family/store_consent_lock/state_declined" xml:space="preserve"><value>Your parent said no.</value></data>
+    <data name="family/store_consent_lock/ask_button" xml:space="preserve"><value>Ask your parent</value></data>
+    <data name="family/store_consent_lock/ask_hint" xml:space="preserve"><value>Tap the button to ask your parent. The app unlocks when they say yes.</value></data>
+    <data name="family/store_consent_lock/play_hint" xml:space="preserve"><value>Google Play asks your parent for you. The app checks again each time you come back to it.</value></data>
     <data name="family/approvals_heading" xml:space="preserve"><value>Approvals</value></data>
     <data name="family/no_approvals" xml:space="preserve"><value>No pending approvals.</value></data>
     <data name="family/approval_no_sender" xml:space="preserve"><value>No sender (delivery notice)</value></data>
@@ -3941,7 +4220,7 @@ built on your own server.</value></data>
     <data name="family/age_band/claim_line" xml:space="preserve"><value>Age {band} · {provenance}</value></data>
     <data name="family/age_band/claim_none" xml:space="preserve"><value>No app age verification</value></data>
     <data name="family/age_band/notice_attested" xml:space="preserve"><value>Your age range ({band}) from {store} will be shared with this nest's admin, verified by {verifier}</value></data>
-    <data name="family/age_band/notice_declared" xml:space="preserve"><value>Your age range ({band}) will be shared with this nest's admin as declared, not verified</value></data>
+    <data name="family/age_band/notice_declared" xml:space="preserve"><value>Your age range ({band}) goes to this nest as declared, not verified</value></data>
     <data name="family/age_band/store_android" xml:space="preserve"><value>Google Play</value></data>
     <data name="family/age_band/store_ios" xml:space="preserve"><value>the App Store</value></data>
     <data name="family/age_band/verifier_android" xml:space="preserve"><value>Google</value></data>
@@ -3980,7 +4259,7 @@ built on your own server.</value></data>
     <data name="notifications/type_report" xml:space="preserve"><value>Report</value></data>
     <data name="notifications/type_default" xml:space="preserve"><value>Notification</value></data>
     <data name="notifications/update_available_summary" xml:space="preserve"><value>Fauna update available</value></data>
-    <data name="notifications/update_available_body" xml:space="preserve"><value>Version {version} is available. Visit fauna.social to download.</value></data>
+    <data name="notifications/update_available_body" xml:space="preserve"><value>Version {version} is available from the project's releases page.</value></data>
     <data name="notifications/row_like" xml:space="preserve"><value>{sender} liked your post</value></data>
     <data name="notifications/row_reply" xml:space="preserve"><value>{sender} replied to your post</value></data>
     <data name="notifications/row_repost" xml:space="preserve"><value>{sender} reposted your post</value></data>
@@ -3988,6 +4267,8 @@ built on your own server.</value></data>
     <data name="notifications/row_mention" xml:space="preserve"><value>{sender} mentioned you</value></data>
     <data name="notifications/row_follow" xml:space="preserve"><value>{sender} followed you</value></data>
     <data name="notifications/row_interaction" xml:space="preserve"><value>{sender} interacted with your content</value></data>
+    <data name="notifications/dismiss" xml:space="preserve"><value>Dismiss</value></data>
+    <data name="notifications/clear_all" xml:space="preserve"><value>Clear all</value></data>
     <data name="notifications/row_tip_sats" xml:space="preserve"><value>{sender} tipped {value} sats on your post</value></data>
     <data name="notifications/row_tip_msats" xml:space="preserve"><value>{sender} tipped {value} msats on your post</value></data>
     <data name="notifications/row_tip" xml:space="preserve"><value>{sender} tipped your post</value></data>
@@ -4016,8 +4297,8 @@ built on your own server.</value></data>
     <data name="notifications/row_security_recovery_replacement_landed" xml:space="preserve"><value>Security: your recovery key was replaced (new key {new_key}). Your recovery phrase cannot recover this account until you restore phrase recovery under Settings → Account → Recovery Kit. If you did not request this replacement, your account may be compromised — contact your nest administrator.</value></data>
     <data name="notifications/row_security_recovery_replacement_cancelled" xml:space="preserve"><value>Security: the pending recovery key replacement was cancelled by {cancelled_by}.</value></data>
     <data name="notifications/row_security_identity_succeeded" xml:space="preserve"><value>Security: this identity was succeeded. Your account moved to a new key ({new_actor_id}). If you did NOT perform this recovery, whoever holds your recovery kit now controls the account — contact your nest administrator immediately.</value></data>
-    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.</value></data>
-    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, change your keys and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_archive_exported" xml:space="preserve"><value>Security: your full account archive was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout) and contact your nest administrator.</value></data>
+    <data name="notifications/row_security_mailbox_export_downloaded" xml:space="preserve"><value>Security: a mailbox export ({format}) was downloaded from {ip}. If this was not you, revoke your sessions under Settings → Security (or use the emergency lockout), discard the export from the mail export page, and contact your nest administrator.</value></data>
     <data name="widget/description" xml:space="preserve"><value>Shows unread message count and quick compose</value></data>
     <data name="widget/unread_label" xml:space="preserve"><value>unread</value></data>
     <data name="markdown/bold" xml:space="preserve"><value>Bold</value></data>
@@ -4057,6 +4338,7 @@ built on your own server.</value></data>
     <data name="profile/edit_remove_avatar" xml:space="preserve"><value>Remove avatar</value></data>
     <data name="profile/edit_banner" xml:space="preserve"><value>Banner image path</value></data>
     <data name="profile/edit_remove_banner" xml:space="preserve"><value>Remove banner</value></data>
+    <data name="profile/edit_audience_toggle" xml:space="preserve"><value>People on other nests can see your profile</value></data>
     <data name="profile/edit_save" xml:space="preserve"><value>Save</value></data>
     <data name="profile/edit_cancel" xml:space="preserve"><value>Cancel</value></data>
     <data name="profile/private_title" xml:space="preserve"><value>Only you can see this</value></data>
@@ -4112,6 +4394,8 @@ built on your own server.</value></data>
     <data name="subscriptions/provider_tier_label" xml:space="preserve"><value>Tier:</value></data>
     <data name="subscriptions/webhook_secret" xml:space="preserve"><value>Webhook secret</value></data>
     <data name="subscriptions/webhook_url_label" xml:space="preserve"><value>Webhook URL:</value></data>
+    <data name="subscriptions/return_url_label" xml:space="preserve"><value>Return URL:</value></data>
+    <data name="subscriptions/return_url_unavailable" xml:space="preserve"><value>Turn on your public web address (Settings, Web) to get a return URL</value></data>
     <data name="subscriptions/redeem_claim_title" xml:space="preserve"><value>Redeem a claim code</value></data>
     <data name="subscriptions/claim_code" xml:space="preserve"><value>Claim code</value></data>
     <data name="subscriptions/redeem" xml:space="preserve"><value>Redeem</value></data>
@@ -4125,6 +4409,10 @@ built on your own server.</value></data>
     <data name="subscriptions/claim_status_unredeemed" xml:space="preserve"><value>Unredeemed</value></data>
     <data name="subscriptions/claim_status_redeemed" xml:space="preserve"><value>Redeemed</value></data>
     <data name="subscriptions/claim_status_voided" xml:space="preserve"><value>Voided</value></data>
+    <data name="subscriptions/void_claim" xml:space="preserve"><value>Void</value></data>
+    <data name="subscriptions/void_claim_confirm_unredeemed" xml:space="preserve"><value>Void now — this code will stop working</value></data>
+    <data name="subscriptions/void_claim_confirm_redeemed" xml:space="preserve"><value>Void now — {redeemer} loses access to {tier}</value></data>
+    <data name="subscriptions/void_claim_cancel" xml:space="preserve"><value>Keep</value></data>
     <data name="subscriptions/provider_status_configured" xml:space="preserve"><value>Configured</value></data>
     <data name="subscriptions/provider_status_verified" xml:space="preserve"><value>Verified</value></data>
     <data name="subscriptions/provider_status_error" xml:space="preserve"><value>Error</value></data>
@@ -4191,6 +4479,7 @@ built on your own server.</value></data>
     <data name="error/bridges/reserved_local_part" xml:space="preserve"><value>That name is reserved for the server and can't be used as an address. Choose another one.</value></data>
     <data name="error/bridges/import_source_locked" xml:space="preserve"><value>This account is already being imported, here or on another of your devices. Finish or cancel that import first.</value></data>
     <data name="error/bridges/over_quota" xml:space="preserve"><value>Your storage is full, so this wasn't saved. Delete something to make room, or ask your nest admin for more space.</value></data>
+    <data name="error/bridges/mail_unavailable_here" xml:space="preserve"><value>Mail wasn't turned on: this server was set up without the virus scanner and spam filter that mail needs. To use mail, set up a server that includes them.</value></data>
     <data name="error/bridges/address_refused" xml:space="preserve"><value>None of your connected bridges can reach that address. Check how it is written.</value></data>
     <data name="error/bridges/conversation_store_full" xml:space="preserve"><value>This bridge has too many messages waiting, so this wasn't sent. Try again once it catches up.</value></data>
     <data name="error/bridges/guardian_approval_required" xml:space="preserve"><value>This account can only message approved contacts.</value></data>
@@ -4346,7 +4635,7 @@ built on your own server.</value></data>
     <data name="provisioning/ovh/app_key" xml:space="preserve"><value>Application key</value></data>
     <data name="provisioning/ovh/app_secret" xml:space="preserve"><value>Application secret</value></data>
     <data name="provisioning/ovh/consumer_key" xml:space="preserve"><value>Consumer key</value></data>
-    <data name="provisioning/ovh/project" xml:space="preserve"><value>Project</value></data>
+    <data name="provisioning/ovh/location" xml:space="preserve"><value>Region</value></data>
     <data name="provisioning/linode/name" xml:space="preserve"><value>Linode (Akamai)</value></data>
     <data name="provisioning/linode/help" xml:space="preserve"><value>Create a Personal Access Token at cloud.linode.com → Profile → API Tokens.</value></data>
     <data name="provisioning/linode/api_token" xml:space="preserve"><value>API token</value></data>
@@ -4369,6 +4658,60 @@ built on your own server.</value></data>
     <data name="region/malformed_notice" xml:space="preserve"><value>This policy could not be read — nothing is blocked under it</value></data>
     <data name="region/last_checked" xml:space="preserve"><value>Last checked {time}</value></data>
     <data name="region/stale_warning" xml:space="preserve"><value>Could not check for policy updates recently — the policies above stay in force</value></data>
+    <data name="nest_rules/blocked_notice" xml:space="preserve"><value>Not shown on {nest} — blocked under this nest’s rules</value></data>
+    <data name="nest_rules/collapsed_notice" xml:space="preserve"><value>Hidden on {nest} under this nest’s rules — select to show</value></data>
+    <data name="nest_rules/changed_notice" xml:space="preserve"><value>{nest} changed its rules — see what is in force</value></data>
+    <data name="nest_rules/reveal_button" xml:space="preserve"><value>Show</value></data>
+    <data name="nest_rules/settings_title" xml:space="preserve"><value>Rules of {nest}</value></data>
+    <data name="nest_rules/version" xml:space="preserve"><value>Version {sequence}, issued {issued}</value></data>
+    <data name="nest_rules/rule_line" xml:space="preserve"><value>{verdict} · {level} — {reason}</value></data>
+    <data name="nest_rules/rule_line_no_level" xml:space="preserve"><value>{verdict} — {reason}</value></data>
+    <data name="rule_editor/kind/category" xml:space="preserve"><value>Category</value></data>
+    <data name="rule_editor/kind/keywords" xml:space="preserve"><value>Keywords</value></data>
+    <data name="rule_editor/kind/labeler" xml:space="preserve"><value>Labeler</value></data>
+    <data name="rule_editor/kind/prompt" xml:space="preserve"><value>Prompt</value></data>
+    <data name="rule_editor/kind/list" xml:space="preserve"><value>Content list</value></data>
+    <data name="rule_editor/verdict/block" xml:space="preserve"><value>Block</value></data>
+    <data name="rule_editor/verdict/collapse" xml:space="preserve"><value>Hide behind a warning</value></data>
+    <data name="rule_editor/level/very_strict" xml:space="preserve"><value>Very strict</value></data>
+    <data name="rule_editor/level/strict" xml:space="preserve"><value>Strict</value></data>
+    <data name="rule_editor/level/standard" xml:space="preserve"><value>Standard</value></data>
+    <data name="rule_editor/level/lenient" xml:space="preserve"><value>Lenient</value></data>
+    <data name="rule_editor/level/very_lenient" xml:space="preserve"><value>Very lenient</value></data>
+    <data name="rule_editor/prompt_not_applied" xml:space="preserve"><value>Not applied on this device</value></data>
+    <data name="rule_editor/newer_version" xml:space="preserve"><value>These rules were written by a newer version of Fauna. Update the app to edit them.</value></data>
+    <data name="rule_editor/item_label" xml:space="preserve"><value>Rule {rule}</value></data>
+    <data name="rule_editor/kind_label" xml:space="preserve"><value>Kind</value></data>
+    <data name="rule_editor/category_label" xml:space="preserve"><value>Category</value></data>
+    <data name="rule_editor/keywords_label" xml:space="preserve"><value>Keywords (separate with commas)</value></data>
+    <data name="rule_editor/labeler_label" xml:space="preserve"><value>Labeler</value></data>
+    <data name="rule_editor/prompt_label" xml:space="preserve"><value>Prompt</value></data>
+    <data name="rule_editor/verdict_label" xml:space="preserve"><value>Verdict</value></data>
+    <data name="rule_editor/level_label" xml:space="preserve"><value>Level</value></data>
+    <data name="rule_editor/reason_label" xml:space="preserve"><value>Reason shown to the member</value></data>
+    <data name="rule_editor/add_button" xml:space="preserve"><value>Add rule</value></data>
+    <data name="rule_editor/remove_button" xml:space="preserve"><value>Remove</value></data>
+    <data name="rule_editor/save_button" xml:space="preserve"><value>Save rules</value></data>
+    <data name="rule_editor/loading" xml:space="preserve"><value>Loading rules…</value></data>
+    <data name="rule_editor/saving" xml:space="preserve"><value>Saving…</value></data>
+    <data name="rule_editor/saved" xml:space="preserve"><value>Saved</value></data>
+    <data name="rule_editor/saved_version" xml:space="preserve"><value>Saved — version {sequence}</value></data>
+    <data name="rule_editor/no_rules" xml:space="preserve"><value>No rules yet</value></data>
+    <data name="rule_editor/nest_section" xml:space="preserve"><value>Nest rules</value></data>
+    <data name="rule_editor/family_section" xml:space="preserve"><value>Content rules</value></data>
+    <data name="rule_editor/defect/no_reason" xml:space="preserve"><value>Rule {rule} needs a reason.</value></data>
+    <data name="rule_editor/defect/no_reason_code" xml:space="preserve"><value>Rule {rule} is missing its identifier. Remove it and add it again.</value></data>
+    <data name="rule_editor/defect/level_out_of_range" xml:space="preserve"><value>Rule {rule} has a level outside the scale. Pick a level.</value></data>
+    <data name="rule_editor/defect/no_subject" xml:space="preserve"><value>Rule {rule} needs something to apply to.</value></data>
+    <data name="rule_editor/defect/missing_scorer" xml:space="preserve"><value>Rule {rule} refers to something these rules do not include. Remove it and add it again.</value></data>
+    <data name="rule_editor/defect/malformed_scorer" xml:space="preserve"><value>Rule {rule} cannot be read. Remove it and add it again.</value></data>
+    <data name="rule_editor/defect/list_not_admitted" xml:space="preserve"><value>Rule {rule} is a content list, which only a region authority may publish. Remove it.</value></data>
+    <data name="rule_editor/defect/scorer_too_large" xml:space="preserve"><value>Rule {rule} is too large.</value></data>
+    <data name="rule_editor/defect/no_keyword" xml:space="preserve"><value>Rule {rule} needs at least one keyword.</value></data>
+    <data name="rule_editor/defect/keyword_too_long" xml:space="preserve"><value>Rule {rule} has a keyword longer than {max} characters.</value></data>
+    <data name="rule_editor/defect/no_prompt" xml:space="preserve"><value>Rule {rule} needs a prompt.</value></data>
+    <data name="rule_editor/defect/no_labeler" xml:space="preserve"><value>Rule {rule} needs a labeler.</value></data>
+    <data name="rule_editor/defect/unused_scorer" xml:space="preserve"><value>These rules include “{name}”, which cannot be read and no rule uses.</value></data>
     <data name="connected_apps/title" xml:space="preserve"><value>Connected apps</value></data>
     <data name="connected_apps/description" xml:space="preserve"><value>Apps and services that act for you from outside Fauna. Each one can only reach what is listed under it, and you can disconnect any of them at any time.</value></data>
     <data name="connected_apps/verbatim" xml:space="preserve"><value>{text}</value></data>
@@ -4390,6 +4733,7 @@ built on your own server.</value></data>
     <data name="connected_apps/revoke_confirm" xml:space="preserve"><value>Disconnect now</value></data>
     <data name="connected_apps/revoke_cancel" xml:space="preserve"><value>Keep</value></data>
     <data name="connected_apps/revoke_prompt" xml:space="preserve"><value>Disconnect {name}? It will no longer be able to act for you.</value></data>
+    <data name="connected_apps/settings_link" xml:space="preserve"><value>Plugin settings</value></data>
     <data name="connected_apps/publisher" xml:space="preserve"><value>From {domain}</value></data>
     <data name="connected_apps/class_remote" xml:space="preserve"><value>Website or service</value></data>
     <data name="connected_apps/class_device" xml:space="preserve"><value>App on a device</value></data>
@@ -4418,8 +4762,10 @@ built on your own server.</value></data>
     <data name="connected_apps/error_code_expired" xml:space="preserve"><value>That code has expired — ask the app for a new one.</value></data>
     <data name="connected_apps/error_handoff_expired" xml:space="preserve"><value>That link has expired or was already used — start again from the app.</value></data>
     <data name="connected_apps/error_block" xml:space="preserve"><value>Failed to block the app: {message}</value></data>
+    <data name="connected_apps/error_bind" xml:space="preserve"><value>Failed to connect the plugin: {message}</value></data>
     <data name="connected_apps/error_secret" xml:space="preserve"><value>Could not read the secret: {message}</value></data>
     <data name="connected_apps/error_record" xml:space="preserve"><value>Could not read what your nest did for this app: {message}</value></data>
+    <data name="connected_apps/error_external_apps" xml:space="preserve"><value>Failed to change the external-apps switch: {message}</value></data>
     <data name="connected_apps/oracle_ops" xml:space="preserve"><value>Your nest used your keys for this app {count} times in the current window</value></data>
     <data name="connected_apps/oracle_ops_one" xml:space="preserve"><value>Your nest used your keys for this app once in the current window</value></data>
     <data name="connected_apps/oracle_requests" xml:space="preserve"><value>{count} requests answered in all</value></data>
@@ -4430,6 +4776,21 @@ built on your own server.</value></data>
     <data name="connected_apps/blocked_hint" xml:space="preserve"><value>Requests from these apps are never shown to you.</value></data>
     <data name="connected_apps/blocked_since" xml:space="preserve"><value>Blocked {time}</value></data>
     <data name="connected_apps/unblock" xml:space="preserve"><value>Allow requests again</value></data>
+    <data name="connected_apps/install_heading" xml:space="preserve"><value>Install this plugin on your nest</value></data>
+    <data name="connected_apps/install_framing" xml:space="preserve"><value>Installing runs this code on your nest. It gets no access to anyone's private data until that person connects it from their own app.</value></data>
+    <data name="connected_apps/install_heading_bind" xml:space="preserve"><value>Connect this plugin on your nest to your account</value></data>
+    <data name="connected_apps/install_form" xml:space="preserve"><value>Runs as: {form}</value></data>
+    <data name="connected_apps/install_publisher" xml:space="preserve"><value>Publisher: {domain} — {key}</value></data>
+    <data name="connected_apps/install_publisher_development" xml:space="preserve"><value>Publisher: Development plugin</value></data>
+    <data name="connected_apps/install_digest" xml:space="preserve"><value>Module: {digest}</value></data>
+    <data name="connected_apps/install_kinds_heading" xml:space="preserve"><value>Kinds of data it defines:</value></data>
+    <data name="connected_apps/install_kinds_none" xml:space="preserve"><value>Kinds of data it defines: none</value></data>
+    <data name="connected_apps/install_hosts_heading" xml:space="preserve"><value>Sites it may reach:</value></data>
+    <data name="connected_apps/install_hosts_none" xml:space="preserve"><value>Sites it may reach: none</value></data>
+    <data name="connected_apps/install_ingress_heading" xml:space="preserve"><value>Addresses it answers on your nest:</value></data>
+    <data name="connected_apps/install_settings_heading" xml:space="preserve"><value>Settings:</value></data>
+    <data name="connected_apps/install_settings_none" xml:space="preserve"><value>Settings: none</value></data>
+    <data name="connected_apps/install_setting" xml:space="preserve"><value>{label} ({kind})</value></data>
     <data name="share_link/button" xml:space="preserve"><value>Share a link</value></data>
     <data name="share_link/create_title" xml:space="preserve"><value>Share a link to {name}</value></data>
     <data name="share_link/create_body" xml:space="preserve"><value>Anyone with the link can open this file until it expires or you revoke it.</value></data>

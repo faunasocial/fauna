@@ -139,6 +139,7 @@ class DevicesRosterContentTest {
         // An unknown key resolves to itself, so the seed text is the key.
         budgetDraft: String = "8 GB",
         stopped: Boolean = false,
+        custodianNestUrl: String? = null,
     ) = CustodyHeldRowView(
         grantId = grantId,
         owner = owner,
@@ -147,6 +148,7 @@ class DevicesRosterContentTest {
         budgetDraft = LocalizedText(budgetDraft, emptyMap()),
         receipt = receipt(),
         stopped = stopped,
+        custodianNestUrl = custodianNestUrl,
     )
 
     private fun offer(
@@ -424,7 +426,7 @@ class DevicesRosterContentTest {
         render(custodyRows = listOf(custody(pending = true, custodianKey = null)))
         composeTestRule.onNodeWithTag("custody-holder-revoke-button").assertIsNotEnabled()
         composeTestRule.onNodeWithText(
-            "Copies already held stay held",
+            "Copies already held stay where they are",
             substring = true,
         ).assertDoesNotExist()
     }
@@ -434,7 +436,7 @@ class DevicesRosterContentTest {
         render(custodyRows = listOf(custody()))
         composeTestRule.onNodeWithTag("custody-holder-revoke-button").assertIsEnabled()
         composeTestRule.onNodeWithText(
-            "Copies already held stay held",
+            "Copies already held stay where they are",
             substring = true,
         ).assertExists()
     }
@@ -564,9 +566,26 @@ class DevicesRosterContentTest {
             composeTestRule.onNodeWithTag(id).assertExists()
         }
         composeTestRule.onNodeWithTag("custody-held-scope")
-            .assertTextEquals("Their account's sealed planes — unreadable on this device")
+            .assertTextEquals("Their account's sealed data — unreadable on this device, apart from what they published to everyone")
         composeTestRule.onNodeWithTag("custody-held-bytes").assertTextEquals("HELD:1024")
         composeTestRule.onNodeWithTag("custody-held-budget-input").assertTextContains("8 GB")
+    }
+
+    /** A NEST-form hold carries the owner's restore address — the accept's URL
+     *  verbatim; a device-form hold carries none (`devices.md` § Custody facet,
+     *  `custody-held-restore-address`). */
+    @Test
+    fun onlyANestFormHoldShowsTheOwnersRestoreAddress() {
+        render(
+            custodyHeld = listOf(
+                held(custodianNestUrl = "https://my-nest.example"),
+                held(grantId = ByteArray(16) { 8 }),
+            ),
+        )
+        composeTestRule.onAllNodesWithTag("custody-held-card").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("custody-held-restore-address").assertCountEquals(1)
+        composeTestRule.onNodeWithTag("custody-held-restore-address")
+            .assertTextContains("https://my-nest.example", substring = true)
     }
 
     @Test
@@ -641,8 +660,9 @@ class DevicesRosterContentTest {
         render(custodyOffers = listOf(offer(nestCanHold = true)))
         composeTestRule.onNodeWithTag("custody-offer-card").assertExists()
         composeTestRule.onNodeWithTag("custody-offer-floor-note").assertTextEquals(
-            "This device would store sealed data it cannot read. It would see only the shape: " +
-                "which scopes exist, how much is stored, and when it changes — never the content.",
+            "This device would store sealed data it cannot read, apart from what they have published " +
+                "to everyone. Of the rest it would see only the shape: which scopes exist, how much is " +
+                "stored, and when it changes — never the content.",
         )
         composeTestRule.onAllNodesWithTag("custody-offer-target-select").assertCountEquals(0)
     }

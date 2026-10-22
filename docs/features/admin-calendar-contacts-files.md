@@ -37,7 +37,7 @@ Stamped 2026-10-01 at 308c995169.
 7. [nest] Switching calendar off leaves mail working: each service has its own switch — `docs/goal/behavior/caldav-server.md` § Independent enablement
    - `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_mail_keeps_working_with_calendar_switched_off`
 8. [app] The calendar-port field says it applies only to a nest with no domain — `docs/goal/behavior/admin.md` § 8. Calendar
-   - (none)
+   - `tests/e2e-unified/tests/test_admin_calendar.py::test_caldav_port_field_says_it_applies_only_without_a_domain`
 9. [app] When the calendar port changes, the calendar server leaves the old port and answers on the new one, with events made before the change still there and new ones accepted — `docs/goal/behavior/caldav-server.md` § Network exposure
    - `tests/e2e-unified/tests/test_caldav_admin_port_rebind.py::test_admin_caldav_port_change_rebinds_listener`
 10. [app] Each page shows its switch as the nest holds it, when the page opens and after a change — `docs/goal/behavior/admin.md` § 8. Calendar
@@ -51,12 +51,12 @@ Stamped 2026-10-01 at 308c995169.
 | App | Status | Stamp |
 |---|---|---|
 | web | ⚠ partial | 0.1.2-dev+c438a386 standalone |
-| linux | ⚠ partial | 0.1.2-dev+c438a386 standalone |
+| linux | ✅ full | 0.1.2-dev+c438a386 standalone |
 | windows | ⚠ partial | 0.1.2-dev+c438a386 standalone |
 | macos | ⚠ partial | 0.1.2-dev+c438a386 standalone |
 | ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+c438a386 standalone |
+| tui | ✅ full | 0.1.2-dev+c438a386 standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -73,7 +73,7 @@ Stamped 2026-10-01 at 308c995169.
 | 5 | nest | `tests/e2e-unified/tests/api/test_webdav_apex_discovery.py::test_the_standard_webdav_address_sends_a_file_app_on_to_the_files` | nest (linux): passed |
 | 6 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_switching_files_off_shuts_file_apps_out_of_members_files` | nest (linux): passed |
 | 7 | nest | `tests/e2e-unified/tests/test_caldav_nest_outcomes.py::test_mail_keeps_working_with_calendar_switched_off` | nest (linux): passed |
-| 8 | app | (none) | — |
+| 8 | app | `tests/e2e-unified/tests/test_admin_calendar.py::test_caldav_port_field_says_it_applies_only_without_a_domain` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_caldav_admin_port_rebind.py::test_admin_caldav_port_change_rebinds_listener` | linux (linux): passed, tui (linux): passed, tui (macos): passed |
 | 10 | app | `tests/e2e-unified/tests/test_admin_calendar.py::test_each_dav_switch_shows_the_nest_state` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 11 | nest | `tests/e2e-unified/tests/api/test_dav_enable_independence.py::test_an_explicit_dav_setting_is_what_the_nest_reports` | nest (linux): passed |

@@ -74,11 +74,19 @@ def served_leaf(
     ctx.verify_mode = ssl.CERT_NONE
     with socket.create_connection((host, port), timeout=timeout) as sock:
         with ctx.wrap_socket(sock, server_hostname=sni) as tls:
-            der = tls.getpeercert(binary_form=True)
+            return leaf_of(tls)
+
+
+def leaf_of(tls: ssl.SSLSocket) -> x509.Certificate:
+    """The leaf an **already-open** TLS socket was served — for a caller that
+    must read it off the connection it then speaks over (a STARTTLS upgrade, a
+    request pinned to the handshake whose leaf it reports), where
+    :func:`served_leaf`'s throwaway second handshake would read another one."""
+    der = tls.getpeercert(binary_form=True)
     if der is None:
         raise AssertionError(
-            f"{host}:{port} completed a TLS handshake for SNI {sni!r} but "
-            "presented no certificate"
+            f"{tls.getpeername()} completed a TLS handshake but presented no "
+            "certificate"
         )
     return x509.load_der_x509_certificate(der)
 

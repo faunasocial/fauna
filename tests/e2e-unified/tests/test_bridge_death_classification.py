@@ -278,3 +278,26 @@ def test_any_bridge_answer_between_pegged_verdicts_restarts_the_count(
         driver._url = live_url
         assert driver._post("/execute", {}) == {"result": None}
         driver._url = pegged_url
+
+
+def test_a_pegged_verdict_prints_what_the_bridge_watchdog_saw(
+    silent_listener, monkeypatch, capsys
+):
+    """A pegged bridge cannot answer why it is stuck, but its watchdog thread
+    has been writing `[bridge-watchdog]` lines to the stderr the driver drains
+    (web-bridge/server.py `_watchdog_tick`); the pegged verdict prints their
+    tail, so the next peg diagnoses itself (convention 6). Other drained lines
+    stay out of it."""
+    _shrink_confirm_budgets(monkeypatch)
+    driver = HttpBridgeDriver(f"http://127.0.0.1:{silent_listener.getsockname()[1]}")
+    driver._bridge_log = [
+        "some playwright chatter",
+        "[bridge-sample] pages 1 contexts 1; tree: renderer x1 900MiB +2.0s",
+        "[bridge-watchdog] 'POST /execute HTTP/1.1' busy 90s; tree: renderer x1 4100MiB +29.9s",
+    ]
+    with pytest.raises(TimeoutError):
+        driver._post("/execute", {}, timeout=_CLIENT_TIMEOUT_S)
+    err = capsys.readouterr().err
+    assert "[bridge-watchdog] 'POST /execute HTTP/1.1' busy 90s" in err
+    assert "[bridge-sample] pages 1" in err
+    assert "some playwright chatter" not in err

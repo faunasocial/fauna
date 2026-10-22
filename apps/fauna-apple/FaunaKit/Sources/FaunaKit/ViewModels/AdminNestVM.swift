@@ -293,6 +293,10 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// Whether the NAT-mode radios should be disabled — true only mid-submit
     /// (mirrors the onboarding wizard's own `inFlight` gate on its sibling radios).
     public private(set) var natInFlight = false
+    /// Whether the nest read a host-status file (`fauna.setup.status` `os_host_status_present`);
+    /// `false` (a hand-built box, dev, desktop) → "OS status not reported by this host",
+    /// never "OS up to date" (installers/vps.md § Host OS Maintenance § 4).
+    public private(set) var osHostStatusPresent = false
     /// Host-OS pending-security-update count (`fauna.setup.status` `os_security_updates_pending`),
     /// backing the `nest-os-updates-count` badge (rendered only when `> 0` — the raw integer).
     /// A nest with no host channel reports 0 → no badge (installers/vps.md § Host OS Maintenance § 4).
@@ -302,10 +306,13 @@ public final class AdminNestVM: BusyAdminCommandVM {
     public private(set) var osRebootPending = false
     /// The always-present `nest-os-maintenance-status` line. The state→key decision is the
     /// shared `fauna_core::format::os_maintenance_status_label` (one source of truth for all
-    /// six apps; do NOT hand-roll the map), resolved to the localized headline
-    /// ("OS up to date" / "Security updates pending" / "Restart pending …").
+    /// seven apps; do NOT hand-roll the map), resolved to the localized headline
+    /// ("OS status not reported by this host" / "OS up to date" / "Security updates pending" / "Restart pending …").
     public var osMaintenanceStatusText: String {
-        Self.osMaintenanceLabel(securityUpdates: osSecurityUpdates, rebootPending: osRebootPending)
+        Self.osMaintenanceLabel(
+            hostStatusPresent: osHostStatusPresent,
+            securityUpdates: osSecurityUpdates,
+            rebootPending: osRebootPending)
     }
     /// The `admin-service-pairing-status` badge text (Enabled / Disabled).
     public var pairingStatus: String {
@@ -339,6 +346,18 @@ public final class AdminNestVM: BusyAdminCommandVM {
     /// a local "no region declared" string for that gap, matching web/android.
     public private(set) var regionView: FfiAdminRegionView?
 
+    /// Web-app origin (`admin-nest-web-app-origin-*`; admin.md § N Nest →
+    /// *Web-app origin*). Every sentence, the central radio's label and the
+    /// `canSet` verdict are the shared `FfiAdminWebAppOriginView` fold (tui's
+    /// `admin/nest.rs`, the reference leg) — this VM decides nothing. `nil`
+    /// until the read lands: the radios stay unmarked and disabled meanwhile,
+    /// since pre-marking bundled would state a choice the nest may not hold.
+    public private(set) var webAppOriginView: FfiAdminWebAppOriginView?
+    /// The marked radio — the local selection the save commits.
+    public private(set) var webAppOriginDraft: FfiWebAppOrigin?
+    /// Disables the radios + save mid-dispatch (re-tap guard).
+    public private(set) var webAppOriginWorking = false
+
     /// The outside-app sign-in key section (`admin-nest-oauth-*`), one value
     /// so each transition is one write (`OauthSectionState`).
     public private(set) var oauth = OauthSectionState()
@@ -362,6 +381,10 @@ public final class AdminNestVM: BusyAdminCommandVM {
     private var api: APIClient?
     private var natMachine: AdminNatModeMachine?
 
+    /// The admin host of the shared `feature-policy-editor` (admin.md § N Nest →
+    /// *Feature limits*): built at `configure(api:)`, nil before it.
+    public private(set) var featureAuthoring: FeatureAuthoringHost?
+
     public init() {}
 
     /// Vend the admin client + retain the APIClient (for the `fauna.setup.status`
@@ -380,12 +403,22 @@ public final class AdminNestVM: BusyAdminCommandVM {
             natMachine = try? api.adminNatModeMachine()
         }
         await hydrate()
+        // Its own read, outside `hydrate()`'s one `do` (a failed read leaves
+        // the radios unmarked and disabled, never blanks the page).
+        if let view = try? await api.adminWebAppOriginStatus() { paintWebAppOrigin(view) }
         // Its own read, after and outside `hydrate()`'s one `do`: a throw
         // there blanks the whole page's error surface, and this one must not.
         oauth.keysLoaded(await readOauthKeys())
         // The reports queue is read in the page's load too, and likewise outside
         // `hydrate()`'s one `do` — a failed read must not blank the page.
         await loadReports()
+        // The feature-limits host: its own read, so a failure paints the host's
+        // own line and never blanks the page.
+        let host = featureAuthoring ?? FeatureAuthoringHost(
+            readRows: { try await api.featuresClient().authoredRows(tier: "admin") },
+            openEditor: { try await api.featuresClient().openEditor(tier: "admin", feature: $0) })
+        featureAuthoring = host
+        await host.refresh()
     }
 
     /// Read the open reports (`fauna.admin.abuse_report.queue`).
@@ -465,6 +498,7 @@ public final class AdminNestVM: BusyAdminCommandVM {
             // Host-OS maintenance state (passive read off the same setup.status fetch).
             // Defaults (0/false) on a nest with no host channel → "OS up to date", no badge,
             // no button (installers/vps.md § Host OS Maintenance § 4).
+            osHostStatusPresent = status.osHostStatusPresent
             osSecurityUpdates = status.osSecurityUpdatesPending
             osRebootPending = status.osRebootPending
 
@@ -518,6 +552,38 @@ public final class AdminNestVM: BusyAdminCommandVM {
         natStatusText = renderLocalizedText(snap.message)
         natSaveEnabled = snap.submitEnabled
         natInFlight = snap.state == .submitting
+    }
+
+    private func paintWebAppOrigin(_ view: FfiAdminWebAppOriginView) {
+        webAppOriginView = view
+        webAppOriginDraft = view.selected
+    }
+
+    /// Whether the web-app origin radios + save are live: the read landed, the
+    /// fold says `canSet`, and no dispatch is out.
+    public var webAppOriginEditable: Bool {
+        webAppOriginView?.canSet == true && !webAppOriginWorking
+    }
+
+    /// Radio pick (`admin-nest-web-app-origin-{bundled,central}-radio`) — local,
+    /// it only arms the save.
+    public func selectWebAppOrigin(_ mode: FfiWebAppOrigin) {
+        if webAppOriginEditable { webAppOriginDraft = mode }
+    }
+
+    /// `admin-nest-web-app-origin-save-button` — `fauna.admin.web_app_origin.set`
+    /// with the marked radio's mode; the section repaints from the set's own
+    /// reply (no second read).
+    public func saveWebAppOrigin() async {
+        guard let api, webAppOriginEditable, let mode = webAppOriginDraft else { return }
+        webAppOriginWorking = true
+        defer { webAppOriginWorking = false }
+        do {
+            paintWebAppOrigin(try await api.adminSetWebAppOrigin(mode))
+            errorMessage = nil
+        } catch {
+            errorMessage = DisplayError.message(error)
+        }
     }
 
     /// Set the client-facing API serving port via `fauna.admin.set_serving_port`
@@ -828,12 +894,15 @@ public final class AdminNestVM: BusyAdminCommandVM {
 
     /// Resolve the `nest-os-maintenance-status` headline via the shared
     /// `os_maintenance_status_label` (UniFFI free fn → `LocalizedText`), so the
-    /// state→key map (reboot-pending > updates-pending > up-to-date) is single-sourced
+    /// state→key map (no-host-data > reboot-pending > updates-pending > up-to-date) is single-sourced
     /// in shared Rust and can't drift per-app (priority #2). Module-qualified to
     /// stay consistent with other FFI-backed label resolvers on this VM. The raw
     /// count renders separately in `nest-os-updates-count`.
-    static func osMaintenanceLabel(securityUpdates: UInt32, rebootPending: Bool) -> String {
+    static func osMaintenanceLabel(
+        hostStatusPresent: Bool, securityUpdates: UInt32, rebootPending: Bool
+    ) -> String {
         renderLocalizedText(FaunaFFISwift.osMaintenanceStatusLabel(
+            hostStatusPresent: hostStatusPresent,
             securityUpdatesPending: securityUpdates, rebootPending: rebootPending))
     }
 }

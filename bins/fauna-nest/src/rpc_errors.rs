@@ -59,7 +59,7 @@ fn classify(err: impl std::fmt::Display, code: &str, i18n: &str) -> RpcError {
 
 /// A cross-nest relay reached a peer nest that predates the required federation
 /// kind — its allowlist refused the kind with `fauna.protocol.unauthenticated`
-/// before any handler ran (S5, `federation.md` § Cross-nest shared folders +
+/// before any handler ran (S5, `federation-shared-folders.md` § Cross-nest shared folders +
 /// channel append → old-peer error shapes). Mapped to the one client-visible
 /// code `fauna.federation.peer_nest_outdated` (NeedsUpdate class, localized
 /// "the other side's nest needs an update") by every relay — send_remote,

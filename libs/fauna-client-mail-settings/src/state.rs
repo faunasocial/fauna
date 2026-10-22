@@ -129,9 +129,22 @@ pub struct MailSettingsSnapshot {
     ///
     /// [`hydrate`]: crate::MailSettingsMachine::hydrate
     pub serving_enabled: bool,
+    /// The box cannot enable mail — a public box whose deployment wired no
+    /// content scanners (`ui/mail-settings.md` § Layout & flow). The toggle
+    /// renders disabled (`state` reads `unavailable`) under
+    /// `mail-settings-unavailable-notice`, and the machine refuses
+    /// [`MailSettingsAction::EnableMail`] while it holds. Computed once, on
+    /// [`hydrate`], from `fauna.setup.status` through
+    /// `SetupStatusReply::mail_unavailable_here` — apps read the field, never
+    /// re-derive it. Best-effort: a failed read leaves `false` and the nest's
+    /// own refusal stands behind it.
+    ///
+    /// [`hydrate`]: crate::MailSettingsMachine::hydrate
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub mail_unavailable_here: bool,
     /// One entry per `MailConfig::credentials`. Order matches
     /// `MailConfig::credentials` so the per-app UI can use
-    /// `mail-settings-credentials-list[N]` indexing without
+    /// `connected-apps-item[N]` indexing without
     /// re-sorting.
     pub credentials: Vec<MailCredentialSummary>,
     /// Set when a rotation is mid-flight (sentinel persisted in
@@ -176,6 +189,9 @@ impl Default for MailSettingsSnapshot {
             // Default on / absent ⇒ on (the nest's `actor_mail_serving`
             // default). Refreshed from the nest on the first `hydrate`.
             serving_enabled: true,
+            // Nest-sourced (`fauna.setup.status`); refreshed on the first
+            // `hydrate`.
+            mail_unavailable_here: false,
             credentials: Vec::new(),
             pending_rotation: None,
             mua: MuaInstructions::placeholder(),
@@ -185,7 +201,7 @@ impl Default for MailSettingsSnapshot {
     }
 }
 
-/// One row in the `mail-settings-credentials-list` component. The
+/// One app-password row on the Connected apps roster. The
 /// secret is never surfaced in the snapshot — only the mail custody
 /// (sealed under BackupKey) holds it.
 ///
@@ -257,7 +273,7 @@ impl From<CredentialKind> for fauna_core::data::MailCredentialKind {
 /// [`member_status_label`](crate::member_status_label) /
 /// [`bridge_display_name`](crate::bridge_display_name)). Lifts the identical
 /// two-arm map that linux/web/windows/apple/android each hard-coded for the
-/// `mail-settings-credential-item-type` badge — the last un-lifted mail-settings
+/// `connected-apps-item-type` badge — the last un-lifted mail-settings
 /// enum→label map, now one source of truth (priority #1/#2/#4). The keys are the
 /// pre-existing `settings.mail.kind_*` strings every app already resolved
 /// (web and linux had hard-coded the English values, bypassing i18n — adopting
@@ -374,6 +390,19 @@ pub struct MuaInstructions {
     pub auth_mechanism: String,
 }
 
+/// How the nest serves its one DAV listener (CalDAV, CardDAV and WebDAV),
+/// as `fauna.bridges.get_caldav_port` reports it — the input to
+/// [`MuaInstructions::apply_dav_listener`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DavListener {
+    /// The effective admin-set listener port (`GetCaldavPortReply.port`).
+    pub port: u16,
+    /// `GetCaldavPortReply.direct_listener`: `Some(true)` bound directly on
+    /// the box's own interface, `Some(false)` behind the SNI router, `None`
+    /// undeclared (older nest, or no operator hatch).
+    pub direct: Option<bool>,
+}
+
 impl MuaInstructions {
     /// Default placeholder text. Real values come from
     /// [`MuaInstructions::for_node_url`] at machine construction (the per-app
@@ -444,12 +473,13 @@ impl MuaInstructions {
     ///   [`DEFAULT_CALDAV_PORT`](fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT)
     ///   = 8443).
     ///
-    /// This builds the **pre-hydrate default** from the node URL alone; the real
-    /// admin-set port is threaded in once the [`MailSettingsMachine`] hydrates and
-    /// calls [`MuaInstructions::apply_admin_caldav_port`] with the synced
-    /// `FetchConfigReply.caldav_port` (read via `fauna.bridges.get_caldav_port`),
-    /// which overrides the local-target port and leaves the registrable `443`
-    /// untouched. IMAP/SMTP keep their direct `993`/`465` (not admin-settable).
+    /// This builds the **pre-hydrate default** from the node URL alone; the
+    /// nest's real DAV listener is threaded in once the [`MailSettingsMachine`]
+    /// hydrates and calls [`MuaInstructions::apply_dav_listener`] with what
+    /// `fauna.bridges.get_caldav_port` reports — the admin-set port and whether
+    /// the listener is direct — which overrides the local-target port, and the
+    /// registrable `mail.<domain>:443` too when the nest declares its listener
+    /// direct (a home box with a domain). IMAP/SMTP keep their direct `993`/`465` (not admin-settable).
     /// The mail `<domain>` is the node-URL host as a stand-in for the real claimed
     /// `add_local_domain` value.
     pub fn for_node_url(node_url: &str) -> Self {
@@ -461,7 +491,7 @@ impl MuaInstructions {
             host.clone()
         };
         // Pre-hydrate default — overridden for a local-target box by
-        // `apply_admin_caldav_port` on the first hydrate. A registrable
+        // `apply_dav_listener` on the first hydrate. A registrable
         // domain stays on the router-fronted public 443.
         let caldav_port = if is_public_name {
             443
@@ -476,7 +506,7 @@ impl MuaInstructions {
             caldav_host: mail_host,
             caldav_port,
             // WebDAV shares the MDA DAV listener with CalDAV, so it takes the
-            // same port; recomputed by `apply_admin_caldav_port` on hydrate.
+            // same port; recomputed by `apply_dav_listener` on hydrate.
             webdav_url: Self::webdav_url_for(&host, caldav_port),
             domain: host,
             username_format: "{handle}+{credential_id}@{domain}".into(),
@@ -484,27 +514,45 @@ impl MuaInstructions {
         }
     }
 
-    /// Apply the nest-reported admin CalDAV port (the `caldav_port` singleton
-    /// projected on `FetchConfigReply.caldav_port`, read by the
-    /// [`MailSettingsMachine`] via `fauna.bridges.get_caldav_port` on hydrate).
-    /// Only a **local-target** box (bare IP / `localhost` / `.local`) binds the
-    /// admin port directly with no SNI router in front, so the synced port is the
-    /// reachable one there and overrides the pre-hydrate default. On a
-    /// **registrable-domain** box the CalDAV surface is router-fronted at the
-    /// public `443` (the admin port governs only the no-router direct listener —
-    /// `caldav-server.md` § Network exposure), so the synced value is *not* the
-    /// reachable port and is ignored, keeping the canonical `443`. A `0` port is
-    /// never reachable, so it is ignored too (the nest never reports 0 — its read
-    /// returns the persisted port or `DEFAULT_CALDAV_PORT` — but a future/buggy
-    /// peer must not blank the display).
-    /// The WebDAV URL rides the same DAV listener, so it is rebuilt here too —
-    /// keeping [`Self::webdav_url`] from going stale against the reachable port
-    /// on a local-target box.
-    pub fn apply_admin_caldav_port(&mut self, port: u16) {
-        if port != 0 && !fauna_core::resolve::is_public_dns_name(&self.domain) {
-            self.caldav_port = port;
-            self.webdav_url = Self::webdav_url_for(&self.domain, self.caldav_port);
+    /// Apply the nest-reported DAV listener ([`DavListener`], read by the
+    /// [`MailSettingsMachine`] via `fauna.bridges.get_caldav_port` on hydrate):
+    /// the CalDAV host/port and the WebDAV URL follow how the box **serves**
+    /// its one DAV listener, not the shape of its name (`caldav-server.md`
+    /// § Network exposure — Any-locator serving).
+    ///
+    /// - **Direct** — the MDA binds the admin-set port on the box's own
+    ///   interface with no SNI router in front: a home box whose bundle names
+    ///   its LAN interface (domain or not), a desktop nest, any local-target
+    ///   locator (bare IP / `localhost` / `.local`, where `mail.<ip>` names
+    ///   nothing). The member reaches it at the address they reach the nest at
+    ///   (the node-URL host, no `mail.` prefix) on the synced port.
+    /// - **Router-fronted** — a registrable name the nest declared
+    ///   `direct_listener = false`, or did not declare at all (an older nest,
+    ///   or one with no operator hatch): `mail.<domain>` on the public `443`,
+    ///   where the admin port is inert.
+    ///
+    /// A `0` port is never reachable, so it is ignored (the nest never reports
+    /// 0 — its read returns the persisted port or `DEFAULT_CALDAV_PORT` — but a
+    /// future/buggy peer must not blank the display). The WebDAV URL rides the
+    /// same DAV listener, so it is rebuilt here too.
+    pub fn apply_dav_listener(&mut self, listener: DavListener) {
+        let local_target = !fauna_core::resolve::is_public_dns_name(&self.domain);
+        let direct = local_target || listener.direct == Some(true);
+        if !direct || listener.port == 0 {
+            return;
         }
+        self.caldav_host = self.domain.clone();
+        self.caldav_port = listener.port;
+        self.webdav_url = format!("https://{}:{}/webdav/", self.domain, listener.port);
+    }
+
+    /// Carry the DAV connection lines (CalDAV host/port, WebDAV URL) over from
+    /// `prior` — the nest-sourced values a config-driven re-snapshot must not
+    /// reset to the for-node-URL default between hydrates.
+    pub(crate) fn carry_dav_lines_from(&mut self, prior: &MuaInstructions) {
+        self.caldav_host = prior.caldav_host.clone();
+        self.caldav_port = prior.caldav_port;
+        self.webdav_url = prior.webdav_url.clone();
     }
 
     /// The concrete MUA username for a credential, with `{credential_id}` and
@@ -654,16 +702,72 @@ pub enum MailSettingsAction {
 mod tests {
     use super::*;
 
+    /// A listener the nest did not declare (an older nest, or no hatch): the
+    /// host-name split decides.
+    fn undeclared(port: u16) -> DavListener {
+        DavListener { port, direct: None }
+    }
+
+    /// The three serving shapes: a home box with a domain (direct), a cloud
+    /// domain box (router-fronted), a bare-IP box — `caldav-server.md`
+    /// § Network exposure — Any-locator serving.
+    #[test]
+    fn dav_lines_follow_the_declared_listener_not_the_host_name() {
+        // Home box with a domain: its bundle names the LAN interface, so the
+        // one DAV listener is the box's own address at the admin port.
+        let mut home = MuaInstructions::for_node_url("https://home.example.com");
+        home.apply_dav_listener(DavListener {
+            port: 9443,
+            direct: Some(true),
+        });
+        assert_eq!(home.caldav_host, "home.example.com");
+        assert_eq!(home.caldav_port, 9443);
+        assert_eq!(home.webdav_url, "https://home.example.com:9443/webdav/");
+        // The IMAP/SMTP lines are not the DAV listener's and stay as they were.
+        assert_eq!(home.imap_host, "mail.home.example.com");
+
+        // Cloud domain box: router-fronted, the admin port is inert.
+        let mut cloud = MuaInstructions::for_node_url("https://example.com");
+        cloud.apply_dav_listener(DavListener {
+            port: 9443,
+            direct: Some(false),
+        });
+        assert_eq!(cloud.caldav_host, "mail.example.com");
+        assert_eq!(cloud.caldav_port, 443);
+        assert_eq!(cloud.webdav_url, "https://mail.example.com/webdav/");
+
+        // Bare-IP box: direct whatever is declared — `mail.<ip>` names nothing.
+        for direct in [None, Some(true), Some(false)] {
+            let mut ip = MuaInstructions::for_node_url("https://192.168.1.50");
+            ip.apply_dav_listener(DavListener { port: 9443, direct });
+            assert_eq!(ip.caldav_host, "192.168.1.50", "{direct:?}");
+            assert_eq!(ip.caldav_port, 9443, "{direct:?}");
+            assert_eq!(
+                ip.webdav_url, "https://192.168.1.50:9443/webdav/",
+                "{direct:?}"
+            );
+        }
+
+        // A direct listener reporting port 0 never blanks the display.
+        let mut zero = MuaInstructions::for_node_url("https://home.example.com");
+        let before = zero.clone();
+        zero.apply_dav_listener(DavListener {
+            port: 0,
+            direct: Some(true),
+        });
+        assert_eq!(zero, before);
+    }
+
     #[test]
     fn username_for_drops_suffix_for_default_else_subaddresses() {
-        let mua = MuaInstructions::for_node_url("https://example.com:8443");
+        let mua = MuaInstructions::for_node_url("https://example.net:8443");
         // The `default` credential uses the bare `<handle>@<domain>` form …
-        assert_eq!(mua.username_for("default"), "{handle}@example.com");
+        assert_eq!(mua.username_for("default"), "{handle}@example.net");
         // … every other credential carries the RFC 5233 `+<credential_id>`.
-        assert_eq!(mua.username_for("iphone"), "{handle}+iphone@example.com");
+        assert_eq!(mua.username_for("iphone"), "{handle}+iphone@example.net");
         assert_eq!(
             mua.username_for("apple-mail"),
-            "{handle}+apple-mail@example.com"
+            "{handle}+apple-mail@example.net"
         );
     }
 
@@ -671,13 +775,13 @@ mod tests {
     fn webdav_url_is_the_router_fronted_collection_root_for_a_real_domain() {
         // `webdav-server.md` slice 5: the apex `/.well-known/webdav` 301s to the
         // collection root at `mail.<domain>` — 443 implicit, no port in the URL.
-        let mua = MuaInstructions::for_node_url("https://example.com:8443");
-        assert_eq!(mua.webdav_url, "https://mail.example.com/webdav/");
+        let mua = MuaInstructions::for_node_url("https://example.net:8443");
+        assert_eq!(mua.webdav_url, "https://mail.example.net/webdav/");
         // A registrable domain is router-fronted, so the admin's direct-listener
         // port never rewrites the URL (same carve-out as `caldav_port`).
         let mut mua = mua;
-        mua.apply_admin_caldav_port(9443);
-        assert_eq!(mua.webdav_url, "https://mail.example.com/webdav/");
+        mua.apply_dav_listener(undeclared(9443));
+        assert_eq!(mua.webdav_url, "https://mail.example.net/webdav/");
     }
 
     #[test]
@@ -694,11 +798,11 @@ mod tests {
         );
         // WebDAV rides the same DAV listener as CalDAV, so the admin-set port
         // rewrites the URL too — it must not go stale against `caldav_port`.
-        mua.apply_admin_caldav_port(9443);
+        mua.apply_dav_listener(undeclared(9443));
         assert_eq!(mua.caldav_port, 9443);
         assert_eq!(mua.webdav_url, "https://127.0.0.1:9443/webdav/");
         // A `0` port is never reachable and must not blank the display.
-        mua.apply_admin_caldav_port(0);
+        mua.apply_dav_listener(undeclared(0));
         assert_eq!(mua.webdav_url, "https://127.0.0.1:9443/webdav/");
     }
 
@@ -706,19 +810,19 @@ mod tests {
     fn resolve_mua_username_substitutes_handle() {
         // The renderer turns the snapshot template into the exact MUA login.
         assert_eq!(
-            resolve_mua_username("{handle}+iphone@example.com", "test"),
-            "test+iphone@example.com"
+            resolve_mua_username("{handle}+iphone@example.net", "test"),
+            "test+iphone@example.net"
         );
         assert_eq!(
-            resolve_mua_username("{handle}@example.com", "alice"),
-            "alice@example.com"
+            resolve_mua_username("{handle}@example.net", "alice"),
+            "alice@example.net"
         );
     }
 
     #[test]
     fn credential_kind_badge_maps_every_variant() {
         // Pins the two-arm CredentialKind → i18n-key map every app renders for
-        // the `mail-settings-credential-item-type` badge (lifted from the
+        // the `connected-apps-item-type` badge (lifted from the
         // hand-rolled per-app maps — priority #1/#2/#4). The keys are the same
         // `settings.mail.kind_*` strings linux/windows/apple/android already used.
         for (kind, key) in [
@@ -798,7 +902,7 @@ mod tests {
             assert_eq!(mua.domain, bare, "domain for {url}");
             // IMAP stays canonical (993, not admin-settable). CalDAV's pre-hydrate
             // default on a local-target box is now `DEFAULT_CALDAV_PORT` (the MDA
-            // binds the admin port directly, no router) — `apply_admin_caldav_port`
+            // binds the admin port directly, no router) — `apply_dav_listener`
             // then threads in the real synced port on hydrate (Change B′ port-half).
             assert_eq!(mua.imap_port, 993);
             assert_eq!(
@@ -837,10 +941,10 @@ mod tests {
         );
 
         // The synced admin port must still override on hydrate — the
-        // local-target branch of `apply_admin_caldav_port` is keyed on the same
+        // local-target branch of `apply_dav_listener` is keyed on the same
         // classification, so a mangled domain silently disabled it too.
         let mut mua = mua;
-        mua.apply_admin_caldav_port(9443);
+        mua.apply_dav_listener(undeclared(9443));
         assert_eq!(mua.caldav_port, 9443);
         assert_eq!(mua.webdav_url, "https://[::1]:9443/webdav/");
     }
@@ -855,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_admin_caldav_port_overrides_local_target_only() {
+    fn undeclared_listener_overrides_local_target_only() {
         // Local-target box: the synced admin port IS the reachable port (MDA binds
         // it directly, no SNI router) → override the pre-hydrate default.
         let mut local = MuaInstructions::for_node_url("https://192.168.1.50:8443");
@@ -863,7 +967,7 @@ mod tests {
             local.caldav_port,
             fauna_protocol::bridge_routing::DEFAULT_CALDAV_PORT
         );
-        local.apply_admin_caldav_port(9000);
+        local.apply_dav_listener(undeclared(9000));
         assert_eq!(local.caldav_port, 9000, "local-target takes the admin port");
 
         // Registrable-domain box: CalDAV is router-fronted at the public 443; the
@@ -871,7 +975,7 @@ mod tests {
         // the reachable port → keep 443 regardless of what the nest reports.
         let mut domain = MuaInstructions::for_node_url("https://nest.example.com:8443");
         assert_eq!(domain.caldav_port, 443);
-        domain.apply_admin_caldav_port(9000);
+        domain.apply_dav_listener(undeclared(9000));
         assert_eq!(
             domain.caldav_port, 443,
             "registrable domain stays on the router-fronted public 443"
@@ -880,7 +984,7 @@ mod tests {
         // A 0 port is never reachable — ignored even on a local-target box.
         let mut local2 = MuaInstructions::for_node_url("https://10.1.8.51");
         let before = local2.caldav_port;
-        local2.apply_admin_caldav_port(0);
+        local2.apply_dav_listener(undeclared(0));
         assert_eq!(local2.caldav_port, before, "port 0 is ignored");
     }
 

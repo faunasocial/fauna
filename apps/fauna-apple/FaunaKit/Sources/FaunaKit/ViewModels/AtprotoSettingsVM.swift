@@ -30,6 +30,11 @@ public final class AtprotoSettingsVM {
     /// `credentialId`. Never persisted, never part of the snapshot.
     public private(set) var revealedSecrets: [String: String] = [:]
 
+    /// The staged `atproto-app-credential-dm-access` choice: page-local, off by
+    /// default (least privilege), read by the next `mint()` — nothing is sent
+    /// until the mint button is pressed.
+    public var mintDmAccess = false
+
     private let observerBox = AtprotoSettingsObserverBox()
 
     #if DEBUG
@@ -142,14 +147,14 @@ public final class AtprotoSettingsVM {
     }
 
     /// Mint a new app credential and remember its one-time secret locally.
-    /// Auto-labels ("App credential N") and defaults `dmAllowed` false
-    /// (least privilege) — F1 collects no label/dm_allowed input at mint time,
-    /// mirrors linux's `settings/atproto.rs`.
+    /// Auto-labels ("App credential N"); `dmAllowed` is the staged
+    /// `mintDmAccess` toggle (off by default), mirrors linux's
+    /// `settings/atproto.rs`.
     public func mint() async {
         guard let machine else { return }
         let before = Set(machine.snapshot().credentials.map(\.credentialId))
         let label = L.atprotoSettings.defaultCredentialLabel(count: "\(before.count + 1)")
-        guard let secret = try? await machine.mint(label: label, dmAllowed: false) else { return }
+        guard let secret = try? await machine.mint(label: label, dmAllowed: mintDmAccess) else { return }
         let newId = machine.snapshot().credentials.map(\.credentialId).first { !before.contains($0) }
         if let newId, !newId.isEmpty {
             revealedSecrets[newId] = secret
@@ -163,9 +168,6 @@ public final class AtprotoSettingsVM {
     }
 
     public func revoke(credentialId: String) async { await machine?.revoke(credentialId: credentialId) }
-    public func setExternalAppsEnabled(_ enabled: Bool) async {
-        await machine?.setExternalAppsEnabled(enabled: enabled)
-    }
 
     // The OAuth consent card (resolve / poll) and the connected-app session rows
     // (revoke) moved to Settings → Connected apps (`ConnectedAppsVM`,

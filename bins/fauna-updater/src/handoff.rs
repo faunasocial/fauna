@@ -22,6 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::catalogue::Step;
 use crate::engine::Engine;
 use crate::successor::{container_name, successor_body};
 use crate::updater::{OLD_SUFFIX, split_reference};
@@ -63,6 +64,12 @@ async fn by_name<E: Engine>(engine: &E, name: &str) -> Option<Value> {
 pub enum Settled {
     /// The one updater: it does the checks.
     Working,
+    /// The one updater, which has just retired its predecessor: a hand-off
+    /// completed (the successor reports it — `self_update.completed`).
+    Retired,
+    /// The one updater, back under its name after a hand-off that left no
+    /// running successor.
+    TookNameBack,
     /// A predecessor whose successor runs: it parks until retired.
     Superseded,
 }
@@ -90,7 +97,7 @@ pub async fn settle<E: Engine>(engine: &E, me_id: &str) -> Result<Settled> {
             None => tracing::warn!("{name}: a hand-off with no successor — taking the name back"),
         }
         engine.rename(me_id, base).await.context("rename back")?;
-        return Ok(Settled::Working);
+        return Ok(Settled::TookNameBack);
     }
     let aside = format!("{name}{OLD_SUFFIX}");
     if let Some(predecessor) = by_name(engine, &aside).await {
@@ -111,6 +118,7 @@ pub async fn settle<E: Engine>(engine: &E, me_id: &str) -> Result<Settled> {
                 tracing::info!("old image {old_image} kept: {e:#}");
             }
         }
+        return Ok(Settled::Retired);
     }
     Ok(Settled::Working)
 }
@@ -154,17 +162,18 @@ pub async fn hand_off<E: Engine>(
         .inspect_image(&my_image_id)
         .await
         .context("inspect own image")?;
-    engine.tag(target, repo, &tag).await.context("tag")?;
+    engine.tag(target, repo, &tag).await.context(Step::Tag)?;
     let body = successor_body(&me, &my_image, &format!("{repo}:{tag}"));
 
     let name = container_name(&me);
     let aside = format!("{name}{OLD_SUFFIX}");
-    engine.rename(me_id, &aside).await.context("rename aside")?;
+    engine.rename(me_id, &aside).await.context(Step::Rename)?;
     let mut created = None;
     let outcome = async {
-        let new_id = engine.create(&name, body).await.context("create")?;
+        let new_id = engine.create(&name, body).await.context(Step::Create)?;
         created = Some(new_id.clone());
-        engine.start(&new_id).await.context("start")
+        exit_after_create_seam();
+        engine.start(&new_id).await.context(Step::Start)
     }
     .await;
     if let Err(e) = outcome {
@@ -175,6 +184,19 @@ pub async fn hand_off<E: Engine>(
         return Err(e);
     }
     Ok(HandOff::Done)
+}
+
+/// The tier_4 witness's kill between create and start: an e2e build
+/// (`test-hooks`) given `FAUNA_E2E_HANDOFF_EXIT_AFTER_CREATE` exits here, as a
+/// crash would, leaving its successor created and never started for the
+/// engine's restart of this predecessor to settle. Compiled out of the shipped
+/// updater.
+fn exit_after_create_seam() {
+    #[cfg(feature = "test-hooks")]
+    if std::env::var_os("FAUNA_E2E_HANDOFF_EXIT_AFTER_CREATE").is_some() {
+        tracing::warn!("e2e seam: exiting between the successor's create and its start");
+        std::process::exit(1);
+    }
 }
 
 /// A parked predecessor's check after [`HANDOFF_TIMEOUT`]: `true` when it took
@@ -344,7 +366,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(settle(&engine, "new").await.unwrap(), Settled::Working);
+        assert_eq!(settle(&engine, "new").await.unwrap(), Settled::Retired);
         assert_eq!(
             engine.calls(),
             ["stop old None", "rm old", "rmi sha256:old"]
@@ -382,7 +404,7 @@ mod tests {
         assert_eq!(engine.calls(), ["start new"]);
 
         engine.containers[1]["State"]["Running"] = json!(true);
-        assert_eq!(settle(&engine, "new").await.unwrap(), Settled::Working);
+        assert_eq!(settle(&engine, "new").await.unwrap(), Settled::Retired);
         assert_eq!(
             engine.calls()[1..],
             ["stop old None", "rm old", "rmi sha256:old"]
@@ -404,7 +426,7 @@ mod tests {
             fail: Some("start new"),
             ..Default::default()
         };
-        assert_eq!(settle(&engine, "old").await.unwrap(), Settled::Working);
+        assert_eq!(settle(&engine, "old").await.unwrap(), Settled::TookNameBack);
         assert_eq!(
             engine.calls(),
             ["start new", "rm new", "rename old fauna-fauna-updater-1"]
@@ -422,7 +444,7 @@ mod tests {
             )],
             ..Default::default()
         };
-        assert_eq!(settle(&engine, "old").await.unwrap(), Settled::Working);
+        assert_eq!(settle(&engine, "old").await.unwrap(), Settled::TookNameBack);
         assert_eq!(engine.calls(), ["rename old fauna-fauna-updater-1"]);
     }
 

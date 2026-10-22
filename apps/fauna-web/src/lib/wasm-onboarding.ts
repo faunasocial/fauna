@@ -1,5 +1,6 @@
-import { base } from '$app/paths';
-import type { LocalizedText } from '$lib/i18n/localized';
+import { asset } from '$app/paths';
+import { registerIdentityStoreChunk } from './identity-store';
+import type { LocalizedText } from '#lib/i18n/localized';
 
 let wasmModule: typeof import('../../static/fauna_wasm_onboarding.js') | null = null;
 let wasmInit: Promise<void> | null = null;
@@ -15,7 +16,10 @@ export function ensureOnboardingWasm(): Promise<void> {
   if (!wasmInit) {
     wasmInit = (async () => {
       const mod = await import('../../static/fauna_wasm_onboarding.js');
-      await mod.default(`${base}/fauna_wasm_onboarding_bg.wasm`);
+      await mod.default(asset('fauna_wasm_onboarding_bg.wasm'));
+      // The identity store's key, if this page holds it, goes in before
+      // anything reads the registry through this chunk (identity-store.ts).
+      registerIdentityStoreChunk(mod);
       wasmModule = mod;
     })().catch((e) => {
       wasmInit = null;
@@ -43,7 +47,7 @@ export interface OnboardingMachineObserver {
 }
 
 // `providerBaseUrls` only ever has a value inside the `__FAUNA_E2E_AUTOMATION__`
-// branch of `$lib/onboarding/machine.svelte.ts`, which a production `vite build`
+// branch of `#lib/onboarding/machine.svelte.ts`, which a production `vite build`
 // constant-folds away. The wasm chunk is flavored to match (testing.md
 // convention 15): the `test-helpers` build's constructor takes the override map,
 // the production build's takes `observer` alone and this second argument is

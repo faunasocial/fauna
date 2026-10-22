@@ -79,6 +79,19 @@ pub struct ClaimOutcome {
     pub handle: String,
 }
 
+/// A handle writer's refusal at the claim: an alias holding the handle is
+/// "handle taken" (`mail-aliases.md` § Cross-user uniqueness), as at every
+/// other handle door; anything else is a server fault.
+fn handle_write_err(e: anyhow::Error, what: &str) -> ClaimError {
+    if e.downcast_ref::<crate::db::mail_aliases::HandleHeldByAlias>()
+        .is_some()
+    {
+        ClaimError::HandleTaken
+    } else {
+        ClaimError::Internal(format!("{what}: {e}"))
+    }
+}
+
 /// One-time admin claim — the body of the `fauna.auth.claim_admin` WS-RPC kind.
 /// Verifies the timestamp (±300 s, accepting seconds or milliseconds), the
 /// domain-tagged signature over `claim_admin_signed_message` (the **raw**
@@ -237,14 +250,14 @@ pub async fn claim_admin_core(
                 .db
                 .create_user_with_handle(&actor_bytes, "free", &handle, None)
                 .await
-                .map_err(|e| ClaimError::Internal(format!("failed to create admin user: {e}")))?;
+                .map_err(|e| handle_write_err(e, "failed to create admin user"))?;
         }
         Ok(true) => {
             state
                 .db
                 .set_handle(&actor_bytes, &handle)
                 .await
-                .map_err(|e| ClaimError::Internal(format!("set handle during claim: {e}")))?;
+                .map_err(|e| handle_write_err(e, "set handle during claim"))?;
         }
         Err(e) => return Err(ClaimError::Internal(format!("database error: {e}"))),
     }

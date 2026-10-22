@@ -388,9 +388,8 @@ mod tests {
     #[tokio::test]
     async fn stage_sealed_body_fails_when_the_metadata_write_fails() {
         let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
-        let blob_dir = tempfile::tempdir().unwrap();
-        let blob_path = blob_dir.path().to_path_buf();
-        std::mem::forget(blob_dir); // outlive the call; never deleted under test
+        let base = AppState::for_test(db.clone());
+        let blob_path = base.test_scratch_path("blobs");
         let backup_svc = Arc::new(
             crate::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
                 .unwrap(),
@@ -402,7 +401,7 @@ mod tests {
             .unwrap();
         let state = Arc::new(AppState {
             backup_service: Some(backup_svc),
-            ..AppState::for_test(db)
+            ..base
         });
         let staged = stage_sealed_body(&state, b"sealed mail body bytes for staging").await;
         assert!(
@@ -414,16 +413,15 @@ mod tests {
     /// A state whose byte plane is real (temp dir), for the staged round trips.
     fn state_with_blob_plane() -> Arc<AppState> {
         let db = Arc::new(crate::db::CacheDb::open_in_memory().unwrap());
-        let blob_dir = tempfile::tempdir().unwrap();
-        let blob_path = blob_dir.path().to_path_buf();
-        std::mem::forget(blob_dir); // outlive the call; never deleted under test
+        let base = AppState::for_test(db.clone());
+        let blob_path = base.test_scratch_path("blobs");
         let backup_svc = Arc::new(
             crate::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
                 .unwrap(),
         );
         Arc::new(AppState {
             backup_service: Some(backup_svc),
-            ..AppState::for_test(db)
+            ..base
         })
     }
 

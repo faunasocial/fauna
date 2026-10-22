@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connectionStatus, identity } from '$lib/store';
+  import { connectionStatus, identity } from '#lib/store';
   import {
     adminServicesList,
     adminServicesUpdate,
@@ -15,18 +15,26 @@
     featureEditorOpen,
     adminWebAppOriginStatus,
     adminSetWebAppOrigin,
+    adminUpdateChannelStatus,
+    adminSetUpdateChannel,
     moderationLegalTakedown,
     adminAbuseReportQueue,
     adminAbuseReportResolve,
+    moderationAdminBlock,
+    moderationAdminBlockList,
     adminIssuerKeyStatus,
     adminRotateIssuerKey,
     adminForceRotateIssuer,
+    adminContentPolicy,
+    adminSetContentPolicy,
     type SeedRotationConfirmView,
     type AdminRegionView,
     type AdminWebAppOriginView,
-  } from '$lib/rpc';
-  import type { AuthoredRow, PolicyEditorHandle } from '$lib/wasm';
-  import FeaturePolicyEditor from '$lib/components/FeaturePolicyEditor.svelte';
+    type AdminUpdateChannelView,
+  } from '#lib/rpc';
+  import { openRuleEditorForNest, type AuthoredRow, type PolicyEditorHandle, type RuleEditorHandle } from '#lib/wasm';
+  import FeaturePolicyEditor from '#lib/components/FeaturePolicyEditor.svelte';
+  import RuleEditor from '#lib/components/RuleEditor.svelte';
   import {
     armOauthForced,
     beginOauthRotate,
@@ -40,20 +48,20 @@
     type IssuerForcedArm,
     type OauthKeysRead,
     type OauthSection,
-  } from '$lib/admin-oauth-keys';
-  import { mintAndPersistPendingFactoryReset } from '$lib/onboarding/launch-persistence';
-  import { accountsClearNestBinding, accountsSessionMaterial } from '$lib/accounts';
-  import { clearAllCriticalAlerts } from '$lib/critical-alerts';
+  } from '#lib/admin-oauth-keys';
+  import { mintAndPersistPendingFactoryReset } from '#lib/onboarding/launch-persistence';
+  import { accountsClearNestBinding, accountsSessionMaterial } from '#lib/accounts';
+  import { clearAllCriticalAlerts } from '#lib/critical-alerts';
   import {
     qualifyReclaimHandle,
     createAdminNatModeMachine,
     type AdminNatModeMachine,
-  } from '$lib/wasm-onboarding';
-  import { nodeUrl } from '$lib/api';
+  } from '#lib/wasm-onboarding';
+  import { nodeUrl } from '#lib/api';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
   import {
     offlineAffordance,
     osMaintenanceStatusLabel,
@@ -66,18 +74,22 @@
     issuerForcedConfirmView,
     reportResolveVerdict,
     reportTakedownPrefill,
+    reportBlockFormView,
+    reportBlockConfirmSummary,
+    reportBlockVerdict,
     type ReportQueueRow,
-  } from '$lib/wasm';
-  import { makeOfflineGate } from '$lib/offline-gate';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { relativeTime } from '$lib/value-format';
-  import { IDS } from '$lib/generated/uiIds';
+    type BlockedRow,
+  } from '#lib/wasm';
+  import { makeOfflineGate } from '#lib/offline-gate';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import { relativeTime } from '#lib/value-format';
+  import { IDS } from '#lib/generated/uiIds';
 
   // W4 (account-data-plane.md § Workstreams) phase 4's UI desensitizing (`account-data-plane.md` § The
   // offline-mutation contract). "Admin/provisioning" is the charter's own
   // example of class 3, and the tui sweep bore it out: the deployment-mutating
   // half of this page is `OnlineOnly`. The verdict is the shared rule's, never a
-  // class test written here; `$lib/offline-gate` owns how a reactive tree obeys
+  // class test written here; `#lib/offline-gate` owns how a reactive tree obeys
   // it. Note what is deliberately NOT gated below — arming a confirm is local,
   // so the openers stay live and only the ceremony's own confirm declares.
   // `admin-nest-seed-rotate-button` is the sharp case: it DOES issue a call,
@@ -127,14 +139,18 @@
   // Read-only patch/reboot status for the host Ubuntu box of an onboarded VPS,
   // from the `os_*` fields on `setup.status`. The status line + count badge are
   // passive; "restart now" expedites the nest-coordinated idle reboot. A nest with
-  // no host channel (dev/desktop) reads the defaults → "OS up to date".
+  // no host channel (a hand-built box, dev, desktop) reads `os_host_status_present`
+  // false → "OS status not reported by this host", never "OS up to date".
+  let osHostStatusPresent = $state(false);
   let osSecurityUpdates = $state(0);
   let osRebootPending = $state(false);
   let restartingNow = $state(false);
   // Shared state→key decision in `fauna_core::format::os_maintenance_status_label`
   // (over wasm); the raw count renders separately in `nest-os-updates-count`.
   const osStatusText = $derived(
-    resolveLocalized(osMaintenanceStatusLabel(osSecurityUpdates, osRebootPending)),
+    resolveLocalized(
+      osMaintenanceStatusLabel(osHostStatusPresent, osSecurityUpdates, osRebootPending),
+    ),
   );
 
   // ── NAT-mode control (`fauna.setup.nat_mode` via the shared AdminNatModeMachine) ──
@@ -221,6 +237,43 @@
       error = t.admin.nest_page.web_app_origin_save_error({ message: detail(e) });
     } finally {
       webOriginSaving = false;
+    }
+  }
+
+  // ── Update channel (`fauna.admin.update_channel.{get,set}`) ──
+  // Which builds this nest installs on its own (nest/update-channel.md § The UI;
+  // admin.md § N Nest → Update channel). Every sentence, the three radios' labels
+  // and descriptions and the `can_set` verdict are the shared
+  // `admin_update_channel_view` fold (tui `admin/nest.rs`, the reference leg); this
+  // file paints and wires. Radios stay unmarked and disabled until the read
+  // lands. The save repaints from the fresh read the set resolves.
+  let updateChannel = $state<AdminUpdateChannelView | null>(null);
+  let updateChannelDraft = $state<'stable' | 'test' | 'dev' | null>(null);
+  let updateChannelSaving = $state(false);
+
+  async function loadUpdateChannel() {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    try {
+      updateChannel = await adminUpdateChannelStatus(id.secretHex);
+      updateChannelDraft = updateChannel.selected;
+    } catch (e) {
+      error = detail(e);
+    }
+  }
+
+  async function saveUpdateChannel() {
+    const id = $identity;
+    if (!id?.secretHex || !updateChannel?.can_set || !updateChannelDraft) return;
+    error = '';
+    updateChannelSaving = true;
+    try {
+      updateChannel = await adminSetUpdateChannel(id.secretHex, updateChannelDraft);
+      updateChannelDraft = updateChannel.selected;
+    } catch (e) {
+      error = detail(e);
+    } finally {
+      updateChannelSaving = false;
     }
   }
 
@@ -409,8 +462,8 @@
   // identity by admin.md § N Nest) — the nest-held OAuth issuer key set and its
   // second signer, the refresh-token secret: the served keys, the ordinary
   // rotation, and two forced arms sharing one inline confirm. Every sentence is
-  // a shared `fauna_client_admin` fold (`$lib/wasm`) and every WHEN is
-  // `$lib/admin-oauth-keys`' pure guard, so this block only paints and wires —
+  // a shared `fauna_client_admin` fold (`#lib/wasm`) and every WHEN is
+  // `#lib/admin-oauth-keys`' pure guard, so this block only paints and wires —
   // mirroring tui's `admin/nest.rs` `oauth_elements` (the reference leg).
   //
   // `$state.raw`: every transition hands back a whole new section, and the view
@@ -527,7 +580,7 @@
   // takedown → Invocation surface, ruled 2026-08-16).
   // Every gating/wording decision is the shared
   // `fauna_client_moderation::takedown` fold (`takedownFormView`/
-  // `takedownVerdict`, `$lib/wasm`, pure — no nest hop) — this page paints
+  // `takedownVerdict`, `#lib/wasm`, pure — no nest hop) — this page paints
   // and wires; nothing here decides. Simpler than seed-rotation above: the
   // fold is pure, so the arm control's sensitivity/reason recompute reactively
   // off the form fields with no async intermediate. Mirrors tui's
@@ -634,6 +687,118 @@
     takedownStatus = '';
   }
 
+  // ── The nest's published rules (`admin-nest-rules-section`; nest-rules.md
+  // § The shared rule editor (a)) — the admin's mounting of the ONE shared rule
+  // editor, directly after the reports queue. Paint only: the document, every
+  // label and defect sentence, and whether it may be saved are `WasmRuleEditor`'s;
+  // the host reads `fauna.admin.content_policy.get` on load (the editor opens on
+  // the document in force, the nest's domain from the setup read) and writes
+  // `.set` — the one OnlineOnly call — whose refusal comes back as the nest's
+  // named defect, never a throw. The editor is re-keyed on each load so a saved
+  // document reopens from what the nest stored.
+  let rulesEditor = $state<RuleEditorHandle | null>(null);
+  let rulesKey = $state(0);
+  let rulesStatus = $state('');
+  let rulesSaving = $state(false);
+
+  async function loadRules() {
+    const id = $identity;
+    if (!id?.secretHex) return;
+    try {
+      const [{ domain }, policy] = await Promise.all([
+        setupStatus(id.secretHex),
+        adminContentPolicy(id.secretHex),
+      ]);
+      rulesEditor = openRuleEditorForNest(domain, policy.document);
+      rulesKey += 1;
+    } catch { /* the rules read is not available — the section stays on its loading line */ }
+  }
+
+  async function saveRules() {
+    const id = $identity;
+    if (!id?.secretHex || !rulesEditor) return;
+    rulesSaving = true;
+    try {
+      const reply = await adminSetContentPolicy(id.secretHex, rulesEditor.documentBytes());
+      if (reply.accepted) {
+        rulesStatus = t.rule_editor.saved_version({ sequence: String(reply.sequence) });
+      } else {
+        rulesStatus = reply.defect ?? '';
+      }
+    } catch (e) {
+      rulesStatus = e instanceof Error ? e.message : String(e);
+    } finally {
+      rulesSaving = false;
+    }
+  }
+
+  // ── Admin block of a reported item (`admin-nest-report-block-*`,
+  // `admin-nest-blocked-*`; moderation.md § Admin block of a reported item).
+  // Paint only: the verb's gate, the armed summary (verb + item + reason), the
+  // verdict and the blocked list's rows are all the shared `block` fold. Arming
+  // folds the summary ONCE, over the row the admin is looking at; the confirm
+  // is the one OnlineOnly call and disarms before it dispatches.
+  let blocked = $state<BlockedRow[]>([]);
+  let blockedLoaded = $state(false);
+  let blockArmed = $state<{
+    reportId: string;
+    restore: boolean;
+    summary: string;
+    confirmLabel: string;
+  } | null>(null);
+  let blockStatus = $state('');
+
+  async function loadBlocked() {
+    const id = $identity;
+    if (!id) return;
+    try {
+      blocked = await moderationAdminBlockList(id.secretHex);
+      blockedLoaded = true;
+    } catch { /* list not available — the empty line stays off */ }
+  }
+
+  function armBlock(row: ReportQueueRow) {
+    const form = reportBlockFormView(row.subject, false);
+    if (!form.can_submit) return;
+    blockArmed = {
+      reportId: row.report_id,
+      restore: false,
+      summary: resolveLocalizedNested(reportBlockConfirmSummary(row.subject, row.reason_token, false)),
+      confirmLabel: resolveLocalized(form.confirm_label),
+    };
+    blockStatus = '';
+  }
+
+  function armUnblock(row: BlockedRow) {
+    if (!row.unblock.can_submit) return;
+    blockArmed = {
+      reportId: row.report_id,
+      restore: true,
+      summary: resolveLocalizedNested(reportBlockConfirmSummary(row.subject, row.reason_token, true)),
+      confirmLabel: resolveLocalized(row.unblock.confirm_label),
+    };
+    blockStatus = '';
+  }
+
+  function cancelBlock() {
+    blockArmed = null;
+  }
+
+  async function confirmBlock() {
+    const id = $identity;
+    const armed = blockArmed;
+    if (!id || !armed) return;
+    blockArmed = null; // disarm before dispatch: a double click must not repeat the act
+    let failure: string | null = null;
+    try {
+      await moderationAdminBlock(id.secretHex, armed.reportId, armed.restore);
+    } catch (e) {
+      failure = detail(e);
+    }
+    blockStatus = resolveLocalized(reportBlockVerdict(armed.restore, failure));
+    await Promise.all([loadReports(), loadBlocked()]);
+  }
+
   // One queue row's line: reason · kind id · origin · when — note — “excerpt”.
   function reportLine(row: ReportQueueRow): string {
     const subjectId =
@@ -657,10 +822,13 @@
     loadRegion();
     loadFeatureLimits();
     loadWebOrigin();
+    loadUpdateChannel();
     loadOsMaintenance();
     loadNatMode();
     loadOauthKeys();
     loadReports();
+    loadRules();
+    loadBlocked();
     // Re-count the retired keys' minutes while the page stays open; the rows
     // re-read the clock on each tick (`oauthRows`).
     const oauthTicker = setInterval(() => (oauthTick += 1), 15_000);
@@ -738,10 +906,11 @@
     if (!id?.secretHex) return;
     try {
       const status = await setupStatus(id.secretHex);
+      osHostStatusPresent = status.os_host_status_present;
       osSecurityUpdates = status.os_security_updates_pending;
       osRebootPending = status.os_reboot_pending;
     } catch (e) {
-      // Non-fatal: the indicator stays "OS up to date" if setup-status is unreachable.
+      // Non-fatal: the indicator stays "not reported" if setup-status is unreachable.
       error = t.admin.nest_page.load_settings_error({ message: detail(e) });
     }
   }
@@ -1031,6 +1200,54 @@
   </div>
 </section>
 
+<!-- Update channel (fauna.admin.update_channel.{get,set}) — admin.md § N Nest →
+     Update channel. Placed directly after the web-app origin, mirroring its radio
+     shape; the radios, descriptions and status are the shared fold's. -->
+<section class="section" data-testid={IDS.ADMIN_NEST_UPDATE_CHANNEL_SECTION}>
+  <div class="nat-mode-card">
+    <div class="service-name">{t.admin.nest_page.update_channel_label}</div>
+    <div class="service-desc">{t.admin.nest_page.update_channel_desc}</div>
+    {#each updateChannel?.options ?? [] as option (option.channel)}
+      <label class="nat-radio">
+        <input
+          type="radio"
+          name="admin-update-channel"
+          value={option.channel}
+          data-testid={option.channel === 'stable'
+            ? IDS.ADMIN_NEST_UPDATE_CHANNEL_STABLE_RADIO
+            : option.channel === 'test'
+              ? IDS.ADMIN_NEST_UPDATE_CHANNEL_TEST_RADIO
+              : IDS.ADMIN_NEST_UPDATE_CHANNEL_DEV_RADIO}
+          checked={updateChannelDraft === option.channel}
+          disabled={!updateChannel?.can_set || updateChannelSaving}
+          onchange={() => (updateChannelDraft = option.channel)}
+        />
+        {resolveLocalized(option.label)}
+      </label>
+      <div class="service-desc">{resolveLocalized(option.description)}</div>
+    {/each}
+    <div class="nat-actions">
+      <span class="service-desc" data-testid={IDS.ADMIN_NEST_UPDATE_CHANNEL_STATUS}>
+        {updateChannel
+          ? resolveLocalized(updateChannel.status)
+          : t.admin.nest_page.update_channel_loading}
+      </span>
+      <button
+        type="button"
+        class="btn"
+        data-testid={IDS.ADMIN_NEST_UPDATE_CHANNEL_SAVE_BUTTON}
+        use:offlineGate={{
+          kind: 'fauna.admin.update_channel.set',
+          disabled: !updateChannel?.can_set || !updateChannelDraft || updateChannelSaving,
+        }}
+        onclick={saveUpdateChannel}
+      >
+        {t.admin.nest_page.update_channel_save}
+      </button>
+    </div>
+  </div>
+</section>
+
 <!-- Declared region (fauna.admin.region.{get,set}) — region-blocking.md § Region
      determination. DECLARED, NEVER DETECTED: no detect/prefill affordance here. -->
 <section class="section" data-testid={IDS.ADMIN_NEST_REGION_SECTION}>
@@ -1179,7 +1396,7 @@
       <p>{t.admin.nest_page.rotate_seed_confirm_body}</p>
       {#if seedRotateState.kind === 'ready'}
         {#each seedRotateState.view.inheritors as inheritor, i (i)}
-          <p data-testid={`admin-nest-seed-rotate-roster-item-${i}`}>{inheritor.label}</p>
+          <p data-testid={IDS.ADMIN_NEST_SEED_ROTATE_ROSTER_ITEM}>{inheritor.label}</p>
         {/each}
       {/if}
       {#if seedRotateReasonText}
@@ -1225,7 +1442,7 @@
        empty list, which would read as "this nest has no keys". -->
   {#if oauthView}
     {#each oauthRows as row, i (i)}
-      <p class="key-row" data-testid={`${IDS.ADMIN_NEST_OAUTH_KEY_ITEM}-${i}`}>{row}</p>
+      <p class="key-row" data-testid={IDS.ADMIN_NEST_OAUTH_KEY_ITEM}>{row}</p>
     {/each}
   {:else}
     <p class="muted" data-testid={IDS.ADMIN_NEST_OAUTH_KEY_REASON}>{oauthReasonText}</p>
@@ -1442,9 +1659,81 @@
         use:offlineGate={{ kind: 'fauna.moderation.abuse_report.resolve', disabled: false }}
         onclick={() => resolveReport(row, false)}
       >{t.admin.nest_page.reports_dismiss}</button>
+      {#if row.can_block}
+        <!-- Arming is local (the confirm below carries the OnlineOnly kind). -->
+        <button
+          class="btn small"
+          data-testid={IDS.ADMIN_NEST_REPORT_BLOCK_BUTTON}
+          onclick={() => armBlock(row)}
+        >{resolveLocalized(reportBlockFormView(row.subject, false).arm_label)}</button>
+      {/if}
     </div>
   {/each}
   {#if reportsStatus}<p class="muted">{reportsStatus}</p>{/if}
+</section>
+
+<!-- The nest's published rules — the shared rule editor's admin mounting,
+     directly after the reports queue (nest-rules.md § The shared rule editor
+     (a); admin.md § N. Nest). -->
+<section class="section" data-testid={IDS.ADMIN_NEST_RULES_SECTION}>
+  <h2>{t.rule_editor.nest_section}</h2>
+  {#if rulesEditor && $identity?.secretHex}
+    {#key rulesKey}
+      <RuleEditor
+        secretHex={$identity.secretHex}
+        editor={rulesEditor}
+        writeKind="fauna.admin.content_policy.set"
+        status={rulesStatus}
+        saving={rulesSaving}
+        onsave={saveRules}
+        onchange={() => (rulesStatus = '')}
+      />
+    {/key}
+  {:else}
+    <p class="muted">{t.rule_editor.loading}</p>
+  {/if}
+</section>
+
+<!-- Blocked items — below the reports queue: a blocked item's report has left
+     the open queue, so Unblock acts from here (moderation.md § Admin block of a
+     reported item). The one armed confirm serves both Block and Unblock. -->
+<section class="section" data-testid={IDS.ADMIN_NEST_BLOCKED_SECTION}>
+  <h2>{t.admin.nest_page.blocked_label}</h2>
+  <p class="muted">{t.admin.nest_page.blocked_desc}</p>
+  {#if !blockedLoaded}
+    <p class="muted">{t.admin.nest_page.blocked_loading}</p>
+  {:else if blocked.length === 0}
+    <p class="muted">{t.admin.nest_page.blocked_empty}</p>
+  {/if}
+  {#each blocked as row (row.report_id)}
+    <div class="report-row">
+      <span data-testid={IDS.ADMIN_NEST_BLOCKED_ITEM} data-subject={row.subject_id} data-kind={row.subject_kind}>{resolveLocalized(row.reason)} · {row.subject_kind} {row.subject_id} · {relativeTime(row.blocked_at / 1000)}</span>
+      <button
+        class="btn small"
+        data-testid={IDS.ADMIN_NEST_BLOCKED_UNBLOCK_BUTTON}
+        disabled={!row.unblock.can_submit}
+        onclick={() => armUnblock(row)}
+      >{resolveLocalized(row.unblock.arm_label)}</button>
+    </div>
+  {/each}
+
+  {#if blockArmed}
+    <div class="confirm-box">
+      <p data-testid={IDS.ADMIN_NEST_REPORT_BLOCK_CONFIRM_SUMMARY}>{blockArmed.summary}</p>
+      <button
+        class="btn danger"
+        data-testid={IDS.ADMIN_NEST_REPORT_BLOCK_CONFIRM_BUTTON}
+        use:offlineGate={{ kind: 'fauna.moderation.admin_block', disabled: false }}
+        onclick={confirmBlock}
+      >{blockArmed.confirmLabel}</button>
+      <button
+        class="btn ghost"
+        data-testid={IDS.ADMIN_NEST_REPORT_BLOCK_CANCEL_BUTTON}
+        onclick={cancelBlock}
+      >{t.admin.nest_page.block_cancel_button}</button>
+    </div>
+  {/if}
+  {#if blockStatus}<p class="muted">{blockStatus}</p>{/if}
 </section>
 
 <!-- Retire this server (nest-retirement.md § Layout & flow) — beside Factory

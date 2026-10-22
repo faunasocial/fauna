@@ -181,7 +181,17 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), auth.RPCTimeout)
 	defer cancel()
 
-	sess, err := m.resolve(ctx, base, domain, credentialID, password)
+	sess, err := m.resolve(ctx, base, domain, credentialID, password, sourceIP)
+	if errors.Is(err, mailfauna.ErrKDFBusy) {
+		// The credential-KDF gate had no slot: no password
+		// was checked, so this is a 503 the client retries — no lockout
+		// failure, no result=fail audit row. The unknown-user dummy KDF
+		// answers the same, so a saturated gate is no account-existence oracle.
+		m.logger.Warn("davauth: AUTH deferred, credential KDF busy", "source_ip", sourceIP)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "credential check temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		lockout.RecordFailureFor(principal, credentialID, sourceIP)
 		m.replyUnauthorized(w, sess, err.Error(), sourceIP)
@@ -215,7 +225,8 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     (fetchAuthMaterial). The material is password-independent, so a
 //     warm cache collapses a stateless-CalDAV request burst to a single
 //     nest fetch and keeps it under nest's `bridge_rate_limit`.
-//  2. UnwrapMLSBlob(blob, password, …) → mlocked MLSCapability.
+//  2. UnwrapMLSBlob(blob, password, …, sourceIP) → mlocked MLSCapability
+//     (sourceIP is the KDF gate's fairness key; a busy gate is ErrKDFBusy).
 //     AEAD-success is the AUTH signal. This runs on EVERY request (hit
 //     or miss), so a cache hit still verifies the presented password —
 //     the cache never stores the unwrapped capability or the password.
@@ -227,7 +238,7 @@ func (m *authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // returned `*Session` is always non-nil on success and
 // non-nil-but-actor-ID-only on failure (so the caller can audit against
 // the resolved actor when applicable).
-func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialID, password string) (*Session, error) {
+func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialID, password, sourceIP string) (*Session, error) {
 	sess := &Session{
 		client:          m.client,
 		logger:          m.logger,
@@ -245,7 +256,9 @@ func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialI
 			// dummy KDF so this path costs the same Argon2id as the real
 			// per-request unwrap below; otherwise the KDF-vs-no-KDF timing gap
 			// enumerates valid accounts (network-exposure.md § Rulings F3).
-			mailfauna.DummyCredentialKDF([]byte(password), mailfauna.KdfKindArgon2id)
+			if busy := mailfauna.DummyCredentialKDF([]byte(password), mailfauna.KdfKindArgon2id, sourceIP); busy != nil {
+				return sess, busy
+			}
 			// fetchAuthMaterial returns a (partial) material carrying the
 			// resolved actor_id even on a post-validate fetch failure, so
 			// the caller can still audit the AUTH-fail against the actor.
@@ -268,6 +281,7 @@ func (m *authMiddleware) resolve(ctx context.Context, local, domain, credentialI
 	// Per-request AEAD-unwrap = password verification (NEVER cached).
 	cap, err := mailfauna.UnwrapMLSBlob(
 		material.wrappedBlob, []byte(password), material.actorID, credentialID, mailfauna.KdfKindArgon2id,
+		sourceIP,
 	)
 	if err != nil {
 		return sess, fmt.Errorf("unwrap_mls_blob: %w", err)

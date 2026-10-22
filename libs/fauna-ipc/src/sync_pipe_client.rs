@@ -181,6 +181,25 @@ pub struct SyncPipeClient {
     alive: Arc<AtomicBool>,
     /// Reader thread handle (kept so we can join on close).
     _reader: Option<thread::JoinHandle<()>>,
+    /// A third handle on a unix socket, shut down (both directions) on drop.
+    /// The reader thread owns a `try_clone` of the stream, so dropping the
+    /// writer alone closes nothing: the socket stayed open, the reader stayed
+    /// parked in its read, and the agent's connection task never saw EOF — a
+    /// leaked descriptor on each side per one-shot request. `None` for
+    /// [`from_streams`](Self::from_streams), whose caller owns the streams.
+    #[cfg(unix)]
+    shutdown_on_drop: Option<std::os::unix::net::UnixStream>,
+}
+
+#[cfg(unix)]
+impl Drop for SyncPipeClient {
+    fn drop(&mut self) {
+        if let Some(stream) = self.shutdown_on_drop.take() {
+            // The reader's blocking read returns 0 and the thread exits on
+            // its own; the peer reads EOF. Not joined: drop never blocks.
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 impl SyncPipeClient {
@@ -212,6 +231,8 @@ impl SyncPipeClient {
             event_rx: Mutex::new(event_rx),
             alive,
             _reader: Some(handle),
+            #[cfg(unix)]
+            shutdown_on_drop: None,
         }
     }
 
@@ -535,11 +556,16 @@ impl SyncPipeClient {
     /// blocking `Read`/`Write`, so the rest of `SyncPipeClient` (reader thread,
     /// `request()`, `recv_event()`) is unchanged and **no tokio runtime is
     /// required** — a GTK main loop or fauna-tui can call this directly.
+    /// Dropping the client shuts the socket down, so the reader thread and
+    /// the agent's end of the connection both go with it.
     pub fn connect_socket(path: &std::path::Path) -> io::Result<Self> {
         use std::os::unix::net::UnixStream;
         let stream = UnixStream::connect(path)?;
         let reader = stream.try_clone()?;
-        Ok(Self::from_streams(Box::new(reader), Box::new(stream)))
+        let closer = stream.try_clone()?;
+        let mut client = Self::from_streams(Box::new(reader), Box::new(stream));
+        client.shutdown_on_drop = Some(closer);
+        Ok(client)
     }
 }
 
@@ -1431,5 +1457,92 @@ mod server_identity {
     fn handle_of(f: &std::fs::File) -> HANDLE {
         use std::os::windows::io::AsRawHandle;
         HANDLE(f.as_raw_handle())
+    }
+}
+
+/// The unix client's connection lifetime: dropping a [`SyncPipeClient`] must
+/// close its socket, so the peer sees EOF and lets its own end go. The reader
+/// thread holds a `try_clone` of the stream, so without an explicit shutdown
+/// the socket outlived every client — one leaked descriptor per call in the
+/// app AND in the agent (whose connection task never saw EOF), which ran a
+/// linux app out of descriptors within a minute of its share pump starting.
+#[cfg(all(test, unix))]
+mod unix_lifetime_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::time::Duration;
+
+    /// Serve `n` connections in turn: read one request frame, answer it, then
+    /// wait (bounded) for EOF and report whether it came.
+    fn spawn_server(listener: UnixListener, n: usize) -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for _ in 0..n {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let payload = read_frame(&mut stream).expect("a request frame");
+                let req: Request = decode_payload(&payload).unwrap();
+                let resp = Response {
+                    id: req.id,
+                    result: crate::sync::ResponseResult::Err("unhandled".into()),
+                };
+                write_frame(&mut stream, &resp).unwrap();
+                let mut buf = [0u8; 1];
+                let eof = matches!(stream.read(&mut buf), Ok(0));
+                tx.send(eof).unwrap();
+            }
+        });
+        rx
+    }
+
+    fn one_shot(sock: &std::path::Path) {
+        let client = SyncPipeClient::connect_socket(sock).unwrap();
+        client
+            .request_with_timeout(RequestMethod::GetSyncStatus, Duration::from_secs(2))
+            .unwrap();
+        drop(client);
+    }
+
+    #[test]
+    fn dropping_the_client_closes_the_socket_for_the_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let eofs = spawn_server(UnixListener::bind(&sock).unwrap(), 1);
+
+        one_shot(&sock);
+
+        assert!(
+            eofs.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "the peer never saw EOF after the client dropped — the socket outlives \
+             its client"
+        );
+    }
+
+    /// This process's descriptor count stays flat across many one-shot
+    /// exchanges — the agent-control client's exact usage (connect, one
+    /// request, drop).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn one_shot_exchanges_leave_the_descriptor_count_flat() {
+        const N: usize = 50;
+        let fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let eofs = spawn_server(UnixListener::bind(&sock).unwrap(), N);
+
+        let before = fds();
+        for _ in 0..N {
+            one_shot(&sock);
+            assert!(eofs.recv_timeout(Duration::from_secs(5)).unwrap());
+        }
+        // Other tests in this binary run in parallel and open descriptors of
+        // their own: a leak here is N, a race a handful.
+        let after = fds();
+        assert!(
+            after < before + N / 2,
+            "{N} one-shot exchanges grew the descriptor count from {before} to {after}"
+        );
     }
 }

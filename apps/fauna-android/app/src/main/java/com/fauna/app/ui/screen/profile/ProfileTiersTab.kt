@@ -2,6 +2,7 @@ package com.fauna.app.ui.screen.profile
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
+import com.fauna.app.core.HexUtil
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -71,6 +72,7 @@ fun ProfileTiersSection(
     val providers by vm.providers.collectAsState()
     val claims by vm.claims.collectAsState()
     val selectedTier by vm.selectedTier.collectAsState()
+    val siteOrigin by vm.siteOrigin.collectAsState()
     val approving by vm.approving.collectAsState()
     val working by vm.working.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
@@ -102,7 +104,10 @@ fun ProfileTiersSection(
         onSetProvider = vm::setProvider,
         onRemoveProvider = vm::removeProvider,
         webhookUrl = vm::webhookUrl,
+        returnUrl = { kind -> vm.returnUrl(siteOrigin, kind) },
+        onFormOpened = vm::ensureSiteOrigin,
         onMintClaim = vm::mintClaim,
+        onVoidClaim = vm::voidClaim,
     )
 }
 
@@ -127,6 +132,7 @@ fun ProfileTiersContent(
     onSetProvider: (String, String, String) -> Unit = { _, _, _ -> },
     onRemoveProvider: (String) -> Unit = {},
     onMintClaim: (String) -> Unit = {},
+    onVoidClaim: (String) -> Unit = {},
     // Shared `fauna_core::format::hex_full` display encoder (value-formatting.md
     // § Hex id display), injected FFI-free so the Robolectric harness stays off
     // the native path.
@@ -134,6 +140,11 @@ fun ProfileTiersContent(
     // §4 live webhook-URL preview — pure local compute (no nest round-trip),
     // injected FFI-free so the Robolectric harness stays off the native path.
     webhookUrl: (String) -> String = { "" },
+    // §4 live return-URL display over the creator's WEB-SITE origin (not the nest
+    // URL), `null` while they have no public web address; and the hook that
+    // hydrates that origin as the form opens. Injected FFI-free like the preview above.
+    returnUrl: (String) -> String? = { null },
+    onFormOpened: () -> Unit = {},
     // Shared `fauna_core::format::claim_status_label` 3-state decision
     // (redeemed wins over voided), injected FFI-free for the same reason.
     claimStatusLabel: (Boolean, Boolean) -> LocalizedText =
@@ -324,7 +335,7 @@ fun ProfileTiersContent(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Button(
-                    onClick = { providerFormOpen = true },
+                    onClick = { providerFormOpen = true; onFormOpened() },
                     enabled = !working,
                     modifier = Modifier.testTag(Ids.SUBSCRIPTION_PROVIDER_ADD_BUTTON),
                 ) { Text(stringResource(R.string.subscriptions_add_provider)) }
@@ -339,6 +350,7 @@ fun ProfileTiersContent(
                         },
                         onCancel = { providerFormOpen = false },
                         webhookUrl = webhookUrl,
+                        returnUrl = returnUrl,
                     )
                 }
 
@@ -366,6 +378,7 @@ fun ProfileTiersContent(
                 tierNames = tiers.map { it.name },
                 working = working,
                 onMint = onMintClaim,
+                onVoid = onVoidClaim,
                 claimStatusLabel = claimStatusLabel,
             )
         }
@@ -629,6 +642,7 @@ private fun ProviderForm(
     onSubmit: (String, String, String) -> Unit,
     onCancel: () -> Unit,
     webhookUrl: (String) -> String,
+    returnUrl: (String) -> String?,
 ) {
     var kind by remember { mutableStateOf(kinds.firstOrNull().orEmpty()) }
     var secret by remember { mutableStateOf("") }
@@ -678,6 +692,29 @@ private fun ProviderForm(
                 CopyButton(
                     testTag = Ids.SUBSCRIPTION_PROVIDER_FORM_WEBHOOK_URL_COPY_BUTTON,
                     text = webhookUrl(kind),
+                )
+            }
+            // The sibling display for the paywall return door: the redirect to set in
+            // the provider's checkout settings. Built on the web-site origin; names
+            // the missing public address when there is none, and the copy is inert.
+            val returnUrlValue = returnUrl(kind)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = returnUrlValue
+                        ?: stringResource(R.string.subscriptions_return_url_unavailable),
+                    onValueChange = {},
+                    readOnly = true,
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.subscriptions_return_url_label)) },
+                    modifier = Modifier.weight(1f).testTag(Ids.SUBSCRIPTION_PROVIDER_FORM_RETURN_URL),
+                )
+                CopyButton(
+                    testTag = Ids.SUBSCRIPTION_PROVIDER_FORM_RETURN_URL_COPY_BUTTON,
+                    text = returnUrlValue.orEmpty(),
+                    enabled = returnUrlValue != null,
                 )
             }
             // The commit gates, not the buffer: this form's kind select, secret
@@ -887,9 +924,13 @@ private fun ClaimSection(
     tierNames: List<String>,
     working: Boolean,
     onMint: (String) -> Unit,
+    onVoid: (String) -> Unit,
     claimStatusLabel: (Boolean, Boolean) -> LocalizedText,
 ) {
     var tier by remember(tierNames) { mutableStateOf(tierNames.firstOrNull().orEmpty()) }
+    // The claim CODE whose Void is armed (first press) — keyed by code, not row
+    // index, and cleared by every landed re-read (a new `claims` list).
+    var armedCode by remember(claims) { mutableStateOf<String?>(null) }
 
     Column(
         modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_CLAIM_SECTION),
@@ -931,7 +972,18 @@ private fun ClaimSection(
             )
         } else {
             claims.forEach { claim ->
-                ClaimRow(claim = claim, claimStatusLabel = claimStatusLabel)
+                ClaimRow(
+                    claim = claim,
+                    armed = armedCode == claim.code,
+                    working = working,
+                    onArm = { armedCode = claim.code },
+                    onKeep = { armedCode = null },
+                    onConfirm = {
+                        armedCode = null
+                        onVoid(claim.code)
+                    },
+                    claimStatusLabel = claimStatusLabel,
+                )
             }
         }
     }
@@ -947,12 +999,27 @@ private fun ClaimSection(
 @Composable
 private fun ClaimRow(
     claim: ClaimItem,
+    armed: Boolean,
+    working: Boolean,
+    onArm: () -> Unit,
+    onKeep: () -> Unit,
+    onConfirm: () -> Unit,
     claimStatusLabel: (Boolean, Boolean) -> LocalizedText,
 ) {
     val status = resolveLocalized(
         LocalContext.current,
         claimStatusLabel(claim.redeemedBy != null, claim.voidedAt != null),
     ).orEmpty()
+    // The armed button names the consequence the second press has: a redeemed
+    // code's void also ends its redeemer's entitlement to the tier.
+    val voidLabel = when {
+        !armed -> stringResource(R.string.subscriptions_void_claim)
+        claim.redeemedBy != null ->
+            stringResource(R.string.subscriptions_void_claim_confirm_redeemed)
+                .replace("{redeemer}", HexUtil.bytesToHex(claim.redeemedBy))
+                .replace("{tier}", claim.tier)
+        else -> stringResource(R.string.subscriptions_void_claim_confirm_unredeemed)
+    }
 
     Card(modifier = Modifier.fillMaxWidth().testTag(Ids.SUBSCRIPTION_CLAIM_ROW)) {
         Row(
@@ -978,6 +1045,25 @@ private fun ClaimRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(Ids.SUBSCRIPTION_CLAIM_STATUS),
             )
+            // A voided code has nothing left to void. `fauna.payments.claims.void`
+            // is OnlineOnly, like the §4 Remove; the arming press sends nothing,
+            // so only the confirming press needs the nest.
+            if (claim.voidedAt == null) {
+                val voidGate = faunaGate("fauna.payments.claims.void", enabled = !working)
+                Column {
+                    OutlinedButton(
+                        onClick = if (armed) onConfirm else onArm,
+                        enabled = voidGate.enabled,
+                        modifier = Modifier.testTag(Ids.SUBSCRIPTION_CLAIM_VOID_BUTTON),
+                    ) { Text(voidLabel) }
+                    DisabledControlReasonText(voidGate.reason)
+                }
+                if (armed) {
+                    TextButton(onClick = onKeep) {
+                        Text(stringResource(R.string.subscriptions_void_claim_cancel))
+                    }
+                }
+            }
         }
     }
 }

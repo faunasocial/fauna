@@ -39,5 +39,6 @@ public struct DevicesView: View {
                     await vm.loadThisDeviceRow(ownDeviceId: client.deviceId)
                 }
             }
+            .onStoreChange { await vm.resyncStore() }
     }
 }

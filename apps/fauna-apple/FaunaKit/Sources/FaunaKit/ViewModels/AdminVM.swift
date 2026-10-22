@@ -12,9 +12,9 @@ import SwiftUI
 /// `actionError` (the `admin-users-action-error` surface), not the app banner.
 @MainActor @Observable
 public class AdminVM {
-    // Dashboard
-    public var stats: FfiAdminStats?
-    public var version: String?
+    // Dashboard — the shared card set (`admin_dashboard_snapshot()`, admin.md
+    // § 1. Dashboard → *The card set*); the view renders its cards and adds none.
+    public var dashboard: FfiAdminDashboardSnapshot?
 
     // Users section
     public var users: [FfiAdminUser] = []
@@ -135,21 +135,16 @@ public class AdminVM {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            let client = try await api.adminClient()
-            // Both dashboard reads on the one admin client: `fauna.admin.stats`
-            // (the four stat cards) and `fauna.admin.status` (the running
-            // version) — the same pair tui's `Op::LoadDashboard` and linux's
-            // `fetch_admin_server_status` make. `status` is the WS-RPC face that
-            // replaced the `GET /api/v1/node-info` HTTP twin the nest deleted;
-            // reading the twin threw here before `isAdmin = true` and took the
-            // whole dashboard load with it.
-            async let s = client.stats()
-            async let n = client.status()
-            stats = try await s
-            version = try await n.version
-            isAdmin = true
+            // The five reads and the fold, in shared Rust. It never fails as a
+            // whole: a failed read drops its own cards and rides `error`, shown
+            // on `error-message` while the other reads' cards still render.
+            let snapshot = try await api.adminDashboardSnapshot()
+            dashboard = snapshot
+            errorMessage = snapshot.error.map { L.admin.dashboard.loadError(message: $0) }
+            if snapshot.error == nil { isAdmin = true }
         } catch {
-            errorMessage = DisplayError.http(error)
+            // The call never reached the nest (the connection is not up yet).
+            errorMessage = DisplayError.message(error).map { L.admin.dashboard.loadError(message: $0) }
         }
     }
 
@@ -185,9 +180,12 @@ public class AdminVM {
         await pollUntilReady(attempts: attempts, load: { await self.loadHub() }, isReady: { !self.users.isEmpty })
     }
 
-    /// Dashboard counterpart of `loadHubUntilReady` — `stats` is the ready signal.
+    /// Dashboard counterpart of `loadHubUntilReady` — a snapshot whose five reads
+    /// all answered is the ready signal (a read that fails while the connection
+    /// comes up is retried; one still failing at the end stays on screen).
     public func loadDashboardUntilReady(attempts: Int = 26) async {
-        await pollUntilReady(attempts: attempts, load: { await self.loadDashboard() }, isReady: { self.stats != nil })
+        await pollUntilReady(attempts: attempts, load: { await self.loadDashboard() },
+                             isReady: { self.dashboard != nil && self.dashboard?.error == nil })
     }
 
     // MARK: - Users section
@@ -466,10 +464,16 @@ public class AdminVM {
     public func loadPendingActions() async {
         do {
             let all = try await admin().pendingActionsList()
-            pendingActions = all.filter { $0.isPending }
+            pendingActions = Self.stillPending(all)
         } catch {
             actionError = error.localizedDescription
         }
+    }
+
+    /// The section lists only live actions: the nest keeps executed, cancelled
+    /// and expired rows in the same read.
+    static func stillPending(_ all: [FfiAdminPendingAction]) -> [FfiAdminPendingAction] {
+        all.filter { $0.isPending }
     }
 
     /// Add this admin's approval (`admin-pending-action-approve-button`). The

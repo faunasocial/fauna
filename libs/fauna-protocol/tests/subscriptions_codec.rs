@@ -299,6 +299,8 @@ fn tier_delete_reply_roundtrip() {
 #[test]
 fn subscribe_request_roundtrip() {
     roundtrip(SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId([1u8; 32]),
         tier: "gold".into(),
         mlkem_encaps_key: None,
@@ -311,6 +313,8 @@ fn subscribe_request_with_mlkem_ek_roundtrip() {
     // Post-quantum surface B (S4): a subscriber publishes their 1184-byte
     // ML-KEM-768 encapsulation key on the subscribe request.
     roundtrip(SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId([1u8; 32]),
         tier: "gold".into(),
         mlkem_encaps_key: Some(ByteBuf::from(vec![0xABu8; 1184])),
@@ -323,6 +327,8 @@ fn subscribe_request_mlkem_ek_absent_on_wire_when_none() {
     // Forward-compat: a new client with no published ek encodes byte-identically
     // to the old shape (skip_serializing_if), so an old nest reads the old shape.
     let with = SubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId([1u8; 32]),
         tier: "gold".into(),
         mlkem_encaps_key: None,
@@ -363,6 +369,8 @@ fn subscribe_reply_queued_variant_roundtrip() {
 #[test]
 fn unsubscribe_request_roundtrip() {
     roundtrip(UnsubscribeRequest {
+        home_nest_url: None,
+        intent: None,
         author_id: ActorId([2u8; 32]),
         extra: Default::default(),
     });
@@ -453,6 +461,7 @@ fn requests_list_reply_roundtrip() {
             // A subscriber who published a post-quantum ek (surface B, S4b),
             // whose request a payment provider verified (Pillar 3).
             PendingRequest {
+                home: None,
                 request_id: 1,
                 subscriber_id: ActorId([4u8; 32]),
                 tier_name: "gold".into(),
@@ -464,6 +473,7 @@ fn requests_list_reply_roundtrip() {
             },
             // A classical subscriber (no ek).
             PendingRequest {
+                home: None,
                 request_id: 2,
                 subscriber_id: ActorId([5u8; 32]),
                 tier_name: "silver".into(),
@@ -485,6 +495,7 @@ fn pending_request_mlkem_ek_absent_on_wire_when_none() {
     // requests.list reply decodes on an old client (mirrors the SubscriberEntry
     // / SubscribeRequest gate).
     let req = PendingRequest {
+        home: None,
         request_id: 9,
         subscriber_id: ActorId([1u8; 32]),
         tier_name: "gold".into(),

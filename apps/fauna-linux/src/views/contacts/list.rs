@@ -19,6 +19,22 @@ use crate::i18n::strings::{common, contacts as contacts_strings};
 /// share one source.
 pub type ContactFilterIndex = Rc<RefCell<HashMap<String, (Option<String>, Option<String>)>>>;
 
+thread_local! {
+    /// Each roster row's recorded home nest, keyed like [`ContactFilterIndex`] by
+    /// the row's `widget_name` (the peer's actor id). Refilled by
+    /// [`update_contacts_list`]; read by the row's tap-through, which opens the
+    /// peer's Profile with that home carried.
+    static CONTACT_HOMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// The home nest `peer_actor_id`'s roster row recorded (`ContactItem.home_nest_url`),
+/// `None` when the nest knows none — the hint the row's tap carries into the
+/// Profile page (`profile.md` § Layout & flow → *Reaching another actor's
+/// profile with their home carried*, door 3).
+pub fn home_nest_url_of(peer_actor_id: &str) -> Option<String> {
+    CONTACT_HOMES.with(|homes| homes.borrow().get(peer_actor_id).cloned())
+}
+
 /// Populate the knocks `ListBox` from a slice of `KnockRow`.
 /// Wires Accept / Block / Dismiss buttons to the `FaunaClient`.
 pub fn update_knocks_list(
@@ -113,6 +129,20 @@ fn build_wired_knock_row(
     subtitle.add_css_class("caption");
     vbox_info.append(&subtitle);
 
+    // While the account is supervised with contact approval on, every knock is
+    // the guardian's to decide, so each row says so (`knock-guardian-pending`,
+    // `family-safety.md` § App surface) — derived by the shared
+    // `fauna_client_family::knocks_await_guardian` at the status read
+    // (`crate::ward_asks`), no per-knock wire field. tui's twin: its knock loop.
+    if crate::ward_asks::knocks_await_guardian() {
+        let pending = gtk::Label::new(Some(contacts_strings::KNOCK_GUARDIAN_PENDING));
+        pending.set_halign(gtk::Align::Start);
+        pending.add_css_class("dim-label");
+        pending.add_css_class("caption");
+        crate::testid::set_test_id(&pending, ids::KNOCK_GUARDIAN_PENDING);
+        vbox_info.append(&pending);
+    }
+
     let accept_btn = gtk::Button::with_label(common::ACCEPT);
     accept_btn.add_css_class("suggested-action");
     crate::testid::set_test_id(&accept_btn, ids::CONTACTS_ACCEPT_BUTTON);
@@ -160,6 +190,15 @@ pub fn update_contacts_list(
     // dropped before `invalidate_filter` below re-runs the (immutably
     // borrowing) filter closure — otherwise the `RefCell` would double-borrow.
     {
+        CONTACT_HOMES.with(|homes| {
+            let mut homes = homes.borrow_mut();
+            homes.clear();
+            for contact in contacts {
+                if let Some(home) = &contact.peer_home_nest_url {
+                    homes.insert(contact.peer_actor_id.clone(), home.clone());
+                }
+            }
+        });
         let mut index = filter_index.borrow_mut();
         index.clear();
         for contact in contacts {
@@ -1128,6 +1167,41 @@ mod knock_row_tests {
                 senders,
                 "every rendered knock row must answer as knock-card"
             );
+        });
+    }
+
+    /// Contact approval on the supervised caller's own policy marks EVERY knock
+    /// row `knock-guardian-pending`; with it off, none.
+    #[test]
+    fn contact_approval_marks_every_knock_row_as_the_guardians() {
+        crate::testid::run_on_gtk_thread(|| {
+            let knocks = [
+                KnockRow {
+                    peer_actor_id: "cd".repeat(32),
+                    ..a_knock(Some("hi"))
+                },
+                a_knock(None),
+            ];
+            let marks = |policy: &fauna_client_family::family::ReachPolicy| {
+                crate::ward_asks::set_from_status(true, Some(policy), Vec::new(), Vec::new());
+                let list = gtk::ListBox::new();
+                fill_knocks_list(&list, &knocks, &ContactsCache::default(), |_| {
+                    (|| {}, || {}, || {})
+                });
+                let root: gtk::Widget = list.upcast();
+                crate::automation::find::count_in(&root, ids::KNOCK_GUARDIAN_PENDING)
+            };
+            let approval_on = fauna_client_family::family::ReachPolicy {
+                contact_approval: true,
+                ..Default::default()
+            };
+            assert_eq!(marks(&approval_on), knocks.len(), "one mark per knock row");
+            assert_eq!(
+                marks(&Default::default()),
+                0,
+                "approval off: the ward decides"
+            );
+            crate::ward_asks::clear_for_identity_change();
         });
     }
 }

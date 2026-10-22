@@ -187,6 +187,31 @@ pub fn push_clear_opt_in(intent_path: String) -> Result<(), FfiError> {
         .map_err(crate::general_err)
 }
 
+/// The strings of one decrypted `web-push` message — what the app's banner
+/// shows (`fauna_client_push::push::WebPushPayload`, the object the nest
+/// encrypts). Android reads it from its UnifiedPush connector's decrypted
+/// message.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiWebPushPayload {
+    pub title: String,
+    pub body: String,
+    /// The deep link a tap opens, when the sender names one.
+    pub url: Option<String>,
+}
+
+/// Read a decrypted `web-push` message. Bytes that are not the nest's payload
+/// read as the generic strings, so a notification still shows and nothing a
+/// relay wrote is shown as Fauna's words.
+#[uniffi::export]
+pub fn push_payload_parse(content: Vec<u8>) -> FfiWebPushPayload {
+    let p = fauna_client_push::push::WebPushPayload::parse_or_generic(&content);
+    FfiWebPushPayload {
+        title: p.title,
+        body: p.body,
+        url: p.url,
+    }
+}
+
 /// FFI mirror of [`fauna_client_push::registration::StandingFailure`]: why a
 /// desktop's push banner cannot reach this machine right now.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]

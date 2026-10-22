@@ -187,7 +187,7 @@ pub enum MlsError {
 
     /// `process_commit` met a commit that decrypted and staged cleanly but is
     /// refused by the **folder-channel commit policy** (owner-managed roster —
-    /// `federation.md` § Cross-nest shared folders + channel append): the staged
+    /// `federation-shared-folders.md` § Cross-nest shared folders + channel append): the staged
     /// commit carries proposals (a roster/group-state change) and its
     /// MLS-authenticated committer is not the channel's recorded folder owner
     /// ([`crate::MlsEngine::folder_channel_owner`]). A bare self-`Update`

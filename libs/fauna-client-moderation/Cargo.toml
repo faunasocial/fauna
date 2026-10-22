@@ -8,11 +8,12 @@ license.workspace = true
 # Derives `uniffi::Record`/`uniffi::Enum` on the reader types (`LocalDetection`,
 # `QueueRow`, `QueueRowSource`) so a native app's `ConversationsSession`
 # reader can return them across the UniFFI boundary. Forwarded by
-# `fauna-conversations/uniffi` (itself turned on by `fauna-ffi`'s default-on
-# `conversations-session`), so it is OFF in the Go mail-bridge's
-# `--no-default-features` build → no Go-binding regen for these types (they are
-# a client-only moderation-queue surface the bridge never sees).
-uniffi = ["dep:uniffi"]
+# `fauna-conversations/uniffi`, which `fauna-ffi` depends on with `uniffi`
+# always on — so these records are in the Go mail-bridge's
+# `--no-default-features` build too, and a field change regenerates the
+# tracked `libs/fauna-mail-go` (`just mail-bridge-ffi`). Forwards
+# `fauna-core/uniffi` because `QueueRow.issued_by` is a `LocalizedText`.
+uniffi = ["dep:uniffi", "fauna-core/uniffi"]
 
 [dependencies]
 # fauna-protocol carries the typed `fauna.moderation.*` wire types + the
@@ -26,9 +27,7 @@ fauna-protocol = { path = "../fauna-protocol", default-features = false }
 # i18n pipeline (the fauna-client-admin pattern). `default-features = false`
 # keeps this wasm32-clean; already in the graph via fauna-protocol.
 fauna-core = { path = "../fauna-core", default-features = false }
-# Optional — only pulled in by the `uniffi` feature (native FFI clients); the
-# reader records carry only built-in scalar fields, so no `fauna-core/uniffi`
-# type registration is needed here.
+# Optional — only pulled in by the `uniffi` feature (native FFI clients).
 uniffi = { workspace = true, optional = true }
 # The reader types (`LocalDetection`, `QueueRow`, `QueueRowSource`) derive
 # `Serialize`/`Deserialize` so the shared `merge_queue` union crosses the wasm

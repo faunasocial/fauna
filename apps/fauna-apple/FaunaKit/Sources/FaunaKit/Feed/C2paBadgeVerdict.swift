@@ -8,12 +8,12 @@ import Foundation
 /// anyone posting through a modified client can make it `true` for an image that
 /// carries no manifest. The badge is therefore the *viewer's* verdict, never the
 /// header's. The header survives only as a pre-filter
-/// (``APIClient/hasC2paAssertion(hash:)``): `false` ends the check without
-/// fetching anything, `true` is what buys the byte-level parse this type owns —
+/// (`FfiPostBlobHosts.headHasC2pa`, through ``FeedVM/hasC2pa(_:home:)``):
+/// `false` ends the check without fetching anything, `true` is what buys the byte-level parse this type owns —
 /// the same two stages as tui's `Op::FetchC2pa`.
 ///
 /// Pure, with its collaborators injected, for the reason
-/// ``PostImageSource/resolve(isSealed:blobURL:opened:)`` is: the composition is
+/// ``PostImageSource/resolve(signedIn:opened:)`` is: the composition is
 /// short and easy to get subtly wrong, and getting it wrong paints a provenance
 /// claim nobody checked. `FeedVM.hasC2pa(_:)` supplies the manager and the fetch.
 public enum C2paBadgeVerdict {

@@ -21,23 +21,26 @@
   // (`fauna.protocol.malformed`); the machine surfaces it via `MailPolicySnapshot::
   // error` → the page's `error-message` (MessageBanner), never faked green.
   // UX/IDs: tests/e2e-unified/ui.yaml `admin-mail` page.
-  import { identity } from '$lib/store';
-  import { mailPolicyMachine } from '$lib/rpc';
+  import { identity } from '#lib/store';
+  import { mailPolicyMachine } from '#lib/rpc';
   import {
     ensureWasm,
     parseCount,
     parseCountU64,
     fcrdnsModeOptions,
+    dmarcForensicModeOptions,
+    dmarcForensicRetentionWarns,
     imapDeleteNonemptyOptions,
+    senderDashboardLinks,
     type ReachPolicyOption,
-  } from '$lib/wasm';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { mailHealthCheckStateLabel } from '$lib/wasm';
-  import { mailHealthHeartbeatText, mailHealthStatusText } from '$lib/value-format';
+  } from '#lib/wasm';
+  import { resolveLocalized } from '#lib/i18n/localized';
+  import { mailHealthCheckStateLabel, secretRotationText } from '#lib/wasm';
+  import { mailHealthHeartbeatText, mailHealthStatusText } from '#lib/value-format';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // Shapes mirror the shared serde JSON (snake_case across the serde_wasm_bindgen
   // boundary; numbers-as-numbers via json_compatible; the status enum serializes
@@ -100,6 +103,29 @@
     subaddressing_enabled: boolean;
     wildcard_prefix_enabled: boolean;
   }
+  // The deployment-wide DMARC catalog (`put_dmarc_policy`); the page edits four
+  // fields, every other record tag round-trips through `...base` on save.
+  interface DmarcPolicyView {
+    policy_mode: string;
+    subdomain_policy_mode: string;
+    pct: number;
+    adkim_mode: string;
+    aspf_mode: string;
+    rua_destination: string | null;
+    ruf_publish: boolean;
+    ruf_destination: string | null;
+    fo_mode: string;
+    ri_seconds: number;
+    aggregate_retention_days: number;
+    forensic_retention_days: number;
+  }
+  // The Outlook import's admin-supplied Microsoft registration
+  // (`set_microsoft_registration`, read back off `fauna.setup.status`).
+  interface MicrosoftRegistrationView {
+    client_id: string;
+    tenant: string;
+    is_default: boolean;
+  }
   // Outcome of the last PublishSpamBaseline action (null until the admin clicks
   // Publish). Mirrors the shared BaselinePublishView; `published` is the
   // wire flag as the nest sent it.
@@ -140,6 +166,8 @@
   }
   interface MailPolicySnapshot {
     mail_enabled: boolean;
+    // `SetupStatusReply::mail_unavailable_here` — read, never re-derived.
+    mail_unavailable_here: boolean;
     auto_enable_mail_for_new_users: boolean;
     spam: SpamPolicyView;
     auth: AuthPolicyView;
@@ -147,12 +175,24 @@
     imap: ImapPolicyView;
     outbound: OutboundPolicyView;
     alias: AliasPolicyView;
+    dmarc: DmarcPolicyView;
+    microsoft_registration: MicrosoftRegistrationView;
     status: string; // "Idle" | "Loading" | "Working"
     baseline_publish_result: BaselinePublishView | null;
     baseline_state: BaselineStateView | null;
     health: MailHealthView | null;
     error: string | null;
+    // The confirm button a first press armed (`MailPolicyConfirm` variant name),
+    // held by the shared machine — the page keeps no arm of its own.
+    armed: MailConfirm | null;
+    // The last secret rotation's outcome, worded by `secretRotationText`.
+    secret_rotation: unknown | null;
   }
+  type MailConfirm =
+    | 'ResetWarmup'
+    | 'RotateListUnsubscribeSecret'
+    | 'RotateSrsSecret'
+    | 'PublishSpamBaseline';
 
   let machine: Awaited<ReturnType<typeof mailPolicyMachine>> | null = null;
   let snap = $state<MailPolicySnapshot | null>(null);
@@ -229,11 +269,16 @@
   let aliasReserved = $state(''); // one local-part per line
   let aliasSubaddressing = $state(false);
   let aliasWildcardPrefix = $state(false);
-
-  // The warm-up reset is a same-button two-click confirm: the first press arms
-  // (the label relabels to the confirm sentence), the second dispatches. Any mail
-  // re-read (`applySnapshot`) disarms.
-  let warmupArmed = $state(false);
+  // DMARC reports group (the four edited fields)
+  let dmarcRufPublish = $state(false);
+  let dmarcFoMode = $state('');
+  let dmarcAggregateRetention = $state('');
+  let dmarcForensicRetention = $state('');
+  let dmarcFoOptions = $state<ReachPolicyOption[]>([]);
+  // Microsoft registration for the Outlook import
+  let msClientId = $state('');
+  let msTenant = $state('');
+  let msIsDefault = $state(true);
 
   const busy = $derived(snap?.status === 'Working' || snap?.status === 'Loading');
 
@@ -273,7 +318,6 @@
   function applySnapshot(): void {
     if (!machine) return;
     snap = machine.snapshot() as unknown as MailPolicySnapshot;
-    warmupArmed = false;
     error = snap?.error ?? '';
     if (!snap) return;
     mailEnabled = snap.mail_enabled;
@@ -329,6 +373,15 @@
     aliasReserved = al.reserved_local_parts.join('\n');
     aliasSubaddressing = al.subaddressing_enabled;
     aliasWildcardPrefix = al.wildcard_prefix_enabled;
+    const dm = snap.dmarc;
+    dmarcRufPublish = dm.ruf_publish;
+    dmarcFoMode = dm.fo_mode;
+    dmarcAggregateRetention = String(dm.aggregate_retention_days);
+    dmarcForensicRetention = String(dm.forensic_retention_days);
+    const ms = snap.microsoft_registration;
+    msClientId = ms.client_id;
+    msTenant = ms.tenant;
+    msIsDefault = ms.is_default;
   }
 
   onMount(async () => {
@@ -337,6 +390,7 @@
     try {
       await ensureWasm();
       fcrdnsOptions = fcrdnsModeOptions();
+      dmarcFoOptions = dmarcForensicModeOptions();
       imapDeleteOptions = imapDeleteNonemptyOptions();
       machine = await mailPolicyMachine(id.secretHex);
       await machine.hydrate();
@@ -395,6 +449,10 @@
     };
   }
 
+  // A box that cannot enable mail keeps the master toggle disabled; one where
+  // mail is already on stays live so it can still be turned off.
+  const unavailable = $derived(!mailEnabled && Boolean(snap?.mail_unavailable_here));
+
   async function handleToggleEnabled(e: Event): Promise<void> {
     if (!machine) return;
     const enabled = (e.currentTarget as HTMLInputElement).checked;
@@ -427,14 +485,14 @@
     applySnapshot();
   }
 
-  async function handleWarmupReset(): Promise<void> {
+  // The same-button two-click confirms (warm-up reset, the two secret rotations,
+  // the baseline publish) are one shared `Press`: the machine arms on a first
+  // press and acts on a second press of the same button, and the snapshot's
+  // `armed` relabels the button.
+  async function press(button: MailConfirm): Promise<void> {
     if (!machine) return;
-    if (!warmupArmed) {
-      warmupArmed = true;
-      return;
-    }
     try {
-      await machine.dispatch('ResetWarmup');
+      await machine.dispatch({ Press: { button } });
     } catch {
       /* the snapshot carries the error */
     }
@@ -541,6 +599,48 @@
     applySnapshot();
   }
 
+  // The four edited fields over the persisted catalog; a retention past its
+  // ceiling is sent as typed — the nest refuses it onto `error-message`.
+  function buildDmarc(): DmarcPolicyView {
+    const base = snap!.dmarc;
+    return {
+      ...base,
+      ruf_publish: dmarcRufPublish,
+      fo_mode: dmarcFoMode,
+      aggregate_retention_days: parseU32(dmarcAggregateRetention, base.aggregate_retention_days),
+      forensic_retention_days: parseU32(dmarcForensicRetention, base.forensic_retention_days),
+    };
+  }
+
+  const forensicRetentionWarns = $derived.by(() => {
+    const days = parseCount(dmarcForensicRetention.trim());
+    return days != null && dmarcForensicRetentionWarns(days);
+  });
+
+  async function handleSaveDmarc(): Promise<void> {
+    if (!machine || !snap) return;
+    try {
+      await machine.dispatch({ SaveDmarc: { policy: buildDmarc() } });
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
+  // The two drafts go out as typed; the shared machine checks them and refuses
+  // a bad pair onto `error-message` before any round trip.
+  async function handleSaveMicrosoft(): Promise<void> {
+    if (!machine || !snap) return;
+    try {
+      await machine.dispatch({
+        SetMicrosoftRegistration: { client_id: msClientId, tenant: msTenant },
+      });
+    } catch {
+      /* the snapshot carries the error */
+    }
+    applySnapshot();
+  }
+
   async function handleSaveAlias(): Promise<void> {
     if (!machine || !snap) return;
     try {
@@ -588,18 +688,6 @@
     return line;
   }
 
-  // Publish the opt-in aggregate as the deployment baseline. Unit-variant action
-  // ⇒ dispatched as a bare string; the outcome lands in
-  // snapshot.baseline_publish_result (rendered below the button).
-  async function handlePublishBaseline(): Promise<void> {
-    if (!machine || !snap) return;
-    try {
-      await machine.dispatch('PublishSpamBaseline');
-    } catch {
-      /* the snapshot carries the error */
-    }
-    applySnapshot();
-  }
 </script>
 
 <h1 data-testid={IDS.PAGE_HEADING}>{t.admin.mail_page.title}</h1>
@@ -612,15 +700,22 @@
   <label class="switch-row">
     <span>
       <span class="label-text">{t.admin.mail_page.enabled_label}</span>
-      <span class="muted small">{t.admin.mail_page.enabled_subtitle}</span>
+      {#if !unavailable}
+        <span class="muted small">{t.admin.mail_page.enabled_subtitle}</span>
+      {/if}
     </span>
     <input
       type="checkbox"
       data-testid={IDS.ADMIN_MAIL_ENABLED_TOGGLE}
+      data-state={mailEnabled ? 'on' : unavailable ? 'unavailable' : 'off'}
       checked={mailEnabled}
+      disabled={unavailable}
       onchange={handleToggleEnabled}
     />
   </label>
+  {#if unavailable}
+    <p class="muted small" data-testid={IDS.ADMIN_MAIL_UNAVAILABLE_NOTICE}>{t.mail_settings.unavailable_notice}</p>
+  {/if}
   <label class="switch-row">
     <span>
       <span class="label-text">{t.admin.mail_page.auto_enable_new_users_label}</span>
@@ -690,10 +785,23 @@
       class="btn"
       data-testid={IDS.ADMIN_MAIL_HEALTH_WARMUP_RESET_BUTTON}
       disabled={busy}
-      onclick={handleWarmupReset}
+      onclick={() => press('ResetWarmup')}
     >
-      {warmupArmed ? t.admin.mail_page.health_warmup_reset_confirm : t.admin.mail_page.health_warmup_reset}
+      {snap?.armed === 'ResetWarmup' ? t.admin.mail_page.health_warmup_reset_confirm : t.admin.mail_page.health_warmup_reset}
     </button>
+    <p class="muted small" data-testid={IDS.ADMIN_MAIL_HEALTH_SENDER_DASHBOARDS_NOTE}>
+      {t.admin.mail_page.health_sender_dashboards_note}
+    </p>
+    {#each senderDashboardLinks() as link (link.key)}
+      <button
+        class="btn"
+        data-testid={IDS.ADMIN_MAIL_HEALTH_SENDER_DASHBOARD_LINK}
+        data-href={link.url}
+        onclick={() => openDelist(link.url)}
+      >
+        {resolveLocalized({ key: link.label_key })}
+      </button>
+    {/each}
   </section>
 {/if}
 
@@ -791,9 +899,11 @@
     class="btn"
     data-testid={IDS.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_BUTTON}
     disabled={busy || !snap}
-    onclick={handlePublishBaseline}
+    onclick={() => press('PublishSpamBaseline')}
   >
-    {t.admin.mail_page.publish_spam_baseline_button}
+    {snap?.armed === 'PublishSpamBaseline'
+      ? t.admin.mail_page.publish_spam_baseline_confirm
+      : t.admin.mail_page.publish_spam_baseline_button}
   </button>
   <p class="muted small">{t.admin.mail_page.publish_spam_baseline_subtitle}</p>
   <p class="muted small" data-testid={IDS.ADMIN_MAIL_PUBLISH_SPAM_BASELINE_RESULT}>
@@ -1028,6 +1138,93 @@
   <button class="btn primary" data-testid={IDS.ADMIN_MAIL_ALIAS_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveAlias}>
     {t.admin.mail_page.alias_save}
   </button>
+</section>
+
+<!-- ── DMARC reports (put_dmarc_policy; dual-read via get_dmarc_policy) ── -->
+<section class="section">
+  <h2>{t.admin.mail_page.dmarc_group_title}</h2>
+  <p class="muted small">{t.admin.mail_page.dmarc_group_desc}</p>
+
+  <label class="switch-row">
+    <span class="label-text">{t.admin.mail_page.dmarc_ruf_publish_label}</span>
+    <input type="checkbox" data-testid={IDS.ADMIN_MAIL_DMARC_RUF_PUBLISH_TOGGLE} bind:checked={dmarcRufPublish} />
+  </label>
+  <p class="muted small" data-testid={IDS.ADMIN_MAIL_DMARC_RUF_WARNING}>{t.admin.mail_page.dmarc_ruf_warning}</p>
+  <label class="field">
+    <span class="label-text">{t.admin.mail_page.dmarc_fo_mode_label}</span>
+    <select class="input" data-testid={IDS.ADMIN_MAIL_DMARC_FO_MODE_SELECT} bind:value={dmarcFoMode}>
+      {#each dmarcFoOptions as o (o.value)}
+        <option value={o.value}>{resolveLocalized(o.label)}</option>
+      {/each}
+    </select>
+  </label>
+  <label class="field">
+    <span class="label-text">{t.admin.mail_page.dmarc_aggregate_retention_label}</span>
+    <input class="input" type="text" inputmode="numeric" data-testid={IDS.ADMIN_MAIL_DMARC_AGGREGATE_RETENTION_INPUT} bind:value={dmarcAggregateRetention} />
+  </label>
+  <label class="field">
+    <span class="label-text">{t.admin.mail_page.dmarc_forensic_retention_label}</span>
+    <input class="input" type="text" inputmode="numeric" data-testid={IDS.ADMIN_MAIL_DMARC_FORENSIC_RETENTION_INPUT} bind:value={dmarcForensicRetention} />
+  </label>
+  {#if forensicRetentionWarns}
+    <p class="muted small">{t.admin.mail_page.dmarc_forensic_retention_warning}</p>
+  {/if}
+
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_DMARC_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveDmarc}>
+    {t.admin.mail_page.dmarc_save}
+  </button>
+</section>
+
+<!-- ── Microsoft registration for the Outlook import (set_microsoft_registration; read via fauna.setup.status) ── -->
+<section class="section">
+  <h2>{t.admin.mail_page.microsoft_group_title}</h2>
+  <p class="muted small">{t.admin.mail_page.microsoft_group_desc}</p>
+  <p class="muted small">{t.admin.mail_page.microsoft_requirements}</p>
+  <p class="muted small">{msIsDefault ? t.admin.mail_page.microsoft_using_default : t.admin.mail_page.microsoft_using_own}</p>
+
+  <label class="field">
+    <span class="label-text">{t.admin.mail_page.microsoft_client_id_label}</span>
+    <input class="input" type="text" data-testid={IDS.ADMIN_MAIL_MICROSOFT_CLIENT_ID_INPUT} bind:value={msClientId} />
+  </label>
+  <label class="field">
+    <span class="label-text">{t.admin.mail_page.microsoft_tenant_label}</span>
+    <span class="muted small">{t.admin.mail_page.microsoft_tenant_subtitle}</span>
+    <input class="input" type="text" data-testid={IDS.ADMIN_MAIL_MICROSOFT_TENANT_INPUT} bind:value={msTenant} />
+  </label>
+
+  <button class="btn primary" data-testid={IDS.ADMIN_MAIL_MICROSOFT_SAVE_BUTTON} disabled={busy || !snap} onclick={handleSaveMicrosoft}>
+    {t.admin.mail_page.microsoft_save}
+  </button>
+</section>
+
+<!-- ── Secrets (rotate_list_unsubscribe_secret / rotate_srs_secret) ── -->
+<section class="section">
+  <h2>{t.admin.mail_page.secrets_group_title}</h2>
+  <p class="muted small">{t.admin.mail_page.secrets_group_desc}</p>
+
+  <button
+    class="btn"
+    data-testid={IDS.ADMIN_MAIL_LIST_UNSUBSCRIBE_SECRET_ROTATE_BUTTON}
+    disabled={busy || !snap}
+    onclick={() => press('RotateListUnsubscribeSecret')}
+  >
+    {snap?.armed === 'RotateListUnsubscribeSecret'
+      ? t.admin.mail_page.list_unsubscribe_secret_rotate_confirm
+      : t.admin.mail_page.list_unsubscribe_secret_rotate}
+  </button>
+  <button
+    class="btn"
+    data-testid={IDS.ADMIN_MAIL_FORWARD_SRS_SECRET_ROTATE_BUTTON}
+    disabled={busy || !snap}
+    onclick={() => press('RotateSrsSecret')}
+  >
+    {snap?.armed === 'RotateSrsSecret'
+      ? t.admin.mail_page.forward_srs_secret_rotate_confirm
+      : t.admin.mail_page.forward_srs_secret_rotate}
+  </button>
+  {#if snap?.secret_rotation}
+    <p class="muted small">{resolveLocalized(secretRotationText(snap.secret_rotation))}</p>
+  {/if}
 </section>
 
 <style>

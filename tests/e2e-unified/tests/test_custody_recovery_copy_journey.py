@@ -34,128 +34,20 @@ The two honest arms ruling 3 and ruling 2 ask for, both at B with A gone:
 from __future__ import annotations
 
 import secrets
-import time
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import pytest
-import requests
 
-from helpers.budgets import MLS_HANDSHAKE_S, RECEIVE_CYCLE_S
+from helpers.custody_rig import mint_nest_custody, pump_once, pump_until
 from helpers.recovery_restore import (
     RESTORE_OUTCOME_S,
     copy_the_shown_kit,
     lose_every_device_and_open_restore,
     wait_for_restore_landing,
 )
-from helpers.waiting import (
-    await_receive_cycle_after,
-    conv_receive_cycles,
-    poke_receive_cycle,
-    wait_until,
-)
-from tests.api import conv_api
+from helpers.waiting import wait_until
 
 pytestmark = pytest.mark.tier_3
-
-# A UI state that only needs local folds after a poked cycle.
-_UI_LEG_S = 30.0
-# The custody ceremony plus the custodian pump's first pulls, poked every try.
-_CUSTODY_S = 240.0
-
-
-def _receive_once(app) -> None:
-    """One poked receive cycle, completion-anchored."""
-    cycles = conv_receive_cycles(app.driver)
-    started = cycles[0] if cycles else None
-    poke_receive_cycle(app.driver)
-    await_receive_cycle_after(
-        app.driver, started, budget_s=RECEIVE_CYCLE_S, what="the ceremony payload"
-    )
-
-
-def _pump_once(custodian: dict) -> dict:
-    """One custodian-nest custody-hosting pass; returns its report."""
-    resp = requests.post(
-        f"{custodian['url']}/api/v1/test/custody_hosting/run-now",
-        timeout=120,
-        verify=False,
-    )
-    assert resp.status_code == 200, (
-        f"custody_hosting run-now returned {resp.status_code}: {resp.text}"
-    )
-    return resp.json()
-
-
-def _custody_log_tail(app) -> str:
-    """The custody/recovery lines from one seat's app stderr (convention 6)."""
-    try:
-        text = app.driver.app_stderr_text() or ""
-    except Exception as e:  # noqa: BLE001 — diagnostics must not mask the assert
-        return f"(app stderr unreadable: {e})"
-    wanted = ("custody", "recovery", "escrow", "generation")
-    lines = [ln for ln in text.splitlines() if any(w in ln for w in wanted)]
-    return "\n".join(lines[-60:]) or "(no custody lines in the app log)"
-
-
-def _open_carrier(alice_app, bob_app, bob: dict, custodian: dict) -> None:
-    """The ceremony's carrier: a real 1:1 MLS conversation alice opens with
-    bob ACROSS the nests (the mint's host list derives from 2-member conv
-    channels), bound on bob's side before any ceremony payload rides it. Bob's
-    key-package pool must settle first — a >=1 read races his login top-up."""
-    quiet_s = 3.0
-    deadline = time.time() + MLS_HANDSHAKE_S
-    last, stable_since, settled = None, None, False
-    while time.time() < deadline:
-        count = conv_api.keypackage_count(custodian["port"], bob, bob["actor_id_hex"])
-        now = time.time()
-        if count != last:
-            last, stable_since = count, now
-        elif count >= 1 and now - stable_since >= quiet_s:
-            settled = True
-            break
-        time.sleep(0.5)
-    assert settled, f"bob's key-package pool never settled (last {last!r})"
-
-    alice_app.conversations.real_resolve_send_new(
-        f"{bob['handle']}@{custodian['authority']}", "custody carrier"
-    )
-    _receive_once(bob_app)
-
-
-def _poll_devices(app, predicate, *, what: str, budget_s: float = _CUSTODY_S) -> None:
-    """Deadline-poll a Devices-page predicate, a receive cycle poked and the
-    page re-entered each try (the facet folds on the nav edge)."""
-    def ready() -> bool:
-        _receive_once(app)
-        app.backups.navigate_devices()
-        return predicate()
-
-    wait_until(ready, budget_s, interval=0.5, diagnose=lambda: f"never observed: {what}")
-
-
-def _pump_until(rig: dict, predicate, *, what: str) -> dict:
-    """Poke the custodian's pump (both seats' receive cycles first, so the
-    ceremony payloads keep flowing) until ``predicate(report)`` holds."""
-    last: dict = {}
-
-    def converged() -> bool:
-        _receive_once(rig["alice_app"])
-        _receive_once(rig["bob_app"])
-        last.clear()
-        last.update(_pump_once(rig["custodian"]))
-        return predicate(last)
-
-    wait_until(
-        converged,
-        _CUSTODY_S,
-        interval=0.5,
-        diagnose=lambda: (
-            f"never observed: {what}; last pass report: {last}"
-            f"\n--- bob's custody log ---\n{_custody_log_tail(rig['bob_app'])}"
-            f"\n--- alice's custody log ---\n{_custody_log_tail(rig['alice_app'])}"
-        ),
-    )
-    return dict(last)
 
 
 def _with_param(kit: str, name: str, value: str) -> str:
@@ -207,25 +99,13 @@ def test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone(
     first_phrase = alice_app.settings.recovery_kit_secret()
     first_kit = copy_the_shown_kit(alice_app, first_phrase)
 
-    # ── The custody, through both UIs: alice offers bob to hold her copies;
-    # bob takes it on HIS NEST ("My nest"), so the hosting row lands on B.
-    _open_carrier(alice_app, bob_app, bob, custodian)
-    alice_app.backups.navigate_devices()
-    # A cross-nest thread is labelled by the handle alice addressed it to,
-    # where a same-nest one shows the peer's hex (the select refuses an
-    # unoffered value loudly, listing what it painted).
-    alice_app.custody.mint_offer(f"{bob['handle']}@{custodian['authority']}")
-    _poll_devices(
-        bob_app,
-        lambda: bob_app.custody.offer_count() >= 1
-        and bob_app.custody.offer_has_nest_choice(0),
-        what="the consent card WITH the nest choice on bob's Devices page",
-    )
-    bob_app.custody.accept_offer_on_nest(0)
+    # ── The custody, through both UIs: bob takes it on HIS NEST, so the
+    # hosting row lands on B.
+    mint_nest_custody(rig)
 
     # ── B's pump takes alice's recovery material: a pass that read all three
     # answers from A and left a custodied escrow blob in the pair store.
-    _pump_until(
+    pump_until(
         rig,
         lambda r: r.get("recovery_pulled", 0) >= 1 and r.get("escrows_custodied", 0) >= 1,
         what="the custodian pump holding alice's seed escrow",
@@ -247,7 +127,7 @@ def test_the_copied_kit_restores_at_a_custodian_after_the_home_nest_is_gone(
         ),
     )
     kit = copy_the_shown_kit(alice_app, alice_app.settings.recovery_kit_secret())
-    report = _pump_once(custodian)
+    report = pump_once(custodian)
     assert report.get("recovery_pulled", 0) >= 1 and report.get("escrows_custodied", 0) >= 1, (
         f"the pass after the replace must carry the new head and blob to B: {report}"
     )

@@ -145,6 +145,7 @@ async fn node_mode_seed_test_helpers_round_trip() {
     let setup = SetupStatus {
         claimed: true,
         node_mode: Some(NodeMode::Private),
+        ..Default::default()
     };
     assert_eq!(setup.node_mode, Some(NodeMode::Private));
 }

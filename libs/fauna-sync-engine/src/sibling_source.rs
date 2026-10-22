@@ -21,7 +21,21 @@ use std::collections::HashMap;
 
 use fauna_core::data::ContentHash;
 
-/// Where a download looks for chunk bodies before the nest.
+/// One page of a sibling's folder rows (`fauna.peer.sync.changes.list`) —
+/// DATA until the engine's ingest has judged each row.
+#[derive(Debug, Default)]
+pub struct SiblingRowPage {
+    pub rows: Vec<fauna_protocol::peer_row::PeerChangeRow>,
+    /// The sibling stopped at its serve bound with rows still to come.
+    pub more: bool,
+}
+
+/// Where a download looks for chunk bodies before the nest — and, since the
+/// same-account leg carries a folder's rows nest-down (`p2p.md` § Same-account
+/// nest-down folder transfer; `p2p-shared-set-build.md` § Build design — the
+/// same-account row leg, decision 4), where the engine's sibling pull pages
+/// rows and asks manifests. The row half's methods default to "no siblings",
+/// so a chunk-only source pulls nothing.
 #[async_trait::async_trait]
 pub trait SiblingChunkSource: Send + Sync {
     /// The bodies a sibling device served of `store_keys` in `folder` (its
@@ -34,6 +48,44 @@ pub trait SiblingChunkSource: Send + Sync {
         store_keys: &[ContentHash],
         relative_path: &str,
     ) -> HashMap<ContentHash, Vec<u8>>;
+
+    /// The siblings held right now, by device key (the NodeId their channel
+    /// proved) — the engine's sibling pull pages each in turn.
+    fn siblings(&self) -> Vec<[u8; 32]> {
+        Vec::new()
+    }
+
+    /// One page of `folder`'s rows above `since` from `sibling`. An error
+    /// means that sibling failed this pass; the caller drops it.
+    async fn pull_folder_changes(
+        &self,
+        sibling: &[u8; 32],
+        folder: &str,
+        since: i64,
+    ) -> anyhow::Result<SiblingRowPage> {
+        let _ = (sibling, folder, since);
+        anyhow::bail!("this source holds no sibling rows")
+    }
+
+    /// `folder`'s manifest by its content hash from the first sibling that
+    /// retains it, already checked against `hash`; `None` leaves it to the
+    /// nest. Infallible like [`Self::fetch`]: a sibling that errs is dropped.
+    async fn fetch_manifest(&self, folder: &str, hash: &ContentHash) -> Option<Vec<u8>> {
+        let _ = (folder, hash);
+        None
+    }
+
+    /// Forget `sibling` — it failed a pull.
+    fn drop_sibling(&self, sibling: &[u8; 32]) {
+        let _ = sibling;
+    }
+
+    /// A signal that changes whenever a sibling is admitted (a new or
+    /// replaced channel), so an engine's loop pulls a freshly admitted sibling
+    /// within seconds rather than a tick. `None` — no such signal.
+    fn admissions(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
 }
 
 /// Fetch `store_keys` sibling first, `nest` for the rest: the bodies `source`

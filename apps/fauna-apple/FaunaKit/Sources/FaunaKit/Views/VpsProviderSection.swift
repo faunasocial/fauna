@@ -64,6 +64,75 @@ public func vpsProviderSection(vm: OnboardingVM, provider: ProviderMeta) -> some
     }
 }
 
+/// The **update-channel** rows of the VPS-config step
+/// (`onboarding-provisioning.md` § 5): `vps-config-update-channel-row` and one
+/// radio per channel, `vps-config-update-channel-row[<id>]`, in
+/// `UpdateChannel` order. Rendered OUTSIDE the per-provider block — the choice
+/// does not depend on the provider. The selection is read from, and a tap
+/// written to, the shared machine; the description key is the availability-aware
+/// `updateChannelDescriptionKeyForRow` (no-build / compat-line / plain), which
+/// the app only resolves. Free `@ViewBuilder` for the same reason as
+/// `vpsProviderSection`.
+@ViewBuilder
+public func vpsUpdateChannelSection(vm: OnboardingVM) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+        Text(L.onboarding.vpsConfig.updateChannelHeading).font(.headline)
+        ForEach(Array(updateChannelRows.enumerated()), id: \.offset) { _, row in
+            let id = "\(Ids.vpsConfigUpdateChannelRow)[\(row.id)]"
+            let selected = { vm.machine.provisionUpdateChannel() == row.channel }
+            let text = {
+                "\(row.label) — \(L.lookup(vm.machine.updateChannelDescriptionKeyForRow(channel: row.channel)))"
+            }
+            vpsChannelOption(id: id, selected: selected(), text: text()) {
+                vm.machine.setProvisionUpdateChannel(channel: row.channel)
+            }
+            .automationActivate(id, text: text, value: { selected() ? "on" : "off" }) {
+                vm.machine.setProvisionUpdateChannel(channel: row.channel)
+            }
+        }
+    }
+    .accessibilityIdentifier(Ids.vpsConfigUpdateChannelRow)
+    // A container's `.accessibilityIdentifier` alone does not register it in
+    // the in-process registry (`is_visible`/`wait_for` read the registry).
+    .accessibilityElement(children: .contain)
+    .automationValue(Ids.vpsConfigUpdateChannelRow, text: {
+        L.onboarding.vpsConfig.updateChannelHeading
+    })
+}
+
+/// `UpdateChannel`'s declaration order (`UpdateChannel::ALL`) with the id each
+/// row is keyed by and its label.
+private let updateChannelRows: [(channel: UpdateChannel, id: String, label: String)] = [
+    (.stable, "stable", L.onboarding.vpsConfig.updateChannelStableLabel),
+    (.test, "test", L.onboarding.vpsConfig.updateChannelTestLabel),
+    (.dev, "dev", L.onboarding.vpsConfig.updateChannelDevLabel),
+]
+
+/// A single-select radio row: a leading circle glyph, then the channel's label
+/// and description.
+@ViewBuilder
+private func vpsChannelOption(
+    id: String,
+    selected: Bool,
+    text: String,
+    action: @escaping () -> Void
+) -> some View {
+    Button(action: action) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: selected ? "circle.inset.filled" : "circle")
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            Text(text)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityIdentifier(id)
+    .accessibilityAddTraits(selected ? .isSelected : [])
+}
+
 /// Mail-vs-social mode (onboarding.md §5). Default-checked from the shared
 /// machine (`provisionMailModeEnabled()` = mail ON iff the handle targets a
 /// real domain); turning it OFF unlocks the 1 GB tier in the radio above.

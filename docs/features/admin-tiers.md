@@ -45,19 +45,23 @@ Stamped 2026-10-01 at e129e78aa0.
 11. [app] The admin defines a new tier from the page — `docs/goal/behavior/admin.md` § 3. Settings
     - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_new`
     - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_refuses_empty_and_duplicate_names`
+12. [nest] A tier nobody is on can be removed; one a member, an invite code or a membership link still names — and the default tier `free` — is refused and stays — `docs/goal/behavior/admin.md` § 3. Settings
+    - `tests/e2e-unified/tests/api/test_tier_removal_api.py::test_a_tier_is_removable_only_once_nothing_names_it`
+13. [app] The admin deletes a tier nobody is on from the page; deleting one a member is on is refused with the reason shown, and the tier stays — `docs/goal/behavior/admin.md` § 3. Settings
+    - `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete`
 
 ## Status
 
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ✅ full | 0.1.2-dev+f3c1e99a standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ✅ full | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| windows | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
 | ios | ⚠ partial | 0.1.2-dev+c438a386 standalone |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
+| tui | ✅ full | 0.1.5-dev+cab1c46a standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -77,6 +81,8 @@ Stamped 2026-10-01 at e129e78aa0.
 | 8 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_re_pointing_or_clearing_the_membership_never_changes_admitted_members_terms` | nest (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_membership_lapse.py::test_people_who_join_by_paying_do_not_count_against_the_free_account_cap` | nest (linux): passed |
 | 10 | app | `tests/e2e-unified/tests/test_admin_settings.py::test_admin_re_points_a_designated_membership_without_clearing_it` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_new` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_refuses_empty_and_duplicate_names` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_new` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 11 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_define_refuses_empty_and_duplicate_names` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | nest | `tests/e2e-unified/tests/api/test_tier_removal_api.py::test_a_tier_is_removable_only_once_nothing_names_it` | nest (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_admin.py::test_settings_tier_delete` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 <!-- features-render:end -->

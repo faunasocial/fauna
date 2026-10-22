@@ -146,6 +146,115 @@ pub fn data_dir_from_db_path(db_path: &str) -> Option<PathBuf> {
     })
 }
 
+/// The deployment-topology hatch the entrypoint writes on every container
+/// start (`docker/entrypoint.sh`) — read by the bridges for their binds and
+/// scanner addresses, and by the nest only for its `content_scanners`
+/// declaration ([`read_content_scanners`]).
+pub const OPERATOR_HATCH_FILE: &str = "operator-hatch.toml";
+
+/// Read the artifact's content-scanner declaration from
+/// `{data_dir}/operator-hatch.toml`, once at boot
+/// (`mail-bridge-lifecycle.md` § Default-off on first claim → *A box with no
+/// content scanners cannot enable mail*):
+///
+/// - no hatch → `Unknown` (a nest outside the image — nothing declared
+///   anything, today's behaviour stands);
+/// - a hatch with the key → its value (open: an unrecognised value is
+///   `Unknown`);
+/// - a hatch *without* the key → `Absent` (the entrypoint always writes it, so
+///   a hatch lacking it was written by an artifact that wired no scanners);
+/// - an unreadable or malformed hatch → `Unknown`, logged.
+pub fn read_content_scanners(data_dir: &Path) -> fauna_core::mail_availability::ContentScanners {
+    use fauna_core::mail_availability::ContentScanners;
+    let path = data_dir.join(OPERATOR_HATCH_FILE);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ContentScanners::Unknown,
+        Err(e) => {
+            tracing::warn!(
+                target: "mail_enable",
+                path = %path.display(),
+                error = %e,
+                "operator hatch unreadable — content scanners read as unknown"
+            );
+            return ContentScanners::Unknown;
+        }
+    };
+    match body.parse::<toml::Table>() {
+        Ok(table) => match table.get("content_scanners") {
+            Some(toml::Value::String(v)) => ContentScanners::from_wire(v),
+            Some(_) => ContentScanners::Unknown,
+            None => ContentScanners::Absent,
+        },
+        Err(e) => {
+            tracing::warn!(
+                target: "mail_enable",
+                path = %path.display(),
+                error = %e,
+                "operator hatch malformed — content scanners read as unknown"
+            );
+            ContentScanners::Unknown
+        }
+    }
+}
+
+/// Read how the artifact binds the MDA's DAV listener from
+/// `{data_dir}/operator-hatch.toml`, once at boot — the shape a member's mail
+/// settings page must follow (`caldav-server.md` § Network exposure —
+/// Any-locator serving), reported on `fauna.bridges.get_caldav_port`. The same
+/// three-way split the MDA's `resolveMDAListenAddrs` binds by:
+///
+/// - a `caldav_listen_https` pin wins: a loopback address is the SNI router's
+///   IPC port (the cloud domain box, `mail.<domain>:443`) → `Some(false)`; any
+///   other address is a desktop supervisor's `<iface>:<port>` → `Some(true)`;
+/// - else a `caldav_bind_host` (the home bundle's LAN interface, domain or not)
+///   → `Some(true)`;
+/// - else, or with no readable hatch → `None` (nothing declared; the client
+///   keeps its host-name split).
+pub fn read_dav_direct_listener(data_dir: &Path) -> Option<bool> {
+    let body = std::fs::read_to_string(data_dir.join(OPERATOR_HATCH_FILE)).ok()?;
+    let table = body.parse::<toml::Table>().ok()?;
+    let non_empty = |key: &str| match table.get(key) {
+        Some(toml::Value::String(v)) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
+    };
+    if let Some(pin) = non_empty("caldav_listen_https") {
+        return Some(!is_loopback_listen_addr(&pin));
+    }
+    non_empty("caldav_bind_host").map(|_| true)
+}
+
+/// Whether a `host:port` listen address names a loopback interface
+/// (`127.0.0.0/8`, `[::1]`, `localhost`).
+fn is_loopback_listen_addr(addr: &str) -> bool {
+    if let Ok(sock) = addr.parse::<std::net::SocketAddr>() {
+        return sock.ip().is_loopback();
+    }
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// [`read_dav_direct_listener`] over the data dir [`data_dir_from_db_path`]
+/// resolves; an in-memory/test nest with no data dir reads `None`.
+pub fn read_dav_direct_listener_from_db_path(db_path: &str) -> Option<bool> {
+    data_dir_from_db_path(db_path).and_then(|dir| read_dav_direct_listener(&dir))
+}
+
+/// [`read_content_scanners`] over the data dir [`data_dir_from_db_path`]
+/// resolves; an in-memory/test nest with no data dir reads `Unknown`.
+pub fn read_content_scanners_from_db_path(
+    db_path: &str,
+) -> fauna_core::mail_availability::ContentScanners {
+    match data_dir_from_db_path(db_path) {
+        Some(dir) => read_content_scanners(&dir),
+        None => fauna_core::mail_availability::ContentScanners::Unknown,
+    }
+}
+
 /// Create (`enabled`) or remove (`!enabled`) `{data_dir}/{flag_name}`.
 /// Idempotent both ways: creating an existing flag and removing an absent one
 /// both succeed. The file is mode 0600 on unix (owner-only — it is sensitive
@@ -282,8 +391,19 @@ async fn notify_service(service: &str, up: bool) {
 /// *runtime* half — the docker image's MTA s6 run-script carries the matching
 /// `FAUNA_MODE=private` re-down so the service also stays down across a restart
 /// where `imap-enabled` is present (the durable flag gate).
-pub fn mta_should_run(node_mode: crate::config::NodeMode, mail_enabled: bool) -> bool {
-    mail_enabled && node_mode != crate::config::NodeMode::Private
+///
+/// The third conjunct is the content-scanner declaration: a box whose artifact
+/// wired no scanners cannot run the fail-closed scan gate, so its MTA stays down
+/// whatever a client wrote (the s6 run-script's scanner-env guard is the durable
+/// twin). Both conditions are [`fauna_core::mail_availability::mta_can_run`] —
+/// decided once in shared Rust (`mail-bridge-lifecycle.md` § Default-off on
+/// first claim → *A box with no content scanners cannot enable mail*).
+pub fn mta_should_run(
+    node_mode: crate::config::NodeMode,
+    scanners: fauna_core::mail_availability::ContentScanners,
+    mail_enabled: bool,
+) -> bool {
+    mail_enabled && fauna_core::mail_availability::mta_can_run(node_mode, scanners)
 }
 
 /// Whether the MDA (IMAP + CalDAV + CardDAV + WebDAV) role service should run.
@@ -305,7 +425,7 @@ pub fn mda_should_run(
 
 /// Bring each mail-bridge role service to its desired state given the NAT axis
 /// and the four enable toggles. The MTA is up iff [`mta_should_run`]
-/// (email-only **and** public axis); the MDA is up iff [`mda_should_run`]
+/// (email-only **and** public axis **and** scanners not declared absent); the MDA is up iff [`mda_should_run`]
 /// (`mail_enabled || caldav_enabled || carddav_enabled || webdav_enabled`, both
 /// axes). Best-effort (see [`notify_service`]) — the `imap-enabled` /
 /// `caldav-enabled` / `carddav-enabled` / `webdav-enabled` flag files are the
@@ -357,12 +477,17 @@ pub async fn effective_service_toggles(db: &crate::db::CacheDb) -> anyhow::Resul
 
 pub async fn reconcile_supervisor(
     node_mode: crate::config::NodeMode,
+    scanners: fauna_core::mail_availability::ContentScanners,
     mail_enabled: bool,
     caldav_enabled: bool,
     carddav_enabled: bool,
     webdav_enabled: bool,
 ) {
-    notify_service(MTA_SERVICE, mta_should_run(node_mode, mail_enabled)).await;
+    notify_service(
+        MTA_SERVICE,
+        mta_should_run(node_mode, scanners, mail_enabled),
+    )
+    .await;
     notify_service(
         MDA_SERVICE,
         mda_should_run(
@@ -1015,6 +1140,22 @@ pub async fn ensure_admin_recipient_aliases(state: &crate::routes::AppState) {
     }
 }
 
+/// Boot report of handle/alias collisions that predate the exclusion (a handle
+/// and another account's exact alias, or a forwarder / list, on one local
+/// part — `mail-aliases.md` § Cross-user uniqueness). Each pair lands once on
+/// the admin audit log ([`crate::db::mail_aliases::HANDLE_COLLISION_AUDIT_ACTION`]);
+/// nothing is reassigned. Best-effort: a failed scan is logged and boot goes on.
+pub async fn report_handle_alias_collisions(state: &crate::routes::AppState) {
+    match state.db.audit_handle_alias_collisions().await {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            "{n} handle/alias collision(s) reported on the admin audit log \
+             (one address, two claimants; nothing reassigned)"
+        ),
+        Err(e) => tracing::warn!("handle/alias collision scan failed: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,27 +1243,147 @@ mod tests {
         // No socket at the well-known path on the test box → must not panic /
         // error; the flag files are the durable signal. Exercise a spread of
         // (mail, caldav, carddav, webdav) combinations on both NAT axes.
+        use fauna_core::mail_availability::ContentScanners;
         for mode in [NodeMode::Public, NodeMode::Private] {
-            reconcile_supervisor(mode, true, true, true, true).await;
-            reconcile_supervisor(mode, true, false, false, false).await;
-            reconcile_supervisor(mode, false, true, false, false).await;
-            reconcile_supervisor(mode, false, false, true, false).await;
-            reconcile_supervisor(mode, false, false, false, true).await;
-            reconcile_supervisor(mode, false, false, false, false).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, true, true, true, true).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, true, false, false, false).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, false, true, false, false).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, false, false, true, false).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, false, false, false, true).await;
+            reconcile_supervisor(mode, ContentScanners::Unknown, false, false, false, false).await;
         }
     }
 
     #[test]
     fn mta_stays_down_on_the_private_axis_even_when_mail_enabled() {
         use crate::config::NodeMode;
-        // Public axis: the MTA rides the mail toggle (the normal VPS box).
-        assert!(mta_should_run(NodeMode::Public, true));
-        assert!(!mta_should_run(NodeMode::Public, false));
-        // Private home box: the perimeter parser is NEVER started — mail-enabled
-        // there only brings up the MDA to serve relayed mail over LAN IMAP/CalDAV
-        // (deployment-home-with-public-relay.md § Plaintext-mode behavior).
-        assert!(!mta_should_run(NodeMode::Private, true));
-        assert!(!mta_should_run(NodeMode::Private, false));
+        use fauna_core::mail_availability::ContentScanners::{Unknown, Wired};
+        for scanners in [Wired, Unknown] {
+            // Public axis: the MTA rides the mail toggle (the normal VPS box).
+            assert!(mta_should_run(NodeMode::Public, scanners, true));
+            assert!(!mta_should_run(NodeMode::Public, scanners, false));
+            // Private home box: the perimeter parser is NEVER started —
+            // mail-enabled there only brings up the MDA to serve relayed mail
+            // over LAN IMAP/CalDAV (deployment-home-with-public-relay.md
+            // § Plaintext-mode behavior).
+            assert!(!mta_should_run(NodeMode::Private, scanners, true));
+            assert!(!mta_should_run(NodeMode::Private, scanners, false));
+        }
+    }
+
+    /// A box whose artifact wired no content scanners keeps its MTA down even
+    /// with mail enabled — the scan gate is fail-closed, so an MTA there would
+    /// 451 every inbound message (`mail-bridge-lifecycle.md` § Default-off on
+    /// first claim → *A box with no content scanners cannot enable mail*).
+    #[test]
+    fn mta_stays_down_when_the_artifact_declares_no_scanners() {
+        use crate::config::NodeMode;
+        use fauna_core::mail_availability::ContentScanners::Absent;
+        for mode in [NodeMode::Public, NodeMode::Private] {
+            assert!(!mta_should_run(mode, Absent, true), "{mode:?}");
+            assert!(!mta_should_run(mode, Absent, false), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn content_scanners_reader_over_the_hatch() {
+        use fauna_core::mail_availability::ContentScanners;
+        let hatch = |body: Option<&str>| {
+            let tmp = TmpDir::new();
+            if let Some(body) = body {
+                std::fs::write(tmp.path().join(OPERATOR_HATCH_FILE), body).unwrap();
+            }
+            read_content_scanners(tmp.path())
+        };
+        // No hatch: a nest outside the image — nothing declared anything.
+        assert_eq!(hatch(None), ContentScanners::Unknown);
+        assert_eq!(
+            hatch(Some(
+                "caldav_listen_https = \"127.0.0.1:8444\"\ncontent_scanners = \"wired\"\n"
+            )),
+            ContentScanners::Wired
+        );
+        assert_eq!(
+            hatch(Some(
+                "content_scanners = \"absent\"\n[mta_mx_override]\n\"a.test\" = \"b\"\n"
+            )),
+            ContentScanners::Absent
+        );
+        // A hatch without the key: the entrypoint always writes one, so this
+        // artifact declared nothing wired.
+        assert_eq!(
+            hatch(Some("caldav_listen_https = \"127.0.0.1:8444\"\n")),
+            ContentScanners::Absent
+        );
+        // An unknown value, a non-string value, garbage: unknown.
+        assert_eq!(
+            hatch(Some("content_scanners = \"partial\"\n")),
+            ContentScanners::Unknown
+        );
+        assert_eq!(
+            hatch(Some("content_scanners = 1\n")),
+            ContentScanners::Unknown
+        );
+        assert_eq!(
+            hatch(Some("this is = = not toml [[")),
+            ContentScanners::Unknown
+        );
+        // No data dir (in-memory/test nest): unknown.
+        assert_eq!(
+            read_content_scanners_from_db_path(""),
+            ContentScanners::Unknown
+        );
+    }
+
+    #[test]
+    fn dav_direct_listener_reader_follows_the_mda_bind_split() {
+        let hatch = |body: Option<&str>| {
+            let tmp = TmpDir::new();
+            if let Some(body) = body {
+                std::fs::write(tmp.path().join(OPERATOR_HATCH_FILE), body).unwrap();
+            }
+            read_dav_direct_listener(tmp.path())
+        };
+        // No hatch, or a hatch naming no CalDAV bind: nothing declared.
+        assert_eq!(hatch(None), None);
+        assert_eq!(hatch(Some("content_scanners = \"wired\"\n")), None);
+        assert_eq!(hatch(Some("this is = = not toml [[")), None);
+        // The cloud domain box: the SNI router's loopback pin.
+        assert_eq!(
+            hatch(Some(
+                "caldav_listen_https = \"127.0.0.1:8444\"\ncontent_scanners = \"wired\"\n"
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            hatch(Some("caldav_listen_https = \"[::1]:8444\"\n")),
+            Some(false)
+        );
+        assert_eq!(
+            hatch(Some("caldav_listen_https = \"localhost:8444\"\n")),
+            Some(false)
+        );
+        // The home bundle (domain or not): the LAN interface, admin port.
+        assert_eq!(
+            hatch(Some("caldav_bind_host = \"192.168.1.50\"\n")),
+            Some(true)
+        );
+        assert_eq!(hatch(Some("caldav_bind_host = \"0.0.0.0\"\n")), Some(true));
+        // A desktop supervisor's routable pin.
+        assert_eq!(
+            hatch(Some("caldav_listen_https = \"192.168.1.50:8443\"\n")),
+            Some(true)
+        );
+        // A pin wins over a bind host, exactly as the MDA resolves it.
+        assert_eq!(
+            hatch(Some(
+                "caldav_listen_https = \"127.0.0.1:8444\"\ncaldav_bind_host = \"192.168.1.50\"\n"
+            )),
+            Some(false)
+        );
+        // Empty values declare nothing.
+        assert_eq!(hatch(Some("caldav_bind_host = \"\"\n")), None);
+        assert_eq!(read_dav_direct_listener_from_db_path(""), None);
     }
 
     #[test]
@@ -1374,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn enable_net_provisions_primary_for_real_domain() {
-        let state = state_with_handle_domain(Some("example.com"));
+        let state = state_with_handle_domain(Some("example.net"));
         // Precondition: a freshly-reset box with no mail domain registered.
         assert!(
             state
@@ -1389,7 +1650,7 @@ mod tests {
 
         let domains = state.db.list_active_mail_domains().await.unwrap();
         assert_eq!(domains.len(), 1, "real domain should be auto-provisioned");
-        assert_eq!(domains[0].domain_name, "example.com");
+        assert_eq!(domains[0].domain_name, "example.net");
         assert!(
             domains[0].is_primary,
             "the first auto-domain is the primary"
@@ -1453,7 +1714,7 @@ mod tests {
     async fn enable_net_is_noop_when_a_domain_is_already_registered() {
         // The user chose a *different* mail domain at claim time; the enable-time
         // net must not override it (composes — fires only when nothing exists).
-        let state = state_with_handle_domain(Some("example.com"));
+        let state = state_with_handle_domain(Some("example.net"));
         state
             .db
             .add_mail_domain(
@@ -1486,7 +1747,7 @@ mod tests {
         let db = crate::db::CacheDb::open_in_memory().unwrap();
         let mut state = crate::routes::AppState::for_test(std::sync::Arc::new(db));
         let cfg = std::sync::Arc::get_mut(&mut state.config).unwrap();
-        cfg.nest.domain = Some("example.com".to_string());
+        cfg.nest.domain = Some("example.net".to_string());
         // seed-read-ok(test): asserting the seed is unset is what makes the
         // assertion below about the `[nest] domain` rung rather than this one.
         assert!(state.auth.registration.handle_domain.is_none());
@@ -1495,15 +1756,15 @@ mod tests {
 
         let domains = state.db.list_active_mail_domains().await.unwrap();
         assert_eq!(domains.len(), 1);
-        assert_eq!(domains[0].domain_name, "example.com");
+        assert_eq!(domains[0].domain_name, "example.net");
         assert!(domains[0].is_primary);
     }
 
     #[tokio::test]
     async fn ensure_mail_domain_registered_is_idempotent() {
         let state = state_with_handle_domain(None);
-        ensure_mail_domain_registered(&state, "example.com").await;
-        ensure_mail_domain_registered(&state, "example.com").await; // second = no-op
+        ensure_mail_domain_registered(&state, "example.net").await;
+        ensure_mail_domain_registered(&state, "example.net").await; // second = no-op
         let domains = state.db.list_active_mail_domains().await.unwrap();
         assert_eq!(domains.len(), 1);
         assert!(domains[0].is_primary);
@@ -1528,10 +1789,10 @@ mod tests {
         // A re-claimed factory-reset box: the admin claimed with a bare handle and
         // the mail domain auto-provisioned at enable time, but the admin never
         // travelled the per-user `provision_recipient_mls_pubkey` canonical-alias
-        // path — so its own `test@example.com` has no exact alias and the AUTH login
+        // path — so its own `test@example.net` has no exact alias and the AUTH login
         // resolver `validate_recipient` (exact-only) would reject it
         // `no such recipient`, breaking IMAP/CalDAV/submission login.
-        let state = state_with_handle_domain(Some("example.com"));
+        let state = state_with_handle_domain(Some("example.net"));
         let admin = [9u8; 32];
         seed_admin_with_handle(&state, &admin, "test").await;
 
@@ -1542,7 +1803,7 @@ mod tests {
         assert!(
             state
                 .db
-                .lookup_exact_alias("example.com", "test")
+                .lookup_exact_alias("example.net", "test")
                 .await
                 .unwrap()
                 .is_none(),
@@ -1555,7 +1816,7 @@ mod tests {
         assert_eq!(
             state
                 .db
-                .lookup_exact_alias("example.com", "test")
+                .lookup_exact_alias("example.net", "test")
                 .await
                 .unwrap(),
             Some(admin),
@@ -1568,7 +1829,7 @@ mod tests {
         assert_eq!(
             state
                 .db
-                .lookup_exact_alias("example.com", "test")
+                .lookup_exact_alias("example.net", "test")
                 .await
                 .unwrap(),
             Some(admin)
@@ -1803,7 +2064,11 @@ mod tests {
              opened the SMTP perimeter on a calendar-only box"
         );
         assert!(
-            !mta_should_run(NodeMode::Public, t.mail),
+            !mta_should_run(
+                NodeMode::Public,
+                fauna_core::mail_availability::ContentScanners::Wired,
+                t.mail
+            ),
             "and so the MTA must stay down on a public DAV-only deployment"
         );
         assert!(

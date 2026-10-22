@@ -6,18 +6,25 @@
 //!
 //! Both follow the same pipeline:
 //!   1. Check Content-Type
-//!   2. Enforce body size limit
+//!   2. Enforce body size limit (a `DefaultBodyLimit` on the routes refuses an
+//!      oversized body before it is buffered)
 //!   3. Parse Signature header
 //!   4. Verify Digest header
-//!   5. Parse activity JSON
-//!   6. Fetch / cache remote actor and extract public key
-//!   7. Verify HTTP Signature
+//!   5. Parse activity JSON; rate-limit per source
+//!   6. The signature floor: coverage, `Host` value, `Date` window — no key needed
+//!   7. Authenticate the actor: verify against the cached key, or fetch an
+//!      unknown actor under the per-source budget and store it only once the
+//!      signature verifies against the fetched key
 //!   8. Dispatch by activity type
 
+use std::future::Future;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::num::NonZeroU32;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 
@@ -37,9 +44,81 @@ use fauna_bridge_activitypub::translate::{
 use fauna_bridge_activitypub::types::ApNote;
 
 use crate::activitypub::db_helpers::{self, RemoteActor};
+use crate::rate_limit::IpRateLimiter;
+use crate::registration::OptionalConnectInfo;
 use crate::routes::AppState;
 
 const MAX_BODY_BYTES: usize = 1_048_576; // 1 MB
+
+/// How long a fetched actor document is trusted before a delivery refreshes it.
+const ACTOR_CACHE_TTL_SECS: i64 = 86_400;
+
+/// Inbox POSTs one source may make per second, whatever actors they name.
+/// A hard-coded constant (`activitypub.md` § Security posture: no
+/// configuration surface beyond the app).
+const INBOX_PER_SOURCE_PER_SECOND: u32 = 30;
+
+/// The per-source budget for the one dial an unverified delivery can steer:
+/// fetching an actor this nest holds no usable key for. A burst of
+/// [`ACTOR_FETCH_BURST`] fetches, replenished at one per
+/// [`ACTOR_FETCH_REPLENISH_SECS`] — far above what a peer's honest traffic
+/// costs (each actor is fetched once and then cached for a day), and low
+/// enough that an anonymous source cannot use this nest as a request forger
+/// against public hosts, nor grow the actor table, at more than a trickle.
+const ACTOR_FETCH_BURST: u32 = 60;
+const ACTOR_FETCH_REPLENISH_SECS: u64 = 1;
+
+/// The limiter every inbox POST is metered against, keyed by source.
+pub(crate) fn new_inbox_limiter() -> Arc<IpRateLimiter> {
+    crate::rate_limit::new_ip_limiter(INBOX_PER_SOURCE_PER_SECOND)
+}
+
+/// The per-source budget an unknown actor's fetch is admitted under.
+pub(crate) fn new_actor_fetch_limiter() -> Arc<IpRateLimiter> {
+    let quota =
+        governor::Quota::with_period(std::time::Duration::from_secs(ACTOR_FETCH_REPLENISH_SECS))
+            .expect("non-zero period")
+            .allow_burst(NonZeroU32::new(ACTOR_FETCH_BURST).expect("non-zero burst"));
+    Arc::new(governor::RateLimiter::dashmap(quota))
+}
+
+/// The key a delivery's source is metered under.
+///
+/// IPv4 at full resolution; IPv6 masked to its /64 (one subscriber's block, so
+/// rotating the host half buys nothing); an IPv4-mapped address as its IPv4
+/// form — the same keying as `anonymous_rate_limit::ip_key_bytes`. A request
+/// with no `ConnectInfo` (only a unit test; both production listeners carry
+/// one) shares a single bucket rather than escaping the limit.
+fn inbox_source_key(peer: Option<SocketAddr>) -> IpAddr {
+    match peer.map(|p| p.ip()) {
+        None => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        Some(IpAddr::V4(v4)) => IpAddr::V4(v4),
+        Some(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                let mut o = v6.octets();
+                o[8..].fill(0);
+                IpAddr::V6(Ipv6Addr::from(o))
+            }
+        },
+    }
+}
+
+/// The remote-actor fetch, as the inbox pipeline calls it. Production passes
+/// [`network_actor_fetch`]; a test passes a recorder, so "this delivery made
+/// no dial" is assertable without the SSRF guard (which refuses a loopback
+/// listener anyway) standing in front of the observation.
+type ActorFetchFuture = Pin<Box<dyn Future<Output = anyhow::Result<RemoteActor>> + Send>>;
+
+fn network_actor_fetch(
+    state: &Arc<AppState>,
+) -> impl Fn(String) -> ActorFetchFuture + Send + Sync + use<> {
+    let state = state.clone();
+    move |uri| {
+        let state = state.clone();
+        Box::pin(async move { fetch_remote_actor(&state, &uri).await })
+    }
+}
 
 /// How far a delivery's signed `Date` may sit from this nest's clock, either
 /// direction, before the inbox refuses it — the replay window's width.
@@ -78,6 +157,9 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/ap/users/{username}/inbox", post(user_inbox))
         .route("/ap/inbox", post(shared_inbox))
+        // Refuse an oversized body before it is buffered — without this axum's
+        // 2 MB default applied and step 2's check ran on bytes already held.
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
 // ── Endpoint handlers ────────────────────────────────────────────────────────
@@ -86,6 +168,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 async fn user_inbox(
     State(state): State<Arc<AppState>>,
     Path(username): Path<String>,
+    OptionalConnectInfo(peer): OptionalConnectInfo,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -103,16 +186,19 @@ async fn user_inbox(
     };
     drop(conn);
 
-    process_inbox(&state, &headers, body, Some(account.username)).await
+    let fetch = network_actor_fetch(&state);
+    process_inbox(&state, peer, &headers, body, Some(account.username), &fetch).await
 }
 
 /// Shared inbox: `POST /ap/inbox`
 async fn shared_inbox(
     State(state): State<Arc<AppState>>,
+    OptionalConnectInfo(peer): OptionalConnectInfo,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    process_inbox(&state, &headers, body, None).await
+    let fetch = network_actor_fetch(&state);
+    process_inbox(&state, peer, &headers, body, None, &fetch).await
 }
 
 // ── Core processing pipeline ─────────────────────────────────────────────────
@@ -203,11 +289,15 @@ pub(super) fn local_actor_username(our_domain: &str, url: &str) -> Option<String
 
 async fn process_inbox(
     state: &Arc<AppState>,
+    // The connection's source — the PROXY-v2-resolved client behind the SNI
+    // router. `None` only in a unit test.
+    peer: Option<SocketAddr>,
     headers: &HeaderMap,
     body: Bytes,
     // For the per-user inbox this is the resolved username;
     // for the shared inbox it is None and the username is inferred from the activity.
     target_username: Option<String>,
+    fetch_actor: &(dyn Fn(String) -> ActorFetchFuture + Send + Sync),
 ) -> axum::response::Response {
     // ── 0. This nest must have an authority to receive AS ─────────────────
     //
@@ -309,67 +399,21 @@ async fn process_inbox(
         }
     };
 
-    // ── 5a. Rate limit per remote domain ────────────────────────────────
-    if let Ok(url) = url::Url::parse(&actor_uri)
-        && let Some(domain) = url.host_str()
-        && let Some(ref limiter) = state.activitypub.inbox_limiter
-        && limiter.check_key(&domain.to_string()).is_err()
+    // ── 5a. Rate limit per SOURCE ───────────────────────────────────────
+    //
+    // Keyed on the connection's source (the PROXY-v2-resolved client IP behind
+    // the SNI router), never on the body's `actor`: that URI is unverified
+    // here, so a limiter keyed on its host was one an attacker reset by naming
+    // a fresh domain per request. Owner: `activitypub.md` § Security posture.
+    let source = inbox_source_key(peer);
+    if let Some(ref limiter) = state.activitypub.inbox_limiter
+        && limiter.check_key(&source).is_err()
     {
-        tracing::debug!(domain, "ap inbox: rate limited");
+        tracing::debug!(%source, "ap inbox: rate limited");
         return ApiError::too_many_requests("rate limited").into_response();
     }
 
-    // ── 6. Fetch / cache remote actor ─────────────────────────────────────
-    let remote_actor = {
-        let conn = state.db.conn().await;
-        let cached = db_helpers::get_remote_actor(&conn, &actor_uri)
-            .ok()
-            .flatten();
-        drop(conn);
-
-        // Re-fetch if not cached, if the cache is older than 24 h, or if the
-        // cached row carries no usable key. That last arm heals a keyless
-        // row (an `Update{Person}` can still store one with an empty
-        // `public_key_pem`) on the next activity instead of leaving every
-        // activity from that actor failing verification for a full day.
-        let needs_fetch = match &cached {
-            None => true,
-            Some(a) => {
-                let age_secs = crate::db::now_epoch_secs() - a.last_fetched;
-                age_secs > 86_400 || a.public_key_pem.is_empty()
-            }
-        };
-
-        if needs_fetch {
-            match fetch_remote_actor(state.as_ref(), &actor_uri).await {
-                Ok(actor) => {
-                    let conn = state.db.conn().await;
-                    if let Err(e) = db_helpers::upsert_remote_actor(&conn, &actor) {
-                        tracing::warn!(error = %e, "ap inbox: upsert_remote_actor failed");
-                    }
-                    actor
-                }
-                Err(e) => {
-                    tracing::warn!(actor = %actor_uri, error = %e, "ap inbox: fetch remote actor failed");
-                    // Fall back to the cache only if it can actually verify a
-                    // signature. A keyless row (the `Update{Person}` case
-                    // above) would otherwise send us into verification with an
-                    // empty PEM, whose parse error reads like a crypto fault
-                    // rather than the failed fetch that really caused it.
-                    match cached.filter(|a| !a.public_key_pem.is_empty()) {
-                        Some(a) => a,
-                        None => {
-                            return ApiError::unauthorized("cannot verify actor").into_response();
-                        }
-                    }
-                }
-            }
-        } else {
-            cached.unwrap()
-        }
-    };
-
-    // ── 7. Verify HTTP Signature ──────────────────────────────────────────
+    // ── 6. The signature floor — every check that needs no key ──────────
     let method = "post";
     // Build the request path.  For shared inbox it is /ap/inbox; for per-user
     // inbox the path must be reconstructed from the username we already have.
@@ -491,23 +535,95 @@ async fn process_inbox(
             .into_response();
     }
 
-    let headers_ref = headers;
-    let verify_result = verify_signature(
-        &parsed_sig,
-        &remote_actor.public_key_pem,
-        method,
-        &path,
-        |name| {
-            headers_ref
+    // ── 7. Authenticate the actor ─────────────────────────────────────────
+    //
+    // Verify-before-fetch, and store-after-verify (owner: `activitypub.md`
+    // § Security posture). Everything a stranger can make this nest do before
+    // a signature verifies is bounded here:
+    //
+    //   * a KNOWN actor (a cached row with a usable key) is verified against
+    //     the cached key, with no dial at all; a stale row it verified against
+    //     is refreshed afterwards, a dial to an actor that has just proved it
+    //     is who it says;
+    //   * an UNKNOWN actor (no row, a keyless row, or a stale row whose key
+    //     no longer verifies — a rotation) is the one dial an unverified body
+    //     can steer, so it is admitted only under the per-source actor-fetch
+    //     budget, and the fetched actor is stored only once the signature
+    //     verifies against its key. A forged delivery naming a fabricated
+    //     actor leaves no row behind.
+    //
+    // A fresh cached key that fails is refused without a re-fetch, as before:
+    // a key rotation heals at the 24 h refresh, and re-fetching on every
+    // failure would hand a stranger an unbudgeted dial by naming a known actor.
+    let verify_with = |public_key_pem: &str| {
+        verify_signature(&parsed_sig, public_key_pem, method, &path, |name| {
+            headers
                 .get(name)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string())
-        },
-    );
+        })
+    };
 
-    if let Err(e) = verify_result {
-        tracing::warn!(actor = %actor_uri, error = %e, "ap inbox: signature verification failed");
+    let cached = {
+        let conn = state.db.conn().await;
+        db_helpers::get_remote_actor(&conn, &actor_uri)
+            .ok()
+            .flatten()
+            .filter(|a| !a.public_key_pem.is_empty())
+    };
+    let cache_is_fresh = cached
+        .as_ref()
+        .is_some_and(|a| crate::db::now_epoch_secs() - a.last_fetched <= ACTOR_CACHE_TTL_SECS);
+    let verified_by_cache = match &cached {
+        Some(a) => match verify_with(&a.public_key_pem) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::debug!(actor = %actor_uri, error = %e, "ap inbox: cached key does not verify");
+                false
+            }
+        },
+        None => false,
+    };
+
+    if verified_by_cache {
+        if !cache_is_fresh {
+            match fetch_actor(actor_uri.clone()).await {
+                Ok(actor) => {
+                    let conn = state.db.conn().await;
+                    if let Err(e) = db_helpers::upsert_remote_actor(&conn, &actor) {
+                        tracing::warn!(error = %e, "ap inbox: upsert_remote_actor failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(actor = %actor_uri, error = %e, "ap inbox: refreshing a verified actor failed; keeping the cached row");
+                }
+            }
+        }
+    } else if cache_is_fresh {
+        tracing::warn!(actor = %actor_uri, "ap inbox: signature verification failed");
         return ApiError::unauthorized("signature verification failed").into_response();
+    } else {
+        if let Some(ref limiter) = state.activitypub.actor_fetch_limiter
+            && limiter.check_key(&source).is_err()
+        {
+            tracing::debug!(%source, actor = %actor_uri, "ap inbox: actor-fetch budget spent");
+            return ApiError::too_many_requests("rate limited").into_response();
+        }
+        let actor = match fetch_actor(actor_uri.clone()).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::warn!(actor = %actor_uri, error = %e, "ap inbox: fetch remote actor failed");
+                return ApiError::unauthorized("cannot verify actor").into_response();
+            }
+        };
+        if let Err(e) = verify_with(&actor.public_key_pem) {
+            tracing::warn!(actor = %actor_uri, error = %e, "ap inbox: signature verification failed");
+            return ApiError::unauthorized("signature verification failed").into_response();
+        }
+        let conn = state.db.conn().await;
+        if let Err(e) = db_helpers::upsert_remote_actor(&conn, &actor) {
+            tracing::warn!(error = %e, "ap inbox: upsert_remote_actor failed");
+        }
     }
 
     // ── 8. Dispatch ───────────────────────────────────────────────────────
@@ -1923,6 +2039,324 @@ mod tests {
         state
     }
 
+    // ── Verify-before-fetch, store-after-verify, the per-source budget ──────
+    //
+    // `activitypub.md` § Security posture: nothing an unverified delivery names
+    // is dialed until every key-free check has passed, an unknown actor is
+    // fetched only under the per-source budget, and the fetched actor is
+    // stored only once the signature verifies against its key. The actor
+    // fetch is injected (`ActorFetchFuture`), so "no dial" is the recorder's
+    // call count — a loopback listener could not observe it, because the SSRF
+    // guard refuses loopback before any socket opens.
+
+    /// A fetch recorder: every URI dialed, in order, answered with an actor
+    /// document carrying `public_key_pem` — or a failed fetch when `None`.
+    fn recording_fetch(
+        public_key_pem: Option<String>,
+    ) -> (
+        Arc<std::sync::Mutex<Vec<String>>>,
+        impl Fn(String) -> ActorFetchFuture + Send + Sync,
+    ) {
+        let dials = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = dials.clone();
+        let fetch = move |uri: String| -> ActorFetchFuture {
+            seen.lock().unwrap().push(uri.clone());
+            let pem = public_key_pem.clone();
+            Box::pin(async move {
+                let Some(public_key_pem) = pem else {
+                    anyhow::bail!("actor fetch failed");
+                };
+                Ok(RemoteActor {
+                    inbox: format!("{uri}/inbox"),
+                    uri,
+                    shared_inbox: None,
+                    public_key_pem,
+                    preferred_username: None,
+                    display_name: None,
+                    avatar_url: None,
+                    banner_url: None,
+                    summary: None,
+                    last_fetched: crate::db::now_epoch_secs(),
+                })
+            })
+        };
+        (dials, fetch)
+    }
+
+    /// A delivery from `actor_uri` signed with `privkey_der` over the full
+    /// floor `(request-target) host date digest` — or with `digest` left out
+    /// of the signed set when `cover_digest` is false.
+    fn signed_delivery(
+        actor_uri: &str,
+        privkey_der: &[u8],
+        cover_digest: bool,
+    ) -> (HeaderMap, Bytes) {
+        let body = json!({
+            "type": "SomeUnknownActivityType",
+            "id": format!("{actor_uri}/activities/1"),
+            "actor": actor_uri,
+        })
+        .to_string();
+        let date = fresh_date();
+        let host = "local.example";
+        let digest = compute_digest(body.as_bytes());
+        let signature = sign_inbox_post(
+            actor_uri,
+            privkey_der,
+            &date,
+            host,
+            cover_digest.then_some(digest.as_str()),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/activity+json".parse().unwrap());
+        headers.insert("signature", signature.parse().unwrap());
+        headers.insert("date", date.parse().unwrap());
+        headers.insert("host", host.parse().unwrap());
+        headers.insert("digest", digest.parse().unwrap());
+        (headers, Bytes::from(body))
+    }
+
+    async fn stored_actor(state: &Arc<AppState>, actor_uri: &str) -> Option<RemoteActor> {
+        let conn = state.db.conn().await;
+        db_helpers::get_remote_actor(&conn, actor_uri).unwrap()
+    }
+
+    async fn deliver(
+        state: &Arc<AppState>,
+        peer: &str,
+        (headers, body): (HeaderMap, Bytes),
+        fetch: &(dyn Fn(String) -> ActorFetchFuture + Send + Sync),
+    ) -> StatusCode {
+        process_inbox(
+            state,
+            Some(peer.parse().unwrap()),
+            &headers,
+            body,
+            None,
+            fetch,
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivery_failing_the_key_free_floor_dials_no_actor_and_stores_none() {
+        let state = state().await;
+        let (privkey_der, pubkey_pem) =
+            fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let actor_uri = "https://fresh.example/users/stranger";
+        let (dials, fetch) = recording_fetch(Some(pubkey_pem));
+
+        let status = deliver(
+            &state,
+            "203.0.113.7:4000",
+            signed_delivery(actor_uri, &privkey_der, false),
+            &fetch,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            dials.lock().unwrap().is_empty(),
+            "a delivery refused by a check that needs no key must never dial the actor it names",
+        );
+        assert!(stored_actor(&state, actor_uri).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_forged_signature_naming_an_unknown_actor_stores_no_actor_row() {
+        let state = state().await;
+        let (_, actor_pem) = fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let (forger_der, _) = fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let actor_uri = "https://fresh.example/users/fabricated";
+        let (dials, fetch) = recording_fetch(Some(actor_pem));
+
+        let status = deliver(
+            &state,
+            "203.0.113.7:4000",
+            signed_delivery(actor_uri, &forger_der, true),
+            &fetch,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            dials.lock().unwrap().len(),
+            1,
+            "an unknown actor's key must be fetched once"
+        );
+        assert!(
+            stored_actor(&state, actor_uri).await.is_none(),
+            "an actor is stored only once a signature verifies against its fetched key",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_correctly_signed_delivery_from_an_unknown_actor_stores_the_actor() {
+        let state = state().await;
+        let (privkey_der, pubkey_pem) =
+            fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let actor_uri = "https://fresh.example/users/newcomer";
+        let (dials, fetch) = recording_fetch(Some(pubkey_pem.clone()));
+
+        let status = deliver(
+            &state,
+            "203.0.113.7:4000",
+            signed_delivery(actor_uri, &privkey_der, true),
+            &fetch,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(*dials.lock().unwrap(), vec![actor_uri.to_string()]);
+        let stored = stored_actor(&state, actor_uri)
+            .await
+            .expect("verified actor is stored");
+        assert_eq!(stored.public_key_pem, pubkey_pem);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_known_actor_is_verified_against_its_cached_key_without_a_dial() {
+        let state = state().await;
+        let (privkey_der, pubkey_pem) =
+            fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let actor_uri = "https://remote.example/users/known";
+        seed_remote_actor(&state, actor_uri, pubkey_pem).await;
+        let (dials, fetch) = recording_fetch(None);
+
+        let status = deliver(
+            &state,
+            "203.0.113.7:4000",
+            signed_delivery(actor_uri, &privkey_der, true),
+            &fetch,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(dials.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fresh_cached_key_that_fails_is_refused_without_a_dial() {
+        let state = state().await;
+        let (_, actor_pem) = fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let (forger_der, forger_pem) =
+            fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let actor_uri = "https://remote.example/users/known";
+        seed_remote_actor(&state, actor_uri, actor_pem.clone()).await;
+        let (dials, fetch) = recording_fetch(Some(forger_pem));
+
+        let status = deliver(
+            &state,
+            "203.0.113.7:4000",
+            signed_delivery(actor_uri, &forger_der, true),
+            &fetch,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(
+            dials.lock().unwrap().is_empty(),
+            "naming a known actor must not buy a stranger an unbudgeted dial",
+        );
+        assert_eq!(
+            stored_actor(&state, actor_uri)
+                .await
+                .unwrap()
+                .public_key_pem,
+            actor_pem
+        );
+    }
+
+    async fn state_with_fetch_burst(burst: u32) -> Arc<AppState> {
+        let mut state = crate::activitypub::ap_state_for_test().await;
+        state
+            .identity_domain
+            .store(Some(Arc::new("local.example".to_string())));
+        let quota = governor::Quota::per_hour(NonZeroU32::new(1).unwrap())
+            .allow_burst(NonZeroU32::new(burst).unwrap());
+        state.activitypub.actor_fetch_limiter =
+            Some(Arc::new(governor::RateLimiter::dashmap(quota)));
+        state.activitypub.inbox_limiter = Some(new_inbox_limiter());
+        Arc::new(state)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rotating_actor_domains_from_one_source_spends_the_source_budget() {
+        let state = state_with_fetch_burst(2).await;
+        let (privkey_der, pubkey_pem) =
+            fauna_bridge_activitypub::identity::generate_rsa_keypair().unwrap();
+        let (dials, fetch) = recording_fetch(Some(pubkey_pem));
+
+        let mut statuses = Vec::new();
+        for n in 0..3 {
+            let actor_uri = format!("https://rotating-{n}.example/users/x");
+            statuses.push(
+                deliver(
+                    &state,
+                    "203.0.113.7:4000",
+                    signed_delivery(&actor_uri, &privkey_der, true),
+                    &fetch,
+                )
+                .await,
+            );
+        }
+        assert_eq!(
+            statuses,
+            vec![
+                StatusCode::ACCEPTED,
+                StatusCode::ACCEPTED,
+                StatusCode::TOO_MANY_REQUESTS
+            ],
+            "a fresh domain per request must not reset the budget",
+        );
+        assert_eq!(
+            dials.lock().unwrap().len(),
+            2,
+            "the refused delivery made no dial"
+        );
+        assert!(
+            stored_actor(&state, "https://rotating-2.example/users/x")
+                .await
+                .is_none()
+        );
+
+        // The budget is the source's: another source still has its own.
+        let other = deliver(
+            &state,
+            "198.51.100.9:4000",
+            signed_delivery("https://rotating-3.example/users/x", &privkey_der, true),
+            &fetch,
+        )
+        .await;
+        assert_eq!(other, StatusCode::ACCEPTED);
+    }
+
+    #[test]
+    fn the_source_key_masks_ipv6_to_its_64_and_unmaps_ipv4() {
+        let key = |s: &str| inbox_source_key(Some(s.parse().unwrap()));
+        assert_eq!(key("[2001:db8:1:2::1]:1"), key("[2001:db8:1:2:ffff::9]:2"));
+        assert_ne!(key("[2001:db8:1:2::1]:1"), key("[2001:db8:1:3::1]:1"));
+        assert_eq!(key("[::ffff:203.0.113.7]:1"), key("203.0.113.7:9"));
+        assert_ne!(key("203.0.113.7:1"), key("203.0.113.8:1"));
+    }
+
+    /// The body cap refuses before the body is buffered: an oversized POST to
+    /// a per-user inbox is refused as too large before the handler runs (it
+    /// would otherwise answer the unknown user with `404`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oversized_body_is_refused_before_the_handler_runs() {
+        use tower::ServiceExt;
+        let state = state().await;
+        let app = routes().with_state(state);
+        let request = axum::http::Request::post("/ap/users/nobody/inbox")
+            .header("content-type", "application/activity+json")
+            .body(axum::body::Body::from(vec![b' '; MAX_BODY_BYTES + 1]))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     // ── Remote-actor document parsing ───────────────────────────────────────
     //
     // Regression set for the 2026-07-22 real-Mastodon finding: a secure-mode
@@ -2187,9 +2621,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             StatusCode::UNAUTHORIZED,
@@ -2230,9 +2669,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             StatusCode::ACCEPTED,
@@ -2306,9 +2750,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_ne!(
             response.status(),
             StatusCode::ACCEPTED,
@@ -2360,9 +2809,14 @@ mod tests {
         headers.insert("host", "some-other-nest.example".parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_ne!(
             response.status(),
             StatusCode::ACCEPTED,
@@ -2431,9 +2885,14 @@ mod tests {
         headers.insert("host", foreign_host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_ne!(
             response.status(),
             StatusCode::ACCEPTED,
@@ -2475,9 +2934,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             StatusCode::NOT_FOUND,
@@ -2518,9 +2982,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             StatusCode::ACCEPTED,
@@ -2561,9 +3030,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_eq!(
             response.status(),
             StatusCode::UNAUTHORIZED,
@@ -2712,9 +3186,14 @@ mod tests {
         headers.insert("host", host.parse().unwrap());
         headers.insert("digest", digest.parse().unwrap());
 
-        let response = shared_inbox(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let response = shared_inbox(
+            State(state),
+            OptionalConnectInfo(None),
+            headers,
+            Bytes::from(body),
+        )
+        .await
+        .into_response();
         assert_ne!(
             response.status(),
             StatusCode::ACCEPTED,

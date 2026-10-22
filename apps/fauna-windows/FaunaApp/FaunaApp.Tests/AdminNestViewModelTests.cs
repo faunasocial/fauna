@@ -232,7 +232,7 @@ public class AdminNestViewModelTests
         {
             NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false),
             NextSetupStatus = MockNestRpcClient.MakeSetupStatus(
-                osSecurityUpdatesPending: 3, osRebootPending: true),
+                osHostStatusPresent: true, osSecurityUpdatesPending: 3, osRebootPending: true),
         };
         var vm = new AdminNestViewModel(rpc);
 
@@ -245,17 +245,18 @@ public class AdminNestViewModelTests
     }
 
     [Theory]
-    [InlineData(0u, false, "admin.nest_page.os_up_to_date")]
-    [InlineData(5u, false, "admin.nest_page.os_updates_pending")]
-    [InlineData(0u, true, "admin.nest_page.os_restart_pending")]
-    [InlineData(3u, true, "admin.nest_page.os_restart_pending")] // reboot is the headline
+    [InlineData(false, 0u, false, "admin.nest_page.os_no_host_data")] // hand-built box: never "up to date"
+    [InlineData(true, 0u, false, "admin.nest_page.os_up_to_date")]
+    [InlineData(true, 5u, false, "admin.nest_page.os_updates_pending")]
+    [InlineData(true, 0u, true, "admin.nest_page.os_restart_pending")]
+    [InlineData(true, 3u, true, "admin.nest_page.os_restart_pending")] // reboot is the headline
     public void OsMaintenanceStatusLine_ResolvesSharedKey(
-        uint updates, bool reboot, string expectedKey)
+        bool present, uint updates, bool reboot, string expectedKey)
     {
         // The state→key decision is single-sourced in shared Rust
         // (os_maintenance_status_label); the windows VM is a pure consume (no per-app
         // map). The test host has no localizer, so Resolve falls back to the dotted key.
-        Assert.Equal(expectedKey, AdminNestViewModel.OsMaintenanceStatusLine(updates, reboot));
+        Assert.Equal(expectedKey, AdminNestViewModel.OsMaintenanceStatusLine(present, updates, reboot));
     }
 
     [Fact]
@@ -265,13 +266,13 @@ public class AdminNestViewModelTests
         {
             NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false),
             NextSetupStatus = MockNestRpcClient.MakeSetupStatus(
-                osSecurityUpdatesPending: 3, osRebootPending: true),
+                osHostStatusPresent: true, osSecurityUpdatesPending: 3, osRebootPending: true),
         };
         var vm = new AdminNestViewModel(rpc);
         await vm.LoadCommand.ExecuteAsync(null);
 
         // After the request the coordinator will reboot; model the cleared host-status.
-        rpc.NextSetupStatus = MockNestRpcClient.MakeSetupStatus();
+        rpc.NextSetupStatus = MockNestRpcClient.MakeSetupStatus(osHostStatusPresent: true);
         await vm.RestartNowAsync();
 
         // The "restart now" rode fauna.admin.request_host_restart, followed by a
@@ -298,7 +299,7 @@ public class AdminNestViewModelTests
         {
             NextServiceFlags = new uniffi.fauna_ffi.FfiAdminServiceFlags(false, false),
             NextSetupStatus = MockNestRpcClient.MakeSetupStatus(
-                osRebootPending: true),
+                osHostStatusPresent: true, osRebootPending: true),
         };
         var vm = new AdminNestViewModel(rpc);
         await vm.LoadCommand.ExecuteAsync(null);

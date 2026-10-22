@@ -26,8 +26,8 @@ import {
   wasmCoreModule,
   signOutFinishRecorded,
   signOutPlannedErase,
-} from '$lib/wasm';
-import type { LocalizedText } from '$lib/i18n/localized';
+} from '#lib/wasm';
+import type { LocalizedText } from '#lib/i18n/localized';
 import { tabPin, setTabPin, clearTabPin, setTabNestUrl } from './tabPin';
 import type { WasmAccountRegistry } from '../../static/fauna_wasm.js';
 import type { SupervisionSnapshotValue } from './supervisionRestore';
@@ -152,7 +152,7 @@ export async function accountsBoot(): Promise<string | undefined> {
     // otherwise each mint a secret and end on two device ids for one account.
     // `ensureInstallDeviceSecret` takes the cross-tab lock itself. Never fatal
     // to boot — a page that cannot store the secret gets its failure where it
-    // asks for an id (`$lib/device-id`).
+    // asks for an id (`#lib/device-id`).
     try {
       await r.ensureInstallDeviceSecret();
     } catch (e) {
@@ -193,6 +193,13 @@ export async function accountsBoot(): Promise<string | undefined> {
 function pinTab(r: WasmAccountRegistry, actorId: string): void {
   setTabPin(actorId);
   setTabNestUrl((r.sessionMaterial(actorId) as SessionMaterial | undefined)?.nest_url ?? null);
+}
+
+/** Re-pin this tab to `actorId` after a terminal outside this module activated
+ *  it (the deferred-DNS exit, `persistAwaitingDns`) — the same re-pin
+ *  `accountsSwitch` and `accountsPersistLoggedIn` do after their activation. */
+export function accountsPinTab(actorId: string): Promise<void> {
+  return withRegistry((r) => pinTab(r, actorId));
 }
 
 /** The account list (add order) for the switcher. */
@@ -344,7 +351,7 @@ export async function accountsRemove(actorId: string): Promise<void> {
 // taxonomy → *Erasure follows scope*, the paragraph "Web's account store is in
 // the erase too", decision 2). The record and everything it orders are shared
 // Rust (`fauna_client_accounts::SignOutRecord`, `fauna-wasm`'s
-// `account_scope`), reached through `$lib/wasm`'s `signOutRecordBegin` (the
+// `account_scope`), reached through `#lib/wasm`'s `signOutRecordBegin` (the
 // gesture's decision), `signOutWipeOwed` (the identity read's fail-closed
 // gate) and the finish below.
 //

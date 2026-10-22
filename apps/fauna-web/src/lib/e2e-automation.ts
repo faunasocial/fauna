@@ -3,7 +3,7 @@
 //
 // This module exists ONLY in builds made for testing (testing.md § Test-agent
 // build exclusion): the sole importer is `+layout.svelte`'s
-// `if (__FAUNA_E2E_AUTOMATION__) import('$lib/e2e-automation')` branch, which a
+// `if (__FAUNA_E2E_AUTOMATION__) import('#lib/e2e-automation')` branch, which a
 // production `vite build` constant-folds away — so neither this chunk nor the
 // hook installers it pulls in (`installRpcTestHooks`,
 // `installConversationsCommandHook`) reach a production bundle. Never import it
@@ -11,17 +11,19 @@
 // behind the same flag), never bare in a component.
 
 import { goto } from '$app/navigation';
-import { identity, inbox, sent, knocks, contacts, connectionStatus } from '$lib/store';
-import { feedSnapshot, feedReloads, type FeedReloads } from '$lib/feed';
-import { devicesRefreshes } from '$lib/devices-session';
-import { paintedSessionTokenIds } from '$lib/sessions-painted';
-import { messageBanners, type FiredBanner } from '$lib/message-banner';
-import { resetActorScopedState } from '$lib/actorScope';
-import { installRpcTestHooks } from '$lib/rpc';
-import { regionBlockRenderForTest } from '$lib/region.svelte';
-import { silentSignIn, homeBearerScheduleForTest } from '$lib/api';
-import { accountsClearNestBinding, accountsTabSessionMaterial } from '$lib/accounts';
-import { clearTabPin } from '$lib/tabPin';
+import { identity, inbox, sent, knocks, contacts, connectionStatus } from '#lib/store';
+import { feedSnapshot, feedReloads, type FeedReloads } from '#lib/feed';
+import { devicesRefreshes } from '#lib/devices-session';
+import { paintedSessionTokenIds } from '#lib/sessions-painted';
+import { messageBanners, type FiredBanner } from '#lib/message-banner';
+import { resetActorScopedState } from '#lib/actorScope';
+import { installRpcTestHooks } from '#lib/rpc';
+import { regionBlockRenderForTest } from '#lib/region.svelte';
+import { wardRuleDocumentRules } from '#lib/contentPolicy.svelte';
+import { nestBlockRenderForTest, nestRulesChangedNoticeText } from '#lib/nestRules.svelte';
+import { silentSignIn, homeBearerScheduleForTest } from '#lib/api';
+import { accountsClearNestBinding, accountsTabSessionMaterial } from '#lib/accounts';
+import { clearTabPin } from '#lib/tabPin';
 import {
   ensureWasm,
   enableDnsFakeProviderForTest,
@@ -29,42 +31,43 @@ import {
   enableFakePlcDirectoryForTestCore,
   servingEnablement,
   type ServingEnablement,
-} from '$lib/wasm';
-import { enableFakePlcDirectoryForTest } from '$lib/wasm-atproto-settings';
-import { launchClockForTest } from '$lib/wasm-launch';
+} from '#lib/wasm';
+import { enableFakePlcDirectoryForTest } from '#lib/wasm-atproto-settings';
+import { launchClockForTest } from '#lib/wasm-launch';
 import {
   conversationThreads,
   conversationSort,
   successionWitness,
   convRealBackendActive,
   registerConversationsCommands,
-} from '$lib/conversations';
-import { installCommandHook } from '$lib/e2e-commands';
-import { registerBackupAuditCommands } from '$lib/backup-audit-e2e';
-import { registerBackupCustodianCommands } from '$lib/backup-custodian-e2e';
-import { registerAtprotoDelegationCommands } from '$lib/atproto-delegation-e2e';
-import { registerTrustClockCommands } from '$lib/trust-clock-e2e';
-import { registerFeedCueCommands } from '$lib/feed-cues-e2e';
-import { registerFamilyNotifyCommands } from '$lib/family-notify-e2e';
-import { registerAccountRuntimeCommands } from '$lib/account-runtime-e2e';
-import { registerScreenTimeCommands } from '$lib/screen-time-e2e';
-import { registerIdentityCommands } from '$lib/identity-e2e';
-import { registerMailCaldavCommands } from '$lib/mail-caldav-e2e';
-import { registerFocusWalkCommands } from '$lib/focus-walk-e2e';
-import { registerLoudSurfaceCommands } from '$lib/loud-surface-e2e';
-import { resetPostAuthEscalation } from '$lib/post-auth-escalation';
+} from '#lib/conversations';
+import { installCommandHook } from '#lib/e2e-commands';
+import { registerBackupAuditCommands } from '#lib/backup-audit-e2e';
+import { registerBackupCustodianCommands } from '#lib/backup-custodian-e2e';
+import { registerAtprotoDelegationCommands } from '#lib/atproto-delegation-e2e';
+import { registerTrustClockCommands } from '#lib/trust-clock-e2e';
+import { registerMailTokenRefreshCommands } from '#lib/mail-token-refresh-e2e';
+import { registerFeedCueCommands } from '#lib/feed-cues-e2e';
+import { registerFamilyNotifyCommands } from '#lib/family-notify-e2e';
+import { registerAccountRuntimeCommands } from '#lib/account-runtime-e2e';
+import { registerScreenTimeCommands } from '#lib/screen-time-e2e';
+import { registerIdentityCommands } from '#lib/identity-e2e';
+import { registerMailCaldavCommands } from '#lib/mail-caldav-e2e';
+import { registerFocusWalkCommands } from '#lib/focus-walk-e2e';
+import { registerLoudSurfaceCommands } from '#lib/loud-surface-e2e';
+import { resetPostAuthEscalation } from '#lib/post-auth-escalation';
 import {
   registerBarrierCommands,
   barrierProbeToken,
   barrierAckProbe,
   clearBarrierProbe,
-} from '$lib/barrier-e2e';
+} from '#lib/barrier-e2e';
 import {
   sessionGeneration,
   recordSessionTeardown,
   clearSessionGeneration,
-} from '$lib/generation-e2e';
-import { criticalAlertSweepPasses, connectionIsOnline, renderDocumentLinkPreviews, type LinkPreviewState } from '$lib/wasm';
+} from '#lib/generation-e2e';
+import { criticalAlertSweepPasses, connectionIsOnline, renderDocumentLinkPreviews, type LinkPreviewState } from '#lib/wasm';
 import { get } from 'svelte/store';
 import {
   convReceiveCycles,
@@ -73,7 +76,7 @@ import {
   mlsFoldedCommits,
   setConvPollSecs,
   setConvPushSuppressed,
-} from '$lib/conversations';
+} from '#lib/conversations';
 
 /** The cross-app **connection barrier** observable
  *  (`fauna_e2e_agent::CONNECTION_KEY`) — `{state, online}`, published so a test
@@ -81,7 +84,7 @@ import {
  *
  *  Why the harness needs it: every app greys an `OnlineOnly` affordance while
  *  its transport word is offline (`fauna_protocol::offline_class::affordance`,
- *  the rule `$lib/offline-gate` binds), `'connecting'` is one of the offline
+ *  the rule `#lib/offline-gate` binds), `'connecting'` is one of the offline
  *  words, and 276 of the 628 registered kinds are `OnlineOnly` — so a test
  *  driving an online-only control on a freshly loaded SPA loses exactly when
  *  the box is loaded, and the failure looks like the assertion rather than the
@@ -92,7 +95,7 @@ import {
  *  an equality test would hang a barrier to its ceiling on the first future
  *  word — the one case the rule exists to tolerate. `connectionIsOnline` is the
  *  wasm face of that rule; nothing here re-derives the word list, exactly as
- *  `$lib/offline-gate` takes `{available}` rather than re-reading the class
+ *  `#lib/offline-gate` takes `{available}` rather than re-reading the class
  *  table.
  *
  *  `null` before wasm is initialized — the honest "cannot answer yet", which
@@ -122,7 +125,7 @@ export function installAutomationSurface(): void {
   if (typeof window === 'undefined' || installed) return;
   installed = true;
   // The `?fauna_e2e_provider_base_urls` override (`driver.set_provider_base_urls`)
-  // is read at MODULE LOAD of `$lib/onboarding/machine.svelte`, whose only
+  // is read at MODULE LOAD of `#lib/onboarding/machine.svelte`, whose only
   // importer is the onboarding page. A test that installs it on an
   // authenticated page and then enters the onboarding route by navigation —
   // `admin-nest-retire-button` → `/app/onboarding?retire=1` — would load that
@@ -130,7 +133,7 @@ export function installAutomationSurface(): void {
   // would reach the real provider. Load it now, while this reload's URL still
   // carries the param.
   if (new URLSearchParams(location.search).has('fauna_e2e_provider_base_urls')) {
-    void import('$lib/onboarding/machine.svelte');
+    void import('#lib/onboarding/machine.svelte');
   }
   (window as any).__fauna_stores = {
     identity, inbox, sent, knocks, contacts, feedSnapshot, goto, conversationThreads,
@@ -142,6 +145,13 @@ export function installAutomationSurface(): void {
   // the block placeholders painted — tui's `region::block_render_json`.
   (window as unknown as { __fauna_regionBlockRender?: () => { blocked: number; placeholders: number } })
     .__fauna_regionBlockRender = regionBlockRenderForTest;
+  // The nest's twin (`nest-block-never-silent`) and the changed notice's text.
+  (window as unknown as { __fauna_nestBlockRender?: () => { blocked: number; placeholders: number } })
+    .__fauna_nestBlockRender = nestBlockRenderForTest;
+  (window as unknown as { __fauna_wardRuleDocumentRules?: () => number | null })
+    .__fauna_wardRuleDocumentRules = wardRuleDocumentRules;
+  (window as unknown as { __fauna_nestRulesChangedNotice?: () => string | null })
+    .__fauna_nestRulesChangedNotice = nestRulesChangedNoticeText;
   // Flip the wasm fake DNS provider on so the onboarding-launch-glue /
   // managed-publish e2e can verify+publish a `fake-dns-ok:<zone>` credential
   // offline (no real registrar reachable from the sandbox). Mirrors native's
@@ -233,7 +243,7 @@ export function installAutomationSurface(): void {
     };
   // Drop THIS TAB's pin (+ its nest-url sibling, `tabPin.ts`) — the
   // synchronous leaf of the erase `identity.logout()` reaches through
-  // `accountsClearAll()` (`$lib/accounts.ts:297`). A `set_state` account
+  // `accountsClearAll()` (`#lib/accounts.ts:297`). A `set_state` account
   // switch cannot call `identity.logout()` itself (WASM, and the patch is
   // applied with no reload — see the reset above), so `agent.js` calls this
   // hook instead of hand-listing the pin's storage keys itself: the owning
@@ -246,7 +256,7 @@ export function installAutomationSurface(): void {
   // ── The machine-free half of the E2E machine-method bridge ────────────────
   //
   // `driver.call_machine_method(name, json)` normally reaches
-  // `$lib/onboarding/machine.svelte`'s hook — but that module's ONLY importer is
+  // `#lib/onboarding/machine.svelte`'s hook — but that module's ONLY importer is
   // the onboarding page, so on a live authenticated session (which never mounts
   // it) the hook is simply absent. That is the same no-machine-post-auth wall
   // linux hit, and the shared answer is the same: the pin seed and its reader
@@ -258,13 +268,13 @@ export function installAutomationSurface(): void {
   // agent is. It **defers** to the onboarding hook for anything the free
   // dispatcher does not claim, and installs itself only if that hook is not
   // already up, so the two can never fight over the single global slot (the
-  // clobber hazard `$lib/e2e-commands` documents). The onboarding page's hook
+  // clobber hazard `#lib/e2e-commands` documents). The onboarding page's hook
   // routes the same names through the same shared dispatcher on its own, so
   // whichever ends up installed, one name table answers.
   (window as unknown as {
     __fauna_callMachineFreeMethod?: (n: string, a: string) => Promise<unknown>;
   }).__fauna_callMachineFreeMethod = async (name: string, jsonArg: string) => {
-    const { callMachineFreeMethodForTest } = await import('$lib/wasm-onboarding');
+    const { callMachineFreeMethodForTest } = await import('#lib/wasm-onboarding');
     const handled = await callMachineFreeMethodForTest(name, jsonArg);
     if (handled === undefined || handled === null) {
       throw new Error(
@@ -275,14 +285,14 @@ export function installAutomationSurface(): void {
     return JSON.parse(handled);
   };
   // The e2e command table behind `window.__fauna_callCommand`. Each domain claims
-  // its own action names (`$lib/e2e-commands` rejects a duplicate claim), then the
+  // its own action names (`#lib/e2e-commands` rejects a duplicate claim), then the
   // hook goes up once — an unrecognised action throws rather than being dropped
   // (testing.md § convention 11).
   //   * conversations: `conversations_*` (+ `feed_inject_posts`) → the shared wasm
   //     managers, the browser twin of linux's bridge commands.
   //   * backup audit: `backup_audit_run_now` → the Backups page's own production
   //     audit path, with only the clock shifted.
-  //   * family notify: `family_notify_check_now` → `$lib/familyNotify`'s own
+  //   * family notify: `family_notify_check_now` → `#lib/familyNotify`'s own
   //     flush check, run_now-poked instead of waiting out its 5s interval
   //     (which this same agent doesn't even arm — see its own comment).
   //   * D10 delegation: `atproto_delegation_advance_clock` → the AT Protocol page's
@@ -300,6 +310,9 @@ export function installAutomationSurface(): void {
   //   * trust facet: `trust_facet_advance_clock` → the Nests page's grant
   //     liveness render clock (a ~90-day window — convention 14's fake clock).
   registerTrustClockCommands();
+  //   * mail: `mail_token_refresh_advance_clock` → the submission-token
+  //     refresh's clock (a 7-day cadence — convention 14's fake clock).
+  registerMailTokenRefreshCommands();
   registerFeedCueCommands();
   //   * screen time: `screen_time_heartbeat` → the usage heartbeat's own
   //     production step, with only the clock advanced (convention 14's fake
@@ -308,7 +321,7 @@ export function installAutomationSurface(): void {
   registerAccountRuntimeCommands();
   registerScreenTimeCommands();
   //   * barrier: `barrier` (+ its `barrier_probe` self-test) → convention 14's
-  //     causal anchor for negative asserts. See `$lib/barrier-e2e` for why web's
+  //     causal anchor for negative asserts. See `#lib/barrier-e2e` for why web's
   //     shape is a double macrotask turn rather than an awaited promise.
   registerBarrierCommands();
   //   * identity: `silent_sign_in` → the production background silent challenge,
@@ -323,12 +336,12 @@ export function installAutomationSurface(): void {
   //   * focus walk: `focus_move` / `switch_pane` → named refusals pointing at
   //     the DRIVER-level door (`tests/e2e-unified/drivers/web.py`), since
   //     in-page JS has no real key door to move focus through. See
-  //     `$lib/focus-walk-e2e` and `e2e-systematic-ui-walks.md` § web leg.
+  //     `#lib/focus-walk-e2e` and `e2e-systematic-ui-walks.md` § web leg.
   registerFocusWalkCommands();
   //   * loud surfaces: `alert_sweep_wake` / `reconnect_backoff` → the critical-
   //     alert loop's wait and the reconnect loop's pace, plus the
   //     `connection_reports` / `painted_errors` counters the connection-gap
-  //     journeys read. See `$lib/loud-surface-e2e`.
+  //     journeys read. See `#lib/loud-surface-e2e`.
   registerLoudSurfaceCommands();
   installCommandHook();
   // The barrier probe's observable + its one-test clear point. Read and cleared
@@ -371,13 +384,13 @@ export function installAutomationSurface(): void {
   // the arms of the native loop on its own rail, so it mirrors these too: the
   // counters are bumped inside the one pump, and the poke drives that same pump
   // rather than a per-rail shortcut. The poke is a hook rather than a command in
-  // `$lib/e2e-commands` because it is a one-liner over module state, the same
+  // `#lib/e2e-commands` because it is a one-liner over module state, the same
   // shape as the accessors above.
   (
     window as unknown as { __fauna_convReceiveCycles?: () => [number, number] }
   ).__fauna_convReceiveCycles = convReceiveCycles;
   // The loop's exit word beside the counters — `'stalled'` while a pass has
-  // outrun the pump's ceiling (`$lib/receive-pump`), else `null`; the bridge
+  // outrun the pump's ceiling (`#lib/receive-pump`), else `null`; the bridge
   // folds it into `conv_receive_cycles.exit`.
   (
     window as unknown as { __fauna_convReceiveExit?: () => 'stalled' | null }
@@ -399,7 +412,7 @@ export function installAutomationSurface(): void {
     window as unknown as { __fauna_devicesRefreshes?: typeof devicesRefreshes }
   ).__fauna_devicesRefreshes = devicesRefreshes;
   // The Sessions page's painted token ids, card order — `settings.
-  // session_token_ids` (`$lib/sessions-painted`); null before its hydrate.
+  // session_token_ids` (`#lib/sessions-painted`); null before its hydrate.
   (
     window as unknown as { __fauna_sessionTokenIds?: typeof paintedSessionTokenIds }
   ).__fauna_sessionTokenIds = paintedSessionTokenIds;
@@ -426,7 +439,7 @@ export function installAutomationSurface(): void {
   // counters that make a NEGATIVE read of them sound
   // (`fauna_e2e_agent::MESSAGE_BANNERS_KEY`, which owns the contract). Same
   // harness-side assembly as the keys above; the accessor reads
-  // `$lib/message-banner`'s log, whose entries are appended at the firing site,
+  // `#lib/message-banner`'s log, whose entries are appended at the firing site,
   // so it says what the user was shown rather than what the shared tracker
   // returned. Absent hook ⇒ the bridge sends `null`, which the consumer refuses
   // loudly — an empty list from an app with no leg would satisfy every negative
@@ -464,7 +477,7 @@ export function installAutomationSurface(): void {
   ).__fauna_launchClock = launchClockForTest;
   // The held home-nest bearer's schedule on this tab's own clock — the web leg
   // of `fauna_e2e_agent::LAUNCH_TOKEN_KEY` (the wrong-clock refresh witness,
-  // case M). A plain read of `$lib/api`'s cache, never a mint; `null` with no
+  // case M). A plain read of `#lib/api`'s cache, never a mint; `null` with no
   // identity on the seat, which the bridge omits.
   (
     window as unknown as {
@@ -494,7 +507,7 @@ export function installAutomationSurface(): void {
   (
     window as unknown as { __fauna_setConvPushSuppressed?: (on: boolean) => void }
   ).__fauna_setConvPushSuppressed = setConvPushSuppressed;
-  // The bump itself is a hook rather than a `$lib/generation-e2e` import in the
+  // The bump itself is a hook rather than a `#lib/generation-e2e` import in the
   // account-switcher route: that keeps the module out of a production bundle
   // entirely (convention 15's strong form), instead of shipping it as dead code
   // behind a folded-false flag.

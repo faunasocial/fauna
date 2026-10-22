@@ -7,7 +7,13 @@
 // bridges page imports are unchanged.
 
 import * as rpc from './rpc';
-import type { BridgeStatus, BridgeFollow, BridgeLinkChallengeReply, BridgeLinkReply } from './rpc';
+import type {
+  BridgeStatus,
+  BridgeFollow,
+  BridgeFollowRequestRow,
+  BridgeLinkChallengeReply,
+  BridgeLinkReply,
+} from './rpc';
 
 export type {
   BridgeIdentity,
@@ -16,6 +22,7 @@ export type {
   BridgeLinkField,
   BridgeLinkMode,
   BridgeFollow,
+  BridgeFollowRequestRow,
 } from './rpc';
 
 // `BridgeInfo` / `BridgeLinkResponse` keep their names but are now the wire
@@ -41,7 +48,7 @@ export function linkBridge(
 }
 
 // The proof-of-possession challenge an external signer signs before `linkBridge`
-// in that mode is accepted (Nostr `nip07` — see `$lib/nostr` `nip07LinkFields`).
+// in that mode is accepted (Nostr `nip07` — see `#lib/nostr` `nip07LinkFields`).
 export function linkBridgeChallenge(
   secretHex: string,
   bridgeId: string,
@@ -76,6 +83,29 @@ export function addBridgeFollow(
   extra?: Record<string, unknown>,
 ): Promise<void> {
   return rpc.bridgesAddFollow(secretHex, bridgeId, id, petname, extra);
+}
+
+export function listBridgeFollowRequests(
+  secretHex: string,
+  bridgeId: string,
+): Promise<BridgeFollowRequestRow[]> {
+  return rpc.bridgesListFollowRequests(secretHex, bridgeId);
+}
+
+export function approveBridgeFollowRequest(
+  secretHex: string,
+  bridgeId: string,
+  id: string,
+): Promise<void> {
+  return rpc.bridgesApproveFollowRequest(secretHex, bridgeId, id);
+}
+
+export function refuseBridgeFollowRequest(
+  secretHex: string,
+  bridgeId: string,
+  id: string,
+): Promise<void> {
+  return rpc.bridgesRefuseFollowRequest(secretHex, bridgeId, id);
 }
 
 export function removeBridgeFollow(

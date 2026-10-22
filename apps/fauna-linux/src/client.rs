@@ -114,6 +114,11 @@ pub struct FaunaClient {
     /// the session bearer and the 401-reactive token refresh — see
     /// `crate::nest_content_api`.
     content_api: Arc<dyn crate::nest_content_api::NestContentApi>,
+    /// The anonymous, pin-graduated planes of the foreign homes a post's own
+    /// bytes can rest on — one per session, handed with `content_api` to
+    /// [`fauna_client::PostBlobHosts`] (`feed.md` § The read model → *A post
+    /// homed on another nest*). Never carries this session's bearer.
+    foreign_blobs: fauna_client::post_blob::ForeignPlane,
     /// WS-RPC façade authentication state — built over the same
     /// `LaunchMachineBearer` as `content_api`, so the HTTP layer and
     /// the WS handshake share one `fauna.auth.handshake` bearer cache + one
@@ -149,6 +154,15 @@ pub struct FaunaClient {
     /// Cleared on `shutdown()` so a sign-out/reset rebuilds against the new
     /// connection. See `tls-certificates.md` § B tier 3 (S6a) + the cert-UI TODO.
     dns_machine: RefCell<Option<Arc<fauna_client_dns::DnsManagementMachine>>>,
+    /// The admin-dns page's persistent `LocalDomainMachine`
+    /// ([`FaunaClient::admin_local_domain_machine`]) — it holds the
+    /// remove-confirm dialog's armed domain across presses. Same lifetime rules
+    /// as `dns_machine`: only the GTK main thread builds it, cleared on
+    /// `shutdown()`.
+    local_domain_machine:
+        RefCell<Option<Arc<fauna_client_mail_settings::local_domains::LocalDomainMachine>>>,
+    /// The persistent `admin-bridges-pending` machine — see [`FaunaClient::bridge_machine`].
+    bridge_machine: RefCell<Option<Arc<fauna_client_mail_settings::BridgeApprovalMachine>>>,
     /// What ends the auto-renew tick's wait early — empty in a production build;
     /// the e2e agent's `auto_renew_wake` fires it ([`crate::loop_wake::LoopWake`]).
     /// Minted where `start_ws_rpc` spawns the tick and dropped by `shutdown()`, so
@@ -286,10 +300,13 @@ impl FaunaClient {
             http,
             machine,
             content_api,
+            foreign_blobs: fauna_client::post_blob::pinned_plane(),
             nest_auth,
             nest_rpc,
             staged_attachment: RefCell::new(None),
             dns_machine: RefCell::new(None),
+            local_domain_machine: RefCell::new(None),
+            bridge_machine: RefCell::new(None),
             auto_renew_wake: RefCell::new(None),
             predecessor_backup_keys_cache: RefCell::new(None),
             attested_predecessors_cache: RefCell::new(None),
@@ -364,6 +381,21 @@ impl FaunaClient {
     /// same shape" as public-post attachments).
     pub fn content_api(&self) -> &Arc<dyn crate::nest_content_api::NestContentApi> {
         &self.content_api
+    }
+
+    /// The one host pick for every byte leg of a post — its gated body, image,
+    /// C2PA probe and video: this nest's bearer-carrying plane, and the
+    /// anonymous, pinned, capped, content-verified plane of a post's foreign
+    /// home (`feed.md` § The read model → *A post homed on another nest*). A
+    /// leg hands it the post's [`PostSummary::blob_home`] unchanged
+    /// ([`crate::feed::post_media::post_home`]) and never re-derives the host.
+    ///
+    /// [`PostSummary::blob_home`]: fauna_feed::PostSummary::blob_home
+    pub fn post_blob_hosts(&self) -> fauna_client::PostBlobHosts {
+        fauna_client::PostBlobHosts::with_foreign(
+            Arc::clone(&self.content_api),
+            Arc::clone(&self.foreign_blobs),
+        )
     }
 
     /// The local actor's 32-byte Ed25519 signing secret (decoded from the hex
@@ -2298,14 +2330,21 @@ impl FaunaClient {
     /// manager notifies on success and the feed page's reactive repaint swaps
     /// the full body into the open detail. Best-effort: a locked post (not
     /// entitled / rotated-out period) just keeps showing its teaser.
-    pub fn unlock_gated_post(&self, manager: Arc<LinuxFeedManager>, post_id: String) {
-        let nest = Arc::clone(&self.content_api);
+    pub fn unlock_gated_post(
+        &self,
+        manager: Arc<LinuxFeedManager>,
+        post_id: String,
+        home: Option<fauna_client::ForeignHome>,
+    ) {
+        let blobs = self.post_blob_hosts();
         self.spawn_bg(async move {
             let Some(hash) = manager.gated_blob_hash(post_id.clone()).await else {
                 return;
             };
-            let path = paths::blob::by_hash(&hash);
-            match nest.get(&path).await {
+            // The sealed body rests where the post does — its home when
+            // another nest is its home (the KeyBlob that opens it still comes
+            // through this nest, inside `unlock_gated_post`).
+            match blobs.get(home.as_ref(), &hash).await {
                 Ok(bytes) => {
                     if let Err(e) = manager.unlock_gated_post(post_id, bytes.to_vec()).await {
                         tracing::debug!("gated unlock (post stays teased): {e}");
@@ -2320,8 +2359,17 @@ impl FaunaClient {
     /// / reply / repost / unrepost / quote. `interaction` is the action name
     /// (the kind's field is `action`; the legacy HTTP twin's `interaction`
     /// JSON key is gone).
-    pub fn interact_with_post(&self, post_id: &str, interaction: &str, body: Option<&str>) {
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+    ///
+    /// `manager` is the one the card's row came from — the timeline's, or a
+    /// profile's author window (`profile.md` § The Posts tab), so the counts
+    /// that move are the ones painted where the tap landed.
+    pub fn interact_with_post(
+        &self,
+        manager: &Arc<LinuxFeedManager>,
+        post_id: &str,
+        interaction: &str,
+        body: Option<&str>,
+    ) {
         let tx = self.tx.clone();
         let post_id = post_id.to_string();
         let action = interaction.to_string();
@@ -2333,78 +2381,58 @@ impl FaunaClient {
         // WHOLE feed from `app.rs` to see the new number — correct, but it
         // re-ranks the window under the user's finger (a like moves
         // `content_meta.score`, a ranking input), so a tap could reorder the
-        // timeline. With no manager (not yet initialised) there is nothing to
-        // fold into and nothing on screen to update.
-        let manager = crate::feed::host::manager();
+        // timeline.
+        let m = Arc::clone(manager);
         let nest_content = Arc::clone(&self.content_api);
         self.spawn_bg(async move {
-            let msg = match manager {
-                // `reply`/`quote` are COMPOSED, not recorded: they create a post
-                // referencing the target, and that is the only thing that moves
-                // the target's counter. `interact` looks identical here and is
-                // not the same call — on a native post its nest arm discards
-                // `body` outright, so the reply typed into `build_reply_dialog`
-                // was acked as success and thrown away
-                // (`ui/feed.md` § Implementation status today). The manager
-                // routes a *bridged* post back through interact itself, where
-                // the body IS consumed, so this stays one call site.
-                //
-                Some(m) => {
-                    let routed = match (action.as_str(), body.clone()) {
-                        // The reply dialog sends through [`FaunaClient::reply_to_post`]
-                        // (sealed / confirmed-public / plain); this arm is the
-                        // unconfirmed door, the same shared `send_reply`.
-                        ("reply", Some(text)) => {
-                            Some(send_reply(&m, &nest_content, post_id.clone(), text, false).await)
-                        }
-                        ("quote", text) => {
-                            Some(m.quote(post_id.clone(), text.unwrap_or_default()).await)
-                        }
-                        // `repost` is the manager's TOGGLE off `viewer_repost_id`
-                        // (feed.md § Interaction bar → Repost, ratified
-                        // 2026-08-10): off → composes the caller's empty-body
-                        // `Reference::Repost` post; on → un-reposts it. The
-                        // render leg (attribution, no bar, activation
-                        // redirect) landed alongside this call in
-                        // `post_list.rs`.
-                        ("repost", _) => Some(m.repost(post_id.clone()).await),
-                        // `like` is the manager's TOGGLE off `viewer_liked`
-                        // (feed.md § Interaction bar): it composes nothing —
-                        // both directions ride the same interact door on the
-                        // same post id — but the bare call below can only ever
-                        // like, never un-like, because the nest's like arm is
-                        // idempotent per (actor, post).
-                        ("like", _) => Some(m.like(post_id.clone()).await),
-                        _ => None,
-                    };
-                    let outcome = match routed {
-                        Some(r) => r,
-                        None => m.interact(post_id, action, body).await,
-                    };
-                    match outcome {
-                        Ok(()) => UiMessage::Action(ActionResult::Success {
-                            context: "post_interaction".into(),
-                        }),
-                        // A STATED REFUSAL (words under a restricted post —
-                        // `ui/feed.md` § Encryption at rest, ruling 6) reads in
-                        // the user's language, recognized by the one shared
-                        // `refusal_i18n_key`; every other failure keeps its
-                        // own text behind the RPC context. tui's `refusal_copy`.
-                        Err(e) => UiMessage::Action(interact_failure(e)),
-                    }
+            // `reply`/`quote` are COMPOSED, not recorded: they create a post
+            // referencing the target, and that is the only thing that moves
+            // the target's counter. `interact` looks identical here and is
+            // not the same call — on a native post its nest arm discards
+            // `body` outright, so the reply typed into `build_reply_dialog`
+            // was acked as success and thrown away
+            // (`ui/feed.md` § Implementation status today). The manager
+            // routes a *bridged* post back through interact itself, where
+            // the body IS consumed, so this stays one call site.
+            let routed = match (action.as_str(), body.clone()) {
+                // The reply dialog sends through [`FaunaClient::reply_to_post`]
+                // (sealed / confirmed-public / plain); this arm is the
+                // unconfirmed door, the same shared `send_reply`.
+                ("reply", Some(text)) => {
+                    Some(send_reply(&m, &nest_content, post_id.clone(), text, false).await)
                 }
-                None => {
-                    let posts = fauna_client_posts::PostsClient::new(nest_rpc);
-                    match posts.posts_interact(post_id, action, body).await {
-                        Ok(_reply) => UiMessage::Action(ActionResult::Success {
-                            context: "post_interaction".into(),
-                        }),
-                        Err(e) => UiMessage::Action(ActionResult::Failed {
-                            context: "fauna.posts.interact".into(),
-                            error: e.to_string(),
-                        }),
-                    }
-                }
+                ("quote", text) => Some(m.quote(post_id.clone(), text.unwrap_or_default()).await),
+                // `repost` is the manager's TOGGLE off `viewer_repost_id`
+                // (feed.md § Interaction bar → Repost, ratified
+                // 2026-08-10): off → composes the caller's empty-body
+                // `Reference::Repost` post; on → un-reposts it. The
+                // render leg (attribution, no bar, activation
+                // redirect) landed alongside this call in
+                // `post_list.rs`.
+                ("repost", _) => Some(m.repost(post_id.clone()).await),
+                // `like` is the manager's TOGGLE off `viewer_liked`
+                // (feed.md § Interaction bar): it composes nothing —
+                // both directions ride the same interact door on the
+                // same post id — but the bare call below can only ever
+                // like, never un-like, because the nest's like arm is
+                // idempotent per (actor, post).
+                ("like", _) => Some(m.like(post_id.clone()).await),
+                _ => None,
+            };
+            let outcome = match routed {
+                Some(r) => r,
+                None => m.interact(post_id, action, body).await,
+            };
+            let msg = match outcome {
+                Ok(()) => UiMessage::Action(ActionResult::Success {
+                    context: "post_interaction".into(),
+                }),
+                // A STATED REFUSAL (words under a restricted post —
+                // `ui/feed.md` § Encryption at rest, ruling 6) reads in
+                // the user's language, recognized by the one shared
+                // `refusal_i18n_key`; every other failure keeps its
+                // own text behind the RPC context. tui's `refusal_copy`.
+                Err(e) => UiMessage::Action(interact_failure(e)),
             };
             tx.send(msg);
         });
@@ -2415,11 +2443,16 @@ impl FaunaClient {
     /// when `public_confirmed` (the dialog's `feed-reply-public-confirm`,
     /// checked), the ordinary `reply` otherwise (`goal/behavior/restricted-posts.md`
     /// § Encryption at rest → *Ruling 5's build — the shape*, (c) + (e)). The
-    /// audience is the manager's answer, never decided here.
-    pub fn reply_to_post(&self, post_id: &str, text: &str, public_confirmed: bool) {
-        let Some(manager) = crate::feed::host::manager() else {
-            return;
-        };
+    /// audience is the manager's answer, never decided here. `manager` is the
+    /// one the target's row came from (as [`Self::interact_with_post`]).
+    pub fn reply_to_post(
+        &self,
+        manager: &Arc<LinuxFeedManager>,
+        post_id: &str,
+        text: &str,
+        public_confirmed: bool,
+    ) {
+        let manager = Arc::clone(manager);
         let nest = Arc::clone(&self.content_api);
         let tx = self.tx.clone();
         let (post_id, text) = (post_id.to_string(), text.to_string());
@@ -2469,6 +2502,16 @@ impl FaunaClient {
             };
             tx.send(msg);
         });
+    }
+
+    /// `dm-message-withheld-badge` tap: ask the app to open the appeal of the author's queue
+    /// row `content_id` names (`DataMessage::OpenWithheldAppeal`) — it moves to the
+    /// Moderation page, whose arrival re-reads the queue, and opens the draft on that row.
+    pub fn open_withheld_appeal(&self, content_id: String) {
+        self.tx
+            .send(UiMessage::Data(DataMessage::OpenWithheldAppeal {
+                content_id,
+            }));
     }
 
     /// Apply a `train-correction-button` click for one queue row. A **server** row
@@ -2655,6 +2698,164 @@ impl FaunaClient {
         });
     }
 
+    /// The admin's installed plugins via `fauna.plugins.list` — only an
+    /// admin may list. Sends `DataMessage::PluginsLoaded`, each row composed
+    /// by the shared `installed_plugin_row`.
+    pub fn fetch_plugins(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let plugins = fauna_client_bridges::PluginsClient::new(nest_rpc);
+            let msg = match plugins.list().await {
+                Ok(listed) => UiMessage::Data(DataMessage::PluginsLoaded {
+                    plugins: listed
+                        .into_iter()
+                        .map(fauna_client_bridges::installed_plugin_row)
+                        .collect(),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.plugins.list".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// `fauna.plugins.install` — the nest opens the install card in
+    /// Connected apps → Requests.
+    pub fn install_plugin(&self, document_url: String) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let plugins = fauna_client_bridges::PluginsClient::new(nest_rpc);
+            let msg = match plugins.install(document_url).await {
+                Ok(_) => UiMessage::Action(ActionResult::Success {
+                    context: "plugin_install_opened".into(),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.plugins.install".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// The settings cards of every installed plugin via
+    /// `fauna.plugins.available` — EVERY account may read them. Sends
+    /// `DataMessage::PluginCardsLoaded`, each card composed by the shared
+    /// `plugin_card`.
+    pub fn fetch_plugin_cards(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let plugins = fauna_client_bridges::PluginsClient::new(nest_rpc);
+            let msg = match plugins.available().await {
+                Ok(available) => UiMessage::Data(DataMessage::PluginCardsLoaded {
+                    cards: available
+                        .into_iter()
+                        .map(fauna_client_bridges::plugin_card)
+                        .collect(),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.plugins.available".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// *Connect* on a plugin's settings card: the connected-apps machine opens
+    /// this account's bind card into Connected apps → Requests
+    /// (`ConnectedAppsMachine::bind_plugin`). A page error the machine set is
+    /// the failure.
+    pub fn connect_plugin(
+        &self,
+        machine: Arc<fauna_client_connected_apps::ConnectedAppsMachine>,
+        principal_id: Vec<u8>,
+    ) {
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            machine.bind_plugin(principal_id).await;
+            tx.send(plugin_machine_outcome(
+                &machine,
+                "plugin_bind_opened",
+                "fauna.plugins.bind",
+            ));
+        });
+    }
+
+    /// *Disconnect* on a bound plugin's settings card: the roster's one verb
+    /// on this account's binding row (`ConnectedAppsMachine::revoke_principal`);
+    /// the cards are re-read on success.
+    pub fn disconnect_plugin(
+        &self,
+        machine: Arc<fauna_client_connected_apps::ConnectedAppsMachine>,
+        binding_principal_id: Vec<u8>,
+    ) {
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            machine.revoke_principal(binding_principal_id).await;
+            tx.send(plugin_machine_outcome(
+                &machine,
+                "plugin_disconnected",
+                "fauna.principals.revoke",
+            ));
+        });
+    }
+
+    /// `fauna.plugins.set_settings` — one of this account's own settings for a
+    /// plugin it has bound; the cards are re-read on success.
+    pub fn set_plugin_setting(
+        &self,
+        principal_id: Vec<u8>,
+        key: String,
+        value: fauna_client::Value,
+    ) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let plugins = fauna_client_bridges::PluginsClient::new(nest_rpc);
+            let msg = match plugins
+                .set_settings(
+                    principal_id,
+                    std::collections::BTreeMap::from_iter([(key, value)]),
+                )
+                .await
+            {
+                Ok(_) => UiMessage::Action(ActionResult::Success {
+                    context: "plugin_setting_set".into(),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.plugins.set_settings".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// `fauna.plugins.uninstall`; the list is re-read on success.
+    pub fn uninstall_plugin(&self, principal_id: Vec<u8>) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let plugins = fauna_client_bridges::PluginsClient::new(nest_rpc);
+            let msg = match plugins.uninstall(principal_id).await {
+                Ok(_) => UiMessage::Action(ActionResult::Success {
+                    context: "plugin_uninstalled".into(),
+                }),
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.plugins.uninstall".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
     /// Link a bridge via `fauna.bridges.link`. `params` carries the per-mode
     /// form fields (handle / app_password / server_url / nsec / smtp_* / …)
     /// as a typed CBOR map; callers compose it from their dialog inputs.
@@ -2732,6 +2933,47 @@ impl FaunaClient {
                 }),
                 Err(e) => UiMessage::Action(ActionResult::Failed {
                     context: "fauna.bridges.list_follows".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
+    /// Fetch the waiting follow requests for a bridge via
+    /// `fauna.bridges.list_follow_requests` (ask only a bridge whose status
+    /// says `supports_follow_requests`). Sends
+    /// `DataMessage::BridgeFollowRequestsLoaded` with the shared
+    /// `follow_request_row` model.
+    pub fn fetch_bridge_follow_requests(&self, bridge_id: &str) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        let bid = bridge_id.to_string();
+        self.spawn_bg(async move {
+            let bridges = fauna_client_bridges::BridgesClient::new(nest_rpc);
+            tx.send(read_follow_requests(&bridges, bid).await);
+        });
+    }
+
+    /// Approve or refuse a waiting follow request via
+    /// `fauna.bridges.resolve_follow_request`, then re-read the list —
+    /// non-optimistic (`bridges.md` § Follow requests), no confirm.
+    pub fn resolve_bridge_follow_request(&self, bridge_id: &str, id: &str, approve: bool) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        let bridge_id = bridge_id.to_string();
+        let id = id.to_string();
+        self.spawn_bg(async move {
+            let bridges = fauna_client_bridges::BridgesClient::new(nest_rpc);
+            let resolved = if approve {
+                bridges.approve_follow_request(bridge_id.clone(), id).await
+            } else {
+                bridges.refuse_follow_request(bridge_id.clone(), id).await
+            };
+            let msg = match resolved {
+                Ok(()) => read_follow_requests(&bridges, bridge_id).await,
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "bridge_follow_request_resolved".into(),
                     error: e.to_string(),
                 }),
             };
@@ -2980,6 +3222,79 @@ impl FaunaClient {
         }
     }
 
+    /// Restore every file of one snapshot into `destination` and send the
+    /// finished `snapshot-restore-result` line down `done` — the Rust-native
+    /// host of the shared whole-snapshot restore
+    /// (`fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir`;
+    /// `ui/backups.md` § Whole-snapshot restore). Everything but the outcome
+    /// line is the shared entry point's; this adds the seat's device id and
+    /// custody resolver and the text. The engine is `!Sync`, so the walk rides
+    /// a current-thread runtime on a dedicated thread, as
+    /// [`Self::save_snapshot_file`] does; the line arrives on the channel for
+    /// the GTK side to paint.
+    pub fn restore_snapshot_to_dir(
+        &self,
+        snapshot_id: i64,
+        destination: std::path::PathBuf,
+        done: async_channel::Sender<String>,
+    ) {
+        use crate::i18n::strings::backups as bs;
+        let failed = |message: &str| bs::snapshot_restore_failed(message);
+        let device_id = match crate::sync::device_id() {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = done.send_blocking(failed(&format!("device id: {e}")));
+                return;
+            }
+        };
+        let auth = self.build_sync_auth();
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let resolver: Arc<dyn fauna_core::folder_keys::FolderKeyResolver> =
+            Arc::new(fauna_client_folders::NestFolderKeyResolver::new(
+                Arc::clone(&self.nest_rpc),
+                crate::account_runtime::folder_key_store(),
+            ));
+        let secret = self.secret_bytes();
+        let spawned = std::thread::Builder::new()
+            .name("fauna-snapshot-restore".to_string())
+            .spawn({
+                let done = done.clone();
+                move || {
+                    // gtk-runtime-ok: this closure IS the dedicated worker
+                    // thread's body (see the `thread::Builder` above).
+                    let line = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Err(e) => failed(&format!("build snapshot-restore runtime: {e}")),
+                        Ok(rt) => {
+                            let path = destination.display().to_string();
+                            match rt.block_on(
+                                fauna_sync_engine::engine_lifecycle::restore_snapshot_into_dir(
+                                    auth,
+                                    nest_rpc,
+                                    device_id,
+                                    &secret,
+                                    Some(resolver),
+                                    snapshot_id,
+                                    &destination,
+                                ),
+                            ) {
+                                Ok(summary) => restore_result_line(&summary, &path),
+                                Err(e) => failed(&format!("{e:#}")),
+                            }
+                        }
+                    };
+                    let _ = done.send_blocking(line);
+                }
+            });
+        if let Err(e) = spawned {
+            let _ = done.send_blocking(bs::snapshot_restore_failed(&format!(
+                "spawn snapshot-restore worker: {e}"
+            )));
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Message-kind snapshot restore — `fauna.filesync.snapshot.*` WS-RPC kinds
     //
@@ -3134,6 +3449,26 @@ impl FaunaClient {
         self.fetch_nest_bytes(paths::blob::by_hash(hash))
     }
 
+    /// [`Self::fetch_blob_bytes`] for a blob a *post* names — its image or
+    /// sealed video — from the nest the post rests on: `home` is the post's
+    /// [`blob_home`](fauna_feed::PostSummary::blob_home) handed over unchanged,
+    /// `None` for this nest. Capped and verified against the content address
+    /// ([`fauna_client::PostBlobHosts::get`]).
+    pub fn fetch_post_blob_bytes(
+        &self,
+        hash: &str,
+        home: Option<fauna_client::ForeignHome>,
+    ) -> async_channel::Receiver<Result<Vec<u8>, crate::nest_content_api::ApiError>> {
+        let (tx, rx) = async_channel::bounded(1);
+        let blobs = self.post_blob_hosts();
+        let hash = hash.to_string();
+        self.spawn_bg(async move {
+            let res = blobs.get(home.as_ref(), &hash).await.map(|b| b.to_vec());
+            let _ = tx.send(res).await;
+        });
+        rx
+    }
+
     /// Fetch the raw bytes at a nest-relative `path` (bearer-carrying, bulk
     /// plane) the way [`Self::fetch_blob_bytes`] fetches a blob — a bridged
     /// post's `ProxiedImage` path is the same call with a different argument
@@ -3162,13 +3497,17 @@ impl FaunaClient {
     pub fn fetch_c2pa_candidate_bytes(
         &self,
         hash: &str,
+        home: Option<fauna_client::ForeignHome>,
     ) -> async_channel::Receiver<Result<Option<Vec<u8>>, crate::nest_content_api::ApiError>> {
         let (tx, rx) = async_channel::bounded(1);
-        let nest = Arc::clone(&self.content_api);
-        let path = paths::blob::by_hash(hash);
+        let blobs = self.post_blob_hosts();
+        let hash = hash.to_string();
         self.spawn_bg(async move {
-            let res = match nest.head_has_c2pa(&path).await {
-                Ok(true) => nest.get(&path).await.map(|b| Some(b.to_vec())),
+            let res = match blobs.head_has_c2pa(home.as_ref(), &hash).await {
+                Ok(true) => blobs
+                    .get(home.as_ref(), &hash)
+                    .await
+                    .map(|b| Some(b.to_vec())),
                 Ok(false) => Ok(None),
                 Err(e) => Err(e),
             };
@@ -3339,6 +3678,40 @@ impl FaunaClient {
             {
                 Ok(node) => tx.send(UiMessage::Data(DataMessage::NodeLegLoaded { node })),
                 Err(e) => tracing::warn!(error = %e, "fauna.nest.info request failed"),
+            }
+        });
+    }
+
+    /// Read the nest's self-description for its published rules
+    /// (`nest-rules.md` § The nest content policy → *Carriage*), folded on
+    /// the GTK main thread by `crate::nest_rules::apply_info`
+    /// (`DataMessage::NestInfoRead`). At sign-in it reads through the
+    /// connection's one memoised reply; `past_memo` — the `nest_info` push
+    /// and the reconnect sweep — asks the nest again, since the memo would
+    /// answer with the reply the change just made stale. A failed read writes
+    /// nothing: the last-known rules stay in force.
+    pub fn fetch_nest_rules(&self, past_memo: bool) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let read = if past_memo {
+                fauna_protocol::RpcRequester::request(
+                    nest_rpc.as_ref(),
+                    "fauna.nest.info",
+                    fauna_protocol::discovery::NestInfoRequest::default(),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            } else {
+                fauna_protocol::read_nest_info(nest_rpc.as_ref())
+                    .await
+                    .map_err(|e| e.to_string())
+            };
+            match read {
+                Ok(info) => tx.send(UiMessage::Data(DataMessage::NestInfoRead {
+                    info: Box::new(info),
+                })),
+                Err(e) => tracing::warn!("nest rules: fauna.nest.info failed: {e}"),
             }
         });
     }
@@ -3964,6 +4337,25 @@ impl FaunaClient {
         );
     }
 
+    /// Get-or-build the **persistent** admin-dns `LocalDomainMachine`
+    /// ([`Self::local_domain_machine`] field). The remove-confirm dialog's armed
+    /// domain lives in the machine's snapshot (`remove_confirm_domain`), so a
+    /// fresh machine per action would drop it between the Remove press and the
+    /// dialog's confirm. Every admin-dns local-domain action runs on this one
+    /// instance.
+    fn admin_local_domain_machine(
+        &self,
+    ) -> Arc<fauna_client_mail_settings::local_domains::LocalDomainMachine> {
+        if let Some(m) = self.local_domain_machine.borrow().as_ref() {
+            return Arc::clone(m);
+        }
+        let machine = Arc::new(crate::mail_glue::build_local_domains_machine(Arc::clone(
+            &self.nest_rpc,
+        )));
+        *self.local_domain_machine.borrow_mut() = Some(Arc::clone(&machine));
+        machine
+    }
+
     /// A fresh `LocalDomainMachine` over this client's nest connection — what
     /// the `nest_retire` page's admin entry re-reads live for the nest's active
     /// domains (`nest-retirement.md` § DNS cleanup → *Several domains* (1)).
@@ -3983,10 +4375,9 @@ impl FaunaClient {
     /// but new admin UI is WS-RPC per the no-HTTP directive.
     pub fn fetch_local_domains(&self) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(Arc::clone(&nest_rpc));
             // `Refresh` records any error into the snapshot (unlike `hydrate`).
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let snapshot = machine.snapshot();
@@ -4008,10 +4399,9 @@ impl FaunaClient {
     /// (`mail-bridge-lifecycle.md` § DKIM provisioning) — the client mints no key.
     pub fn add_local_domain(&self, domain: String) {
         use fauna_client_mail_settings::local_domains::{DEFAULT_CERT_MODE, LocalDomainAction};
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(Arc::clone(&nest_rpc));
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::AddDomain {
@@ -4025,18 +4415,43 @@ impl FaunaClient {
         });
     }
 
-    /// Soft-delete (remove) a local mail domain (admin) from `admin-dns`. The
-    /// nest refuses the primary (`cannot_remove_primary_domain`); that error
-    /// surfaces in the shipped snapshot. Same `Refresh`-then-act shape.
-    pub fn remove_local_domain(&self, domain: String) {
+    /// Open the remove-confirm dialog for `domain` on the persistent machine
+    /// ([`LocalDomainMachine::arm_remove_domain`]) and ship the snapshot that now
+    /// names it (`remove_confirm_domain`). Synchronous — it reaches no nest — so
+    /// the dialog paints on the press's own frame (`mail-multidomain.md` §
+    /// Removing a local domain).
+    pub fn arm_remove_local_domain(&self, domain: String) {
+        let machine = self.admin_local_domain_machine();
+        machine.arm_remove_domain(domain);
+        self.tx
+            .send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
+                snapshot: machine.snapshot(),
+            }));
+    }
+
+    /// Close the remove-confirm dialog with nothing removed
+    /// ([`LocalDomainMachine::cancel_remove_domain`]) and ship the snapshot.
+    pub fn cancel_remove_local_domain(&self) {
+        let machine = self.admin_local_domain_machine();
+        machine.cancel_remove_domain();
+        self.tx
+            .send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
+                snapshot: machine.snapshot(),
+            }));
+    }
+
+    /// Soft-delete the domain the remove-confirm dialog is open for (admin) from
+    /// `admin-dns` — the dialog's confirm. The nest refuses the primary
+    /// (`cannot_remove_primary_domain`); that error surfaces in the shipped
+    /// snapshot. Same `Refresh`-then-act shape.
+    pub fn confirm_remove_local_domain(&self) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
-                .dispatch(LocalDomainAction::RemoveDomain { domain })
+                .dispatch(LocalDomainAction::ConfirmRemoveDomain)
                 .await;
             tx.send(UiMessage::Data(DataMessage::AdminLocalDomainsLoaded {
                 snapshot: machine.snapshot(),
@@ -4048,10 +4463,9 @@ impl FaunaClient {
     /// the 30-day window). Same `Refresh`-then-act shape.
     pub fn restore_local_domain(&self, domain: String) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::RestoreDomain { domain })
@@ -4070,10 +4484,9 @@ impl FaunaClient {
     /// track (mail-multidomain.md § Implementation status today).
     pub fn set_catch_all_actor(&self, domain: String, actor_id: Option<Vec<u8>>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::SetCatchAllActor { domain, actor_id })
@@ -4095,10 +4508,9 @@ impl FaunaClient {
         policy: fauna_client_mail_settings::local_domains::DomainDmarcPolicy,
     ) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::UpdateConfig {
@@ -4129,10 +4541,9 @@ impl FaunaClient {
         actor_id: Option<Vec<u8>>,
     ) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::SetRoleAddress {
@@ -4158,10 +4569,9 @@ impl FaunaClient {
     /// (mail-primary-domain-rename.md § UX surface). No HTTP.
     pub fn start_primary_rename(&self, new_primary_domain_id: Vec<u8>, grace_days: Option<i64>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::StartPrimaryRename {
@@ -4183,10 +4593,9 @@ impl FaunaClient {
     /// surfaces in the shipped snapshot. No HTTP.
     pub fn complete_primary_rename(&self, rename_id: Vec<u8>, force: bool) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::CompletePrimaryRename { rename_id, force })
@@ -4204,10 +4613,9 @@ impl FaunaClient {
     /// No HTTP.
     pub fn extend_primary_rename_grace(&self, rename_id: Vec<u8>, additional_days: i64) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::ExtendPrimaryRenameGrace {
@@ -4228,10 +4636,9 @@ impl FaunaClient {
     /// surfaces in the shipped snapshot. No HTTP.
     pub fn abort_primary_rename(&self, rename_id: Vec<u8>, reason: Option<String>) {
         use fauna_client_mail_settings::local_domains::LocalDomainAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.admin_local_domain_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_local_domains_machine(nest_rpc);
             let _ = machine.dispatch(LocalDomainAction::Refresh).await;
             let _ = machine
                 .dispatch(LocalDomainAction::AbortPrimaryRename { rename_id, reason })
@@ -4242,16 +4649,31 @@ impl FaunaClient {
         });
     }
 
+    /// Get-or-build the **persistent** `BridgeApprovalMachine` behind the
+    /// `admin-bridges-pending` page. It must persist: the reject / rotate
+    /// confirms live in the machine (`snapshot.armed`, opened by the sync
+    /// `arm`), so a fresh machine per action would drop the dialog's arm
+    /// between the click and its confirm.
+    fn bridge_machine(&self) -> Arc<fauna_client_mail_settings::BridgeApprovalMachine> {
+        if let Some(m) = self.bridge_machine.borrow().as_ref() {
+            return Arc::clone(m);
+        }
+        let machine = Arc::new(crate::mail_glue::build_bridge_approval_machine(Arc::clone(
+            &self.nest_rpc,
+        )));
+        *self.bridge_machine.borrow_mut() = Some(Arc::clone(&machine));
+        machine
+    }
+
     /// Fetch the pending-bridge approval feed over WS-RPC via the shared
     /// `BridgeApprovalMachine` (`fauna.bridges.list_pending_bridges`), for the
     /// admin `admin-bridges-pending` page. Dispatches `Refresh` (records any
     /// error into the snapshot) and ships the resulting snapshot. No HTTP.
     pub fn fetch_pending_bridges(&self) {
         use fauna_client_mail_settings::BridgeApprovalAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.bridge_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_bridge_approval_machine(nest_rpc);
             let _ = machine.dispatch(BridgeApprovalAction::Refresh).await;
             tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
                 snapshot: machine.snapshot(),
@@ -4261,15 +4683,13 @@ impl FaunaClient {
 
     /// Approve a pending bridge (admin). `pubkey_hex`/`role` come from the
     /// rendered `admin-bridges-pending-card`. We `Refresh` first so the feed is
-    /// populated even if the approve errors (the machine starts empty); the
-    /// `Approve` path re-reads on success, so the shipped snapshot already drops
-    /// the approved card.
+    /// populated even if the approve errors; the `Approve` path re-reads on
+    /// success, so the shipped snapshot already drops the approved card.
     pub fn approve_pending_bridge(&self, pubkey_hex: String, role: String) {
         use fauna_client_mail_settings::BridgeApprovalAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.bridge_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_bridge_approval_machine(nest_rpc);
             let _ = machine.dispatch(BridgeApprovalAction::Refresh).await;
             let _ = machine
                 .dispatch(BridgeApprovalAction::Approve { pubkey_hex, role })
@@ -4280,39 +4700,31 @@ impl FaunaClient {
         });
     }
 
-    /// Reject (revoke) a pending bridge (admin). Same `Refresh`-then-act shape as
-    /// [`approve_pending_bridge`]; the rejected card drops from the feed.
-    pub fn reject_pending_bridge(&self, pubkey_hex: String) {
-        use fauna_client_mail_settings::BridgeApprovalAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
-        let tx = self.tx.clone();
-        self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_bridge_approval_machine(nest_rpc);
-            let _ = machine.dispatch(BridgeApprovalAction::Refresh).await;
-            let _ = machine
-                .dispatch(BridgeApprovalAction::Reject { pubkey_hex })
-                .await;
-            tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
-                snapshot: machine.snapshot(),
-            }));
-        });
+    /// Open the reject / rotate confirm in the shared machine. Sync (arming
+    /// reaches no nest), so the caller presents the dialog in the click's own
+    /// frame — the inline-reveal contract of `admin-bridges-reject-confirm` /
+    /// `admin-bridges-rotate-confirm` (`mail-bridge-lifecycle.md` § Pending
+    /// approval).
+    pub fn arm_bridge_confirm(&self, confirm: fauna_client_mail_settings::BridgeConfirm) {
+        self.bridge_machine().arm(confirm);
     }
 
-    /// Rotate an approved bridge's service-user key (admin). Same
-    /// `Refresh`-then-act shape as [`reject_pending_bridge`]; the rotated bridge
-    /// is revoked (drops from the approved roster) and re-enrolls +
-    /// auto-approves on a mail-enabled box (`mail-bridge-lifecycle.md`
-    /// § Service-user re-keying).
-    pub fn rotate_service_user(&self, pubkey_hex: String) {
+    /// The open confirm's cancel: close it in the machine, no write.
+    pub fn disarm_bridge_confirm(&self) {
+        self.bridge_machine().disarm();
+    }
+
+    /// The open confirm's confirm button: the machine runs the armed act
+    /// (`reject_pending_bridge` for a reject; `revoke_service_user` for a
+    /// rotation — the rotated bridge re-enrolls and auto-approves on a
+    /// mail-enabled box, `mail-bridge-lifecycle.md` § Service-user re-keying),
+    /// re-reads, and the shipped snapshot reflects the post-mutation rosters.
+    pub fn confirm_bridge(&self) {
         use fauna_client_mail_settings::BridgeApprovalAction;
-        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let machine = self.bridge_machine();
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            let machine = crate::mail_glue::build_bridge_approval_machine(nest_rpc);
-            let _ = machine.dispatch(BridgeApprovalAction::Refresh).await;
-            let _ = machine
-                .dispatch(BridgeApprovalAction::Rotate { pubkey_hex })
-                .await;
+            let _ = machine.dispatch(BridgeApprovalAction::Confirm).await;
             tx.send(UiMessage::Data(DataMessage::AdminPendingBridgesLoaded {
                 snapshot: machine.snapshot(),
             }));
@@ -4694,7 +5106,7 @@ impl FaunaClient {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            match resolve_this_nest_id(&nest_rpc).await {
+            let snapshot = match resolve_this_nest_id(&nest_rpc).await {
                 Ok(target_nest_id) => {
                     let _ = machine
                         .dispatch(DnsAction::IssueCert {
@@ -4704,11 +5116,15 @@ impl FaunaClient {
                         .await;
                     // Reflect the (possibly) freshly-installed cert in the badge.
                     let _ = machine.dispatch(DnsAction::RefreshCertStatus).await;
+                    machine.snapshot()
                 }
-                Err(e) => tracing::error!("dns_issue_cert: resolve target nest id: {e}"),
-            }
+                Err(e) => {
+                    tracing::error!("dns_issue_cert: resolve target nest id: {e}");
+                    snapshot_with_resolve_refusal(machine.snapshot(), &domain, &e)
+                }
+            };
             tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
-                snapshot: machine.snapshot(),
+                snapshot,
             }));
         });
     }
@@ -4732,7 +5148,7 @@ impl FaunaClient {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
-            match resolve_this_nest_id(&nest_rpc).await {
+            let snapshot = match resolve_this_nest_id(&nest_rpc).await {
                 Ok(target_nest_id) => {
                     let _ = machine
                         .dispatch(DnsAction::BeginManualIssueCert {
@@ -4740,11 +5156,15 @@ impl FaunaClient {
                             target_nest_id,
                         })
                         .await;
+                    machine.snapshot()
                 }
-                Err(e) => tracing::error!("dns_begin_manual_issue: resolve target nest id: {e}"),
-            }
+                Err(e) => {
+                    tracing::error!("dns_begin_manual_issue: resolve target nest id: {e}");
+                    snapshot_with_resolve_refusal(machine.snapshot(), &domain, &e)
+                }
+            };
             tx.send(UiMessage::Data(DataMessage::AdminDnsRecordsLoaded {
-                snapshot: machine.snapshot(),
+                snapshot,
             }));
         });
     }
@@ -5733,6 +6153,32 @@ impl FaunaClient {
         });
     }
 
+    /// Remove a tier over `fauna.admin.tiers.delete` — the delete button on every
+    /// `admin-settings-tier-item` row (admin.md § 3 → *Removing a tier*). On
+    /// success `tiers.list` is refetched (`AdminTierDeleted`) so the row
+    /// disappears; a failure goes on the banner through `delete_tier_error`, the
+    /// nest's in-use refusal already worded by the shared `tier_delete_refusal`.
+    pub fn delete_admin_tier(&self, name: String) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.tiers_delete(name).await {
+                Ok(()) => UiMessage::Data(DataMessage::AdminTierDeleted),
+                Err(e) => {
+                    let message = fauna_client_admin::tier_delete_refusal(&e)
+                        .map_or_else(|| e.to_string(), str::to_string);
+                    UiMessage::Action(ActionResult::FailedLocalized {
+                        message: crate::i18n::strings::admin::settings_page::delete_tier_error(
+                            &message,
+                        ),
+                    })
+                }
+            };
+            tx.send(msg);
+        });
+    }
+
     /// Define a new tier over `fauna.admin.tiers.create` — the add-a-tier form on
     /// `admin-settings` (admin.md § 3 → *Defining a new tier*). On success the
     /// form clears and `tiers.list` is refetched (`AdminTierAdded`); a refusal
@@ -5894,6 +6340,21 @@ impl FaunaClient {
         });
     }
 
+    /// Read one page of the admin audit log section (`admin-logs`;
+    /// `fauna_client_admin::audit_log_page`) — `None` for the newest page, the
+    /// `admin-audit-more-button` cursor for an older one.
+    pub fn fetch_admin_audit(&self, before_id: Option<i64>) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let result = fauna_client_admin::audit_log_page(&admin, before_id)
+                .await
+                .map_err(|e| e.to_string());
+            tx.send(UiMessage::Data(DataMessage::AdminAuditLoaded { result }));
+        });
+    }
+
     /// Flip one sidecar-service flag (admin only) over
     /// `fauna.admin.services.update` — the `admin-service-pairing-toggle`
     /// click (`name` ∈ {bridge, pairing}; the nest rejects
@@ -5956,6 +6417,7 @@ impl FaunaClient {
                 .await;
             if let Ok(reply) = reply {
                 tx.send(UiMessage::Data(DataMessage::NestOsMaintenanceLoaded {
+                    host_status_present: reply.os_host_status_present,
                     security_updates_pending: reply.os_security_updates_pending,
                     reboot_pending: reply.os_reboot_pending,
                 }));
@@ -6095,6 +6557,55 @@ impl FaunaClient {
         });
     }
 
+    /// Fetch the update channel over `fauna.admin.update_channel.get` (the
+    /// `admin-nest-update-channel-*` section, `nest/update-channel.md` § The UI)
+    /// via the shared `AdminClient`, folded through
+    /// `fauna_client_admin::admin_update_channel_view` — every sentence and the
+    /// `can_set` verdict live there (tui's `admin/nest.rs`, the reference leg).
+    /// An older nest's unknown-kind answer is the fold's own "predates the
+    /// choice" view (`Ok(None)`), not a failure; any other error leaves the
+    /// section as last-rendered, like the sibling nest fetches.
+    pub fn fetch_nest_update_channel(&self) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            if let Ok(reply) = admin.update_channel().await {
+                tx.send(UiMessage::Data(DataMessage::NestUpdateChannelLoaded {
+                    view: fauna_client_admin::admin_update_channel_view(reply.as_ref()),
+                }));
+            }
+        });
+    }
+
+    /// Save the update channel over `fauna.admin.update_channel.set` (the
+    /// `admin-nest-update-channel-save-button`) via the shared `AdminClient`.
+    /// The set's reply carries no projection, so the section repaints from a
+    /// fresh read.
+    pub fn set_update_channel(&self, channel: fauna_client_admin::UpdateChannel) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let admin = fauna_client_admin::AdminClient::new(nest_rpc);
+            let msg = match admin.set_update_channel(channel).await {
+                Ok(()) => match admin.update_channel().await {
+                    Ok(reply) => UiMessage::Data(DataMessage::NestUpdateChannelLoaded {
+                        view: fauna_client_admin::admin_update_channel_view(reply.as_ref()),
+                    }),
+                    Err(e) => UiMessage::Action(ActionResult::Failed {
+                        context: "fauna.admin.update_channel.get".into(),
+                        error: e.to_string(),
+                    }),
+                },
+                Err(e) => UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.admin.update_channel.set".into(),
+                    error: e.to_string(),
+                }),
+            };
+            tx.send(msg);
+        });
+    }
+
     /// Fetch the deployment's registration posture + free-tier ceiling over
     /// `fauna.setup.status` (`registration_mode` raw wire string +
     /// `max_free_users`) for the `admin-users-registration-section` (admin.md § 2
@@ -6220,20 +6731,29 @@ impl FaunaClient {
     /// so the newly admitted account is the visible feedback.
     ///
     /// `guardian_actor` is the Admit-section guardian picker's pick (`None` for
-    /// an ordinary admission); no age band is sent from this surface.
+    /// an ordinary admission); `age_band` is the Admit-section band select's
+    /// pick (`admin-users-admit-age-band-select`), sent only beside a guardian.
     pub fn admit_user(
         &self,
         actor_id: Vec<u8>,
         tier: String,
         handle: Option<String>,
         guardian_actor: Option<Vec<u8>>,
+        age_band: Option<fauna_protocol::age::AgeBand>,
     ) {
         let nest_rpc = Arc::clone(&self.nest_rpc);
         let tx = self.tx.clone();
         self.spawn_bg(async move {
             let admin = fauna_client_admin::AdminClient::new(nest_rpc);
             let msg = match admin
-                .users_create(actor_id, tier, String::new(), handle, guardian_actor, None)
+                .users_create(
+                    actor_id,
+                    tier,
+                    String::new(),
+                    handle,
+                    guardian_actor,
+                    age_band,
+                )
                 .await
             {
                 Ok(()) => UiMessage::Data(DataMessage::AdminUserUpdated),
@@ -6714,6 +7234,8 @@ impl FaunaClient {
         // against the next connection (and any suspended manual cert order is
         // abandoned with the session, not leaked into the new one).
         self.dns_machine.borrow_mut().take();
+        self.local_domain_machine.borrow_mut().take();
+        self.bridge_machine.borrow_mut().take();
         // The tick dies with the runtime; its wake goes with it.
         self.auto_renew_wake.borrow_mut().take();
         if let Some(rt) = self.runtime.borrow_mut().take() {
@@ -6794,6 +7316,65 @@ impl FaunaClient {
             };
             tx.send(msg);
         });
+    }
+
+    /// `notification-dismiss` — delete one notification row
+    /// (`fauna.notifications.dismiss`; `behavior/notifications.md` § Retention
+    /// rule 2), then repaint the page from a fresh list. A
+    /// `fauna.notifications.retained` refusal at the security window's edge
+    /// surfaces as an ordinary failed action.
+    pub fn dismiss_notification(&self, id: i64) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let notifs = fauna_client_notifications::NotificationsClient::new(nest_rpc);
+            if let Err(e) = notifs.notifications_dismiss(id).await {
+                tx.send(UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.notifications.dismiss".into(),
+                    error: e.to_string(),
+                }));
+                return;
+            }
+            tx.send(Self::notifications_page_refetch(&notifs).await);
+        });
+    }
+
+    /// `notification-clear` — delete every row up to `up_to` (the newest
+    /// `created_at` the page has shown), then repaint from a fresh list.
+    pub fn clear_notifications(&self, up_to: i64) {
+        let nest_rpc = Arc::clone(&self.nest_rpc);
+        let tx = self.tx.clone();
+        self.spawn_bg(async move {
+            let notifs = fauna_client_notifications::NotificationsClient::new(nest_rpc);
+            if let Err(e) = notifs.notifications_clear(Some(up_to)).await {
+                tx.send(UiMessage::Action(ActionResult::Failed {
+                    context: "fauna.notifications.clear".into(),
+                    error: e.to_string(),
+                }));
+                return;
+            }
+            tx.send(Self::notifications_page_refetch(&notifs).await);
+        });
+    }
+
+    /// The page's list read as a ready-to-send message — the refetch each
+    /// mutation ends on (the reply of a delete is a bare echo, so the fresh list
+    /// is the observable effect).
+    async fn notifications_page_refetch<R: fauna_protocol::RpcRequester>(
+        notifs: &fauna_client_notifications::NotificationsClient<R>,
+    ) -> UiMessage
+    where
+        R::Error: std::fmt::Display,
+    {
+        match notifs.notifications_list(None, Some(20)).await {
+            Ok(reply) => UiMessage::Data(DataMessage::NotificationsPageLoaded {
+                notifications: reply.notifications,
+            }),
+            Err(e) => UiMessage::Action(ActionResult::Failed {
+                context: "fauna.notifications.list".into(),
+                error: e.to_string(),
+            }),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -7340,8 +7921,9 @@ impl FaunaClient {
                     name,
                     members: reply.members,
                 }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.folders.members.list".into(),
+                Err(e) => UiMessage::Data(DataMessage::FolderRowReadFailed {
+                    name,
+                    read: "fauna.folders.members.list",
                     error: e.to_string(),
                 }),
             };
@@ -7389,8 +7971,9 @@ impl FaunaClient {
                         channel_id: None,
                     })
                 }
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.folders.members.list_actors".into(),
+                Err(e) => UiMessage::Data(DataMessage::FolderRowReadFailed {
+                    name,
+                    read: "fauna.folders.members.list_actors",
                     error: e.to_string(),
                 }),
             };
@@ -7422,8 +8005,9 @@ impl FaunaClient {
                     name,
                     devices: reply.devices,
                 }),
-                Err(e) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.folders.devices".into(),
+                Err(e) => UiMessage::Data(DataMessage::FolderRowReadFailed {
+                    name,
+                    read: "fauna.folders.devices",
                     error: e.to_string(),
                 }),
             };
@@ -7459,8 +8043,9 @@ impl FaunaClient {
                     folder_id,
                     places,
                 }),
-                Err(error) => UiMessage::Action(ActionResult::Failed {
-                    context: "fauna.backup.destination.list".into(),
+                Err(error) => UiMessage::Data(DataMessage::FolderRowReadFailed {
+                    name,
+                    read: "fauna.backup.destination.list",
                     error,
                 }),
             };
@@ -8400,6 +8985,7 @@ fn family_status_loaded<E: std::fmt::Display>(
                 // time), which seeds the heartbeat and is what their read-only
                 // summary shows. `None` = no daily budget, no accounting at all.
                 usage_today_minutes: reply.usage_today_minutes,
+                own_policy: reply.policy,
                 // The ward's own asks — the handler gates them on
                 // `supervised_by` when folding them into `crate::ward_asks`.
                 contact_requests: reply.contact_requests,
@@ -8545,6 +9131,25 @@ fn secret_to_keypair(secret_hex: &str) -> Result<ActorKeypair, anyhow::Error> {
     ActorKeypair::from_secret_hex(secret_hex).map_err(Into::into)
 }
 
+/// What a plugin settings card's Connect / Disconnect came to: the
+/// connected-apps machine carries the page error a failed verb set, resolved
+/// through the string table; none means `success_context`.
+fn plugin_machine_outcome(
+    machine: &fauna_client_connected_apps::ConnectedAppsMachine,
+    success_context: &str,
+    failed_context: &str,
+) -> UiMessage {
+    match machine.snapshot().error {
+        Some(e) => UiMessage::Action(ActionResult::Failed {
+            context: failed_context.into(),
+            error: e.resolve(crate::i18n::strings::lookup),
+        }),
+        None => UiMessage::Action(ActionResult::Success {
+            context: success_context.into(),
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Custody-hosting registry (`admin-custody-hosting`)
 // ---------------------------------------------------------------------------
@@ -8569,6 +9174,29 @@ async fn load_custody_hosting_snapshot(
 /// `{ actor_id, handle, domain }` the `HandleResolved` consumer reads. A
 /// not-found / unreachable resolve is `ActionResult::Failed` (the contacts error
 /// element), never a raw body.
+/// Read a bridge's waiting follow requests as the `BridgeFollowRequestsLoaded`
+/// the Bridges detail repaints from — one row per request through the shared
+/// `follow_request_row` model.
+async fn read_follow_requests<R: fauna_protocol::RpcRequester>(
+    bridges: &fauna_client_bridges::BridgesClient<R>,
+    bridge_id: String,
+) -> UiMessage {
+    match bridges.list_follow_requests(bridge_id.clone()).await {
+        Ok(reply) => UiMessage::Data(DataMessage::BridgeFollowRequestsLoaded {
+            bridge_id,
+            rows: reply
+                .requests
+                .iter()
+                .map(fauna_client_bridges::follow_request_row)
+                .collect(),
+        }),
+        Err(e) => UiMessage::Action(ActionResult::Failed {
+            context: "fauna.bridges.list_follow_requests".into(),
+            error: e.to_string(),
+        }),
+    }
+}
+
 async fn find_user_message<R: fauna_protocol::RpcRequester>(
     rpc: &R,
     handle: &str,
@@ -9180,7 +9808,7 @@ async fn do_decline_share(
 /// (1) the nest roster self-drop `fauna.folders.leave` (`FoldersClient::leave`
 /// removes the caller's own `actor_channels` row — the durable, security-meaningful
 /// half: off the roster their `content_key.get` folds to `not_found`); then (2) the
-/// local MLS forget (`ConversationsSession::leave_folder` → `MlsEngine::forget_group`),
+/// local MLS forget (`FaunaMlsBackend::leave_folder` → `MlsEngine::forget_group`),
 /// so the set drops from the `has_group`-filtered member-visible list. The session
 /// handle is resolved up-front (fail fast if MLS isn't live), but the **nest drop
 /// runs first** so a failure there leaves local state untouched and a retry is clean;
@@ -9189,7 +9817,7 @@ async fn do_decline_share(
 async fn do_leave_folder_share(nest_rpc: &Arc<NestClient>, group_id: String) -> Result<(), String> {
     let session = crate::conversations::conv_backend::active_session()
         .ok_or_else(|| "conversations session not ready".to_string())?;
-    fauna_client_folders::leave_share(Arc::clone(nest_rpc), &session, group_id).await
+    fauna_client_folders::leave_share(Arc::clone(nest_rpc), &session.backend(), group_id).await
 }
 
 /// `fauna.pending_actions.list`, filtered to still-`pending` rows (an
@@ -9224,6 +9852,24 @@ async fn list_pending_actions(
 /// [`FaunaClient::dns_issue_cert`], [`FaunaClient::dns_begin_manual_issue`],
 /// and the auto-renew cadence.
 use fauna_client_pair::resolve_this_nest_id;
+
+/// The snapshot an `admin-dns` cert issue ships when the bound-id resolver
+/// refuses: the machine never saw the action, so it has no error to report —
+/// carry the reason ourselves so it reaches the page's `error-message` instead
+/// of failing silently (the refusal means the nest's identity claim disagreed
+/// with the connection-bound id). Same wording as tui's `Op::DnsIssueCert`.
+fn snapshot_with_resolve_refusal(
+    mut snapshot: fauna_client_dns::DnsSnapshot,
+    domain: &str,
+    refusal: &str,
+) -> fauna_client_dns::DnsSnapshot {
+    snapshot.error = Some(resolve_refusal_message(domain, refusal));
+    snapshot
+}
+
+fn resolve_refusal_message(domain: &str, refusal: &str) -> String {
+    format!("resolve target nest for {domain}: {refusal}")
+}
 
 /// [`resolve_this_nest_id`] as the 32-byte source-box key of the per-box
 /// backup-destination list in `fauna.state.backup` — the id every backup read
@@ -10299,6 +10945,7 @@ fn contact_rows_from_items(
             peer_actor_id: item.peer_id,
             peer_handle: item.handle,
             peer_domain: item.domain,
+            peer_home_nest_url: item.home_nest_url,
             status: item.status,
             updated_at: Some(item.accepted_at.unwrap_or(item.created_at).to_string()),
         })
@@ -10402,6 +11049,27 @@ async fn seal_and_upload_attachment(
 /// throwaway restore engine on a fresh current-thread runtime (mirrors
 /// `libs/fauna-ffi/src/snapshot_download.rs`'s worker), fetch the file's
 /// plaintext bytes by manifest, then write them to `save_path`.
+#[allow(clippy::too_many_arguments)]
+/// The `snapshot-restore-result` line for a finished walk: how many files were
+/// written and where, and — when any failed to fetch, open or verify — which,
+/// by their redacted paths, with everything else said to be written. The tui
+/// twin is `restore_result_line` in `apps/fauna-tui/src/backups.rs`.
+fn restore_result_line(summary: &fauna_sync_engine::engine::RestoreSummary, path: &str) -> String {
+    use crate::i18n::strings::backups as bs;
+    let files = summary.files_restored.to_string();
+    if summary.unverified.is_empty() {
+        let size = crate::i18n::byte_size(summary.bytes_written);
+        bs::snapshot_restore_done(&files, &size, path)
+    } else {
+        bs::snapshot_restore_partial(
+            &files,
+            path,
+            &summary.unverified.len().to_string(),
+            &summary.unverified.join(", "),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn download_snapshot_file_and_save(
     auth: Arc<AuthClient>,
@@ -11067,6 +11735,21 @@ mod silent_sign_in_adapter_tests {
         ] {
             assert!(super::session_ending_escalation(&ordinary, None).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod resolve_refusal_tests {
+    //! A bound-id refusal on the `admin-dns` cert issue reaches the page's
+    //! `error-message` (`DnsSnapshot.error`) — never log-only.
+    use super::resolve_refusal_message;
+
+    #[test]
+    fn refusal_message_matches_the_other_apps() {
+        assert_eq!(
+            resolve_refusal_message("example.com", "nest id mismatch"),
+            "resolve target nest for example.com: nest id mismatch"
+        );
     }
 }
 

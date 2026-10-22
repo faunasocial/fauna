@@ -37,6 +37,7 @@ class SubscriptionSettingsContentTest {
         // for this fixture (handle if non-blank, else the full hex actor id) —
         // the screen renders `sub.authorDisplay` verbatim, no local fallback.
         authorDisplay: String = handle ?: HexUtil.bytesToHex(authorId),
+        homeNestUrl: String? = null,
     ) = FfiMineSubscription(
         authorId = authorId,
         tier = tier,
@@ -44,12 +45,13 @@ class SubscriptionSettingsContentTest {
         handle = handle,
         since = 0uL,
         authorDisplay = authorDisplay,
+        homeNestUrl = homeNestUrl,
     )
 
     private fun render(
         subscriptions: List<FfiMineSubscription> = emptyList(),
         working: Boolean = false,
-        onUnsubscribe: (ByteArray) -> Unit = {},
+        onUnsubscribe: (FfiMineSubscription) -> Unit = {},
         onRedeemClaim: (String) -> Unit = {},
     ) {
         composeTestRule.setContent {
@@ -100,15 +102,17 @@ class SubscriptionSettingsContentTest {
     }
 
     @Test
-    fun unsubscribe_firesWithAuthorId() {
+    fun unsubscribe_firesWithTheRowCarryingTierAndHome() {
         val bytes = ByteArray(32) { 9 }
-        var unsubscribed: ByteArray? = null
+        var unsubscribed: FfiMineSubscription? = null
         render(
-            subscriptions = listOf(sub(authorId = bytes)),
+            subscriptions = listOf(sub(authorId = bytes, homeNestUrl = "https://home.example")),
             onUnsubscribe = { unsubscribed = it },
         )
         composeTestRule.onNodeWithTag("subscription-mine-unsubscribe-button").performClick()
         assertTrue(unsubscribed != null)
-        assertArrayEquals(bytes, unsubscribed)
+        assertArrayEquals(bytes, unsubscribed!!.authorId)
+        assertEquals("gold", unsubscribed!!.tier)
+        assertEquals("https://home.example", unsubscribed!!.homeNestUrl)
     }
 }

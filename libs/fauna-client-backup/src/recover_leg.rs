@@ -49,7 +49,7 @@ use fauna_core::crypto::{NestBackupKey, OwnerSealKey};
 use fauna_core::data::ContentHash;
 use fauna_core::file_download::{FileDownloadKeys, download_file_bytes_by_manifest};
 use fauna_protocol::segments::{
-    BACKED_UP_KINDS, LiveManifestMirror, SegmentFamily, SegmentHalf,
+    BACKED_UP_KINDS, LiveManifestMirror, SegmentFamily, SegmentHalf, landing_set_name,
     parse_reserved_backup_set_name, reserved_backup_set_name,
 };
 use fauna_protocol::{MaybeSendSync, RpcRequester};
@@ -503,11 +503,12 @@ where
         let set = reserved_backup_set_name(kind, &self.scope_id)
             .ok_or_else(|| anyhow::anyhow!("kind has no backup surface: {kind}"))?;
         let mut report = self.deliver(kind, &set).await?;
+        let landing = self.landing(kind)?;
         report.recovered = self
-            .verb(&set)
+            .verb(&landing)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("recovery: the source's recover of {set}"))?;
+            .with_context(|| format!("recovery: the source's recover of {landing}"))?;
         report.tombstoned_at_destination = self.duties(kind, &set).await?;
         Ok(report)
     }
@@ -536,7 +537,11 @@ where
         if let Err(e) = self.deliver(kind, set_name).await {
             return LegAnswer::Failed(format!("{e:#}"));
         }
-        let reply = match self.verb(set_name).await {
+        let landing = match self.landing(kind) {
+            Ok(landing) => landing,
+            Err(e) => return LegAnswer::Failed(format!("{e:#}")),
+        };
+        let reply = match self.verb(&landing).await {
             Ok(reply) => reply,
             Err(e) => {
                 return match e.as_rpc_error() {
@@ -551,6 +556,17 @@ where
             .map(|_| ())
             .map_err(|e| format!("{e:#}"));
         LegAnswer::Replied { reply, duties }
+    }
+
+    /// The name the copy lands under on the source, and the verb names — the
+    /// landing name, never the rail's: the source mints its own `__<kind>`
+    /// rail within a minute of holding mail, and a record into that is the
+    /// rail's own and seal-gated (`reserved-folders.md` § __mail Sync → *The
+    /// landing set*). The copy's own set keeps its name wherever the copy
+    /// itself is read — the leg derives both and trusts neither.
+    fn landing(&self, kind: &str) -> Result<String> {
+        landing_set_name(kind, &self.scope_id)
+            .ok_or_else(|| anyhow::anyhow!("kind has no landing set: {kind}"))
     }
 
     /// `fauna.backup.custody.recover` on the source, its error kept typed so a
@@ -581,7 +597,8 @@ where
         self.retire_unnamed(kind, set).await
     }
 
-    /// Every generation of the set the copy holds, landed on the source — the
+    /// Every generation of the set the copy holds (read under `set`, the copy's
+    /// own name), landed on the source under the kind's landing name — the
     /// landing alone, before the verb ([`Self::run_kind`] is the whole run).
     /// Public so a host's tests can pin what each end lands, byte for byte.
     pub async fn deliver(&self, kind: &str, set: &str) -> Result<RecoveryReport> {
@@ -596,6 +613,7 @@ where
                 .context("recovery: this device's store")?,
         };
 
+        let landing = self.landing(kind)?;
         // Segments of each family in pass order, then every mirror last.
         let held = self.source_segments(kind, &scope_hex).await;
         let mut report = RecoveryReport::default();
@@ -631,7 +649,7 @@ where
             self.source
                 .records
                 .record_custody(
-                    set,
+                    &landing,
                     &self.source.device_id,
                     &g.path,
                     Some(manifest_hex.clone()),

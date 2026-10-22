@@ -426,3 +426,56 @@ def test_while_the_malware_scanner_is_down_mail_is_put_off_never_delivered_unsca
         f"with the scanner down a message must be put off (451), never delivered "
         f"unscanned; got {reply!r} (bridge log {handle.log_file})"
     )
+
+
+# ── The in-flight DATA byte budget (smtp-server.md § Connection-time limits) ──
+#
+# Unmarked for the feature catalog until the public-texts round adds its outcome
+# line to `docs/features/mail-abuse-refused.md`.
+
+# Bytes each holder streams: under any size cap the fixture runs with (the
+# 50 MB default), so no holder is refused for size; twelve of them are well past
+# the bridge's 256 MiB budget whatever loopback buffering leaves unread.
+_HOLDER_BYTES = 40_000_000
+_HOLDERS = 12
+
+
+def test_messages_past_the_servers_memory_budget_are_put_off_not_accepted(mail_bridge_mta):
+    """While other connections hold unfinished messages that fill the server's
+    in-flight memory budget, the next message is put off with `451 4.3.1` — the
+    sender keeps it and retries — instead of being read into memory without bound.
+
+    No timing: twelve connections stream 40 MB each and none finishes, so the
+    server holds every byte it has read. Loopback leaves at most a few megabytes
+    per connection unread, so the last connection's message cannot fit; its reply
+    to `.` is the witness. The others are dropped mid-message, which ends their
+    transactions without delivering anything.
+    """
+    handle = mail_bridge_mta
+    deadline = time.monotonic() + 300.0
+    line = b"x" * 998 + b"\r\n"
+    head = _message(_rcpt(handle), body="budget")
+    chunk = line * 1000
+    conns = []
+    try:
+        for _ in range(_HOLDERS):
+            conn = _connect_smtp_starttls(handle.mx_port, handle.domain, deadline)
+            conns.append(conn)
+            conn.cmd("MAIL FROM:<sender@external.test>", "250", deadline)
+            conn.cmd(f"RCPT TO:<{_rcpt(handle)}>", "250", deadline)
+            conn.cmd("DATA", "354", deadline)
+            conn.send_raw(head)
+            sent = len(head)
+            while sent < _HOLDER_BYTES:
+                conn.send_raw(chunk)
+                sent += len(chunk)
+        last = conns[-1]
+        last.send_raw(b".\r\n")
+        reply = _read_final_reply(last, deadline)
+        assert reply.startswith("451") and "4.3.1" in reply, (
+            f"a message past the in-flight memory budget must be put off 451 4.3.1; "
+            f"got {reply!r}"
+        )
+    finally:
+        for conn in conns:
+            conn.__exit__(None, None, None)

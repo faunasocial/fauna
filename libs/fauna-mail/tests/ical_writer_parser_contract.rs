@@ -55,7 +55,7 @@ fn writer_output_parses_through_mda_parser() {
         ..Default::default()
     };
 
-    let ics = generate_ical(&event, &[], "alice@example.com");
+    let ics = generate_ical(&event, &[], "alice@example.net");
     let vevent = first_vevent(&ics);
 
     assert_eq!(prop(&vevent, "UID"), Some("contract-1@fauna"));
@@ -64,7 +64,7 @@ fn writer_output_parses_through_mda_parser() {
     assert_eq!(prop(&vevent, "DTEND"), Some("20260401T110000Z"));
     assert_eq!(prop(&vevent, "LOCATION"), Some("Room 42"));
     assert_eq!(prop(&vevent, "DESCRIPTION"), Some("Weekly sync"));
-    assert_eq!(prop(&vevent, "ORGANIZER"), Some("mailto:alice@example.com"));
+    assert_eq!(prop(&vevent, "ORGANIZER"), Some("mailto:alice@example.net"));
 }
 
 #[test]
@@ -80,19 +80,19 @@ fn writer_attendee_roster_parses_through_mda_parser() {
     let attendees = vec![
         AttendeeInfo {
             name: "Bob".into(),
-            email: "bob@example.com".into(),
+            email: "bob@example.net".into(),
             partstat: "ACCEPTED".into(),
             fauna_status: "going".into(),
         },
         AttendeeInfo {
             name: "Carol".into(),
-            email: "carol@example.com".into(),
+            email: "carol@example.net".into(),
             partstat: "TENTATIVE".into(),
             fauna_status: "interested".into(),
         },
     ];
 
-    let ics = generate_ical(&event, &attendees, "alice@example.com");
+    let ics = generate_ical(&event, &attendees, "alice@example.net");
     let vevent = first_vevent(&ics);
 
     let attendees_parsed: Vec<_> = vevent
@@ -192,7 +192,7 @@ fn itip_request_message_parses_through_mda_parser() {
     };
     let attendees = vec![AttendeeInfo {
         name: "Bob".into(),
-        email: "bob@example.com".into(),
+        email: "bob@example.net".into(),
         partstat: "NEEDS-ACTION".into(),
         fauna_status: "invited".into(),
     }];
@@ -201,7 +201,7 @@ fn itip_request_message_parses_through_mda_parser() {
         ITipMethod::Request,
         &event,
         &attendees,
-        "alice@example.com",
+        "alice@example.net",
         "2026-06-04T12:00:00Z",
     );
 
@@ -218,7 +218,7 @@ fn itip_request_message_parses_through_mda_parser() {
     let vevent = first_vevent(&ics);
     assert_eq!(prop(&vevent, "UID"), Some("itip-req@fauna"));
     assert_eq!(prop(&vevent, "DTSTAMP"), Some("20260604T120000Z"));
-    assert_eq!(prop(&vevent, "ORGANIZER"), Some("mailto:alice@example.com"));
+    assert_eq!(prop(&vevent, "ORGANIZER"), Some("mailto:alice@example.net"));
     assert_eq!(
         vevent
             .properties
@@ -241,7 +241,7 @@ fn itip_reply_message_parses_through_mda_parser() {
     };
     let responder = vec![AttendeeInfo {
         name: "Bob".into(),
-        email: "bob@example.com".into(),
+        email: "bob@example.net".into(),
         partstat: "ACCEPTED".into(),
         fauna_status: "going".into(),
     }];
@@ -250,7 +250,7 @@ fn itip_reply_message_parses_through_mda_parser() {
         ITipMethod::Reply,
         &event,
         &responder,
-        "alice@example.com",
+        "alice@example.net",
         "2026-06-04T12:30:00Z",
     );
 
@@ -270,5 +270,5 @@ fn itip_reply_message_parses_through_mda_parser() {
         .filter(|p| p.name.eq_ignore_ascii_case("ATTENDEE"))
         .collect();
     assert_eq!(attendees.len(), 1, "a REPLY carries only the responder");
-    assert_eq!(attendees[0].value, "mailto:bob@example.com");
+    assert_eq!(attendees[0].value, "mailto:bob@example.net");
 }

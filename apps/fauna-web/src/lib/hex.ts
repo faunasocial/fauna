@@ -6,7 +6,7 @@
 // priority #2/#4). Single home so the admin-users hub and the admin-dns catch-all
 // picker don't re-derive the wire-shape normalization.
 
-import { hexFull } from '$lib/wasm';
+import { hexFull } from '#lib/wasm';
 
 /** Normalize a raw actor id (either wire shape) to a `Uint8Array`. */
 export function toBytes(actorId: Uint8Array | number[]): Uint8Array {

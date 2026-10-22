@@ -175,7 +175,6 @@ where
             directory_url: None,
         }),
         email: None,
-        update: Default::default(),
     });
 
     // Open database.
@@ -416,6 +415,9 @@ where
                     tracing::info!("shutting down nest server");
                     server_handle.abort();
                     let _ = server_handle.await;
+                    // An open segment left behind is unreadable to the next
+                    // start (`AppState::finalize_open_segments`).
+                    app_state.finalize_open_segments().await;
                     return Ok(());
                 }
                 join = &mut server_handle => {

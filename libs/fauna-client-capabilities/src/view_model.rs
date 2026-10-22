@@ -496,8 +496,9 @@ pub fn unclaimed_history(
 // and whose history lens renders its log. It is the same fold as a nest row's,
 // over a one-key holder set — the principal's attested `holder_x25519` — and
 // over **third-party grants only**: those whose scope a consent mints
-// (`third-party.md` § The principal model rule 4) — an `ext.*` kind, the
-// keyless `deposit` tuple, or the `content.read{folder}` read twin — the only
+// (`third-party.md` § The principal model rule 4) — an `ext.*` kind, a
+// keyless `deposit` or `identity.op` tuple, or a `content.read` tuple over a
+// kind a plane's twin carries ([`crate::CONSENT_TWIN_KINDS`]) — the only
 // grants an app mints to a principal (`ext_consent`). The holder key comes from
 // the nest's roster read, so the scope filter is the log's guard against a
 // roster naming some other holder's key pulling that holder's grants into a
@@ -509,15 +510,20 @@ pub fn unclaimed_history(
 // refuses a consent attesting an enrolled bridge's key, the web-serve holder
 // among them.
 
-/// Whether a grant's declared scope is a third-party principal's: any tuple
-/// over an `ext.*` kind, a `deposit` tuple, or a `content.read{folder}` tuple
-/// (`third-party.md` § The principal model rule 4).
+/// Whether a grant's declared scope is a third-party principal's: a keyless
+/// `deposit` or `identity.op` tuple, any tuple over an `ext.*` kind, or a
+/// `content.read` tuple over a kind a plane's consent twin carries
+/// ([`crate::CONSENT_TWIN_KINDS`]; `third-party.md` § The principal model
+/// rule 4).
 fn is_principal_scope(scope: &[GrantEventScope]) -> bool {
     scope.iter().any(|t| {
         t.class == ScopeTuple::CLASS_DEPOSIT
-            || (t.class == ScopeTuple::CLASS_CONTENT_READ
-                && t.base_kind() == Some(ScopeTuple::KIND_FOLDER))
-            || t.base_kind().is_some_and(fauna_core::ext_kind::is_ext_kind)
+            || t.class == ScopeTuple::CLASS_IDENTITY_OP
+            || t.base_kind().is_some_and(|kind| {
+                fauna_core::ext_kind::is_ext_kind(kind)
+                    || (t.class == ScopeTuple::CLASS_CONTENT_READ
+                        && crate::CONSENT_TWIN_KINDS.contains(&kind))
+            })
     })
 }
 
@@ -789,6 +795,10 @@ pub struct HeldCustodyView {
     /// The host stopped holding (registry-row fact, overlaid the same way;
     /// `false` when no row is readable).
     pub stopped: bool,
+    /// `Some` for a NEST-form hold only: the accept's `custodian_nest_url`,
+    /// verbatim — the address the owner's cold device restores from
+    /// (`custody-held-restore-address`, `ui/devices.md` § Custody facet).
+    pub custodian_nest_url: Option<String>,
 }
 
 /// Overlay the registry rows' live facts onto the config fold: the budget in
@@ -937,11 +947,15 @@ pub fn held_custodies(custody: &CustodyConfig) -> Vec<HeldCustodyView> {
                 grant_id: h.grant_id.clone(),
                 owner: h.owner,
                 scopes,
-                retained_bytes_cap: accept.map(|a| a.retained_bytes_cap).unwrap_or_default(),
+                retained_bytes_cap: accept
+                    .as_ref()
+                    .map(|a| a.retained_bytes_cap)
+                    .unwrap_or_default(),
                 receipt: (!h.receipt.is_empty())
                     .then(|| decode_receipt_view(&h.receipt))
                     .flatten(),
                 stopped: false,
+                custodian_nest_url: accept.and_then(|a| a.custodian_nest_url),
             }
         })
         .collect();
@@ -2043,6 +2057,77 @@ mod tests {
                 .iter()
                 .any(|e| e.grant_id[0] == 6)
         );
+    }
+
+    /// Rule 4 widened (2026-10-17): an `identity.op`-only grant and a
+    /// personalization-only grant — the fifth arm's twin, read from
+    /// [`crate::CONSENT_TWIN_KINDS`] — are a principal's too, on its facet,
+    /// in its history and among the grants its revoke ends; a
+    /// `content.read{mail}` grant to the same holder still is not (mail has
+    /// no twin yet), nor is a key-bearing class over a twin kind.
+    #[test]
+    fn is_principal_scope_admits_every_consent_twin_and_the_oracle_class() {
+        let p = [0x44u8; 32];
+        let kp = ActorKeypair::generate();
+        let mut cfg = principal_ledger(p, &kp);
+        let identity_op = GrantEventScope {
+            class: ScopeTuple::CLASS_IDENTITY_OP.into(),
+            kind: Some("nostr.sign".into()),
+            tier: None,
+        };
+        let personalization: Vec<_> = crate::PERSONALIZATION_GRANT_KINDS
+            .iter()
+            .map(|kind| GrantEventScope {
+                class: ScopeTuple::CLASS_CONTENT_READ.into(),
+                kind: Some((*kind).into()),
+                tier: None,
+            })
+            .collect();
+        for (id, scope, at) in [
+            (6u8, vec![identity_op.clone()], 70),
+            (7, personalization.clone(), 80),
+        ] {
+            record_mint(
+                &mut cfg,
+                kp.signing_key(),
+                [id; 16],
+                p,
+                scope,
+                0,
+                99_000,
+                at,
+            )
+            .unwrap();
+        }
+        assert!(is_principal_scope(std::slice::from_ref(&identity_op)));
+        assert!(is_principal_scope(&personalization));
+        for kind in crate::PERSONALIZATION_GRANT_KINDS {
+            assert!(crate::CONSENT_TWIN_KINDS.contains(&kind));
+        }
+        assert!(!is_principal_scope(&[mail_scope()]));
+        assert!(!is_principal_scope(&[GrantEventScope {
+            class: ScopeTuple::CLASS_INDEX_READ.into(),
+            ..personalization[0].clone()
+        }]));
+
+        let mut ids: Vec<_> = grants_ended_by_principal_revoke(&cfg, &p)
+            .into_iter()
+            .map(|g| g.grant_id[0])
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2, 6, 7], "never the mail grant (4)");
+        let mut facet: Vec<_> = principal_trust_facet(&cfg, &p, 1000)
+            .grants
+            .iter()
+            .map(|g| g.grant_id[0])
+            .collect();
+        facet.sort_unstable();
+        assert_eq!(facet, [1, 2, 6, 7]);
+        let history: BTreeSet<_> = principal_history(&cfg, &p)
+            .iter()
+            .map(|e| e.grant_id[0])
+            .collect();
+        assert_eq!(history, BTreeSet::from([1, 2, 3, 6, 7]));
     }
 
     /// A principal's folder read grant names its folder on the facet and in

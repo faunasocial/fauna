@@ -34,11 +34,11 @@ use std::sync::Arc;
 
 use fauna_client::MultipartBlob;
 use fauna_client::NestClient;
-use fauna_core::obligation::RenderVerdict;
+use fauna_core::obligation::{ComposedVerdict, RenderVerdict};
 use fauna_core::render::{AuthoringOriginStatus, VerificationStatus};
 use fauna_feed::{
     AttachedFile, FactorWeightInput, FeedManager, FeedSnapshot, FeedSnapshotObserver,
-    FilterRuleInput, PostSummary, ReplyAudience, classify_sources,
+    FilterRuleInput, PlaybackSource, PostSummary, ReplyAudience, classify_sources,
 };
 // Entering sell mode is the paywall-designation gesture, the money plane's
 // (`dynamic-features.md` § Platform-family surface excision → *The
@@ -55,7 +55,7 @@ use fauna_i18n::strings::subscriptions;
 // in this module, which is exactly where the strings are read.
 #[cfg(feature = "payments")]
 use fauna_i18n::strings::tips as tips_i18n;
-use fauna_nest_http::{NestContentApi, paths};
+use fauna_nest_http::NestContentApi;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::app::{App, DataMessage, UiMessage};
@@ -96,11 +96,13 @@ pub enum Action {
         post_id: String,
         verb: fauna_feed::TrainVerb,
     },
-    /// `feed-post-train-target-sheet` — choose which trained factor the open
-    /// post's verbs train, by its stable `topic:<hex>` key. Choosing
-    /// [`NEW_TRAINED_TOPIC_OPTION`] instead leaves for the Personalization
-    /// home's Trained-topics facet, where topics are created.
-    PickTrainTarget(String),
+    /// `feed-post-train-target-item` — train the open sheet's post into this
+    /// trained factor (its stable `topic:<hex>` key) with the verb that opened
+    /// the sheet, toggle semantics as train-in-context. One tap is the train.
+    TrainIntoTarget(String),
+    /// `feed-post-train-target-new-button` — leave the sheet for the
+    /// Personalization home's Trained-topics facet, where topics are created.
+    NewTrainedTopic,
     /// `feed-post-delete-button` — arm the destructive confirm step on this own
     /// post. Purely local: nothing is destroyed until the confirm.
     StartDeletePost(String),
@@ -135,6 +137,25 @@ pub enum Action {
     /// post's image, by blob hash. The hash (not a row index) because the
     /// loaded window re-ranks in place, the `OpenPostActions` finding.
     OpenLightbox(String),
+    /// `video-thumbnail` activation — hand that block's clip to the OS default
+    /// player, honoring the `tui-settings-external-media` mode exactly as
+    /// `media-external-open-button` does: `ask` arms the reused inline confirm,
+    /// `always` fetches at once, `never` paints the thumbnail inert so this only
+    /// fires from a stale click (`apps/tui.md` § External media handoff → *Feed
+    /// video*). Keyed by the block, not a row index — the `OpenLightbox` reason.
+    /// `post_id` is the post carrying it: a host that is not the feed page (the
+    /// profile's Posts tab, `crate::profile`) has no confirm surface of its own
+    /// and opens that post's `post_detail` instead, where the handoff runs.
+    OpenVideo {
+        post_id: String,
+        target: VideoTarget,
+    },
+    /// `media-external-open-confirm-button` on the feed — the armed confirm's
+    /// launch of [`FeedState::video_confirm`].
+    ConfirmVideoOpen,
+    /// `media-external-open-cancel-button` on the feed — a pure no-op decline:
+    /// nothing fetches, nothing launches.
+    CancelVideoOpen,
     /// `post-tip-list-button` — open that post's `post-tip-list` attribution
     /// window (`monetization.md` § Tips). By post id, same re-rank reasoning as
     /// [`Self::OpenLightbox`]. Purely local: the window is already resolved
@@ -206,6 +227,15 @@ pub enum Action {
     LoadMore,
     /// `post-card` click — ui.yaml `feed.sub_pages.post_detail`.
     OpenPostDetail(String),
+    /// The same door for a post homed on another nest — a room-search post
+    /// hit on a room whose recorded home is elsewhere (`room-search.md`
+    /// § The surface → *Opening a hit*): `FeedManager::resolve_post_from`
+    /// relays this nest's miss to `home`; everything else is
+    /// [`Self::OpenPostDetail`]'s.
+    OpenPostDetailFrom {
+        post_id: String,
+        home: String,
+    },
     /// `feed-post-view-thread-button` — ui.yaml `feed.sub_pages.thread`.
     OpenThread(String),
     /// `gated-post-buy-button` — the self-serve teaser purchase (gap (2c),
@@ -338,6 +368,96 @@ fn has_c2pa(cache: &C2paCache, hash: &str) -> bool {
     cache.ready(hash) == Some(&true)
 }
 
+/// The video block a `video-thumbnail` activation hands off (`apps/tui.md`
+/// § External media handoff → *Feed video*) — which of the byte paths its clip
+/// arrives by. Whether a `Blob` is sealed is not decided here: the shared
+/// `FeedManager::playback_source` answers that at fetch time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoTarget {
+    /// A [`RenderBlock::Video`](fauna_core::render::RenderBlock::Video), by blob
+    /// hash, fetched from the nest its post rests on (`home`: the post's
+    /// [`blob_home`](fauna_feed::PostSummary::blob_home), `None` for this nest).
+    Blob {
+        hash: String,
+        home: Option<fauna_client::ForeignHome>,
+    },
+    /// A bridged post's
+    /// [`RenderBlock::ProxiedVideo`](fauna_core::render::RenderBlock::ProxiedVideo),
+    /// by its nest-relative proxied path.
+    Proxied(String),
+}
+
+impl VideoTarget {
+    /// The [`FeedState::video_handoff`] key — the hash or the path, which never
+    /// collide (a path starts with `/`), the [`ImageCache`] keying.
+    pub fn key(&self) -> &str {
+        match self {
+            VideoTarget::Blob { hash, .. } => hash,
+            VideoTarget::Proxied(path) => path,
+        }
+    }
+}
+
+/// `post`'s video at `hash`, fetched from the nest the post rests on.
+fn video_blob(post: &PostSummary, hash: &str) -> VideoTarget {
+    VideoTarget::Blob {
+        hash: hash.to_string(),
+        home: post_home(post),
+    }
+}
+
+/// One by-hash blob of a post, and the nest it is fetched from — `home` is
+/// the post's [`PostSummary::blob_home`] for the post's own bytes, `None` for
+/// a blob this nest serves itself (a revealed link-preview og:image).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostBlob {
+    pub hash: String,
+    pub home: Option<fauna_client::ForeignHome>,
+}
+
+/// The foreign home `post`'s own bytes are fetched from, with the identity its
+/// pin graduates against — `None` for this nest ([`PostSummary::blob_home`]).
+fn post_home(post: &PostSummary) -> Option<fauna_client::ForeignHome> {
+    post.blob_home()
+        .map(|home| fauna_client::ForeignHome::new(home.url, home.nest_actor_id))
+}
+
+/// The one host pick for every post byte leg on this page (`feed.md` § The
+/// read model → *A post homed on another nest*): this nest's plane, and the
+/// anonymous, pinned, capped, content-verified plane of a post's foreign home. `None`
+/// before auth (no content plane yet).
+pub(crate) fn blob_hosts(feed: &FeedState) -> Option<fauna_client::PostBlobHosts> {
+    let own = Arc::clone(feed.content.as_ref()?);
+    Some(match &feed.foreign_blobs {
+        Some(foreign) => fauna_client::PostBlobHosts::with_foreign(own, Arc::clone(foreign)),
+        None => fauna_client::PostBlobHosts::new(own),
+    })
+}
+
+/// A `video-thumbnail`'s `state` past `idle` — the cross-app vocabulary
+/// (`render-model.md` § D6c → *Inline playback*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoHandoffState {
+    /// The clip's bytes are being fetched (and opened, for a sealed one).
+    Loading,
+    /// The OS handler was spawned on the materialized file.
+    Playing,
+    /// The fetch or the materialization failed; the cause is on `error-message`.
+    Error,
+}
+
+impl VideoHandoffState {
+    /// The `state` attribute's token; `idle` is the absence of an entry.
+    fn token(state: Option<&Self>) -> &'static str {
+        match state {
+            None => "idle",
+            Some(VideoHandoffState::Loading) => "loading",
+            Some(VideoHandoffState::Playing) => "playing",
+            Some(VideoHandoffState::Error) => "error",
+        }
+    }
+}
+
 /// The feed page's state, hung off [`App`] rather than a process-wide singleton
 /// (linux's `OnceLock` shape): the manager is built on auth and dropped on
 /// sign-out, so its lifetime is the session's, and `App` already *is* that
@@ -357,6 +477,11 @@ pub struct FeedState {
     /// (`GET /api/v1/blob/<hash>`, the same bulk-binary carve-out). Shares the
     /// `AuthClient`'s single bearer cache rather than minting a parallel token.
     pub content: Option<Arc<dyn NestContentApi>>,
+    /// The plane a post **homed on another nest** serves its own bytes from —
+    /// anonymous and pinned, one per session ([`fauna_client::post_blob::pinned_plane`]).
+    /// `None` builds that same production plane per op; a test sets a fake so
+    /// no host is dialled. Read only through [`blob_hosts`].
+    pub foreign_blobs: Option<fauna_client::post_blob::ForeignPlane>,
     /// The per-hash `post-image` art cache — the shared spine Media's thumbnails
     /// also hang off ([`ImageCache`]). A feed image's bytes are a *plaintext*
     /// public-post blob fetched raw by hash (no decrypt, unlike a sealed Media
@@ -447,6 +572,15 @@ pub struct FeedState {
     /// The blob hash whose `image-lightbox` is open, if any — set by a
     /// `post-image` click, cleared by Escape.
     pub lightbox: Option<String>,
+    /// The video whose external-open confirm is armed (`ask` mode), if any —
+    /// set by a `video-thumbnail` activation, taken by the confirm, cleared by
+    /// the cancel.
+    pub video_confirm: Option<VideoTarget>,
+    /// Each handed-off video's `state` past `idle`, keyed by
+    /// [`VideoTarget::key`]; absent = `idle`. A new handoff resets the others —
+    /// it deletes the prior clip's file (at most one rests at a time), so none
+    /// of them is still playing from here.
+    pub video_handoff: std::collections::HashMap<String, VideoHandoffState>,
     /// The post whose `post-tip-list` attribution window is open, if any — set
     /// by `post-tip-list-button`, cleared by Escape. Keyed by post id, not row
     /// index, for the `OpenPostActions` reason: the loaded window re-ranks in
@@ -506,6 +640,12 @@ impl FeedSnapshotObserver for TuiFeedObserver {
     }
 }
 
+/// Attach the render loop's `FeedChanged` tick to a manager — the timeline's at
+/// [`init`], a profile's author window at mint (`crate::profile`).
+pub(crate) fn observe(manager: &CliFeedManager, tx: &UnboundedSender<UiMessage>) {
+    manager.add_observer(Arc::new(TuiFeedObserver { tx: tx.clone() }));
+}
+
 /// Build the feed manager over the authed transport + the local actor's signing
 /// secret, attach the observer, and kick the first load.
 ///
@@ -524,7 +664,7 @@ pub fn init(
     let manager = Arc::new(FeedManager::new(nest, secret));
     manager.set_period_key_store(period_keys);
     manager.set_preference_store(preferences);
-    manager.add_observer(Arc::new(TuiFeedObserver { tx: tx.clone() }));
+    observe(&manager, tx);
 
     let m = Arc::clone(&manager);
     tokio::spawn(async move {
@@ -585,6 +725,7 @@ pub fn init(
         manager: Some(manager),
         drafts_sync: None,
         content: Some(content),
+        foreign_blobs: Some(fauna_client::post_blob::pinned_plane()),
         images: ImageCache::new(),
         remote_images: ImageCache::new(),
         c2pa: C2paCache::default(),
@@ -599,6 +740,8 @@ pub fn init(
         web_copied: None,
         compose_dialog_open: false,
         lightbox: None,
+        video_confirm: None,
+        video_handoff: std::collections::HashMap::new(),
         #[cfg(feature = "payments")]
         tip_list_open: None,
         bridge_form_open: false,
@@ -860,8 +1003,9 @@ impl Action {
             // `train_post`/`untrain_post` read the model, then put it back; the
             // put is the mutation.
             Action::TrainPost { .. } => Some("fauna.personalization.model.put"),
-            // Choosing a target is local; the verb it arms makes the put.
-            Action::PickTrainTarget(_) => None,
+            // A sheet row trains as the verb would have in context.
+            Action::TrainIntoTarget(_) => Some("fauna.personalization.model.put"),
+            Action::NewTrainedTopic => None,
             Action::CreateFeed => Some("fauna.feed.create"),
             Action::DeleteFeed(_) => Some("fauna.feed.delete"),
             Action::SubscribeBridge => Some("fauna.bridges.feeds.create"),
@@ -904,6 +1048,8 @@ impl Action {
             | Action::ClearSearch
             | Action::LoadMore
             | Action::OpenPostDetail(_)
+            // A `Read` this nest relays (`fauna.posts.get_remote`).
+            | Action::OpenPostDetailFrom { .. }
             // A `Read` (`bluesky.feed.thread`): a view switch like the detail.
             | Action::OpenThread(_)
             | Action::OpenPostActions(_)
@@ -912,6 +1058,11 @@ impl Action {
             | Action::OpenReplyDialog(_)
             | Action::ToggleReplyPublicConfirm
             | Action::OpenLightbox(_)
+            // The video handoff READS a blob (or a proxied path) and hands a
+            // file to the OS — no mutation, the `OpenPaymentLink` class.
+            | Action::OpenVideo { .. }
+            | Action::ConfirmVideoOpen
+            | Action::CancelVideoOpen
             | Action::SetGateTier(_)
             | Action::RemoveComposeAttachment
             | Action::RevealMuted(_)
@@ -944,6 +1095,45 @@ impl Action {
 
 pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
     let manager = app.feed.manager.clone()?;
+    apply_on(app, manager, action)
+}
+
+/// The post-detail door — local for a public post the timeline already holds,
+/// a fetch for a DEEP LINK the feed never loaded (relayed to `home` when the
+/// link names one), and a sealed-body unseal on top for a GATED one.
+fn open_post_detail(
+    app: &mut App,
+    manager: Arc<CliFeedManager>,
+    post_id: String,
+    home: Option<String>,
+) -> Option<Op> {
+    app.feed.mode = Mode::PostDetail(post_id.clone());
+    // A transient overlay doesn't follow you off the list — the
+    // `conversations` posture (its ⋯ overlay clears on thread change);
+    // there is no ui.yaml close affordance on either surface.
+    app.feed.actions_open = None;
+    // Both round trips ride ONE op rather than two actions, because they
+    // are ordered: a post outside the timeline must be fetched before
+    // anything can ask whether it is gated. The op resolves first, then
+    // consults the snapshot — so a card click on a public post still
+    // costs nothing, and neither leg needs the caller to know which case
+    // it is in (`fauna_feed::FeedManager::resolve_post` is a no-op for a
+    // loaded post; the unseal is skipped for a post that isn't gated or
+    // was already unsealed this session).
+    Some(Op::OpenPostDetail {
+        manager,
+        blobs: blob_hosts(&app.feed),
+        post_id,
+        home,
+    })
+}
+
+/// [`apply_local`] over the manager the gesture's row came from — the
+/// timeline's, or a profile's author window (`crate::profile`'s Posts tab, which
+/// routes the card's ⋯ menu, reply dialog and tip list through here). The
+/// post-scoped arms resolve their post against `manager`, never the timeline, so
+/// an overlay opened on a window's row acts on that window.
+pub(crate) fn apply_on(app: &mut App, manager: Arc<CliFeedManager>, action: Action) -> Option<Op> {
     match action {
         // --- network ---
         Action::SelectFeed(id) => {
@@ -981,12 +1171,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // re-check ownership against the post they NAME rather than trusting
         // the paint that produced them.
         Action::StartDeletePost(post_id) => {
-            own_post(app, &post_id)?;
+            own_post(app, &manager, &post_id)?;
             app.feed.delete_confirm = Some(post_id);
             None
         }
         Action::ConfirmDeletePost(post_id) => {
-            own_post(app, &post_id)?;
+            own_post(app, &manager, &post_id)?;
             // Both close on dispatch: the card is about to go, so leaving the
             // menu open would leave it anchored to a post that no longer
             // exists (conversations' `ConfirmDeleteMessage` takes its overlay
@@ -996,7 +1186,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             Some(Op::DeletePost { manager, post_id })
         }
         Action::PublishWeb(post_id) => {
-            own_published_post(app, &post_id, false)?;
+            own_published_post(app, &manager, &post_id, false)?;
             Some(Op::WebPublish {
                 nest: app.session.as_ref()?.client.clone(),
                 manager,
@@ -1004,7 +1194,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             })
         }
         Action::UnpublishWeb(post_id) => {
-            own_published_post(app, &post_id, true)?;
+            own_published_post(app, &manager, &post_id, true)?;
             Some(Op::WebUnpublish {
                 nest: app.session.as_ref()?.client.clone(),
                 manager,
@@ -1017,7 +1207,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // case, and this arm refuses independently rather than trusting the
         // paint (a dead link on the clipboard is worse than no copy).
         Action::CopyWebLink(post_id) => {
-            let slug = own_published_post(app, &post_id, true)?.web_slug.clone()?;
+            let slug = own_published_post(app, &manager, &post_id, true)?
+                .web_slug
+                .clone()?;
             let origin = crate::settings::web::site_link(&app.settings).origin?;
             let url = fauna_client_web::post_page_url(&origin, &slug);
             crate::wizard::copy_to_clipboard(&url);
@@ -1033,7 +1225,7 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // re-minting is free, so re-copying always yields a link that works from
         // now, never a cached one that already expired.
         Action::CopyPaywallLink(post_id) => {
-            let post = own_published_post(app, &post_id, true)?;
+            let post = own_published_post(app, &manager, &post_id, true)?;
             // Gated posts only — the button paints only for them, and this
             // refusal is what keeps a re-ranked window from minting against an
             // ungated post.
@@ -1068,7 +1260,6 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             // is what writes the nest's post-act counters back into it
             // (`FeedManager::interact`). The old direct call is exactly why a
             // tapped ♥ stayed at 0 here.
-            let manager = app.feed.manager.clone()?;
             Some(Op::Interact {
                 manager,
                 post_id,
@@ -1227,6 +1418,32 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             app.feed.actions_open = None;
             None
         }
+
+        // --- the feed-video external handoff (`apps/tui.md` § External media
+        // handoff → *Feed video*): the Media page's gate, on the feed ---
+        Action::OpenVideo { target, .. } => {
+            match crate::settings::external_media_outcome(&app.settings.prefs.external_media) {
+                // `ask` (the default): arm the inline confirm; nothing runs yet.
+                crate::settings::HandoffOutcome::Prompt => {
+                    app.feed.video_confirm = Some(target);
+                    app.feed.actions_open = None;
+                    None
+                }
+                crate::settings::HandoffOutcome::Launched => video_open_op(app, target),
+                // `never` paints the thumbnail inert, so this only fires from a
+                // stale click — the mode says nothing may launch.
+                crate::settings::HandoffOutcome::Suppressed => None,
+            }
+        }
+        Action::ConfirmVideoOpen => {
+            // Only an armed confirm may launch (a stale click is a no-op).
+            let target = app.feed.video_confirm.take()?;
+            video_open_op(app, target)
+        }
+        Action::CancelVideoOpen => {
+            app.feed.video_confirm = None;
+            None
+        }
         #[cfg(feature = "payments")]
         Action::OpenTipList(post_id) => {
             app.feed.tip_list_open = Some(post_id);
@@ -1237,25 +1454,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
         // --- opening the post-detail sub-page: local for a public post the
         // timeline already holds, a fetch for a DEEP LINK the feed never loaded,
         // and a sealed-body unseal on top for a GATED one ---
-        Action::OpenPostDetail(post_id) => {
-            app.feed.mode = Mode::PostDetail(post_id.clone());
-            // A transient overlay doesn't follow you off the list — the
-            // `conversations` posture (its ⋯ overlay clears on thread change);
-            // there is no ui.yaml close affordance on either surface.
-            app.feed.actions_open = None;
-            // Both round trips ride ONE op rather than two actions, because they
-            // are ordered: a post outside the timeline must be fetched before
-            // anything can ask whether it is gated. The op resolves first, then
-            // consults the snapshot — so a card click on a public post still
-            // costs nothing, and neither leg needs the caller to know which case
-            // it is in (`fauna_feed::FeedManager::resolve_post` is a no-op for a
-            // loaded post; the unseal is skipped for a post that isn't gated or
-            // was already unsealed this session).
-            Some(Op::OpenPostDetail {
-                manager,
-                content: app.feed.content.clone(),
-                post_id,
-            })
+        Action::OpenPostDetail(post_id) => open_post_detail(app, manager, post_id, None),
+        Action::OpenPostDetailFrom { post_id, home } => {
+            open_post_detail(app, manager, post_id, Some(home))
         }
         // --- the Bluesky thread page, opened from the post detail ---
         Action::OpenThread(post_id) => {
@@ -1289,9 +1490,9 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             let own = app
                 .session
                 .as_ref()
-                .zip(app.feed.manager.as_ref())
-                .and_then(|(s, m)| {
-                    m.snapshot()
+                .and_then(|s| {
+                    manager
+                        .snapshot()
                         .find_post(&post_id)
                         .map(|p| p.author == s.actor_id)
                 })
@@ -1321,52 +1522,36 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
             None
         }
         // Train-in-context: the verb targets the composed feed's single trained
-        // factor. With none resolved it targets the factor chosen on this post's
-        // open `feed-post-train-target-sheet` — and with no sheet open yet, the
-        // tap opens one (ui.yaml's component spec: "with no in-context factor
-        // they open feed-post-train-target-sheet").
+        // factor. With none resolved the tap opens this post's
+        // `feed-post-train-target-sheet` instead (ui.yaml's component spec:
+        // "with no in-context factor they open feed-post-train-target-sheet"),
+        // which remembers the verb — a second verb tap re-opens it on that one.
         Action::TrainPost { post_id, verb } => {
-            let manager = app.feed.manager.clone()?;
-            let Some(factor) = train_target(app, &manager, &post_id) else {
-                // The registry's first topic starts chosen, as linux's dropdown
-                // does; with none the sheet offers only "New trained topic…".
-                let target = trained_topic_keys(app)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default();
-                app.feed.train_sheet = Some(TrainSheet { post_id, target });
+            let Some(factor) = manager.train_target_factor() else {
+                app.feed.train_sheet = Some(TrainSheet { post_id, verb });
                 return None;
             };
-            // Tapping the already-active verb un-marks it (the toggle semantics
-            // ui.yaml's component spec states); tapping the other verb re-trains.
-            let undo = manager.example_label_for(&post_id, &factor) == Some(verb);
-            app.feed.actions_open = None;
-            app.feed.train_sheet = None;
-            Some(Op::TrainPost {
-                manager,
-                post_id,
-                factor,
-                verb,
-                undo,
-            })
+            train_op(app, manager, post_id, factor, verb)
+        }
+
+        // A sheet row is the train: the verb that opened the sheet, into the
+        // tapped topic (topic-factors.md § Authoring surface & picker).
+        Action::TrainIntoTarget(factor) => {
+            let sheet = app.feed.train_sheet.clone()?;
+            // Only a key the registry holds: a stale row (the topic deleted
+            // since the sheet painted) must not train a dead factor.
+            if !trained_topic_keys(app).contains(&factor) {
+                return None;
+            }
+            train_op(app, manager, sheet.post_id, factor, sheet.verb)
         }
 
         // "New trained topic…" links out to the Trained-topics facet rather than
-        // duplicating its create form here — the shape every other app's sheet
-        // has. A topic key only re-aims the sheet; the verbs make the train.
-        Action::PickTrainTarget(value) => {
-            if value == NEW_TRAINED_TOPIC_OPTION {
-                app.feed.actions_open = None;
-                app.feed.train_sheet = None;
-                open_trained_topics_facet(app);
-                return None;
-            }
-            // Only a key the registry holds: a stale pick (the topic deleted
-            // since the sheet painted) must not aim a train at a dead factor.
-            let known = trained_topic_keys(app).contains(&value);
-            if let Some(sheet) = app.feed.train_sheet.as_mut().filter(|_| known) {
-                sheet.target = value;
-            }
+        // duplicating its create form here — the ratified shape on every app.
+        Action::NewTrainedTopic => {
+            app.feed.actions_open = None;
+            app.feed.train_sheet = None;
+            open_trained_topics_facet(app);
             None
         }
 
@@ -1497,24 +1682,12 @@ pub fn apply_local(app: &mut App, action: Action) -> Option<Op> {
 /// on the agent's path or spawned on the keyboard's. Resolves to an [`Outcome`]:
 /// an error to surface on `error-message` / `compose-error`, or `Done` on
 /// success.
-/// The `feed-post-train-target-sheet` option that leaves for the Trained-topics
-/// facet rather than naming a factor — the sheet's "New trained topic…" entry.
-/// Never a valid factor key (those are `topic:<hex>`), so the two cannot
-/// collide.
-pub const NEW_TRAINED_TOPIC_OPTION: &str = "new-trained-topic";
-
-/// The open target sheet ([`FeedState::train_sheet`]).
-///
-/// A terminal picker cycles on Enter, so choosing and training are two steps
-/// here: the sheet holds the chosen factor and the verbs train into it. Were
-/// choosing itself the train, the first Enter on the picker would train the
-/// post into whichever topic happened to come next.
+/// The open target sheet ([`FeedState::train_sheet`]): which post's verb
+/// opened it, and which verb — the one a tapped row trains with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrainSheet {
     pub post_id: String,
-    /// The chosen factor's stable `topic:<hex>` key; empty while the user has
-    /// no trained topic to choose.
-    pub target: String,
+    pub verb: fauna_feed::TrainVerb,
 }
 
 /// What the ⋯ menu's last copy affordance produced: the exact string it put on
@@ -1640,12 +1813,16 @@ pub enum Op {
     ///
     /// Step 2 has to follow step 1 rather than ride a second action, because a
     /// post outside the timeline has no snapshot row to ask "is this gated?" of
-    /// until the fetch lands. `content` is `None` on a seat with no content API;
-    /// step 1 still runs (the unseal is what needs the blob plane).
+    /// until the fetch lands. `blobs` is `None` on a seat with no content API;
+    /// step 1 still runs (the unseal is what needs the blob plane). The sealed
+    /// body is read from the post's home when another nest is its home.
     OpenPostDetail {
         manager: Arc<CliFeedManager>,
-        content: Option<Arc<dyn NestContentApi>>,
+        blobs: Option<fauna_client::PostBlobHosts>,
         post_id: String,
+        /// The nest the link says the post lives on, when another nest is its
+        /// home: step 1 then resolves through `resolve_post_from`.
+        home: Option<String>,
     },
     /// `feed-post-view-thread-button` — the shared `FeedManager::open_thread`,
     /// which lands loading / loaded / failed on the snapshot itself.
@@ -1719,11 +1896,12 @@ pub enum Op {
     /// render-model.md § D6c): the same bearer-carrying `content.get`, with the
     /// path as its argument instead of `paths::blob::by_hash`. Their bytes are the
     /// nest proxy's plaintext answer — never a sealed attachment — so they skip
-    /// the open seam; their art is cached under the path.
+    /// the open seam; their art is cached under the path. A hash is fetched
+    /// from its [`PostBlob::home`]; a proxied path always from this nest.
     FetchImage {
-        content: Arc<dyn NestContentApi>,
+        blobs: fauna_client::PostBlobHosts,
         manager: Arc<CliFeedManager>,
-        hashes: Vec<String>,
+        hashes: Vec<PostBlob>,
         paths: Vec<String>,
     },
     /// Fetch + rasterize the **revealed** `doc-remote-image` bodies for `urls`.
@@ -1762,9 +1940,19 @@ pub enum Op {
     /// The extra GET is bounded by the posts that claim provenance, which is
     /// why the header survives as a pre-filter rather than being dropped.
     FetchC2pa {
-        content: Arc<dyn NestContentApi>,
+        blobs: fauna_client::PostBlobHosts,
         manager: Arc<CliFeedManager>,
-        hashes: Vec<String>,
+        hashes: Vec<PostBlob>,
+    },
+    /// The feed-video external handoff's network half: fetch the clip by its
+    /// byte path ([`fetch_video_bytes`]), materialize it to the hardened temp
+    /// file and hand that FILE to the OS handler (`apps/tui.md` § External media
+    /// handoff → *Feed video*; never a URL — § *Why a file and not a loopback
+    /// stream*). Whole-file in memory, the ratified first cut.
+    OpenVideo {
+        blobs: fauna_client::PostBlobHosts,
+        manager: Arc<CliFeedManager>,
+        target: VideoTarget,
     },
 }
 
@@ -1796,6 +1984,14 @@ pub enum Outcome {
     /// unreadable image: a provenance check is a UI hint, never a page error.
     /// A transient one is [`Finished::Transient`], forgotten like an image's.
     C2pa(Vec<(String, Finished<bool>)>),
+    /// A feed-video handoff finished: `Ok` once the OS handler was spawned
+    /// (`state = playing`), `Err` with the cause on a failed fetch, open or
+    /// materialization (`state = error` + the page banner). Keyed by
+    /// [`VideoTarget::key`].
+    VideoHandoff {
+        key: String,
+        result: Result<(), String>,
+    },
     /// The web-origin inputs the ⋯ menu's copy affordances resolve against,
     /// folded into the settings page's own state so both surfaces read one
     /// answer. A read failure lands on `error-message` like any other.
@@ -1980,13 +2176,16 @@ impl Op {
             },
             Op::OpenPostDetail {
                 manager,
-                content,
+                blobs,
                 post_id,
+                home,
             } => {
                 // Step 1 — make the post exist in the snapshot at all.
-                if let fauna_feed::PostResolution::TakenDown { .. } =
-                    manager.resolve_post(post_id.clone()).await
-                {
+                let resolution = match home {
+                    Some(home) => manager.resolve_post_from(post_id.clone(), home).await,
+                    None => manager.resolve_post(post_id.clone()).await,
+                };
+                if let fauna_feed::PostResolution::TakenDown { .. } = resolution {
                     // The nest withholds a legally-taken-down post's body from
                     // every viewer, so there is no body to paint — but the
                     // manager parks a tombstone `PostSummary` in the deep-link
@@ -2004,11 +2203,18 @@ impl Op {
                 // idempotent but the fetch is not free, and the (now-resolved)
                 // snapshot tells us which case this is
                 // (`PostSummary::{gated_tier,gated_unlocked}`).
-                let needs_unseal = manager
+                // The sealed body rests where the post does: its home when
+                // another nest is its home (the KeyBlob that opens it still
+                // comes through this nest, inside `unlock_gated_post`).
+                let Some(home) = manager
                     .snapshot()
                     .find_post(&post_id)
-                    .is_some_and(|p| p.gated_tier.is_some() && !p.gated_unlocked);
-                let Some(content) = content.filter(|_| needs_unseal) else {
+                    .filter(|p| p.gated_tier.is_some() && !p.gated_unlocked)
+                    .map(post_home)
+                else {
+                    return Outcome::Done;
+                };
+                let Some(blobs) = blobs else {
                     return Outcome::Done;
                 };
                 // A failure here leaves the post TEASED, never errored: the
@@ -2019,7 +2225,7 @@ impl Op {
                 let Some(hash) = manager.gated_blob_hash(post_id.clone()).await else {
                     return Outcome::Done;
                 };
-                if let Ok(bytes) = content.get(&paths::blob::by_hash(&hash)).await {
+                if let Ok(bytes) = blobs.get(home.as_ref(), &hash).await {
                     let _ = manager.unlock_gated_post(post_id, bytes.to_vec()).await;
                 }
                 Outcome::Done
@@ -2111,7 +2317,7 @@ impl Op {
                 None => Outcome::Done,
             },
             Op::FetchImage {
-                content,
+                blobs,
                 manager,
                 hashes,
                 paths,
@@ -2121,8 +2327,8 @@ impl Op {
                 // the bulk-binary carve-out). The one shared call between fetch and
                 // decode opens a gated post's sealed attachment and hands a public
                 // post's plaintext straight back, so this arm never asks which it has.
-                let arts = futures_util::future::join_all(hashes.into_iter().map(|hash| {
-                    let content = Arc::clone(&content);
+                let arts = futures_util::future::join_all(hashes.into_iter().map(|blob| {
+                    let blobs = blobs.clone();
                     let manager = Arc::clone(&manager);
                     async move {
                         // A miss, a body that will not open, or an undecodable
@@ -2130,7 +2336,8 @@ impl Op {
                         // (shared degrade). A nest that could not serve it right
                         // now is `Transient` — forgotten, so the next kick
                         // retries rather than blanking the image for the session.
-                        let art = match content.get(&paths::blob::by_hash(&hash)).await {
+                        let PostBlob { hash, home } = blob;
+                        let art = match blobs.get(home.as_ref(), &hash).await {
                             Ok(bytes) => manager
                                 .open_media_bytes(&hash, bytes.to_vec())
                                 .and_then(|plain| {
@@ -2148,6 +2355,7 @@ impl Op {
                 }));
                 // A bridged post's proxied picture: fetched from this nest with the
                 // bearer like a blob, rasterized the same way, cached by its path.
+                let content = blobs.own();
                 let proxied = futures_util::future::join_all(paths.into_iter().map(|path| {
                     let content = Arc::clone(&content);
                     async move {
@@ -2170,26 +2378,47 @@ impl Op {
             Op::FetchRemoteImages { urls } => Outcome::RemoteImages(
                 crate::remote_image::fetch_all(urls, crate::thumbnail::POST_IMAGE_COLS).await,
             ),
+            Op::OpenVideo {
+                blobs,
+                manager,
+                target,
+            } => {
+                let result = match fetch_video_bytes(&blobs, &manager, &target).await {
+                    // Client glue, exactly the Media page's: the hardened temp
+                    // file + the fire-and-forget OS spawn.
+                    Ok(bytes) => {
+                        crate::media_handoff::materialize(&video_handoff_name(&bytes), &bytes)
+                            .map(|path| crate::os_open::open(&path.to_string_lossy()))
+                            .map_err(|e| e.to_string())
+                    }
+                    Err(e) => Err(e),
+                };
+                Outcome::VideoHandoff {
+                    key: target.key().to_string(),
+                    result,
+                }
+            }
             Op::FetchC2pa {
-                content,
+                blobs,
                 manager,
                 hashes,
             } => {
-                let results = futures_util::future::join_all(hashes.into_iter().map(|hash| {
-                    let content = Arc::clone(&content);
+                let results = futures_util::future::join_all(hashes.into_iter().map(|blob| {
+                    let blobs = blobs.clone();
                     let manager = Arc::clone(&manager);
                     async move {
+                        let PostBlob { hash, home } = blob;
+                        let home = home.as_ref();
                         // Stage 1 — the uploader's assertion, used only to
                         // decide whether the bytes are worth fetching. A refusal
                         // degrades to `false` (no badge); a nest that could not
                         // answer right now leaves the verdict unsettled, so the
                         // next kick asks again (either stage).
-                        let asserted =
-                            match content.head_has_c2pa(&paths::blob::by_hash(&hash)).await {
-                                Ok(asserted) => asserted,
-                                Err(e) if e.is_transient() => return (hash, Finished::Transient),
-                                Err(_) => false,
-                            };
+                        let asserted = match blobs.head_has_c2pa(home, &hash).await {
+                            Ok(asserted) => asserted,
+                            Err(e) if e.is_transient() => return (hash, Finished::Transient),
+                            Err(_) => false,
+                        };
                         if !asserted {
                             return (hash, Finished::Loaded(false));
                         }
@@ -2198,7 +2427,7 @@ impl Op {
                         // is a `false` for the same reason `Op::FetchImage`
                         // degrades to a placeholder: an unverifiable claim is
                         // not a verified one.
-                        let verified = match content.get(&paths::blob::by_hash(&hash)).await {
+                        let verified = match blobs.get(home, &hash).await {
                             Ok(bytes) => {
                                 manager.open_media_bytes(&hash, bytes.to_vec()).is_some_and(
                                     |plain| fauna_media::process::detect_c2pa_in_bytes(&plain),
@@ -2270,6 +2499,23 @@ pub fn apply_outcome(app: &mut App, outcome: Outcome) {
                 app.feed.c2pa.finish(hash, has_c2pa);
             }
         }
+        // The user asked for this handoff, so a failure lands on the banner as
+        // well as the element's `state` — the Media page's posture.
+        Outcome::VideoHandoff { key, result } => match result {
+            Ok(()) => {
+                app.errors.remove(&crate::pages::Page::Feed);
+                app.feed
+                    .video_handoff
+                    .insert(key, VideoHandoffState::Playing);
+            }
+            Err(e) => {
+                app.errors.insert(
+                    crate::pages::Page::Feed,
+                    fauna_i18n::strings::media::error_external_open(&e),
+                );
+                app.feed.video_handoff.insert(key, VideoHandoffState::Error);
+            }
+        },
         // The mint succeeded and the link is already on the clipboard; folding
         // it is what repaints the button's `copied` attr and the confirmation
         // line. Clears the error slot for the same reason `Done` does — this IS
@@ -2548,9 +2794,17 @@ async fn finish_gated(
 /// forever — the manager notifies on every mutation, including the ones these
 /// resolves cause.
 pub fn fire_resolves(state: &FeedState) {
-    let (Some(manager), Some(snapshot)) = (state.manager.clone(), state.snapshot()) else {
-        return;
-    };
+    if let Some(manager) = &state.manager {
+        fire_resolves_for(manager);
+    }
+}
+
+/// [`fire_resolves`] over any manager whose rows paint as feed cards — the
+/// timeline's, or a profile's author window (`feed.md` § The author window:
+/// "every per-post lazy resolve … works on it as on the timeline").
+pub(crate) fn fire_resolves_for(manager: &Arc<CliFeedManager>) {
+    let snapshot = manager.snapshot();
+    let manager = Arc::clone(manager);
     // Walks the RENDERED set, not just the timeline: a deep-linked post (a
     // search hit the feed never loaded, parked in the snapshot's deep-link slot)
     // owes exactly the same embed resolves as a list post, and `snapshot.posts`
@@ -2580,6 +2834,15 @@ pub fn fire_resolves(state: &FeedState) {
         if post.tips.is_none() {
             let (m2, id) = (Arc::clone(&manager), post.post_id.clone());
             tokio::spawn(async move { m2.resolve_post_tips(id).await });
+        }
+        // The remote author's byline (`feed.md` § The read model → *The remote
+        // author's byline*): a post homed on another nest names its author from
+        // their own signed profile. Fire-once for the same reason as the tips —
+        // every outcome writes a face, an empty one when the author shows none —
+        // and the manager's memo folds an author's N cards into one relay.
+        if post.home_nest_url.is_some() && post.author_display.is_none() {
+            let (m2, id) = (Arc::clone(&manager), post.post_id.clone());
+            tokio::spawn(async move { m2.resolve_author_face(id).await });
         }
         if post.has_media && post.media_hash.is_none() {
             let id = post.post_id.clone();
@@ -2619,48 +2882,64 @@ pub fn fire_resolves(state: &FeedState) {
 /// auth (no `content` plane yet). Marks the requested hashes in flight so the
 /// next tick's gate suppresses a duplicate.
 pub fn kick_image_fetches(app: &mut App) -> Option<Op> {
-    let content = Arc::clone(app.feed.content.as_ref()?);
+    let blobs = blob_hosts(&app.feed)?;
     // Rides along solely to open a gated post's sealed attachments — see
     // [`Op::FetchImage`]. Before auth there is no manager and no content plane
     // either, so the two `?`s bail together.
     let manager = app.feed.manager.clone()?;
     let snapshot = app.feed.snapshot()?;
-    let hashes: Vec<String> = snapshot
-        .rendered_posts()
+    // The profile's Posts tab paints the same cards off its author window, out
+    // of the same image cache — its pictures are fetched on the same tick.
+    let window = app.profile.posts_snapshot();
+    let rendered = || {
+        snapshot
+            .rendered_posts()
+            .chain(window.iter().flat_map(|w| w.posts.iter()))
+    };
+    let hashes: Vec<PostBlob> = rendered()
         .flat_map(|post| {
             // Two by-hash sinks share this one fetch: the post's own
             // `post-image`, and every **revealed** link-preview og:image. The
             // og:image is a content-addressed blob this nest fetched and stored
             // (render-model.md § D4), so it is the same `GET /api/v1/blob/<hash>`
-            // — not a third-party request. An unrevealed preview yields nothing:
-            // the D3/D4 reveal gate is the user's consent, and fetching before it
-            // would defeat the gate while still painting nothing.
+            // — not a third-party request — and always this nest's, while the
+            // post's own image rests on the post's home. An unrevealed preview
+            // yields nothing: the D3/D4 reveal gate is the user's consent, and
+            // fetching before it would defeat the gate while still painting
+            // nothing.
+            let home = post_home(post);
             post.document
                 .first_image_hash()
+                .map(|hash| PostBlob {
+                    hash: hash.to_string(),
+                    home,
+                })
                 .into_iter()
                 .chain(
                     post.document
                         .resolved_link_previews()
                         .into_iter()
                         .filter(|preview| preview.revealed)
-                        .filter_map(|preview| preview.image_hash),
+                        .filter_map(|preview| preview.image_hash)
+                        .map(|hash| PostBlob {
+                            hash: hash.to_string(),
+                            home: None,
+                        }),
                 )
                 .collect::<Vec<_>>()
         })
-        .map(|hash| hash.to_string())
         .collect();
     // Marking in the same pass that accepts a hash is what makes the filter
     // dedupe *within* one tick as well as across ticks: two posts sharing an
     // og:image (the same article linked twice) yield that hash twice in one
     // pass, where a single `post-image` per post never could.
     let mut hashes = hashes;
-    hashes.retain(|hash| app.feed.images.begin(hash));
+    hashes.retain(|blob| app.feed.images.begin(&blob.hash));
     // A bridged post's own pictures (render-model.md § D6c): nest-relative
     // proxied paths, keyed in the same cache by path — a path starts with `/`,
     // so it never collides with a 64-hex hash. They paint immediately: no
     // reveal gate (the user-ruled D6c posture).
-    let mut paths: Vec<String> = snapshot
-        .rendered_posts()
+    let mut paths: Vec<String> = rendered()
         .filter_map(|post| post.document.proxied_post_image())
         .map(str::to_string)
         .collect();
@@ -2669,11 +2948,99 @@ pub fn kick_image_fetches(app: &mut App) -> Option<Op> {
         return None;
     }
     Some(Op::FetchImage {
-        content,
+        blobs,
         manager,
         hashes,
         paths,
     })
+}
+
+/// The feed-video handoff's [`Op::OpenVideo`] for `target`, marking its
+/// thumbnail `loading`. `None` before auth (no content plane yet) or while this
+/// same clip is already loading (a double press fetches once).
+fn video_open_op(app: &mut App, target: VideoTarget) -> Option<Op> {
+    let blobs = blob_hosts(&app.feed)?;
+    let manager = app.feed.manager.clone()?;
+    if app.feed.video_handoff.get(target.key()) == Some(&VideoHandoffState::Loading) {
+        return None;
+    }
+    // Each new handoff deletes the prior clip's file (`media_handoff`: at most
+    // one rests at a time), so no other thumbnail is still playing from here.
+    app.feed.video_handoff.clear();
+    app.feed
+        .video_handoff
+        .insert(target.key().to_string(), VideoHandoffState::Loading);
+    Some(Op::OpenVideo {
+        blobs,
+        manager,
+        target,
+    })
+}
+
+/// The clip's plaintext, by its block's byte path (`apps/tui.md` § External
+/// media handoff → *Feed video*):
+///
+/// - a `Video` asks the shared [`FeedManager::playback_source`] what plays —
+///   its `Url` arm is the unauthenticated blob route (signed plaintext, no
+///   manifest walk, no key); its `Sealed` arm is the same blob, opened under
+///   the per-post key the body unlocked ([`FeedManager::open_media_bytes`], the
+///   sealed-image seam). Either way the bytes are the blob by hash from the
+///   nest the post rests on — its home when another nest is its home — through
+///   the one host pick ([`blob_hosts`]);
+/// - a `ProxiedVideo` is a bearer GET of its proxied path on this nest. It
+///   never goes through `playback_source`, whose `ProxiedVideo` arm mints a
+///   playback ticket for players that cannot carry a bearer — tui is not a
+///   `src=` fetch.
+async fn fetch_video_bytes(
+    blobs: &fauna_client::PostBlobHosts,
+    manager: &CliFeedManager,
+    target: &VideoTarget,
+) -> Result<Vec<u8>, String> {
+    match target {
+        VideoTarget::Blob { hash, home } => {
+            let block = fauna_core::render::RenderBlock::Video {
+                hash: hash.clone(),
+                alt: String::new(),
+            };
+            match manager.playback_source(&block).await {
+                PlaybackSource::Url { .. } => blobs
+                    .get(home.as_ref(), hash)
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|e| e.to_string()),
+                PlaybackSource::Sealed { hash } => {
+                    let sealed = blobs
+                        .get(home.as_ref(), &hash)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    manager
+                        .open_media_bytes(&hash, sealed.to_vec())
+                        .ok_or_else(|| "the sealed video would not open".to_string())
+                }
+                // Unreachable for a `Video` block; the reason is a diagnostic,
+                // never user copy.
+                PlaybackSource::Unplayable { .. } => Err("not a playable video".to_string()),
+            }
+        }
+        VideoTarget::Proxied(path) => blobs
+            .own()
+            .get(path)
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// The handoff file's name: `video` plus the extension of the container the
+/// plaintext sniffs as. The block carries no media type, and the extension is
+/// load-bearing — it is what the OS resolves the player by
+/// (`media_handoff::materialize` keeps only the extension; the stem is its own).
+/// An unrecognized container gets no extension: the honest answer, never a
+/// guessed one.
+fn video_handoff_name(bytes: &[u8]) -> String {
+    fauna_media::process::sniff_known_prefix(bytes)
+        .and_then(|known| fauna_core::share::extension_for_content_type(known.mime()))
+        .map_or_else(|| "video".to_string(), |ext| format!("video.{ext}"))
 }
 
 /// Kick a `doc-remote-image` byte fetch for every **revealed** remote image in
@@ -2707,23 +3074,27 @@ pub fn kick_remote_image_fetches(app: &mut App) -> Option<Op> {
 /// cache, same as the image kick: a hash already in-flight or resolved is
 /// filtered out.
 pub fn kick_c2pa_fetches(app: &mut App) -> Option<Op> {
-    let content = Arc::clone(app.feed.content.as_ref()?);
+    let blobs = blob_hosts(&app.feed)?;
     // Rides along to open a gated post's sealed attachment before the
     // provenance probe reads it — see [`Op::FetchC2pa`] stage 2, the same
     // reason [`kick_image_fetches`] carries it.
     let manager = app.feed.manager.clone()?;
     let snapshot = app.feed.snapshot()?;
-    let mut hashes: Vec<String> = snapshot
+    let mut hashes: Vec<PostBlob> = snapshot
         .rendered_posts()
-        .filter_map(|post| post.document.first_image_hash())
-        .map(|hash| hash.to_string())
+        .filter_map(|post| {
+            post.document.first_image_hash().map(|hash| PostBlob {
+                hash: hash.to_string(),
+                home: post_home(post),
+            })
+        })
         .collect();
-    hashes.retain(|hash| app.feed.c2pa.begin(hash));
+    hashes.retain(|blob| app.feed.c2pa.begin(&blob.hash));
     if hashes.is_empty() {
         return None;
     }
     Some(Op::FetchC2pa {
-        content,
+        blobs,
         manager,
         hashes,
     })
@@ -2742,6 +3113,9 @@ pub fn elements(app: &App) -> Vec<Element> {
         Element::label(ids::PAGE_HEADING, feed::list::TITLE),
         Element::label(ids::FEED_VIEW, ""),
     ];
+    // The nest changed its rules (`nest-rules.md` § Acceptance at joining, and
+    // a change of rules): the one-line notice, a way to the rules surface.
+    out.extend(crate::nest_rules::changed_notice_elements(app));
     let Some(snapshot) = app.feed.snapshot() else {
         return out;
     };
@@ -2773,6 +3147,31 @@ pub fn elements(app: &App) -> Vec<Element> {
             ));
             return out;
         }
+        // The nest source, the same way (`nest-rules.md` § The nest content
+        // policy: the rules bind everything read through the nest).
+        if let Some(withheld) = nest_withheld(app, &snapshot, post_id) {
+            out.push(Element::label(ids::FEED_POST_DETAIL_DIALOG, ""));
+            out.extend(crate::nest_rules::placeholder(
+                &withheld,
+                Gesture::Feed(Action::RevealContent(post_id.clone())),
+                Some((ids::FEED_POST_DETAIL_DIALOG, 0)),
+            ));
+            return out;
+        }
+        // And the content policy — a guardian rule or floor, or the viewer's
+        // own threshold — so a card opened from its placeholder never shows
+        // the body there; the guardian's reason rides beside the frame here
+        // as on the card (`nest-rules.md` § The shared rule editor → *The
+        // reason is the member's to read*).
+        if let Some(composed) = content_withheld(app, &snapshot, post_id) {
+            out.push(Element::label(ids::FEED_POST_DETAIL_DIALOG, ""));
+            out.extend(crate::content_policy::placeholder(
+                &composed,
+                Gesture::Feed(Action::RevealContent(post_id.clone())),
+                Some((ids::FEED_POST_DETAIL_DIALOG, 0)),
+            ));
+            return out;
+        }
         out.extend(post_detail_elements(
             &snapshot,
             post_id,
@@ -2780,10 +3179,13 @@ pub fn elements(app: &App) -> Vec<Element> {
             &app.feed.images,
             &app.feed.remote_images,
             &app.feed.c2pa,
+            &VideoPaint::of(app),
         ));
         // ui.yaml scopes `image-lightbox` to `feed.post_detail` as well as the
         // list card, and `post_detail_elements` paints a `post-image` too.
         out.extend(lightbox_elements(&app.feed));
+        // The detail paints a `video-thumbnail` too, so its armed confirm.
+        out.extend(video_confirm_elements(&app.feed));
         return out;
     }
 
@@ -2936,18 +3338,47 @@ pub fn elements(app: &App) -> Vec<Element> {
         }
         None => {}
     }
-    for (i, post) in snapshot.posts.iter().enumerate() {
+    let manager = app.feed.manager.as_ref();
+    out.extend(post_card_rows(
+        app,
+        manager.map(|m| m.as_ref()),
+        &snapshot.posts,
+        &snapshot.bridge_roster,
+    ));
+    out.extend(post_overlays(app, manager.map(|m| m.as_ref()), &snapshot));
+    // The armed feed-video confirm, flat and once, like the reply dialog.
+    out.extend(video_confirm_elements(&app.feed));
+    // The lightbox last — a modal overlay paints over everything below it (the
+    // `backup-destination-remove-confirm-modal` placement).
+    out.extend(lightbox_elements(&app.feed));
+    out
+}
+
+/// The post-card rows of `posts`, in order — the ONE card walk every surface
+/// that lists posts paints through (`profile.md` § The Posts tab: the profile's
+/// Posts tab is rendered by the feed's own card, never a second post view).
+///
+/// Every arm of a row is here: the region / reported / content-blocked / muted /
+/// collapsed placeholders, the full [`post_card`], and the per-card ⋯ opener —
+/// so a post paints identically wherever it lists. `manager` is the manager the
+/// rows came from (the timeline's, or a profile's author window): the mute
+/// predicate is asked of it. The cards' gestures are `Gesture::Feed`; a host
+/// that is not the feed page re-routes them (`crate::profile`'s Posts tab).
+pub(crate) fn post_card_rows(
+    app: &App,
+    manager: Option<&CliFeedManager>,
+    posts: &[PostSummary],
+    bridge_roster: &[fauna_core::source_glyph::BridgeIdentitySnapshot],
+) -> Vec<Element> {
+    let mut out = Vec::new();
+    for (i, post) in posts.iter().enumerate() {
         // The mute predicate is the SHARED `FeedManager::is_muted` — the sealed
         // `MutedKeywords` scorer the manager installs on a real `fetch_page` —
         // never a second client-side match over the settings list. Two surfaces,
         // two shared seams (the conversations twin runs `body_excludes_matches`
         // post-decrypt because the nest never sees an MLS-sealed body at all).
         let muted = !app.feed.revealed_muted.contains(&post.post_id)
-            && app
-                .feed
-                .manager
-                .as_ref()
-                .is_some_and(|m| m.is_muted(&post.post_id));
+            && manager.is_some_and(|m| m.is_muted(&post.post_id));
         // Content-policy render enforcement (`family-safety.md` § Content
         // policy): the composed verdict over this post's labels — the viewer's
         // own spam/phishing thresholds, plus a guardian floor when supervised.
@@ -2989,10 +3420,18 @@ pub fn elements(app: &App) -> Vec<Element> {
                 || !app.feed.revealed_content.contains(&post.post_id))
         {
             out.extend(region_post_card(post, i, &withheld));
+        } else if let Some(withheld) = crate::nest_rules::nest_verdict(&composed)
+            && (withheld.is_block() || !app.feed.revealed_content.contains(&post.post_id))
+        {
+            // A NEST verdict paints the nest's own placeholder — naming the nest
+            // the post was read through and the admin's reason
+            // (`nest-rules.md` § Don't do these: no silent application); the
+            // region arm's twin, and like it ahead of the generic arms.
+            out.extend(nest_post_card(post, i, &withheld));
         } else if composed.reported() {
             out.extend(reported_post_card(i));
         } else if content_verdict == RenderVerdict::Block {
-            out.extend(blocked_post_card(post, i));
+            out.extend(blocked_post_card(post, i, &composed));
         } else if muted {
             out.extend(muted_post_card(post, i));
         } else if content_verdict == RenderVerdict::Collapse
@@ -3001,7 +3440,7 @@ pub fn elements(app: &App) -> Vec<Element> {
             // After the muted arm: both are revealable collapses, and a post
             // that is muted should say so (the user's own verb) rather than
             // blaming a content floor.
-            out.extend(content_collapsed_post_card(post, i));
+            out.extend(content_collapsed_post_card(post, i, &composed));
         } else {
             out.extend(post_card(
                 post,
@@ -3010,7 +3449,8 @@ pub fn elements(app: &App) -> Vec<Element> {
                 &app.feed.images,
                 &app.feed.remote_images,
                 &app.feed.c2pa,
-                &snapshot.bridge_roster,
+                &VideoPaint::of(app),
+                bridge_roster,
             ));
         }
         // The ⋯ overflow's OPENER is per-card and scoped, because the shared
@@ -3030,25 +3470,43 @@ pub fn elements(app: &App) -> Vec<Element> {
             .within(ids::POST_CARD, i),
         );
     }
+    out
+}
+
+/// The post-card overlays — the ⋯ menu, the tip list, the reply dialog — over
+/// the rows of `snapshot`, which `manager` serves: the ONE painter of each that
+/// every surface listing posts through [`post_card_rows`] calls (`profile.md` §
+/// The Posts tab → *What a row is*), so the profile's Posts tab opens them over
+/// its author window rather than a second copy.
+///
+/// Each paints only while the post it was opened on is one of `snapshot`'s: the
+/// open state is the feed state's, shared by both hosts, and a menu opened on a
+/// profile row must not resurface on a feed page that does not hold the post.
+pub(crate) fn post_overlays(
+    app: &App,
+    manager: Option<&CliFeedManager>,
+    snapshot: &FeedSnapshot,
+) -> Vec<Element> {
+    let mut out = Vec::new();
     // The open menu is painted ONCE, flat, after every card — which is exactly
     // what makes the shared action's unscoped verb reads unambiguous ("a closed
     // popover's children are unmapped, so the one open menu is the only match",
     // `actions/feed.py::train_verb_state`).
-    out.extend(post_actions_menu(app));
+    if let Some(manager) = manager {
+        out.extend(post_actions_menu(app, manager, snapshot));
+    }
     // Same flat-and-once placement as the ⋯ menu, and for the same reason: at
     // most one attribution window is open, so the shared action reads its rows
     // unscoped.
     #[cfg(feature = "payments")]
-    out.extend(tip_list_elements(&app.feed));
+    out.extend(tip_list_elements(&app.feed, snapshot));
     // Same flat-and-once placement again: at most one reply dialog is open.
-    out.extend(reply_dialog_elements(&app.feed, &snapshot));
-    // The lightbox last — a modal overlay paints over everything below it (the
-    // `backup-destination-remove-confirm-modal` placement).
-    out.extend(lightbox_elements(&app.feed));
+    out.extend(reply_dialog_elements(&app.feed, snapshot));
     out
 }
 
-/// The open post-card ⋯ overflow, or nothing when no menu is open.
+/// The open post-card ⋯ overflow, or nothing when no menu is open over one of
+/// `snapshot`'s posts.
 ///
 /// **Train-in-context.** `FeedManager::train_target_factor` answers `Some` only
 /// when the feed's composition has exactly ONE trained factor — then the verbs
@@ -3056,23 +3514,28 @@ pub fn elements(app: &App) -> Vec<Element> {
 /// `feed-post-train-target-sheet` instead, per ui.yaml's component spec: the
 /// verbs would have no unambiguous target, and guessing one would train the
 /// wrong model silently.
-fn post_actions_menu(app: &App) -> Vec<Element> {
-    let Some(post_id) = app.feed.actions_open.clone() else {
+fn post_actions_menu(app: &App, manager: &CliFeedManager, snapshot: &FeedSnapshot) -> Vec<Element> {
+    let Some(post_id) = app
+        .feed
+        .actions_open
+        .clone()
+        .filter(|id| snapshot.find_post(id).is_some())
+    else {
         return Vec::new();
     };
     let mut out = vec![Element::label(ids::FEED_POST_ACTIONS_MENU, String::new())];
-    out.extend(train_verbs(app, &post_id));
+    out.extend(train_verbs(app, manager, &post_id));
     // ⚠ Deliberately OUTSIDE the training half. The web verbs have nothing to
     // do with training, so gating them on its target would hide the whole
     // family behind an unrelated condition — pinned by
     // `the_web_verbs_paint_with_no_in_context_trained_factor`.
-    out.extend(web_publish_verbs(app, &post_id));
+    out.extend(web_publish_verbs(app, manager, &post_id));
     // Last in the menu, and outside the training half for the same reason the
     // web verbs are: delete has nothing to do with training, so gating it there
     // could make an own-post's destruction verb vanish on any feed whose
     // composition resolves no single trained factor.
-    out.extend(delete_verbs(app, &post_id));
-    out.extend(report_verb(app, &post_id));
+    out.extend(delete_verbs(app, manager, &post_id));
+    out.extend(report_verb(app, manager, &post_id));
     out
 }
 
@@ -3081,16 +3544,11 @@ fn post_actions_menu(app: &App) -> Vec<Element> {
 /// `!is_own` off the same `PostSummary::author` the delete verb reads, and
 /// outside the training half for the delete verb's reason. Opens the
 /// shared report sheet (`crate::report`) with the post as its subject.
-fn report_verb(app: &App, post_id: &str) -> Vec<Element> {
+fn report_verb(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
     let Some(session) = app.session.as_ref() else {
         return Vec::new();
     };
-    let Some(post) = app
-        .feed
-        .manager
-        .as_ref()
-        .and_then(|m| m.snapshot().find_post(post_id).cloned())
-    else {
+    let Some(post) = manager.snapshot().find_post(post_id).cloned() else {
         return Vec::new();
     };
     if post.author == session.actor_id {
@@ -3120,8 +3578,8 @@ fn report_verb(app: &App, post_id: &str) -> Vec<Element> {
 /// button rather than sitting beside it — linux's shape, which in turn mirrors
 /// conversations' `dm-message-delete-button`/`-confirm-button` verbatim, so a
 /// second press cannot land on the un-armed verb.
-fn delete_verbs(app: &App, post_id: &str) -> Vec<Element> {
-    if own_post(app, post_id).is_none() {
+fn delete_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
+    if own_post(app, manager, post_id).is_none() {
         return Vec::new();
     }
     let id = post_id.to_string();
@@ -3144,16 +3602,26 @@ fn delete_verbs(app: &App, post_id: &str) -> Vec<Element> {
     )]
 }
 
-/// The factor `post_id`'s training verbs train: the feed's in-context trained
-/// factor, else the one chosen on that post's open target sheet, else none (a
-/// verb then opens the sheet).
-fn train_target(app: &App, manager: &CliFeedManager, post_id: &str) -> Option<String> {
-    manager.train_target_factor().or_else(|| {
-        app.feed
-            .train_sheet
-            .as_ref()
-            .filter(|s| s.post_id == post_id && !s.target.is_empty())
-            .map(|s| s.target.clone())
+/// Train `post_id` into `factor` with `verb` and close the menu — the one
+/// shape behind both a verb tapped in context and a target-sheet row. Tapping
+/// the already-active verb un-marks it (the toggle semantics ui.yaml's
+/// component spec states); the other verb re-trains.
+fn train_op(
+    app: &mut App,
+    manager: Arc<CliFeedManager>,
+    post_id: String,
+    factor: String,
+    verb: fauna_feed::TrainVerb,
+) -> Option<Op> {
+    let undo = manager.example_label_for(&post_id, &factor) == Some(verb);
+    app.feed.actions_open = None;
+    app.feed.train_sheet = None;
+    Some(Op::TrainPost {
+        manager,
+        post_id,
+        factor,
+        verb,
+        undo,
     })
 }
 
@@ -3185,53 +3653,46 @@ fn open_trained_topics_facet(app: &mut App) {
     }
 }
 
-/// `feed-post-train-target-sheet`: the user's trained topics plus "New trained
-/// topic…", as one picker (no row ids of its own exist in ui.yaml). Its value
-/// is the chosen factor's stable key — or, with no topic to choose, the
-/// new-topic entry, so Enter still reaches it — and each option paints the
-/// user's own name for the topic.
-fn train_target_sheet(app: &App, sheet: &TrainSheet) -> Element {
-    let topics = &app.settings.trained_topics.rows;
-    let mut keys = Vec::new();
-    let mut labels = Vec::new();
-    for t in topics {
-        if let Some(key) = t.factor_key.clone() {
-            keys.push(key);
-            labels.push(t.name.clone());
-        }
-    }
-    keys.push(NEW_TRAINED_TOPIC_OPTION.to_string());
-    labels.push(fauna_i18n::strings::personalization::TRAINED_FACTOR_CREATE.to_string());
-    let value = if sheet.target.is_empty() {
-        NEW_TRAINED_TOPIC_OPTION.to_string()
-    } else {
-        sheet.target.clone()
-    };
-    let display = keys
-        .iter()
-        .position(|k| *k == value)
-        .map(|i| labels[i].clone())
-        .unwrap_or_default();
-    Element::select(
+/// `feed-post-train-target-sheet` (a `view`) and its rows: one
+/// `feed-post-train-target-item` button per trained topic in registry order —
+/// the user's name as text, the stable key's hex as the `factor` attr (the
+/// `personalization-trained-factor-item` convention, hex alone) — then
+/// `feed-post-train-target-new-button` last. With zero topics only that entry
+/// paints. A corrupt (keyless) topic has no model to train and gets no row.
+fn train_target_sheet(app: &App) -> Vec<Element> {
+    let mut out = vec![Element::label(
         ids::FEED_POST_TRAIN_TARGET_SHEET,
-        value,
-        SelectTarget::TrainTarget,
-        keys,
-    )
-    .labelled(feed::TRAIN_TARGET_TITLE)
-    .display_value(display)
-    .option_labels(labels)
+        feed::TRAIN_TARGET_TITLE,
+    )];
+    for t in &app.settings.trained_topics.rows {
+        let Some(key) = t.factor_key.clone() else {
+            continue;
+        };
+        let hex = key.strip_prefix("topic:").unwrap_or(&key).to_string();
+        out.push(
+            Element::gesture_button(
+                ids::FEED_POST_TRAIN_TARGET_ITEM,
+                t.name.clone(),
+                true,
+                Gesture::Feed(Action::TrainIntoTarget(key)),
+            )
+            .attr("factor", hex),
+        );
+    }
+    out.push(Element::gesture_button(
+        ids::FEED_POST_TRAIN_TARGET_NEW_BUTTON,
+        fauna_i18n::strings::personalization::TRAINED_FACTOR_CREATE,
+        true,
+        Gesture::Feed(Action::NewTrainedTopic),
+    ));
+    out
 }
 
-/// The training half of the ⋯ overflow: both verbs — against the in-context
-/// factor, else the target sheet's choice — and the sheet itself once a verb
-/// has opened it.
-fn train_verbs(app: &App, post_id: &str) -> Vec<Element> {
+/// The training half of the ⋯ overflow: both verbs against the in-context
+/// factor, and the target sheet once a verb with none has opened it.
+fn train_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
     let mut out = Vec::new();
-    let Some(manager) = app.feed.manager.as_ref() else {
-        return out;
-    };
-    let factor = train_target(app, manager, post_id);
+    let factor = manager.train_target_factor();
     let post_id = post_id.to_string();
     // The marker lives in the SEALED model, so it renders the same across
     // restarts and devices — `example_label_for`, never a local set. With no
@@ -3269,13 +3730,13 @@ fn train_verbs(app: &App, post_id: &str) -> Vec<Element> {
             .attr("state", if marked == Some(verb) { "on" } else { "off" }),
         );
     }
-    if let Some(sheet) = app
+    if app
         .feed
         .train_sheet
         .as_ref()
-        .filter(|s| s.post_id == post_id)
+        .is_some_and(|s| s.post_id == post_id)
     {
-        out.push(train_target_sheet(app, sheet));
+        out.extend(train_target_sheet(app));
     }
     out
 }
@@ -3296,16 +3757,11 @@ fn train_verbs(app: &App, post_id: &str) -> Vec<Element> {
 /// unreachable, and the doc is explicit that the UI must say so rather than hand
 /// out a link that cannot load. The takedown stays live — it needs no origin,
 /// and it is the one thing a user with an unreachable site may well want.
-fn web_publish_verbs(app: &App, post_id: &str) -> Vec<Element> {
+fn web_publish_verbs(app: &App, manager: &CliFeedManager, post_id: &str) -> Vec<Element> {
     let Some(session) = app.session.as_ref() else {
         return Vec::new();
     };
-    let Some(post) = app
-        .feed
-        .manager
-        .as_ref()
-        .and_then(|m| m.snapshot().find_post(post_id).cloned())
-    else {
+    let Some(post) = manager.snapshot().find_post(post_id).cloned() else {
         return Vec::new();
     };
     if post.author != session.actor_id {
@@ -3418,19 +3874,14 @@ fn decode_post_id(post_id: &str) -> Result<Vec<u8>, String> {
 /// and copy verbs (which need a live slug) from publish (which needs none).
 fn own_published_post(
     app: &App,
+    manager: &CliFeedManager,
     post_id: &str,
     want_published: bool,
 ) -> Option<fauna_feed::PostSummary> {
     let session = app.session.as_ref()?;
     // Owned: `snapshot()` hands back a guard, so a borrow into it cannot outlive
     // this call.
-    let post = app
-        .feed
-        .manager
-        .as_ref()?
-        .snapshot()
-        .find_post(post_id)
-        .cloned()?;
+    let post = manager.snapshot().find_post(post_id).cloned()?;
     (post.author == session.actor_id && post.web_slug.is_some() == want_published).then_some(post)
 }
 
@@ -3441,15 +3892,9 @@ fn own_published_post(
 /// `fauna.posts.delete` is authorship-gated nest-side by three independent
 /// checks, so this is not the security boundary; it is what stops a verb
 /// painting (or firing) where it could only ever be refused.
-fn own_post(app: &App, post_id: &str) -> Option<fauna_feed::PostSummary> {
+fn own_post(app: &App, manager: &CliFeedManager, post_id: &str) -> Option<fauna_feed::PostSummary> {
     let session = app.session.as_ref()?;
-    let post = app
-        .feed
-        .manager
-        .as_ref()?
-        .snapshot()
-        .find_post(post_id)
-        .cloned()?;
+    let post = manager.snapshot().find_post(post_id).cloned()?;
     (post.author == session.actor_id).then_some(post)
 }
 
@@ -3667,16 +4112,79 @@ fn post_image_element(hash: &str, images: &ImageCache) -> Element {
 /// Text is the play glyph + the hash (or path), so the element is addressable and carries a
 /// paint observable in every load state, exactly like the image placeholder.
 ///
-/// **Not clickable, and deliberately not byte-loaded.** Inline AV playback is one of tui's
-/// four declared platform absences (`tui.md` § Declared platform absences), so there is no
-/// gesture to attach; and a *poster* frame would be what a still preview needs, which no
+/// **Activation is the external-media handoff, not inline playback.** Inline AV playback is
+/// one of tui's declared platform absences (`tui.md` § Declared platform absences), so the
+/// element is the activation surface for the OS handoff instead (`tui.md` § External media
+/// handoff → *Feed video*): under `ask`/`always` it is a button whose gesture is
+/// [`Action::OpenVideo`]; under `never` it stays an inert label — still painted, since it is
+/// the block's only element. It publishes `state` (`idle`/`loading`/`playing`/`error`), the
+/// cross-app vocabulary (`render-model.md` § D6c → *Inline playback*). Still never
+/// byte-loaded for its paint: a *poster* frame would be what a still preview needs, which no
 /// writer populates today (`MediaItem::thumbnail` is `None` everywhere — see
-/// `RenderBlock::Video`'s own note). Rasterizing the video blob itself as an image is exactly
-/// the confusion the typed variant exists to prevent. Painting the marker is real parity here:
-/// `video-thumbnail` is NOT among tui's declared absences, and before this a video post
-/// painted a permanently-failed `post-image` placeholder instead.
-fn video_thumbnail_element(hash_or_path: &str) -> Element {
-    Element::label(ids::VIDEO_THUMBNAIL, format!("▶ {hash_or_path}"))
+/// `RenderBlock::Video`'s own note), and rasterizing the video blob itself as an image is
+/// exactly the confusion the typed variant exists to prevent.
+fn video_thumbnail_element(post_id: &str, target: VideoTarget, video: &VideoPaint<'_>) -> Element {
+    let element = Element::label(ids::VIDEO_THUMBNAIL, format!("▶ {}", target.key())).attr(
+        "state",
+        VideoHandoffState::token(video.states.get(target.key())),
+    );
+    if video.live {
+        element.clickable(Gesture::Feed(Action::OpenVideo {
+            post_id: post_id.to_string(),
+            target,
+        }))
+    } else {
+        element
+    }
+}
+
+/// What a `video-thumbnail` paints from beyond its own block.
+struct VideoPaint<'a> {
+    /// Whether activation hands off at all — `false` under `never`
+    /// ([`crate::settings::external_media_outcome`]).
+    live: bool,
+    /// [`FeedState::video_handoff`].
+    states: &'a std::collections::HashMap<String, VideoHandoffState>,
+}
+
+impl<'a> VideoPaint<'a> {
+    fn of(app: &'a App) -> Self {
+        VideoPaint {
+            live: crate::settings::external_media_outcome(&app.settings.prefs.external_media)
+                != crate::settings::HandoffOutcome::Suppressed,
+            states: &app.feed.video_handoff,
+        }
+    }
+}
+
+/// The armed feed-video confirm (`ask`, the default) — the Media page's
+/// `media-external-open-*` inline confirm, reused on the feed (scope extended
+/// to the feed page, user-approved 2026-10-16), or nothing while none is armed.
+/// Painted flat like the lightbox: at most one is open.
+fn video_confirm_elements(state: &FeedState) -> Vec<Element> {
+    if state.video_confirm.is_none() {
+        return Vec::new();
+    }
+    use fauna_i18n::strings::media;
+    vec![
+        Element::label(
+            ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL,
+            feed::VIDEO_EXTERNAL_OPEN_CONFIRM_TITLE,
+        ),
+        Element::chrome(media::EXTERNAL_OPEN_CONFIRM_BODY),
+        Element::gesture_button(
+            ids::MEDIA_EXTERNAL_OPEN_CONFIRM_BUTTON,
+            media::EXTERNAL_OPEN_CONFIRM,
+            true,
+            Gesture::Feed(Action::ConfirmVideoOpen),
+        ),
+        Element::gesture_button(
+            ids::MEDIA_EXTERNAL_OPEN_CANCEL_BUTTON,
+            media::EXTERNAL_OPEN_CANCEL,
+            true,
+            Gesture::Feed(Action::CancelVideoOpen),
+        ),
+    ]
 }
 
 /// The `link-preview-image` element for a **revealed** og:image `hash`: the
@@ -3762,8 +4270,8 @@ fn tip_elements(post: &PostSummary, scope: Option<(&str, usize)>) -> Vec<Element
 /// client-side trust check here would re-open exactly the per-reader
 /// re-checking that discipline exists to prevent.
 #[cfg(feature = "payments")]
-fn tip_list_elements(state: &FeedState) -> Vec<Element> {
-    let (Some(post_id), Some(snapshot)) = (&state.tip_list_open, state.snapshot()) else {
+fn tip_list_elements(state: &FeedState, snapshot: &FeedSnapshot) -> Vec<Element> {
+    let Some(post_id) = &state.tip_list_open else {
         return Vec::new();
     };
     let Some(tips) = snapshot
@@ -3821,7 +4329,7 @@ fn tip_list_elements(state: &FeedState) -> Vec<Element> {
 ///
 /// Painted flat, not scoped: the test reads `is_visible("image-lightbox")`
 /// unscoped, and there is exactly one at a time.
-fn lightbox_elements(state: &FeedState) -> Vec<Element> {
+pub(crate) fn lightbox_elements(state: &FeedState) -> Vec<Element> {
     let Some(hash) = &state.lightbox else {
         return Vec::new();
     };
@@ -3855,8 +4363,10 @@ fn reply_dialog_elements(state: &FeedState, snapshot: &FeedSnapshot) -> Vec<Elem
     let Some(draft) = &state.reply_draft else {
         return Vec::new();
     };
-    let target = snapshot.find_post(&draft.post_id);
-    let author = target.map(|p| p.author.clone()).unwrap_or_default();
+    let Some(target) = snapshot.find_post(&draft.post_id) else {
+        return Vec::new();
+    };
+    let author = target.author.clone();
     let mut out = vec![Element::label(
         ids::FEED_REPLY_DIALOG,
         feed::post::replying_to_user(&author),
@@ -3867,10 +4377,8 @@ fn reply_dialog_elements(state: &FeedState, snapshot: &FeedSnapshot) -> Vec<Elem
     // (`feed-reply-public-confirm`) only where this reader cannot write for
     // the audience (`ui/feed.md` § Encryption at rest → *Ruling 5's build —
     // the shape*, (d) + (e)). A public target paints neither.
-    let audience = target.and_then(|p| p.reply_audience);
-    if let Some(target) = target
-        && let Some(audience) = audience
-    {
+    let audience = target.reply_audience;
+    if let Some(audience) = audience {
         let text = match audience {
             ReplyAudience::SealedToRoom => {
                 feed::post::reply_audience_room(target.room_label.as_deref().unwrap_or_default())
@@ -3928,15 +4436,18 @@ fn muted_post_card(post: &PostSummary, i: usize) -> Vec<Element> {
     vec![
         Element::gesture_button(
             ids::POST_CARD,
-            feed::POST_MUTED_PLACEHOLDER,
+            fauna_i18n::strings::muted_words::COLLAPSED,
             true,
             Gesture::Feed(Action::OpenPostDetail(post.post_id.clone())),
         ),
-        Element::label(ids::FEED_POST_MUTED, feed::POST_MUTED_PLACEHOLDER)
-            .within(ids::POST_CARD, i),
+        Element::label(
+            ids::FEED_POST_MUTED,
+            fauna_i18n::strings::muted_words::COLLAPSED,
+        )
+        .within(ids::POST_CARD, i),
         Element::gesture_button(
             ids::FEED_POST_MUTED_REVEAL_BUTTON,
-            feed::POST_MUTED_REVEAL,
+            fauna_i18n::strings::muted_words::REVEAL,
             true,
             Gesture::Feed(Action::RevealMuted(post.post_id.clone())),
         )
@@ -3953,21 +4464,25 @@ fn muted_post_card(post: &PostSummary, i: usize) -> Vec<Element> {
 /// placeholder, so a blocked post cannot leak what it says and
 /// `count("feed-post-text")` naturally excludes it, as on the other six apps.
 /// `content-policy-blocked-notice` is the ui.yaml id (user-approved 2026-07-15)
-/// the e2e drives.
-fn blocked_post_card(post: &PostSummary, i: usize) -> Vec<Element> {
-    vec![
-        Element::gesture_button(
-            ids::POST_CARD,
-            family::CONTENT_BLOCKED_NOTICE,
-            true,
-            Gesture::Feed(Action::OpenPostDetail(post.post_id.clone())),
-        ),
-        Element::label(
-            ids::CONTENT_POLICY_BLOCKED_NOTICE,
-            family::CONTENT_BLOCKED_NOTICE,
-        )
-        .within(ids::POST_CARD, i),
-    ]
+/// the e2e drives; `state="blocked"` tells it from the collapse arm's.
+///
+/// The guardian's reason, when a rule of the guardian's document drove the
+/// block, paints beside the notice as `content-policy-blocked-reason`
+/// ([`crate::content_policy::placeholder`]); the card's own text stays the
+/// frame.
+fn blocked_post_card(post: &PostSummary, i: usize, composed: &ComposedVerdict) -> Vec<Element> {
+    let mut els = vec![Element::gesture_button(
+        ids::POST_CARD,
+        family::CONTENT_BLOCKED_NOTICE,
+        true,
+        Gesture::Feed(Action::OpenPostDetail(post.post_id.clone())),
+    )];
+    els.extend(crate::content_policy::placeholder(
+        composed,
+        Gesture::Feed(Action::RevealContent(post.post_id.clone())),
+        Some((ids::POST_CARD, i)),
+    ));
+    els
 }
 
 /// A post the viewer **reported** — or whose author they reported
@@ -3987,6 +4502,7 @@ fn reported_post_card(i: usize) -> Vec<Element> {
             ids::CONTENT_POLICY_BLOCKED_NOTICE,
             fauna_i18n::strings::moderation::report::HIDDEN_PLACEHOLDER,
         )
+        .attr("state", "blocked")
         .attr("source", "reported")
         .within(ids::POST_CARD, i),
     ]
@@ -4007,6 +4523,80 @@ fn region_withheld(
     (withheld.verb == fauna_client_region::RegionVerb::Block
         || !app.feed.revealed_content.contains(&post.post_id))
     .then_some(withheld)
+}
+
+/// [`region_withheld`] for the nest source: the open post's nest placeholder,
+/// unless it is a revealed `collapse`.
+fn nest_withheld(
+    app: &App,
+    snapshot: &FeedSnapshot,
+    post_id: &str,
+) -> Option<crate::nest_rules::NestPlaceholder> {
+    let post = snapshot.find_post(post_id)?;
+    let composed = crate::region::verdict_for(app, &post.post_id, &post.labels, None, || {
+        crate::region::post_input(post)
+    });
+    let withheld = crate::nest_rules::nest_verdict(&composed)?;
+    (withheld.is_block() || !app.feed.revealed_content.contains(&post.post_id)).then_some(withheld)
+}
+
+/// [`nest_withheld`] for the content-policy arms: the open post's composed
+/// verdict when it is a `block`, or a `collapse` not yet revealed — and no
+/// region or nest drove it (those paint their own placeholders first).
+fn content_withheld(app: &App, snapshot: &FeedSnapshot, post_id: &str) -> Option<ComposedVerdict> {
+    let post = snapshot.find_post(post_id)?;
+    let composed = crate::region::verdict_for(app, &post.post_id, &post.labels, None, || {
+        crate::region::post_input(post)
+    });
+    if composed.region().is_some() || composed.nest().is_some() {
+        return None;
+    }
+    let withheld = composed.verdict == RenderVerdict::Block
+        || (composed.verdict == RenderVerdict::Collapse
+            && !app.feed.revealed_content.contains(&post.post_id));
+    withheld.then_some(composed)
+}
+
+/// How many posts the feed page's current surface NEST-blocks — the verdict
+/// side of the convention-17 "a nest Block never renders silent" invariant
+/// (`crate::nest_rules::block_render_json`), the [`region_blocked_count`] twin.
+pub(crate) fn nest_blocked_count(app: &App) -> usize {
+    let Some(snapshot) = app.feed.snapshot() else {
+        return 0;
+    };
+    let is_blocked = |post: &PostSummary| {
+        let composed = crate::region::verdict_for(app, &post.post_id, &post.labels, None, || {
+            crate::region::post_input(post)
+        });
+        crate::nest_rules::nest_verdict(&composed).is_some_and(|p| p.is_block())
+    };
+    match &app.feed.mode {
+        Mode::List => snapshot.posts.iter().filter(|p| is_blocked(p)).count(),
+        Mode::PostDetail(id) => snapshot
+            .find_post(id)
+            .map_or(0, |p| usize::from(is_blocked(p))),
+        Mode::CreateFeed | Mode::Thread(_) => 0,
+    }
+}
+
+/// A post a **nest** rule blocks or collapses (`nest-rules.md` § Element IDs):
+/// the placeholder in place of the body, scoped in `post-card[i]` — the
+/// [`region_post_card`] twin.
+fn nest_post_card(
+    post: &PostSummary,
+    i: usize,
+    withheld: &crate::nest_rules::NestPlaceholder,
+) -> Vec<Element> {
+    let mut els = vec![Element::label(
+        ids::POST_CARD,
+        crate::nest_rules::notice_text(withheld),
+    )];
+    els.extend(crate::nest_rules::placeholder(
+        withheld,
+        Gesture::Feed(Action::RevealContent(post.post_id.clone())),
+        Some((ids::POST_CARD, i)),
+    ));
+    els
 }
 
 /// How many posts the feed page's current surface REGION-blocks — the verdict
@@ -4061,35 +4651,39 @@ fn region_post_card(
 /// guardian `collapse` floor. One-tap reveal, session-local; the floor itself
 /// persists.
 ///
-/// The placeholder and the reveal are untagged ([`Element::chrome`] /
-/// [`Element::chrome_button`]): ui.yaml scopes no id to this arm, and both
-/// sibling implementations (linux's `build_content_collapse`, web's
-/// `PostCard.svelte`) made the same call — "v1 e2e drives the block case".
-fn content_collapsed_post_card(post: &PostSummary, i: usize) -> Vec<Element> {
-    vec![
-        Element::gesture_button(
-            ids::POST_CARD,
-            family::CONTENT_COLLAPSED_NOTICE,
-            true,
-            Gesture::Feed(Action::OpenPostDetail(post.post_id.clone())),
-        ),
-        Element::chrome(family::CONTENT_COLLAPSED_NOTICE).within(ids::POST_CARD, i),
-        Element::chrome_button(
-            family::CONTENT_REVEAL_BUTTON,
-            Gesture::Feed(Action::RevealContent(post.post_id.clone())),
-        )
-        .within(ids::POST_CARD, i),
-    ]
+/// The placeholder is the block arm's `content-policy-blocked-notice` in
+/// `state="collapsed"`, beside `content-policy-collapsed-reveal-button` — the
+/// region engine's notice + reveal pair, for the content policy (ids
+/// user-approved 2026-10-16), both scoped in `post-card[i]`; a guardian
+/// document rule's reason paints beside them, as on the block arm.
+fn content_collapsed_post_card(
+    post: &PostSummary,
+    i: usize,
+    composed: &ComposedVerdict,
+) -> Vec<Element> {
+    let mut els = vec![Element::gesture_button(
+        ids::POST_CARD,
+        family::CONTENT_COLLAPSED_NOTICE,
+        true,
+        Gesture::Feed(Action::OpenPostDetail(post.post_id.clone())),
+    )];
+    els.extend(crate::content_policy::placeholder(
+        composed,
+        Gesture::Feed(Action::RevealContent(post.post_id.clone())),
+        Some((ids::POST_CARD, i)),
+    ));
+    els
 }
 
 /// What the feed calls a post's author: the one shared resolver
 /// (`fauna_core::format::peer_display_label`, value-formatting.md § Peer
 /// display label) over the viewer's own nickname for them (contacts.md § The
-/// private overlay). A **bridged** author's face — the display name and handle
-/// the origin bridge served, `PostSummary.author_display` (bridges.md
-/// § Unified feed ingestion → *Bridged authors*) — fills the resolver's
-/// self-published-name and handle slots, so the chain reads nickname → display
-/// name → handle → short id; a native author carries neither today and reads
+/// private overlay). The author's face, `PostSummary.author_display` — a
+/// bridged author's as the origin bridge served it, a local native author's as
+/// their nest projected it, a remote native author's from their own signed
+/// profile (bridges.md § Unified feed ingestion → *Bridged authors*) — fills
+/// the resolver's self-published-name and handle slots, so the chain reads
+/// nickname → display name → handle → short id; an author with no face reads
 /// as the canonical short id.
 fn author_label(app: &App, post: &PostSummary) -> String {
     let nickname = crate::contacts::overlay_projection(app).and_then(|p| p.nickname(&post.author));
@@ -4103,6 +4697,18 @@ fn author_label(app: &App, post: &PostSummary) -> String {
     .primary
 }
 
+/// The author line's activation — `post-author` on a card,
+/// `feed-post-detail-author` in the detail dialog: open the author's Profile
+/// with the post's home carried, `PostSummary.home_nest_url` (`None` for a post
+/// homed here; `profile.md` § Layout & flow → *Reaching another actor's
+/// profile*). The viewer's own id normalizes to SELF at the dispatch.
+fn open_author(post: &PostSummary) -> Gesture {
+    Gesture::OpenProfile {
+        actor: Some(post.author.clone()),
+        home: post.home_nest_url.clone(),
+    }
+}
+
 /// One post card, with its children scoped under `post-card[i]`.
 ///
 /// The children carry the **same literal id** repeated per card, addressed by
@@ -4110,6 +4716,7 @@ fn author_label(app: &App, post: &PostSummary) -> String {
 /// convention the shared feed suites use; it is NOT `post-card-{i}` (a
 /// dash-index id) and NOT `post-card[{i}]` as a literal id string. Registering
 /// the wrong one leaves every scoped query resolving to nothing.
+#[allow(clippy::too_many_arguments)]
 fn post_card(
     post: &PostSummary,
     author: String,
@@ -4117,6 +4724,7 @@ fn post_card(
     images: &ImageCache,
     remote_images: &ImageCache,
     c2pa: &C2paCache,
+    video: &VideoPaint<'_>,
     bridges: &[fauna_core::source_glyph::BridgeIdentitySnapshot],
 ) -> Vec<Element> {
     // A REPOST ROW (`feed.md` § Interaction bar → Repost, ratified 2026-08-10):
@@ -4149,7 +4757,12 @@ fn post_card(
             post_id: post.post_id.clone(),
             is_media: post.plays_media,
         }),
-        Element::label(ids::POST_AUTHOR, author).within(ids::POST_CARD, i),
+        // The author line opens the author's Profile with the post's home
+        // carried (`feed.md` § User actions; ui.yaml `click post-author →
+        // profile`). The id stays `type: text`: the registered text is the
+        // author label, unchanged — only the activation is new.
+        Element::gesture_button(ids::POST_AUTHOR, author, true, open_author(post))
+            .within(ids::POST_CARD, i),
         // The document, walked. The registry still reads its plaintext, which is
         // what every app's `feed-post-text` reports. For a repost row this is
         // the folded embed alone (the body is empty by construction).
@@ -4275,6 +4888,22 @@ fn post_card(
         );
     }
 
+    // Bought, the author's grant still on its way (`monetization.md` § Per-post
+    // pay-to-unlock → *a completed buy must not be re-offered*): the shared
+    // marker the buy sets and every later declined resolve re-sets. Never set
+    // while the offer is (the buy clears it in the same write), and the
+    // `gated_unlocked` check keeps it off an opened post.
+    #[cfg(feature = "payments")]
+    if post.unlock_offer.is_none() && post.unlock_purchase_pending && !post.gated_unlocked {
+        out.push(
+            Element::label(
+                ids::GATED_POST_PURCHASE_PENDING,
+                feed::post::PURCHASE_PENDING,
+            )
+            .within(ids::POST_CARD, i),
+        );
+    }
+
     // The tip surface (`monetization.md` § Tips) — resolved lazily by
     // `fire_resolves`, absent until then and on an untipped post.
     #[cfg(feature = "payments")]
@@ -4326,11 +4955,17 @@ fn post_card(
         out.push(post_image_element(path, images).within(ids::POST_CARD, i));
     }
     if let Some(hash) = post.document.first_video_hash() {
-        out.push(video_thumbnail_element(hash).within(ids::POST_CARD, i));
+        out.push(
+            video_thumbnail_element(&post.post_id, video_blob(post, hash), video)
+                .within(ids::POST_CARD, i),
+        );
     } else if let Some(path) = post.document.proxied_post_video() {
         // A bridged post's own video (render-model.md § D6c → *Proxied video*), in the
-        // same slot, keyed by its proxied path — never byte-loaded.
-        out.push(video_thumbnail_element(path).within(ids::POST_CARD, i));
+        // same slot, keyed by its proxied path — never byte-loaded for its paint.
+        out.push(
+            video_thumbnail_element(&post.post_id, VideoTarget::Proxied(path.to_string()), video)
+                .within(ids::POST_CARD, i),
+        );
     }
     for element in crate::document::remote_image_elements(&post.document, remote_images) {
         out.push(element.within(ids::POST_CARD, i));
@@ -4350,7 +4985,9 @@ fn post_card(
         );
         // The two embed badges describe a DECODED envelope; a withheld or gone
         // post had none to verify, so neither can apply.
-        let decoded = quoted.legal_takedown_ref.is_none() && !quoted.not_found;
+        let decoded = quoted.legal_takedown_ref.is_none()
+            && !quoted.not_found
+            && !(quoted.admin_block_reason.is_some() && quoted.body.is_empty());
         // The embed badge keys off the *quoted* post's own verification,
         // folded into `RenderBlock::QuotedPost::verification` —
         // independent of the focal card's badge above.
@@ -4511,12 +5148,21 @@ fn post_detail_elements(
     images: &ImageCache,
     remote_images: &ImageCache,
     c2pa: &C2paCache,
+    video: &VideoPaint<'_>,
 ) -> Vec<Element> {
     std::iter::once(Element::label(ids::FEED_POST_DETAIL_DIALOG, ""))
         .chain(
-            post_detail_contents(snapshot, post_id, author_label, images, remote_images, c2pa)
-                .into_iter()
-                .map(|e| e.within(ids::FEED_POST_DETAIL_DIALOG, 0)),
+            post_detail_contents(
+                snapshot,
+                post_id,
+                author_label,
+                images,
+                remote_images,
+                c2pa,
+                video,
+            )
+            .into_iter()
+            .map(|e| e.within(ids::FEED_POST_DETAIL_DIALOG, 0)),
         )
         .collect()
 }
@@ -4529,6 +5175,7 @@ fn post_detail_contents(
     images: &ImageCache,
     remote_images: &ImageCache,
     c2pa: &C2paCache,
+    video: &VideoPaint<'_>,
 ) -> Vec<Element> {
     let mut out = Vec::new();
     let Some(post) = snapshot.find_post(post_id) else {
@@ -4550,14 +5197,36 @@ fn post_detail_contents(
         ));
         return out;
     }
-    out.push(Element::label(
+    // An admin-blocked post (`moderation.md` § Admin block of a reported
+    // item): for any viewer but its author the nest withheld the body, so the
+    // shared notice stands in the body area exactly as the tombstone does; the
+    // author's own read keeps the body, and the notice paints beside it.
+    if let Some(reason) = post.admin_block_reason.as_deref()
+        && post.body.is_empty()
+    {
+        out.push(Element::label(
+            ids::FEED_POST_DETAIL_BODY,
+            crate::moderation::admin_block_notice(reason),
+        ));
+        return out;
+    }
+    out.push(Element::gesture_button(
         ids::FEED_POST_DETAIL_AUTHOR,
         author_label(post),
+        true,
+        open_author(post),
     ));
     out.push(Element::document(
         ids::FEED_POST_DETAIL_BODY,
         post.document.clone(),
     ));
+    if let Some(reason) = post.admin_block_reason.as_deref() {
+        // Beside the author's own body: no dedicated id (none approved), so
+        // the notice rides as chrome right after the body.
+        out.push(Element::chrome(crate::moderation::admin_block_notice(
+            reason,
+        )));
+    }
     if post.offers_thread_view() {
         out.push(Element::gesture_button(
             ids::FEED_POST_VIEW_THREAD_BUTTON,
@@ -4568,6 +5237,13 @@ fn post_detail_contents(
     }
     for tag in &post.tags {
         out.push(Element::label(ids::TAG_CHIP, format!("#{tag}")));
+    }
+    // The card's own shared pick, carrying no card index — the detail holds one
+    // post, and the caller registers it inside the dialog like its siblings.
+    // The room's relayed verdicts fold onto `deep_linked_post` too
+    // (`rendered_posts_mut`), so an opened room post carries its labels.
+    if let Some(badge) = crate::moderation::content_label_badge(&post.labels) {
+        out.push(badge);
     }
     if let Some(hash) = post.document.first_image_hash() {
         out.push(post_image_element(hash, images));
@@ -4581,9 +5257,17 @@ fn post_detail_contents(
         out.push(post_image_element(path, images));
     }
     if let Some(hash) = post.document.first_video_hash() {
-        out.push(video_thumbnail_element(hash));
+        out.push(video_thumbnail_element(
+            &post.post_id,
+            video_blob(post, hash),
+            video,
+        ));
     } else if let Some(path) = post.document.proxied_post_video() {
-        out.push(video_thumbnail_element(path));
+        out.push(video_thumbnail_element(
+            &post.post_id,
+            VideoTarget::Proxied(path.to_string()),
+            video,
+        ));
     }
     out.extend(crate::document::remote_image_elements(
         &post.document,
@@ -4659,7 +5343,10 @@ pub(crate) fn close_thread(state: &mut FeedState) -> bool {
 /// show, why: the shared legal-takedown tombstone (the nest withheld it,
 /// `moderation.md` § Categories & enforcement item 1), or that the post is gone
 /// (`feed.md` § Post deletion). One reading for the list card and the detail, so
-/// neither can paint a blank embed the other explains.
+/// neither can paint a blank embed the other explains. An admin-blocked quote
+/// (`moderation.md` § Admin block of a reported item) paints the shared notice
+/// in place of the withheld body — or, on its author's own read, which keeps
+/// the body, beside it.
 fn quoted_post_text(quoted: &fauna_core::render::QuotedPostEmbed<'_>) -> String {
     if let Some(reference) = quoted.legal_takedown_ref {
         return fauna_i18n::strings::moderation::legal_takedown::tombstone(reference);
@@ -4667,7 +5354,15 @@ fn quoted_post_text(quoted: &fauna_core::render::QuotedPostEmbed<'_>) -> String 
     if quoted.not_found {
         return feed::post::POST_NOT_FOUND.to_string();
     }
-    quoted.body.to_string()
+    match quoted.admin_block_reason {
+        Some(reason) if quoted.body.is_empty() => crate::moderation::admin_block_notice(reason),
+        Some(reason) => format!(
+            "{}\n{}",
+            quoted.body,
+            crate::moderation::admin_block_notice(reason)
+        ),
+        None => quoted.body.to_string(),
+    }
 }
 
 /// An interaction button's text: the icon alone at zero, icon + count otherwise.
@@ -4964,6 +5659,15 @@ pub fn state_json(state: &FeedState) -> serde_json::Value {
                     .into_iter()
                     .map(|(url, state)| serde_json::json!({ "url": url, "state": state.name() }))
                     .collect::<Vec<_>>(),
+                // The author face (`feed.md` § The read model → *The remote
+                // author's byline*): `null` until a remote author's resolve has
+                // answered, then the face — an empty one when the author shows
+                // none. What lets a test wait for that answer before it reads
+                // the card's id fallback as final.
+                "author_display": p.author_display.as_ref().map(|a| serde_json::json!({
+                    "handle": a.handle,
+                    "display_name": a.display_name,
+                })),
                 // The harness's `data.feed.posts[]` contract carries the collapse
                 // flag so a state-backed reader can drop a muted post the way an
                 // element-backed one does (`actions/feed.py::_feed_posts_from_state`).
@@ -4989,9 +5693,19 @@ pub fn state_json(state: &FeedState) -> serde_json::Value {
 /// stops on children (the interaction bar), so the focused element's ancestor
 /// path is what tells us where in the feed we are.
 pub fn at_last_card(app: &App) -> bool {
-    let Some(snapshot) = app.feed.snapshot() else {
-        return false;
-    };
+    // The profile's Posts tab paints `post-card`s too — off its own window,
+    // whose load-more is its own (`crate::profile::at_last_post`).
+    app.page == crate::pages::Page::Feed
+        && app
+            .feed
+            .snapshot()
+            .is_some_and(|snapshot| focus_at_last_card(app, &snapshot))
+}
+
+/// Whether the focus ring sits on the last `post-card` of `snapshot`'s rows
+/// while more remain — the load-more gesture, for any page painting
+/// [`post_card_rows`] (the feed, and the profile's Posts tab).
+pub(crate) fn focus_at_last_card(app: &App, snapshot: &FeedSnapshot) -> bool {
     if !snapshot.has_more || snapshot.posts.is_empty() {
         return false;
     }
@@ -5017,7 +5731,22 @@ mod tests {
         );
         assert_eq!(refusal_copy("nest unreachable".into()), "nest unreachable");
     }
+    use fauna_nest_http::paths;
     use std::collections::BTreeSet;
+
+    /// The content address the blob door serves `bytes` under — a fixture's
+    /// hash must be its bytes' own, or the host pick refuses them.
+    fn blob_hash(bytes: &[u8]) -> String {
+        hex::encode(fauna_core::encoding::content_hash(bytes).digest())
+    }
+
+    /// A blob fetched from this nest.
+    fn here(hash: &str) -> PostBlob {
+        PostBlob {
+            hash: hash.to_string(),
+            home: None,
+        }
+    }
 
     use fauna_feed::FeedSummaryView;
     use fauna_feed::test_support::{
@@ -5339,13 +6068,7 @@ mod tests {
         app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
         let op = apply_local(&mut app, Action::OpenPostDetail(post_id.clone()));
         assert!(
-            matches!(
-                &op,
-                Some(Op::OpenPostDetail {
-                    content: Some(_),
-                    ..
-                })
-            ),
+            matches!(&op, Some(Op::OpenPostDetail { blobs: Some(_), .. })),
             "a gated detail-open must carry the content plane to unseal with"
         );
 
@@ -5396,6 +6119,54 @@ mod tests {
         assert!(
             rendered.iter().any(|e| e.id == "feed-post-detail-author"),
             "and its author"
+        );
+    }
+
+    /// A classified deep-linked post paints the shared `content-label-badge`
+    /// in its detail, inside the dialog (it holds one post) — the room's relayed
+    /// verdicts fold onto the opened post, so this is where a member sees them
+    /// (`room-restricted-posts` outcome 21). An unlabelled one paints none.
+    #[test]
+    fn post_detail_paints_the_content_label_badge_for_a_labelled_deep_linked_post() {
+        let open = |labels: Vec<fauna_core::content_category::ContentLabelEntry>| {
+            let deep_linked = TestPostSpec {
+                post_id: "cc".repeat(32),
+                author: "dd".repeat(32),
+                body: "the deep-linked body".into(),
+                labels,
+                ..Default::default()
+            }
+            .into_summary();
+            let post_id = deep_linked.post_id.clone();
+            let mut app = feed_app_with(FeedSnapshot {
+                deep_linked_post: Some(deep_linked),
+                status: fauna_feed::FeedStatus::Loaded,
+                ..Default::default()
+            });
+            apply_local(&mut app, Action::OpenPostDetail(post_id));
+            crate::feed::elements(&app)
+        };
+
+        let labelled = open(vec![fauna_core::content_category::ContentLabelEntry {
+            category: "commercial".to_string(),
+            confidence_per_mille: 900,
+        }]);
+        let badges: Vec<&Element> = labelled
+            .iter()
+            .filter(|e| e.id == "content-label-badge")
+            .collect();
+        assert_eq!(badges.len(), 1, "the labelled post carries one badge");
+        assert_eq!(
+            badges[0].path,
+            vec![("feed-post-detail-dialog".to_string(), 0)],
+            "registered inside the detail dialog, as every detail child is"
+        );
+
+        assert!(
+            !open(Vec::new())
+                .iter()
+                .any(|e| e.id == "content-label-badge"),
+            "an unlabelled post paints no badge"
         );
     }
 
@@ -5710,6 +6481,36 @@ mod tests {
         assert!(!ids.contains("gated-post-price"));
         assert!(!ids.contains("gated-post-buy-button"));
         assert!(!ids.contains("gated-post-payment-link"));
+    }
+
+    /// A bought post whose grant is still pending paints "purchase pending"
+    /// and no buy affordance (`monetization.md` § Per-post pay-to-unlock →
+    /// *a completed buy must not be re-offered*).
+    #[cfg(feature = "payments")]
+    #[test]
+    fn a_bought_posts_card_shows_purchase_pending_and_no_buy_button() {
+        let mut sold = post("teaser");
+        sold.gated_tier = Some("post-unlock-abc123".into());
+        sold.unlock_purchase_pending = true;
+        let app = feed_app(vec![sold]);
+        let ids = ids(&app);
+        assert!(ids.contains("gated-post-purchase-pending"));
+        assert!(!ids.contains("gated-post-buy-button"));
+        assert!(!ids.contains("gated-post-price"));
+    }
+
+    /// An unbought sold post never paints the pending line.
+    #[test]
+    fn an_unbought_sold_posts_card_shows_no_purchase_pending() {
+        let mut sold = post("teaser");
+        sold.gated_tier = Some("post-unlock-abc123".into());
+        sold.unlock_offer = Some(fauna_feed::UnlockOfferView {
+            tier_name: "post-unlock-abc123".into(),
+            price_hint: Some("$3".into()),
+            payment_url: None,
+        });
+        let app = feed_app(vec![sold]);
+        assert!(!ids(&app).contains("gated-post-purchase-pending"));
     }
 
     /// A `payment_url` on the resolved offer renders the payment-link
@@ -6146,107 +6947,84 @@ mod tests {
             apply_local(&mut app, tap).is_none(),
             "with no target the tap must open the sheet, never train"
         );
-        let sheet = element(&app, "feed-post-train-target-sheet").expect("the sheet opens");
-        // The user's topics by name, then the new-topic entry; the first
-        // topic starts chosen.
-        let options = sheet
-            .attrs
-            .iter()
-            .find(|(k, _)| k == "options")
-            .map(|(_, v)| v.clone())
-            .unwrap();
-        assert_eq!(options, r#"["Cats","Dogs","New trained topic"]"#);
-        assert_eq!(sheet.text, topic_row(0x11, "Cats").factor_key.unwrap());
         assert!(
-            crate::feed::elements(&app)
-                .iter()
-                .any(|e| e.id == "feed-post-actions-menu"),
+            element(&app, "feed-post-train-target-sheet").is_some(),
+            "the sheet opens"
+        );
+        // One row per topic in registry order — the name as text, the key's
+        // hex alone as `factor` — then the new-topic entry last.
+        let els = crate::feed::elements(&app);
+        let rows: Vec<(String, String)> = els
+            .iter()
+            .filter(|e| e.id == "feed-post-train-target-item")
+            .map(|e| {
+                let factor = e
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "factor")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                (e.text.clone(), factor)
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Cats".to_string(), "11".repeat(16)),
+                ("Dogs".to_string(), "22".repeat(16)),
+            ]
+        );
+        let last = els
+            .iter()
+            .rposition(|e| e.id.starts_with("feed-post-train-target-"))
+            .unwrap();
+        assert_eq!(els[last].id, "feed-post-train-target-new-button");
+        assert!(
+            els.iter().any(|e| e.id == "feed-post-actions-menu"),
             "the sheet opens inside the still-open menu"
         );
     }
 
-    /// Choosing a topic re-aims the verbs; the next tap trains the post into
-    /// it — the two-step a terminal picker needs, since Enter cycles it.
+    /// One tap on a row is the train: into the tapped topic, with the verb
+    /// that opened the sheet, closing the menu.
     #[test]
-    fn a_topic_chosen_on_the_sheet_is_what_the_verb_trains() {
+    fn tapping_a_row_trains_into_it_with_the_verb_that_opened_the_sheet() {
         let mut app = feed_app(vec![post("hello")]);
         app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats"), topic_row(0x22, "Dogs")];
         let dogs = topic_row(0x22, "Dogs").factor_key.unwrap();
         let post_id = "aa".repeat(32);
         apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
-        let tap = || Action::TrainPost {
-            post_id: post_id.clone(),
-            verb: fauna_feed::TrainVerb::MoreLikeThis,
-        };
-        apply_local(&mut app, tap());
-        assert!(apply_local(&mut app, Action::PickTrainTarget(dogs.clone())).is_none());
-        assert_eq!(
-            element(&app, "feed-post-train-target-sheet").unwrap().text,
-            dogs
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id: post_id.clone(),
+                verb: fauna_feed::TrainVerb::LessLikeThis,
+            },
         );
-
-        match apply_local(&mut app, tap()) {
+        match apply_local(&mut app, Action::TrainIntoTarget(dogs.clone())) {
             Some(Op::TrainPost {
-                factor, verb, undo, ..
+                post_id: p,
+                factor,
+                verb,
+                undo,
+                ..
             }) => {
+                assert_eq!(p, post_id);
                 assert_eq!(factor, dogs);
-                assert_eq!(verb, fauna_feed::TrainVerb::MoreLikeThis);
+                assert_eq!(verb, fauna_feed::TrainVerb::LessLikeThis);
                 assert!(!undo);
             }
-            _ => panic!("the second tap must train into the chosen topic"),
+            _ => panic!("tapping a row must train into it"),
         }
         assert!(app.feed.actions_open.is_none() && app.feed.train_sheet.is_none());
     }
 
     /// A key the registry no longer holds (the topic deleted since the sheet
-    /// painted) must not aim a train at a dead factor.
+    /// painted) must not train a dead factor.
     #[test]
     fn the_sheet_refuses_a_key_the_registry_does_not_hold() {
         let mut app = feed_app(vec![post("hello")]);
         app.settings.trained_topics.rows = vec![topic_row(0x11, "Cats")];
-        let cats = topic_row(0x11, "Cats").factor_key.unwrap();
-        let post_id = "aa".repeat(32);
-        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
-        apply_local(
-            &mut app,
-            Action::TrainPost {
-                post_id,
-                verb: fauna_feed::TrainVerb::MoreLikeThis,
-            },
-        );
-        apply_local(
-            &mut app,
-            Action::PickTrainTarget(format!("topic:{}", "ff".repeat(16))),
-        );
-        assert_eq!(app.feed.train_sheet.as_ref().unwrap().target, cats);
-    }
-
-    /// With no topic at all the sheet still offers its one way forward, and
-    /// it is the picker's value — so Enter, which cycles, can reach it.
-    #[test]
-    fn with_no_topic_the_sheet_offers_only_the_new_topic_entry() {
-        let mut app = feed_app(vec![post("hello")]);
-        let post_id = "aa".repeat(32);
-        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
-        let tap = || Action::TrainPost {
-            post_id: post_id.clone(),
-            verb: fauna_feed::TrainVerb::LessLikeThis,
-        };
-        apply_local(&mut app, tap());
-        let sheet = element(&app, "feed-post-train-target-sheet").unwrap();
-        assert_eq!(sheet.text, NEW_TRAINED_TOPIC_OPTION);
-        assert!(
-            apply_local(&mut app, tap()).is_none(),
-            "no topic, no train — the tap leaves the sheet open"
-        );
-        assert!(element(&app, "feed-post-train-target-sheet").is_some());
-    }
-
-    /// "New trained topic…" leaves for the Trained-topics facet, where topics
-    /// are created (the shape every other app's sheet has), closing the menu.
-    #[tokio::test]
-    async fn the_new_topic_entry_opens_the_trained_topics_facet() {
-        let mut app = feed_app(vec![post("hello")]);
         let post_id = "aa".repeat(32);
         apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
         apply_local(
@@ -6259,10 +7037,50 @@ mod tests {
         assert!(
             apply_local(
                 &mut app,
-                Action::PickTrainTarget(NEW_TRAINED_TOPIC_OPTION.into())
+                Action::TrainIntoTarget(format!("topic:{}", "ff".repeat(16)))
             )
             .is_none()
         );
+        assert!(app.feed.train_sheet.is_some(), "the sheet stays open");
+    }
+
+    /// With no topic at all the sheet still offers its one way forward.
+    #[test]
+    fn with_no_topic_the_sheet_offers_only_the_new_topic_entry() {
+        let mut app = feed_app(vec![post("hello")]);
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id,
+                verb: fauna_feed::TrainVerb::LessLikeThis,
+            },
+        );
+        let ids = ids(&app);
+        assert!(ids.contains("feed-post-train-target-sheet"), "have {ids:?}");
+        assert!(
+            ids.contains("feed-post-train-target-new-button"),
+            "have {ids:?}"
+        );
+        assert!(!ids.contains("feed-post-train-target-item"), "have {ids:?}");
+    }
+
+    /// "New trained topic…" leaves for the Trained-topics facet, where topics
+    /// are created (never an in-sheet create form), closing the menu.
+    #[tokio::test]
+    async fn the_new_topic_entry_opens_the_trained_topics_facet() {
+        let mut app = feed_app(vec![post("hello")]);
+        let post_id = "aa".repeat(32);
+        apply_local(&mut app, Action::OpenPostActions(post_id.clone()));
+        apply_local(
+            &mut app,
+            Action::TrainPost {
+                post_id,
+                verb: fauna_feed::TrainVerb::MoreLikeThis,
+            },
+        );
+        assert!(apply_local(&mut app, Action::NewTrainedTopic).is_none());
         assert_eq!(app.page, Page::Settings);
         assert_eq!(app.settings.sub, crate::settings::SubPage::Personalization);
         assert!(app.feed.actions_open.is_none() && app.feed.train_sheet.is_none());
@@ -7847,6 +8665,42 @@ mod tests {
         );
     }
 
+    /// An admin-blocked QUOTE (`moderation.md` § Admin block of a reported item)
+    /// paints the shared notice in place of the withheld body for a viewer who
+    /// is not its author, and beside the body on the author's own read.
+    #[test]
+    fn an_admin_blocked_quote_paints_the_notice_in_place_of_or_beside_the_body() {
+        let notice = crate::moderation::admin_block_notice("harassment");
+        assert_eq!(
+            notice,
+            "Blocked by this nest's admin after a report: Harassment"
+        );
+        let blocked = |body: &str| {
+            let mut quoting = post("quoting a blocked post");
+            quoting.quoted = Some(TestQuotedSpec {
+                post_id: "e".repeat(64),
+                author: "5".repeat(64),
+                body: body.to_string(),
+                verification: VerificationStatus::Failed,
+                admin_block_reason: Some("harassment".to_string()),
+                ..Default::default()
+            });
+            let app = feed_app(vec![quoting]);
+            crate::feed::elements(&app)
+        };
+        let els = blocked("");
+        let quoted = els.iter().find(|e| e.id == "quoted-post").expect("embed");
+        assert_eq!(quoted.text, notice, "the notice replaces the withheld body");
+        assert!(
+            !els.iter().any(|e| e.id == "unverified-source-badge"),
+            "nothing was decoded, so no badge"
+        );
+
+        let els = blocked("my own words");
+        let quoted = els.iter().find(|e| e.id == "quoted-post").expect("embed");
+        assert_eq!(quoted.text, format!("my own words\n{notice}"));
+    }
+
     /// A quote of a post that is GONE (`feed.md` § Post deletion — a reference to
     /// a deleted post dangles by design and renders the not-found state) paints
     /// the not-found copy as the embed's text: never a blank embed, and no
@@ -7958,6 +8812,272 @@ mod tests {
         }
     }
 
+    /// The guardian's rule document, written in the shared editor, binds the
+    /// ward's feed exactly as the floor it supersedes: a category rule on spam
+    /// at `block` paints the placeholder and leaks nothing.
+    #[test]
+    fn a_guardian_document_block_rule_replaces_the_body() {
+        use fauna_core::content_policy::{
+            ContentPolicyDocument, ContentRule, ContentVerdict, REASON_DEFAULT_KEY,
+        };
+        let app = feed_app(vec![flagged_post("p-blocked", "buy zzcheappills now")]);
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(ContentRule {
+            factor: "spam".into(),
+            min_permille: 500,
+            verdict: ContentVerdict::Block,
+            reason_code: "rule-1".into(),
+            reason: [(
+                REASON_DEFAULT_KEY.to_string(),
+                "Set by the guardian".to_string(),
+            )]
+            .into(),
+            extra: Default::default(),
+        });
+        app.content_policy
+            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
+                document: Some(document),
+                ..Default::default()
+            }));
+        let els = crate::feed::elements(&app);
+        assert_eq!(
+            els.iter()
+                .filter(|e| e.id == "content-policy-blocked-notice")
+                .count(),
+            1,
+            "the blocked post paints the ui.yaml placeholder"
+        );
+        assert!(els.iter().all(|e| !e.text.contains("zzcheappills")));
+
+        // A nest publishing an unrelated keyword rule changes nothing.
+        let nest = fauna_core::content_policy::Publisher::Nest("example.test".into());
+        let mut nest_doc = ContentPolicyDocument::empty();
+        nest_doc
+            .scorers
+            .push(fauna_core::content_policy::BundledScorer {
+                name: "keywords".into(),
+                kind: fauna_core::content_policy::ScorerKind::Keywords,
+                bytes: b"casino".to_vec(),
+                extra: Default::default(),
+            });
+        nest_doc.rules.push(ContentRule {
+            factor: fauna_core::content_policy::scorer_factor(&nest, "keywords"),
+            min_permille: 500,
+            verdict: ContentVerdict::Block,
+            reason_code: "rule-1".into(),
+            reason: [(REASON_DEFAULT_KEY.to_string(), "No gambling".to_string())].into(),
+            extra: Default::default(),
+        });
+        app.content_policy
+            .set_nest_policies(vec![fauna_core::obligation::rules_from_nest_policy(
+                &nest_doc,
+                "example.test",
+            )]);
+        let els = crate::feed::elements(&app);
+        assert_eq!(
+            els.iter()
+                .filter(|e| e.id == "content-policy-blocked-notice")
+                .count(),
+            1,
+            "a nest's unrelated rule leaves the guardian's block in force"
+        );
+
+        // …and the same through the book, as a sign-in binds the session
+        // nest's signed self-description.
+        let keypair = fauna_core::identity::ActorKeypair::from_secret([3; 32]);
+        let bytes = fauna_core::content_policy::encode_document(&nest_doc).unwrap();
+        let signature = fauna_core::content_policy::sign_nest_policy(
+            keypair.signing_key(),
+            &bytes,
+            2,
+            1_700_000_002,
+        )
+        .unwrap();
+        let mut app = app;
+        let read = app.nest_rules.bind_for_test(
+            &keypair.actor_id_hex(),
+            "example.test",
+            fauna_client_policy::SignedNestRules {
+                document: &bytes,
+                sequence: 2,
+                issued_at: 1_700_000_002,
+                signature: &signature,
+            },
+        );
+        assert!(matches!(
+            read,
+            fauna_client_policy::NestRulesRead::First { .. }
+        ));
+        crate::nest_rules::apply_rule_sets(&app);
+        let els = crate::feed::elements(&app);
+        assert_eq!(
+            els.iter()
+                .filter(|e| e.id == "content-policy-blocked-notice")
+                .count(),
+            1,
+            "a session nest with published rules leaves the guardian's block in force"
+        );
+    }
+
+    /// A ward app whose guardian's document holds one spam rule at `verdict`,
+    /// its reason "Not for this account".
+    fn guardian_rule_app(
+        posts: Vec<TestPostSpec>,
+        verdict: fauna_core::content_policy::ContentVerdict,
+    ) -> App {
+        use fauna_core::content_policy::{ContentPolicyDocument, ContentRule, REASON_DEFAULT_KEY};
+        let app = feed_app(posts);
+        let mut document = ContentPolicyDocument::empty();
+        document.rules.push(ContentRule {
+            factor: "spam".into(),
+            min_permille: 500,
+            verdict,
+            reason_code: "rule-1".into(),
+            reason: [(
+                REASON_DEFAULT_KEY.to_string(),
+                "Not for this account".to_string(),
+            )]
+            .into(),
+            extra: Default::default(),
+        });
+        app.content_policy
+            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
+                document: Some(document),
+                ..Default::default()
+            }));
+        app
+    }
+
+    fn in_card<'a>(els: &'a [Element], id: &str, card: usize) -> Vec<&'a Element> {
+        els.iter()
+            .filter(|e| e.id == id && e.path.contains(&(ids::POST_CARD.to_string(), card)))
+            .collect()
+    }
+
+    /// `nest-rules.md` § The shared rule editor → *The reason is the member's
+    /// to read*: a guardian document rule's `block` paints the guardian's
+    /// reason verbatim in `content-policy-blocked-reason`, beside the notice
+    /// and scoped in the same card — and the notice's own text stays the
+    /// app's fixed frame.
+    #[test]
+    fn a_guardian_rule_block_paints_its_reason_beside_the_frame() {
+        let app = guardian_rule_app(
+            vec![flagged_post("p-blocked", "buy zzcheappills now")],
+            fauna_core::content_policy::ContentVerdict::Block,
+        );
+        let els = crate::feed::elements(&app);
+        let notice = in_card(&els, ids::CONTENT_POLICY_BLOCKED_NOTICE, 0);
+        assert_eq!(notice.len(), 1);
+        assert_eq!(notice[0].text, family::CONTENT_BLOCKED_NOTICE);
+        let reason = in_card(&els, ids::CONTENT_POLICY_BLOCKED_REASON, 0);
+        assert_eq!(reason.len(), 1, "the reason paints within the card");
+        assert_eq!(reason[0].text, "Not for this account");
+        assert!(in_card(&els, ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON, 0).is_empty());
+        assert!(els.iter().all(|e| !e.text.contains("zzcheappills")));
+    }
+
+    /// The collapse arm carries the reason too, beside the notice and the
+    /// reveal.
+    #[test]
+    fn a_guardian_rule_collapse_paints_its_reason_and_the_reveal() {
+        let app = guardian_rule_app(
+            vec![flagged_post("p-col", "buy zzcheappills now")],
+            fauna_core::content_policy::ContentVerdict::Collapse,
+        );
+        let els = crate::feed::elements(&app);
+        let notice = in_card(&els, ids::CONTENT_POLICY_BLOCKED_NOTICE, 0);
+        assert_eq!(notice.len(), 1);
+        assert!(
+            notice[0]
+                .attrs
+                .iter()
+                .any(|(k, v)| k == "state" && v == "collapsed")
+        );
+        assert_eq!(
+            in_card(&els, ids::CONTENT_POLICY_BLOCKED_REASON, 0)[0].text,
+            "Not for this account"
+        );
+        assert_eq!(
+            in_card(&els, ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON, 0).len(),
+            1
+        );
+    }
+
+    /// A floor invents no reason: the per-category `block` select paints the
+    /// frame alone.
+    #[test]
+    fn a_guardian_floor_block_paints_no_reason() {
+        let app = feed_app(vec![flagged_post("p-blocked", "buy zzcheappills now")]);
+        app.content_policy
+            .set_ward_content_policy(Some(fauna_core::obligation::ContentPolicy {
+                spam: fauna_core::obligation::ContentFloor::Block,
+                ..Default::default()
+            }));
+        let els = crate::feed::elements(&app);
+        assert_eq!(
+            in_card(&els, ids::CONTENT_POLICY_BLOCKED_NOTICE, 0).len(),
+            1
+        );
+        assert!(
+            !els.iter()
+                .any(|e| e.id == ids::CONTENT_POLICY_BLOCKED_REASON)
+        );
+    }
+
+    /// Post detail composes the content policy as the card does: a post the
+    /// guardian blocks, opened from its placeholder, shows the placeholder
+    /// and the reason inside the dialog — never the body.
+    #[test]
+    fn post_detail_of_a_guardian_blocked_post_shows_the_reasoned_placeholder() {
+        let mut app = guardian_rule_app(
+            vec![flagged_post("p-blocked", "buy zzcheappills now")],
+            fauna_core::content_policy::ContentVerdict::Block,
+        );
+        app.feed.mode = Mode::PostDetail("p-blocked".to_string());
+        let els = crate::feed::elements(&app);
+        let in_dialog = |id: &str| {
+            els.iter()
+                .filter(|e| {
+                    e.id == id
+                        && e.path
+                            .contains(&(ids::FEED_POST_DETAIL_DIALOG.to_string(), 0))
+                })
+                .count()
+        };
+        assert_eq!(in_dialog(ids::CONTENT_POLICY_BLOCKED_NOTICE), 1);
+        assert_eq!(in_dialog(ids::CONTENT_POLICY_BLOCKED_REASON), 1);
+        assert_eq!(in_dialog(ids::FEED_POST_DETAIL_BODY), 0);
+        for el in &els {
+            assert!(
+                !el.text.contains("zzcheappills"),
+                "{:?} leaked the body",
+                el.id
+            );
+        }
+    }
+
+    /// A guardian collapse revealed in post detail shows the body there.
+    #[test]
+    fn post_detail_of_a_revealed_guardian_collapse_shows_the_body() {
+        let mut app = guardian_rule_app(
+            vec![flagged_post("p-col", "buy zzcheappills now")],
+            fauna_core::content_policy::ContentVerdict::Collapse,
+        );
+        app.feed.mode = Mode::PostDetail("p-col".to_string());
+        assert!(
+            crate::feed::elements(&app)
+                .iter()
+                .any(|e| e.id == ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON)
+        );
+        app.feed.revealed_content.insert("p-col".to_string());
+        let els = crate::feed::elements(&app);
+        assert!(
+            !els.iter()
+                .any(|e| e.id == ids::CONTENT_POLICY_BLOCKED_NOTICE)
+        );
+        assert!(els.iter().any(|e| e.id == ids::FEED_POST_DETAIL_BODY));
+    }
+
     /// A post the viewer reported — or whose author they reported — paints the
     /// "You reported this" placeholder and nothing of its body; any other post
     /// renders as usual (`moderation.md` § Corollary).
@@ -7990,6 +9110,179 @@ mod tests {
         assert!(
             els.iter().any(|e| e.text.contains("an ordinary post")),
             "an unreported post still paints"
+        );
+    }
+
+    // ── Nest rules (nest-rules.md § The nest content policy) ────────────────
+
+    const NEST_DOMAIN: &str = "nest.test";
+
+    /// A nest's self-description carrying `document` signed at `sequence`.
+    fn nest_info(
+        document: &fauna_core::content_policy::ContentPolicyDocument,
+        sequence: u64,
+    ) -> fauna_protocol::discovery::NestInfoReply {
+        let nest = fauna_core::identity::ActorKeypair::from_secret([9u8; 32]);
+        let signed = fauna_protocol::content_policy::SignedContentPolicy::sign(
+            document,
+            sequence,
+            1_700_000_000 + sequence as i64,
+            nest.signing_key(),
+        )
+        .unwrap();
+        fauna_protocol::discovery::NestInfoReply {
+            domain: NEST_DOMAIN.to_string(),
+            nest_id: nest.actor_id_hex(),
+            moderation: fauna_protocol::discovery::ModerationInfo {
+                content_policy: Some(signed),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// One keywords rule on `term` with `verdict`, as the admin's editor
+    /// writes it.
+    fn keyword_rules(
+        term: &str,
+        verdict: fauna_client_policy::RuleVerdict,
+    ) -> fauna_core::content_policy::ContentPolicyDocument {
+        let mut editor = fauna_client_policy::RuleEditor::load(
+            None,
+            fauna_core::content_policy::Publisher::Nest(NEST_DOMAIN.to_string()),
+        );
+        let r = editor
+            .add_rule(fauna_client_policy::RuleKind::Keywords)
+            .unwrap();
+        editor.set_keywords_inline(r, term);
+        editor.set_verdict(r, verdict);
+        editor.set_reason(r, "default", "No gambling on this nest");
+        assert!(editor.can_save());
+        editor.document()
+    }
+
+    fn nest_feed_app(verdict: fauna_client_policy::RuleVerdict) -> App {
+        let mut app = feed_app(vec![
+            post_with_id("a0", "an ordinary post"),
+            post_with_id("a1", "zzcasino night tonight"),
+        ]);
+        app.page = crate::pages::Page::Feed;
+        let generation = app.session_generation;
+        crate::nest_rules::apply_info(
+            &mut app,
+            generation,
+            &nest_info(&keyword_rules("casino", verdict), 1),
+        );
+        app
+    }
+
+    /// The nest placeholder stands IN PLACE of the matching card's body: the
+    /// frame naming the nest, the domain, and the admin's reason verbatim.
+    #[test]
+    fn a_nest_keyword_rule_paints_the_reasoned_placeholder_on_the_matching_card() {
+        let app = nest_feed_app(fauna_client_policy::RuleVerdict::Block);
+        let els = crate::feed::elements(&app);
+        let notice = scoped(&els, "nest-blocked-notice", 1);
+        assert_eq!(notice.len(), 1, "the matching post paints the placeholder");
+        assert_eq!(
+            notice[0].text,
+            fauna_i18n::strings::nest_rules::blocked_notice(NEST_DOMAIN)
+        );
+        assert_eq!(scoped(&els, "nest-blocked-domain", 1)[0].text, NEST_DOMAIN);
+        assert_eq!(
+            scoped(&els, "nest-blocked-reason", 1)[0].text,
+            "No gambling on this nest"
+        );
+        assert!(scoped(&els, "nest-collapsed-reveal-button", 1).is_empty());
+        assert!(scoped(&els, "nest-blocked-notice", 0).is_empty());
+        for el in &els {
+            assert!(!el.text.contains("zzcasino"), "{:?} leaked the body", el.id);
+        }
+        // Convention 17: the verdict walk and the painted placeholders agree.
+        assert_eq!(
+            crate::nest_rules::block_render_json(&app),
+            serde_json::json!({"blocked": 1, "placeholders": 1})
+        );
+        // Post detail composes the nest source too.
+        let mut app = app;
+        app.feed.mode = Mode::PostDetail("a1".to_string());
+        let els = crate::feed::elements(&app);
+        assert!(els.iter().any(|e| e.id == "nest-blocked-notice"));
+        assert!(!els.iter().any(|e| e.text.contains("zzcasino")));
+    }
+
+    /// A nest `collapse` paints the reveal; revealing shows the body.
+    #[test]
+    fn a_nest_collapse_reveals_on_the_reveal_button() {
+        let mut app = nest_feed_app(fauna_client_policy::RuleVerdict::Collapse);
+        let els = crate::feed::elements(&app);
+        assert_eq!(scoped(&els, "nest-collapsed-reveal-button", 1).len(), 1);
+        app.feed.revealed_content.insert("a1".to_string());
+        let els = crate::feed::elements(&app);
+        assert!(scoped(&els, "nest-blocked-notice", 1).is_empty());
+        assert_eq!(scoped(&els, "feed-post-text", 1).len(), 1);
+    }
+
+    /// A newer sequence is a change: the one-line notice names the nest until
+    /// Settings is opened, and the rules surface shows the version in force.
+    #[test]
+    fn a_rules_change_shows_the_notice_and_the_rules_surface_names_the_version() {
+        let mut app = nest_feed_app(fauna_client_policy::RuleVerdict::Block);
+        assert!(
+            app.nest_rules.changed_notice.is_none(),
+            "the first read is no change"
+        );
+        let generation = app.session_generation;
+        crate::nest_rules::apply_info(
+            &mut app,
+            generation,
+            &nest_info(
+                &keyword_rules("casino, lottery", fauna_client_policy::RuleVerdict::Block),
+                2,
+            ),
+        );
+        let notice = fauna_i18n::strings::nest_rules::changed_notice(NEST_DOMAIN);
+        assert_eq!(
+            app.nest_rules.changed_notice.as_deref(),
+            Some(notice.as_str())
+        );
+        assert!(crate::feed::elements(&app).iter().any(|e| e.text == notice));
+
+        let surface = crate::nest_rules::settings_elements(&app);
+        let version = surface
+            .iter()
+            .find(|e| e.id == "settings-nest-rules-version")
+            .expect("the rules surface names its version");
+        assert!(version.text.starts_with("Version 2,"), "{}", version.text);
+        assert_eq!(
+            surface
+                .iter()
+                .filter(|e| e.id == "settings-nest-rules-item")
+                .count(),
+            1
+        );
+
+        let _ = app.apply(crate::pages::Page::Settings);
+        assert!(app.nest_rules.changed_notice.is_none());
+    }
+
+    /// A read fired under an earlier session is dropped.
+    #[test]
+    fn a_stale_generation_read_changes_nothing() {
+        let mut app = feed_app(vec![post_with_id("a1", "zzcasino night")]);
+        let stale = app.session_generation.wrapping_add(1);
+        crate::nest_rules::apply_info(
+            &mut app,
+            stale,
+            &nest_info(
+                &keyword_rules("casino", fauna_client_policy::RuleVerdict::Block),
+                1,
+            ),
+        );
+        assert!(
+            !crate::feed::elements(&app)
+                .iter()
+                .any(|e| e.id == "nest-blocked-notice")
         );
     }
 
@@ -8216,24 +9509,29 @@ mod tests {
                 el.id
             );
         }
-        // The reveal is untagged (ui.yaml scopes no id to this arm — linux and
-        // web made the same call), so it is found by role + text, and it must be
-        // FOCUSABLE: a TUI has no mouse, so an unfocusable control would be a
-        // dead affordance rather than merely an un-automatable one.
+        // The reveal is `content-policy-collapsed-reveal-button`, beside the
+        // notice in state `collapsed`, and it must be FOCUSABLE: a TUI has no
+        // mouse, so an unfocusable control would be a dead affordance rather
+        // than merely an un-automatable one.
         let reveal = els
             .iter()
-            .find(|e| {
-                matches!(e.role, crate::element::Role::Button(_))
-                    && e.text == fauna_i18n::strings::family::CONTENT_REVEAL_BUTTON
-            })
+            .find(|e| e.id == ids::CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON)
             .expect("a collapse offers a reveal");
         assert!(
             reveal.focusable(),
             "the reveal must be reachable by keyboard"
         );
+        let notice = els
+            .iter()
+            .find(|e| e.id == ids::CONTENT_POLICY_BLOCKED_NOTICE)
+            .expect("a collapse paints the notice");
         assert!(
-            reveal.id.is_empty(),
-            "and it must not mint a app-specific id"
+            notice
+                .attrs
+                .iter()
+                .any(|(k, v)| k == "state" && v == "collapsed"),
+            "the collapse arm's notice says which verb it is: {:?}",
+            notice.attrs
         );
 
         // Revealing restores the body for that post, session-locally.
@@ -8468,7 +9766,9 @@ mod tests {
         let mut app = feed_app(vec![preview_post(true)]);
         app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
         match kick_image_fetches(&mut app) {
-            Some(Op::FetchImage { hashes, .. }) => assert_eq!(hashes, vec![hash.clone()]),
+            // This nest's blob, whatever the post's home: the preview's image
+            // is one this nest fetched and stored.
+            Some(Op::FetchImage { hashes, .. }) => assert_eq!(hashes, vec![here(&hash)]),
             _ => panic!("the kick must request the revealed og:image"),
         }
 
@@ -8648,7 +9948,7 @@ mod tests {
         app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
 
         match kick_c2pa_fetches(&mut app) {
-            Some(Op::FetchC2pa { hashes, .. }) => assert_eq!(hashes, vec![hash.clone()]),
+            Some(Op::FetchC2pa { hashes, .. }) => assert_eq!(hashes, vec![here(&hash)]),
             _ => panic!("the kick must request this post's image hash"),
         }
         assert!(
@@ -8673,7 +9973,10 @@ mod tests {
     /// other input. `ui/media.md` § C2PA provenance.
     #[tokio::test]
     async fn a_forged_x_c2pa_header_over_plain_bytes_resolves_false() {
-        let hash = "33".repeat(32);
+        // The real content address of the bytes served, so the verdict below
+        // is the manifest check's and not the digest check's.
+        let png = fauna_media::test_fixtures::build_png(24, 24);
+        let hash = blob_hash(&png);
         let app = feed_app_with(image_post_snapshot(&hash));
         let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
         // The lie: the header asserts provenance…
@@ -8682,13 +9985,13 @@ mod tests {
         content.set_ok(
             fauna_nest_http::Verb::Get,
             &paths::blob::by_hash(&hash),
-            fauna_media::test_fixtures::build_png(24, 24),
+            png,
         );
 
         let outcome = Op::FetchC2pa {
-            content,
+            blobs: fauna_client::PostBlobHosts::new(content),
             manager: app.feed.manager.clone().expect("feed manager present"),
-            hashes: vec![hash.clone()],
+            hashes: vec![here(&hash)],
         }
         .run()
         .await;
@@ -8713,20 +10016,21 @@ mod tests {
     /// watches for in the shipped build, caught here in milliseconds instead.
     #[tokio::test]
     async fn a_genuinely_signed_image_still_resolves_true() {
-        let hash = "44".repeat(32);
+        let signed = include_bytes!("../../../../tests/fixtures/c2pa-signed.png").to_vec();
+        let hash = blob_hash(&signed);
         let app = feed_app_with(image_post_snapshot(&hash));
         let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
         content.set_c2pa(&paths::blob::by_hash(&hash), Ok(true));
         content.set_ok(
             fauna_nest_http::Verb::Get,
             &paths::blob::by_hash(&hash),
-            include_bytes!("../../../../tests/fixtures/c2pa-signed.png").to_vec(),
+            signed,
         );
 
         let outcome = Op::FetchC2pa {
-            content,
+            blobs: fauna_client::PostBlobHosts::new(content),
             manager: app.feed.manager.clone().expect("feed manager present"),
-            hashes: vec![hash.clone()],
+            hashes: vec![here(&hash)],
         }
         .run()
         .await;
@@ -8751,9 +10055,11 @@ mod tests {
         // call-count check below is what actually pins the short-circuit.
 
         let outcome = Op::FetchC2pa {
-            content: Arc::clone(&content) as Arc<dyn fauna_nest_http::NestContentApi>,
+            blobs: fauna_client::PostBlobHosts::new(
+                Arc::clone(&content) as Arc<dyn fauna_nest_http::NestContentApi>
+            ),
             manager: app.feed.manager.clone().expect("feed manager present"),
-            hashes: vec![hash.clone()],
+            hashes: vec![here(&hash)],
         }
         .run()
         .await;
@@ -9274,7 +10580,7 @@ mod tests {
         app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
 
         match kick_image_fetches(&mut app) {
-            Some(Op::FetchImage { hashes, .. }) => assert_eq!(hashes, vec![hash.clone()]),
+            Some(Op::FetchImage { hashes, .. }) => assert_eq!(hashes, vec![here(&hash)]),
             _ => panic!("the kick must produce a post-image fetch"),
         }
         assert!(
@@ -9441,7 +10747,8 @@ mod tests {
     /// paints (`fauna_core::load_cache`'s module doc, transient failures).
     #[tokio::test]
     async fn a_transient_image_fetch_failure_is_retried_on_the_next_kick() {
-        let hash = "a1".repeat(32);
+        let png = fauna_media::test_fixtures::build_png(4, 4);
+        let hash = blob_hash(&png);
         let path = paths::blob::by_hash(&hash);
         let mut app = feed_app_with(image_post_snapshot(&hash));
         let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
@@ -9454,16 +10761,131 @@ mod tests {
             "a transient failure records nothing"
         );
 
-        content.set_ok(
-            fauna_nest_http::Verb::Get,
-            &path,
-            fauna_media::test_fixtures::build_png(4, 4),
-        );
+        content.set_ok(fauna_nest_http::Verb::Get, &path, png);
         fetch_and_fold(&mut app, &hash).await;
         assert!(matches!(
             app.feed.images.get(&hash),
             Some(ImageState::Ready(_))
         ));
+    }
+
+    /// A fake plane for every foreign home, recording the homes it was asked
+    /// for — so a post homed elsewhere is fetched from it and no host is dialled.
+    fn foreign_plane(
+        app: &mut App,
+    ) -> (
+        Arc<fauna_nest_http::FakeNestContentApi>,
+        Arc<std::sync::Mutex<Vec<fauna_client::ForeignHome>>>,
+    ) {
+        let foreign = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (plane, log) = (Arc::clone(&foreign), Arc::clone(&asked));
+        app.feed.foreign_blobs = Some(Arc::new(move |home: &fauna_client::ForeignHome| {
+            log.lock().unwrap().push(home.clone());
+            Arc::clone(&plane) as Arc<dyn NestContentApi>
+        }));
+        (foreign, asked)
+    }
+
+    const HOME: &str = "https://home.example";
+
+    /// [`HOME`] as the byte plane is handed it, with `id` its pin graduates
+    /// against.
+    fn home(id: Option<&str>) -> fauna_client::ForeignHome {
+        fauna_client::ForeignHome::new(HOME, id)
+    }
+
+    /// `feed.md` § The read model → *A post homed on another nest*: a post whose
+    /// summary names another home paints its image from that home's by-hash
+    /// route — and asks this nest nothing — while a post homed here still
+    /// reads this nest.
+    #[tokio::test]
+    async fn a_post_homed_elsewhere_paints_its_image_from_its_home() {
+        let png = fauna_media::test_fixtures::build_png(4, 4);
+        let hash = blob_hash(&png);
+        let mut snapshot = image_post_snapshot(&hash);
+        snapshot.posts[0].home_nest_url = Some(HOME.to_string());
+        // The identity this nest stamped for the home rides to the plane.
+        let id = "ab".repeat(32);
+        snapshot.posts[0].home_nest_actor_id = Some(id.clone());
+        let mut app = feed_app_with(snapshot);
+        let own = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        app.feed.content = Some(Arc::clone(&own) as Arc<dyn NestContentApi>);
+        let (foreign, asked) = foreign_plane(&mut app);
+        foreign.set_ok(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&hash),
+            png,
+        );
+
+        let op = kick_image_fetches(&mut app).expect("the kick must request the image");
+        match &op {
+            Op::FetchImage { hashes, .. } => assert_eq!(
+                hashes,
+                &vec![PostBlob {
+                    hash: hash.clone(),
+                    home: Some(home(Some(&id))),
+                }]
+            ),
+            _ => panic!("expected Op::FetchImage"),
+        }
+        apply_outcome(&mut app, op.run().await);
+        assert!(matches!(
+            app.feed.images.get(&hash),
+            Some(ImageState::Ready(_))
+        ));
+        assert_eq!(*asked.lock().unwrap(), vec![home(Some(&id))]);
+        assert!(own.calls().is_empty(), "this nest holds none of its bytes");
+    }
+
+    /// The image a foreign home serves is kept only if it is the content the
+    /// post names — a substitute paints the placeholder, settled.
+    #[tokio::test]
+    async fn a_home_serving_other_bytes_paints_nothing() {
+        let hash = blob_hash(b"the named picture");
+        let mut snapshot = image_post_snapshot(&hash);
+        snapshot.posts[0].home_nest_url = Some(HOME.to_string());
+        let mut app = feed_app_with(snapshot);
+        app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
+        let (foreign, _) = foreign_plane(&mut app);
+        foreign.set_ok(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&hash),
+            fauna_media::test_fixtures::build_png(4, 4),
+        );
+
+        fetch_and_fold(&mut app, &hash).await;
+        assert!(matches!(
+            app.feed.images.get(&hash),
+            Some(ImageState::Failed)
+        ));
+    }
+
+    /// The C2PA probe and its verdict read the post's home too: both stages
+    /// land on the foreign plane, none on this nest.
+    #[tokio::test]
+    async fn a_post_homed_elsewhere_resolves_c2pa_from_its_home() {
+        let signed = include_bytes!("../../../../tests/fixtures/c2pa-signed.png").to_vec();
+        let hash = blob_hash(&signed);
+        let mut snapshot = image_post_snapshot(&hash);
+        snapshot.posts[0].home_nest_url = Some(HOME.to_string());
+        let mut app = feed_app_with(snapshot);
+        let own = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        app.feed.content = Some(Arc::clone(&own) as Arc<dyn NestContentApi>);
+        let (foreign, _) = foreign_plane(&mut app);
+        foreign.set_c2pa(&paths::blob::by_hash(&hash), Ok(true));
+        foreign.set_ok(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&hash),
+            signed,
+        );
+
+        let op = kick_c2pa_fetches(&mut app).expect("the kick must request the check");
+        match op.run().await {
+            Outcome::C2pa(results) => assert_eq!(results, vec![(hash, Finished::Loaded(true))]),
+            other => panic!("expected a C2pa outcome, got {other:?}"),
+        }
+        assert!(own.calls().is_empty(), "this nest holds none of its bytes");
     }
 
     /// The other half: the nest's own answer about the blob (a `404`) is
@@ -9502,9 +10924,9 @@ mod tests {
         );
 
         let outcome = Op::FetchC2pa {
-            content,
+            blobs: fauna_client::PostBlobHosts::new(content),
             manager: app.feed.manager.clone().expect("feed manager present"),
-            hashes: vec![hash.clone()],
+            hashes: vec![here(&hash)],
         }
         .run()
         .await;
@@ -9646,6 +11068,64 @@ mod tests {
             .map(|e| e.text)
             .unwrap_or_default();
         assert_eq!(detail, "Bob");
+    }
+
+    /// Door (2) (`feed.md` § User actions): the author line — `post-author` on
+    /// the card, `feed-post-detail-author` in the dialog — opens the author's
+    /// Profile with the post's home carried: `PostSummary.home_nest_url` for a
+    /// relayed post, `None` for one homed here. The registered text is still
+    /// the author label.
+    #[test]
+    fn the_author_line_opens_the_author_with_the_posts_home() {
+        let relayed = TestPostSpec {
+            post_id: "a1".repeat(32),
+            author: "b1".repeat(32),
+            ..post("relayed")
+        };
+        let local = TestPostSpec {
+            post_id: "a2".repeat(32),
+            author: "b2".repeat(32),
+            ..post("local")
+        };
+        let mut snapshot = feed_snapshot_with_posts(vec![relayed, local]);
+        snapshot.posts[0].home_nest_url = Some("https://peer.test".to_string());
+        let mut app = feed_app_with(snapshot);
+
+        let opens = |app: &App, id: &str| -> Vec<(Option<String>, Option<String>, String)> {
+            crate::feed::elements(app)
+                .into_iter()
+                .filter(|e| e.id == id)
+                .map(|e| match e.role {
+                    crate::element::Role::Button(Gesture::OpenProfile { actor, home }) => {
+                        (actor, home, e.text)
+                    }
+                    _ => panic!("{id} must open the author's profile"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            opens(&app, "post-author"),
+            vec![
+                (
+                    Some("b1".repeat(32)),
+                    Some("https://peer.test".to_string()),
+                    fauna_core::format::short_id(&"b1".repeat(32)),
+                ),
+                (
+                    Some("b2".repeat(32)),
+                    None,
+                    fauna_core::format::short_id(&"b2".repeat(32)),
+                ),
+            ],
+        );
+
+        apply_local(&mut app, Action::OpenPostDetail("a1".repeat(32)));
+        let detail = opens(&app, "feed-post-detail-author");
+        assert_eq!(detail.len(), 1);
+        assert_eq!(
+            (detail[0].0.clone(), detail[0].1.clone()),
+            (Some("b1".repeat(32)), Some("https://peer.test".to_string())),
+        );
     }
 
     /// `Outcome::Done` now clears a prior page error, unifying with the six
@@ -9886,5 +11366,405 @@ mod tests {
             !ids(&app).contains("bridge-feed-subscribe-toggle"),
             "no available bridge left to subscribe to another"
         );
+    }
+
+    // ── `video-thumbnail` → the external-media handoff (`apps/tui.md` § External
+    //    media handoff → *Feed video — the same seam*) ──────────────────────────
+
+    /// The three block kinds the handoff serves, by how their bytes arrive.
+    #[derive(Clone, Copy, Debug)]
+    enum VideoKind {
+        /// A `Video` on a public post — the unauthenticated blob GET.
+        Public,
+        /// A `Video` whose item this reader unlocked — the sealed open.
+        Sealed,
+        /// A bridged post's `ProxiedVideo` — the bearer GET of its path.
+        Proxied,
+    }
+
+    /// The blob hash of `video_app`'s clip — built, never a 64-hex literal (the
+    /// leak scanner reads one as a key).
+    fn video_hash() -> String {
+        blob_hash(&mp4_bytes())
+    }
+    const VIDEO_PATH: &str = "/api/v1/media/proxy?url=https%3A%2F%2Ffiles.example%2Fa.mp4";
+    const SEAL_KEY: [u8; 32] = [9u8; 32];
+
+    /// An ISO-BMFF prefix (`ftyp` + an mp4 brand) and a payload — enough for the
+    /// sniff; nothing decodes it.
+    fn mp4_bytes() -> Vec<u8> {
+        let mut bytes = b"\0\0\0\x18ftypisom\0\0\0\0isomiso2".to_vec();
+        bytes.extend_from_slice(b"fake video payload ".repeat(8).as_slice());
+        bytes
+    }
+
+    fn video_app(kind: VideoKind, mode: crate::settings::ExternalMediaMode) -> App {
+        use fauna_core::render::RenderBlock;
+        let mut snapshot = feed_snapshot_with_posts(vec![post("with a video")]);
+        let block = match kind {
+            VideoKind::Public | VideoKind::Sealed => RenderBlock::Video {
+                hash: video_hash(),
+                alt: String::new(),
+            },
+            VideoKind::Proxied => {
+                snapshot.posts[0].media_hash = Some(String::new());
+                RenderBlock::ProxiedVideo {
+                    path: VIDEO_PATH.to_string(),
+                    alt: String::new(),
+                }
+            }
+        };
+        snapshot.posts[0].document.blocks.push(block);
+        let mut app = feed_app_with(snapshot);
+        if let VideoKind::Sealed = kind {
+            app.feed
+                .manager
+                .as_ref()
+                .unwrap()
+                .register_sealed_media_for_test(&video_hash(), SEAL_KEY);
+        }
+        app.feed.content = Some(Arc::new(fauna_nest_http::FakeNestContentApi::new()));
+        app.settings.prefs.external_media = mode;
+        app
+    }
+
+    fn expected_target(kind: VideoKind) -> VideoTarget {
+        match kind {
+            VideoKind::Public | VideoKind::Sealed => VideoTarget::Blob {
+                hash: video_hash(),
+                home: None,
+            },
+            VideoKind::Proxied => VideoTarget::Proxied(VIDEO_PATH.to_string()),
+        }
+    }
+
+    /// The activation the thumbnail of `video_app`'s one post carries.
+    fn open_video(target: VideoTarget) -> Action {
+        Action::OpenVideo {
+            post_id: "aa".repeat(32),
+            target,
+        }
+    }
+
+    fn video_thumbnail(app: &App) -> Element {
+        let mut found = painted(app, ids::VIDEO_THUMBNAIL);
+        assert_eq!(found.len(), 1, "one video-thumbnail on the card");
+        found.remove(0)
+    }
+
+    fn video_state(app: &App) -> Option<String> {
+        video_thumbnail(app)
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.clone())
+    }
+
+    /// The nine cells: every external-media mode × every video block kind paints,
+    /// activates and suppresses exactly as `apps/tui.md` § External media handoff
+    /// → *Feed video* rules — `never` keeps an inert label (the block's only
+    /// element, so it paints), `ask` arms the reused inline confirm, `always`
+    /// goes straight to the fetch; the element publishes `state` throughout.
+    #[test]
+    fn feed_video_handoff_honours_every_mode_for_every_block_kind() {
+        use crate::element::Role;
+        use crate::settings::ExternalMediaMode;
+        for kind in [VideoKind::Public, VideoKind::Sealed, VideoKind::Proxied] {
+            for mode in [
+                ExternalMediaMode::Ask,
+                ExternalMediaMode::Always,
+                ExternalMediaMode::Never,
+            ] {
+                let cell = format!("{kind:?} × {mode:?}");
+                let mut app = video_app(kind, mode.clone());
+                let target = expected_target(kind);
+
+                // Paint: idle before any activation, never autoplaying.
+                assert_eq!(video_state(&app).as_deref(), Some("idle"), "{cell}");
+                let role = video_thumbnail(&app).role;
+                match mode {
+                    ExternalMediaMode::Never => assert!(
+                        matches!(role, Role::Label),
+                        "{cell}: under never the thumbnail is an inert label, got {role:?}"
+                    ),
+                    _ => assert!(
+                        matches!(&role, Role::Button(Gesture::Feed(Action::OpenVideo { target: t, .. })) if *t == target),
+                        "{cell}: the thumbnail activates its own block, got {role:?}"
+                    ),
+                }
+
+                // Activate.
+                let op = apply_local(&mut app, open_video(target.clone()));
+                match mode {
+                    ExternalMediaMode::Ask => {
+                        assert!(op.is_none(), "{cell}: ask runs nothing before the confirm");
+                        assert_eq!(
+                            painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL).len(),
+                            1,
+                            "{cell}: ask arms the inline confirm"
+                        );
+                        assert_eq!(video_state(&app).as_deref(), Some("idle"), "{cell}");
+                        let op = apply_local(&mut app, Action::ConfirmVideoOpen);
+                        assert!(
+                            matches!(&op, Some(Op::OpenVideo { target: t, .. }) if *t == target),
+                            "{cell}: the confirm runs the fetch for this block"
+                        );
+                        assert!(
+                            painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL).is_empty(),
+                            "{cell}: the confirm closes on launch"
+                        );
+                        assert_eq!(video_state(&app).as_deref(), Some("loading"), "{cell}");
+                    }
+                    ExternalMediaMode::Always => {
+                        assert!(
+                            matches!(&op, Some(Op::OpenVideo { target: t, .. }) if *t == target),
+                            "{cell}: always goes straight to the fetch"
+                        );
+                        assert!(
+                            painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL).is_empty(),
+                            "{cell}: no confirm under always"
+                        );
+                        assert_eq!(video_state(&app).as_deref(), Some("loading"), "{cell}");
+                    }
+                    _ => {
+                        assert!(op.is_none(), "{cell}: never launches nothing");
+                        assert!(
+                            painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL).is_empty(),
+                            "{cell}: never arms nothing"
+                        );
+                        assert_eq!(video_state(&app).as_deref(), Some("idle"), "{cell}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The post detail paints the same activatable thumbnail as the list card.
+    #[test]
+    fn the_post_detail_thumbnail_activates_the_same_handoff() {
+        let mut app = video_app(VideoKind::Public, crate::settings::ExternalMediaMode::Ask);
+        let post_id = app.feed.snapshot().unwrap().posts[0].post_id.clone();
+        apply_local(&mut app, Action::OpenPostDetail(post_id));
+        assert!(ids(&app).contains("feed-post-detail-dialog"));
+        assert!(
+            matches!(
+                &video_thumbnail(&app).role,
+                crate::element::Role::Button(Gesture::Feed(Action::OpenVideo { .. }))
+            ),
+            "the detail's video-thumbnail is activatable too"
+        );
+        assert!(apply_local(&mut app, open_video(expected_target(VideoKind::Public))).is_none());
+        assert_eq!(
+            painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_BUTTON).len(),
+            1,
+            "the confirm paints over the post detail"
+        );
+    }
+
+    /// Cancel is a pure no-op: nothing fetches, the element stays idle.
+    #[test]
+    fn cancelling_the_feed_video_confirm_runs_nothing() {
+        let mut app = video_app(VideoKind::Public, crate::settings::ExternalMediaMode::Ask);
+        apply_local(&mut app, open_video(expected_target(VideoKind::Public)));
+        assert!(apply_local(&mut app, Action::CancelVideoOpen).is_none());
+        assert!(painted(&app, ids::MEDIA_EXTERNAL_OPEN_CONFIRM_MODAL).is_empty());
+        assert_eq!(video_state(&app).as_deref(), Some("idle"));
+        // A stale confirm click after the cancel launches nothing either.
+        assert!(apply_local(&mut app, Action::ConfirmVideoOpen).is_none());
+    }
+
+    /// The outcome folds into `state`: `playing` once the handler was spawned,
+    /// `error` (plus the page banner) on a failed fetch.
+    #[test]
+    fn the_handoff_outcome_folds_into_the_thumbnail_state() {
+        let mut app = video_app(
+            VideoKind::Public,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        apply_local(&mut app, open_video(expected_target(VideoKind::Public)));
+        apply_outcome(
+            &mut app,
+            Outcome::VideoHandoff {
+                key: video_hash(),
+                result: Ok(()),
+            },
+        );
+        assert_eq!(video_state(&app).as_deref(), Some("playing"));
+        assert_eq!(app.error_line_text(), None);
+
+        apply_outcome(
+            &mut app,
+            Outcome::VideoHandoff {
+                key: video_hash(),
+                result: Err("boom".to_string()),
+            },
+        );
+        assert_eq!(video_state(&app).as_deref(), Some("error"));
+        assert!(
+            app.error_line_text().is_some_and(|t| t.contains("boom")),
+            "a failed handoff names its cause on the page error line"
+        );
+    }
+
+    /// Byte path 1: a public `Video` is one GET of the blob route, handed back
+    /// as-is (signed plaintext).
+    #[tokio::test]
+    async fn a_public_feed_video_is_fetched_off_the_blob_route() {
+        let app = video_app(
+            VideoKind::Public,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        let route = paths::blob::by_hash(&video_hash());
+        content.set_ok(fauna_nest_http::Verb::Get, &route, mp4_bytes());
+        let bytes = fetch_video_bytes(
+            &fauna_client::PostBlobHosts::new(content.clone()),
+            app.feed.manager.as_ref().unwrap(),
+            &expected_target(VideoKind::Public),
+        )
+        .await
+        .expect("the public clip");
+        assert_eq!(bytes, mp4_bytes());
+        assert_eq!(content.calls(), vec![(fauna_nest_http::Verb::Get, route)]);
+    }
+
+    /// Byte path 2: a `Video` this reader unlocked is the sealed blob, opened
+    /// under its per-post key before it reaches the file.
+    #[tokio::test]
+    async fn a_sealed_feed_video_is_opened_before_the_handoff() {
+        let app = video_app(
+            VideoKind::Sealed,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        let sealed = fauna_core::subscription::crypto::encrypt_content(&SEAL_KEY, &mp4_bytes());
+        assert_ne!(sealed, mp4_bytes());
+        // The sealed blob's own content address — the bytes at rest are the
+        // seal, so that is what the post names.
+        let hash = blob_hash(&sealed);
+        app.feed
+            .manager
+            .as_ref()
+            .unwrap()
+            .register_sealed_media_for_test(&hash, SEAL_KEY);
+        content.set_ok(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&hash),
+            sealed,
+        );
+        let bytes = fetch_video_bytes(
+            &fauna_client::PostBlobHosts::new(content.clone()),
+            app.feed.manager.as_ref().unwrap(),
+            &VideoTarget::Blob { hash, home: None },
+        )
+        .await
+        .expect("the opened clip");
+        assert_eq!(
+            bytes,
+            mp4_bytes(),
+            "the handoff gets the plaintext, never the seal"
+        );
+    }
+
+    /// Byte path 3: a `ProxiedVideo` is a bearer GET of its own proxied path —
+    /// no playback ticket (tui is not a `src=` fetch), so the path is fetched
+    /// exactly as the block carries it.
+    #[tokio::test]
+    async fn a_proxied_feed_video_is_fetched_off_its_path_with_no_ticket() {
+        let app = video_app(
+            VideoKind::Proxied,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        content.set_ok(fauna_nest_http::Verb::Get, VIDEO_PATH, mp4_bytes());
+        let bytes = fetch_video_bytes(
+            &fauna_client::PostBlobHosts::new(content.clone()),
+            app.feed.manager.as_ref().unwrap(),
+            &expected_target(VideoKind::Proxied),
+        )
+        .await
+        .expect("the proxied clip");
+        assert_eq!(bytes, mp4_bytes());
+        assert_eq!(
+            content.calls(),
+            vec![(fauna_nest_http::Verb::Get, VIDEO_PATH.to_string())]
+        );
+    }
+
+    /// A video on a post homed elsewhere is fetched from that home — the
+    /// thumbnail's target carries the post's home, and the blob GET lands on
+    /// the foreign plane, none on this nest.
+    #[tokio::test]
+    async fn a_feed_video_homed_elsewhere_is_fetched_from_its_home() {
+        let mut app = video_app(
+            VideoKind::Public,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        let own = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        app.feed.content = Some(Arc::clone(&own) as Arc<dyn NestContentApi>);
+        let (foreign, asked) = foreign_plane(&mut app);
+        foreign.set_ok(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&video_hash()),
+            mp4_bytes(),
+        );
+        let mut post = app.feed.snapshot().unwrap().posts[0].clone();
+        post.home_nest_url = Some(HOME.to_string());
+        let target = video_blob(&post, &video_hash());
+        assert_eq!(
+            target,
+            VideoTarget::Blob {
+                hash: video_hash(),
+                home: Some(home(None)),
+            }
+        );
+        let Some(Op::OpenVideo { blobs, manager, .. }) = video_open_op(&mut app, target.clone())
+        else {
+            panic!("the handoff must fetch");
+        };
+        let bytes = fetch_video_bytes(&blobs, &manager, &target)
+            .await
+            .expect("the clip from its home");
+        assert_eq!(bytes, mp4_bytes());
+        assert_eq!(*asked.lock().unwrap(), vec![home(None)]);
+        assert!(own.calls().is_empty(), "this nest holds none of its bytes");
+    }
+
+    /// A refused fetch is an error the outcome turns into `state = error`.
+    #[tokio::test]
+    async fn a_refused_feed_video_fetch_is_an_error() {
+        let app = video_app(
+            VideoKind::Public,
+            crate::settings::ExternalMediaMode::Always,
+        );
+        let content = Arc::new(fauna_nest_http::FakeNestContentApi::new());
+        content.set_status(
+            fauna_nest_http::Verb::Get,
+            &paths::blob::by_hash(&video_hash()),
+            404,
+            "gone",
+        );
+        assert!(
+            fetch_video_bytes(
+                &fauna_client::PostBlobHosts::new(content.clone()),
+                app.feed.manager.as_ref().unwrap(),
+                &expected_target(VideoKind::Public),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    /// The handed-off file's extension comes from the plaintext's container
+    /// (the block carries no media type) — it is what the OS resolves the
+    /// player by.
+    #[test]
+    fn the_handoff_file_is_named_by_the_sniffed_container() {
+        assert_eq!(video_handoff_name(&mp4_bytes()), "video.mp4");
+        assert_eq!(
+            video_handoff_name(&[0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x02]),
+            "video.webm"
+        );
+        assert_eq!(video_handoff_name(b"no known container"), "video");
     }
 }

@@ -24,9 +24,9 @@ import {
   backupUsageLabel,
   type BackupAuditAlertReason,
   type RelativeTimeDisplay,
-} from '$lib/wasm';
-import { resolveLocalized } from '$lib/i18n/localized';
-import { utcOffsetSeconds } from '$lib/utcOffset';
+} from '#lib/wasm';
+import { resolveLocalized } from '#lib/i18n/localized';
+import { utcOffsetSeconds } from '#lib/utcOffset';
 
 /** Human byte size ("1.5 MB") for a raw byte count. */
 export function byteSize(bytes: number): string {
@@ -241,7 +241,7 @@ export function durationSecs(secs: number): string {
   return resolveLocalized(durationSecsRaw(secs));
 }
 
-// The three tip formatters MOVED to `$lib/payments` (2026-08-16, the web
+// The three tip formatters MOVED to `#lib/payments` (2026-08-16, the web
 // `payments` excision leg). This module is unconditionally in the bundle, so a
 // formatter defined here ships the wasm face's name into the store-safe
 // artifact even with every caller folded away by `__FAUNA_PAYMENTS__`
@@ -265,7 +265,7 @@ export function graceCountdown(deadlineMs: number): string | null {
  * duration buckets): today → a local 24h clock ("14:30"), the previous local day
  * → "Yesterday", 2–6 days → a weekday ("Mon"), else a locale-aware absolute date.
  * The offset is passed because shared Rust is WASM-safe and can't read the zone
- * (seconds east of UTC, via the one `$lib/utcOffset` door). Clients MUST NOT
+ * (seconds east of UTC, via the one `#lib/utcOffset` door). Clients MUST NOT
  * hand-roll the buckets — see value-formatting.md § Conversation timestamp.
  */
 export function conversationTimestamp(epochMs: number): string {

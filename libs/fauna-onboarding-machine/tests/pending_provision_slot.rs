@@ -509,7 +509,7 @@ async fn a_retry_after_a_failed_claim_resumes_the_box_with_the_code_and_identity
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: None,
-        deployment_seed: None,
+        ..Default::default()
     }));
     m.clone().retry_provisioning();
     wait_for_provisioning_to_finish(&m).await;
@@ -715,7 +715,7 @@ async fn a_retry_after_a_successful_claim_still_expects_the_box_it_claimed() {
         token: Some("tok".into()),
         expires_at: Some(0),
         domain: None,
-        deployment_seed: None,
+        ..Default::default()
     }));
     let m = OnboardingMachine::with_nest_api_and_provider_base_urls(
         CountingObserver::new(),

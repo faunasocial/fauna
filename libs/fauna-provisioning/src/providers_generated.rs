@@ -128,9 +128,9 @@ static PVS_VULTR: PostVerifySelect = PostVerifySelect {
 };
 
 static PVS_OVH: PostVerifySelect = PostVerifySelect {
-    id: "project-select",
-    label_key: "provisioning.ovh.project",
-    source: "projects",
+    id: "location-select",
+    label_key: "provisioning.ovh.location",
+    source: "regions",
     required: true,
 };
 
@@ -325,7 +325,7 @@ pub static PROVIDERS: &[ProviderMeta] = &[
         post_verify_select: Some(&PVS_OVH),
         registrar_requires_contact: None,
         registrar_notes_key: None,
-        curated_offers: &[],
+        curated_offers: &["d2-2", "d2-4", "d2-8", "b2-7"],
         tld_pricing_endpoint: None,
         dns_dispatch: None,
         vps_dispatch: Some("OvhVps"),

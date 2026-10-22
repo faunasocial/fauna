@@ -72,6 +72,11 @@ public struct MailSpamView: View {
             guard let client else { return }
             await vm.configure(api: client.api)
         }
+        // Another device's undo/reset (push) and a reconnect (a push missed while
+        // offline) both re-read the history; `resetArmedId` is view-local, so an
+        // armed confirm survives the re-hydrate.
+        .onMailSpamChanged { await vm.hydrate() }
+        .onReconnect { await vm.hydrate() }
     }
 
     // MARK: - Controls (reset + contribute toggle)

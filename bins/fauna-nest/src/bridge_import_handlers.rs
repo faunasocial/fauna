@@ -26,12 +26,13 @@ use std::time::Duration;
 use fauna_mail::segments::placement::MailPlacementRecord;
 use fauna_protocol::bridge_routing::{
     BridgeImportCompletePush, BridgeImportErrorPush, BridgeImportProgressPush,
-    ClientImportOutcomeKind, FailImportSessionRequest, IMPORT_SKIP_QUOTA_EXCEEDED,
-    ImportMailboxCursor, ImportMessageBatchReply, ImportMessageBatchRequest, ImportMessageItem,
-    ImportMessageOutcome, ImportMessageReply, ImportMessageRequest, ImportSessionActionReply,
-    ImportSessionActionRequest, ImportSessionInfo, ListImportSessionsReply,
-    ListImportSessionsRequest, MailboxStateEvent, RecordImportOutcomesReply,
-    RecordImportOutcomesRequest, StartImportSessionReply, StartImportSessionRequest,
+    ClientImportOutcomeKind, DiscardImportSessionReply, FailImportSessionRequest,
+    IMPORT_SKIP_QUOTA_EXCEEDED, ImportMailboxCursor, ImportMessageBatchReply,
+    ImportMessageBatchRequest, ImportMessageItem, ImportMessageOutcome, ImportMessageReply,
+    ImportMessageRequest, ImportSessionActionReply, ImportSessionActionRequest, ImportSessionInfo,
+    ListImportSessionsReply, ListImportSessionsRequest, MailboxStateEvent,
+    RecordImportOutcomesReply, RecordImportOutcomesRequest, StartImportSessionReply,
+    StartImportSessionRequest,
 };
 use fauna_protocol::decode_strict as decode;
 
@@ -44,7 +45,8 @@ use crate::bridge_routing_handlers::{
 };
 use crate::db::bridge_routing::{InboundMailFields, RecipientSealKey};
 use crate::db::mail_import::{
-    CreateImportSessionOutcome, ImportFold, ImportSessionRow, ImportState, import_counter_to_sql,
+    CreateImportSessionOutcome, DiscardImportSessionOutcome, ImportFold, ImportSessionRow,
+    ImportState, import_counter_to_sql,
 };
 use crate::email_handlers::invalid_params;
 use crate::rpc_router::{RpcKindMeta, RpcRouterBuilder};
@@ -78,6 +80,7 @@ fn row_to_info(row: ImportSessionRow) -> ImportSessionInfo {
         error_reason: row.error_reason,
         scope: row.scope,
         date_from: row.date_from,
+        skip_dedup: row.skip_dedup,
         // The pair ships TOGETHER. `source_hash` is the salt `source_sealed`
         // opens under, and it is derived from `source_descriptor` — exactly
         // the column the boot scrub blanks once the seal rests. A reply
@@ -601,6 +604,10 @@ fn start_import_session_handler() -> crate::rpc_router::RpcHandler {
                     // session that did not record it can only resume by
                     // importing everything they excluded.
                     &req.date_from,
+                    // The "Import duplicates anyway" choice, recorded for the
+                    // same reason: a resume after a restart reads only the row
+                    // (§ Opt-out per session, § Resume protocol step 3).
+                    req.skip_dedup,
                     // Stored verbatim: the root is the owner's, so the nest
                     // neither mints nor opens this label (the `name_sealed` /
                     // `tags_sealed` store-and-serve posture).
@@ -738,7 +745,8 @@ fn record_import_outcomes_handler() -> crate::rpc_router::RpcHandler {
                 .iter()
                 .map(|o| {
                     let fold = match o.kind {
-                        ClientImportOutcomeKind::TooLarge { .. } => ImportFold::Skipped,
+                        ClientImportOutcomeKind::TooLarge { .. }
+                        | ClientImportOutcomeKind::SkippedByUser => ImportFold::Skipped,
                         _ => ImportFold::Errored,
                     };
                     (o.uid, fold)
@@ -856,6 +864,42 @@ fn fail_import_session_handler() -> crate::rpc_router::RpcHandler {
             encode_reply(&ImportSessionActionReply {
                 session: row_to_info(row),
             })
+        })
+    })
+}
+
+/// `fauna.bridges.discard_import_session` — a failed import's Dismiss
+/// (`mailbox-migration.md` § A failed import is a record the wizard shows
+/// until the user moves on): delete a terminal row. The twin of
+/// `discard_export_blob` with no blob to unlink.
+fn discard_import_session_handler() -> crate::rpc_router::RpcHandler {
+    Box::new(|state, actor_id, payload| {
+        Box::pin(async move {
+            require_class(&state, &actor_id, "fauna.bridges.discard_import_session").await?;
+            let req: ImportSessionActionRequest = decode(&payload).map_err(malformed)?;
+            match state
+                .db
+                .discard_import_session(&actor_id, &req.session_id)
+                .await
+                .map_err(internal)?
+            {
+                DiscardImportSessionOutcome::Deleted => encode_reply(&DiscardImportSessionReply {
+                    existed: true,
+                    ..Default::default()
+                }),
+                // The answer a second discard gives — Dismiss pressed twice,
+                // or on two devices, is not a failure.
+                DiscardImportSessionOutcome::Missing => encode_reply(&DiscardImportSessionReply {
+                    existed: false,
+                    ..Default::default()
+                }),
+                // The family's wrong-state error: a live import is cancelled,
+                // and its imported mail kept, never silently discarded.
+                DiscardImportSessionOutcome::Live(current) => Err(invalid_params(&format!(
+                    "import session '{}' is {current}; cancel it before discarding it",
+                    req.session_id
+                ))),
+            }
         })
     })
 }
@@ -1079,6 +1123,16 @@ pub fn register_bridge_import_handlers(b: &mut RpcRouterBuilder) {
             forbid_replay: false,
             default_deadline: fetch,
             handler: fail_import_session_handler(),
+        },
+    );
+    // A conditional delete of a terminal row: a replay finds the row gone and
+    // answers `existed: false`, the same answer — naturally idempotent.
+    b.add(
+        "fauna.bridges.discard_import_session",
+        RpcKindMeta {
+            forbid_replay: false,
+            default_deadline: fetch,
+            handler: discard_import_session_handler(),
         },
     );
 }
@@ -1385,6 +1439,66 @@ mod tests {
             (2, 1),
             "the turned-away message counted once, as what it became"
         );
+    }
+
+    /// The full-mailbox notice's "Skip the rest" records the turned-away
+    /// message and everything after it as a plain skip: the hold lifts, the
+    /// cursor moves on past them, and the turned-away message — already
+    /// counted skipped by its refusal — is counted once
+    /// (`mailbox-migration.md` § Progress lives nest-side → *The quota hold*).
+    #[tokio::test]
+    async fn skipping_the_rest_lifts_the_quota_hold_and_counts_each_message_once() {
+        use fauna_protocol::bridge_routing::ClientImportOutcome;
+        let state = fixture_state().await;
+        state
+            .db
+            .put_imap_policy(crate::db::mail_policy::ImapPolicyOverrides {
+                message_count_default: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let sid = start_session(&state, "src").await;
+        import_single(
+            &state,
+            &sid,
+            item("INBOX", b"Subject: a\r\n\r\nx", 10, "k10"),
+            false,
+        )
+        .await
+        .unwrap();
+        import_single(
+            &state,
+            &sid,
+            item("INBOX", b"Subject: b\r\n\r\ny", 11, "k11"),
+            false,
+        )
+        .await
+        .unwrap();
+        let skipped = |uid| ClientImportOutcome {
+            uid,
+            kind: ClientImportOutcomeKind::SkippedByUser,
+            extra: Default::default(),
+        };
+        let reply = record_outcomes(&state, &sid, vec![skipped(11), skipped(12), skipped(13)])
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                reply.imported_count,
+                reply.skipped_count,
+                reply.errored_count
+            ),
+            (1, 3, 0),
+            "the turned-away message counted once, never an error"
+        );
+        let row = state
+            .db
+            .get_import_session(&USER, &sid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.cursors.get("INBOX"), Some(&(13, 9)), "the hold lifted");
     }
 
     /// Like a sent message, a recorded outcome needs a running session, and an
@@ -1728,6 +1842,39 @@ mod tests {
         );
     }
 
+    /// There is no absent key (`mailbox-migration.md` § There is no absent
+    /// key): the import door refuses an item whose envelope key or dedup key
+    /// is empty, per item, and records no dedup row for it.
+    #[tokio::test]
+    async fn an_import_with_an_empty_key_is_refused_and_records_no_dedup_row() {
+        let state = fixture_state().await;
+        let sid = start_session(&state, "src").await;
+
+        let empty_envelope = keyed_item("");
+        let empty_dedup = ImportMessageItem {
+            dedup_key: String::new(),
+            ..keyed_item("env:v1:real")
+        };
+        for (what, it) in [
+            ("empty envelope key", empty_envelope),
+            ("empty dedup key", empty_dedup),
+        ] {
+            let reply = import_single(&state, &sid, it, false).await.unwrap();
+            assert!(
+                matches!(reply.outcome, ImportMessageOutcome::Errored { .. }),
+                "an item with an {what} must be refused, got {:?}",
+                reply.outcome
+            );
+            for key in [STRANGER_MSGID, ""] {
+                assert_eq!(
+                    state.db.dedup_envelope_key(&USER, key).await.unwrap(),
+                    None,
+                    "the refused {what} item must record no dedup row for {key:?}"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn batch_isolates_bad_messages_and_reports_outcomes_in_order() {
         let state = fixture_state().await;
@@ -1906,6 +2053,78 @@ mod tests {
         assert_eq!(reply.session.error_reason, "auth_failed");
     }
 
+    async fn discard(
+        state: &Arc<AppState>,
+        sid: &str,
+    ) -> Result<DiscardImportSessionReply, fauna_protocol::RpcError> {
+        let req = ImportSessionActionRequest {
+            session_id: sid.into(),
+        };
+        let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
+        discard_import_session_handler()(state.clone(), USER, payload)
+            .await
+            .map(|bytes| fauna_cbor::decode_strict(&bytes).unwrap())
+    }
+
+    async fn fail_session(state: &Arc<AppState>, sid: &str, reason: &str) {
+        let freq = FailImportSessionRequest {
+            session_id: sid.into(),
+            reason: reason.into(),
+        };
+        let payload = Bytes::from(encode_canonical(&freq).unwrap().to_vec());
+        fail_import_session_handler()(state.clone(), USER, payload)
+            .await
+            .expect("fail ok");
+    }
+
+    /// § A failed import is a record …: Dismiss deletes the terminal row, a
+    /// second Dismiss (or a missing row) answers `existed: false`, and a live
+    /// import is refused with the family's wrong-state error, its row kept.
+    #[tokio::test]
+    async fn discard_removes_a_failed_import_and_refuses_a_live_one() {
+        let state = fixture_state().await;
+        let sid = start_session(&state, "src").await;
+
+        let err = discard(&state, &sid).await.unwrap_err();
+        assert_eq!(err.code, "fauna.email.invalid_params");
+        assert!(
+            state
+                .db
+                .get_import_session(&USER, &sid)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        fail_session(&state, &sid, "auth_failed").await;
+        assert!(discard(&state, &sid).await.unwrap().existed);
+        assert!(
+            state
+                .db
+                .get_import_session(&USER, &sid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!discard(&state, &sid).await.unwrap().existed);
+        assert!(!discard(&state, "never-was").await.unwrap().existed);
+    }
+
+    /// A new start is the user's answer to a failure: the caller's `errored`
+    /// rows leave with the insert, so the next wizard opens on Source.
+    #[tokio::test]
+    async fn a_start_sweeps_the_callers_failed_imports() {
+        let state = fixture_state().await;
+        let failed = start_session(&state, "src").await;
+        fail_session(&state, &failed, "auth_failed").await;
+
+        let next = start_session(&state, "src").await;
+
+        let list = state.db.list_import_sessions(&USER).await.unwrap();
+        let ids: Vec<_> = list.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(ids, vec![next.as_str()]);
+    }
+
     /// The 76th pass's misleading-answer
     /// class, applied here. All five state-transition kinds declare
     /// `forbid_replay: false`, which `transport.md` § Idempotency and
@@ -2064,6 +2283,7 @@ mod tests {
             total_count: 3,
             scope: vec!["INBOX".into(), "Sent".into(), "Archive".into()],
             date_from: "2023-11-14".into(),
+            skip_dedup: true,
         };
         let payload = Bytes::from(encode_canonical(&req).unwrap().to_vec());
         start_import_session_handler()(state.clone(), USER, payload)
@@ -2089,6 +2309,10 @@ mod tests {
         // path, and for a sharper reason — a resume that reads it back as
         // empty imports every message the user excluded.
         assert_eq!(reply.sessions[0].date_from, "2023-11-14");
+        // § Opt-out per session: so does the duplicates choice — a resume
+        // after a restart that read it back as off would quietly drop the
+        // snapshot the user asked for.
+        assert!(reply.sessions[0].skip_dedup);
     }
 
     #[tokio::test]
@@ -2143,16 +2367,15 @@ mod tests {
             &crate::test_support::FIXTURE_MSEK,
         )
         .await;
-        let blob_dir = tempfile::tempdir().unwrap();
-        let blob_path = blob_dir.path().to_path_buf();
-        std::mem::forget(blob_dir); // outlive the call; never deleted under test
+        let base = AppState::for_test(db.clone());
+        let blob_path = base.test_scratch_path("blobs");
         let backup_svc = Arc::new(
             crate::backup::service::BackupService::new(db.clone(), None, false, blob_path, None)
                 .unwrap(),
         );
         Arc::new(AppState {
             backup_service: Some(backup_svc),
-            ..AppState::for_test(db)
+            ..base
         })
     }
 

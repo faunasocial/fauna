@@ -5,7 +5,7 @@
 //! refresh_token, notify_401.
 //!
 //! **Persistence is NOT a JS seam (CR-3).** The machine routes on the shared
-//! `RegistryLaunchPersistence` over `LocalStorageSecretStore` — the same
+//! `RegistryLaunchPersistence` over `WebIdentityStore` — the same
 //! per-actor registry store the switcher's `WasmAccountRegistry` (fauna-wasm
 //! chunk) drives — so web cannot hand the machine a bespoke single-slot store:
 //! the four-in-language-impls divergence is unrepresentable, not just fixed.
@@ -26,7 +26,7 @@ use std::sync::Arc;
 // memory/build-system: no native gate reaches a wasm32-only block).
 #[cfg(target_arch = "wasm32")]
 use fauna_client_accounts::{
-    AccountRegistry, LocalStorageSecretStore, RegistryLaunchPersistence, SecretStore,
+    AccountRegistry, RegistryLaunchPersistence, SecretStore, WebIdentityStore,
 };
 use fauna_launch_machine::LaunchMachine as InnerMachine;
 #[cfg(target_arch = "wasm32")]
@@ -39,7 +39,7 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
 fn store() -> Arc<dyn SecretStore> {
-    Arc::new(LocalStorageSecretStore)
+    Arc::new(WebIdentityStore)
 }
 
 /// A fresh adapter view over the one localStorage-backed registry store.
@@ -148,6 +148,26 @@ pub fn registry_has_identity() -> bool {
     persistence().load_identity().is_some()
 }
 
+/// The index blob as the identity store serves it (opened, when the store is
+/// sealed), or `undefined` — the launch fact report's read
+/// (`wasm-launch.ts::launchIdentityInputs`), which cannot read the row raw once
+/// it rests sealed.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = registryIndexBlob)]
+pub fn registry_index_blob() -> Option<String> {
+    WebIdentityStore.get(fauna_client_accounts::INDEX_KEY)
+}
+
+/// Whether the identity store holds a secret row for `actor_id` — presence
+/// only; the value never crosses to JS here.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = registryHasSecretRow)]
+pub fn registry_has_secret_row(actor_id: &str) -> bool {
+    WebIdentityStore
+        .get(&fauna_client_accounts::secret_key(actor_id))
+        .is_some()
+}
+
 /// The active account's pending-invite record as serde JSON, or `undefined`.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = registryLoadPendingInvite)]
@@ -193,21 +213,35 @@ pub fn registry_load_awaiting_dns() -> Option<String> {
     serde_json::to_string(&rec).ok()
 }
 
-/// Write the active account's awaiting-manual-dns slot from serde JSON. Same
-/// refuse-unparseable contract as [`registry_save_pending_invite`].
+/// The deferred-DNS exit — a wizard terminal — through the shared
+/// `fauna_client_accounts::persist_awaiting_dns`, the writer tui and linux
+/// call at the same exit: it registers the identity the wizard provisioned
+/// with (`secret_hex`, read from the MACHINE — in append mode it exists
+/// nowhere else yet), makes it active, and completes its per-actor slot,
+/// carrying forward the reach address and built-with identity the
+/// pending-provision write stored (`onboarding.md` § Multi-account →
+/// *Append-mode deferred/incomplete states + abandonment*: the pointer moves
+/// only at the terminal). Keyed by the provisioned identity, never by the
+/// tab's account: writing the active account's slot here filed an append's
+/// deferred nest under the account the user was adding from.
+///
+/// Resolves to the actor id; `undefined` when `json` does not parse as an
+/// `AwaitingDnsRecord` (same refuse-unparseable contract as
+/// [`registry_save_pending_invite`]) or the registry refused the account.
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = registrySaveAwaitingDns, unchecked_return_type = "Promise<boolean>")]
-pub fn registry_save_awaiting_dns(json: String) -> js_sys::Promise {
-    if serde_json::from_str::<AwaitingDnsRecord>(&json).is_err() {
-        return js_sys::Promise::resolve(&JsValue::FALSE);
-    }
+#[wasm_bindgen(
+    js_name = registryPersistAwaitingDns,
+    unchecked_return_type = "Promise<string | undefined>"
+)]
+pub fn registry_persist_awaiting_dns(secret_hex: String, json: String) -> js_sys::Promise {
+    let Ok(record) = serde_json::from_str::<AwaitingDnsRecord>(&json) else {
+        return js_sys::Promise::resolve(&JsValue::UNDEFINED);
+    };
     mutate(move || {
-        let reg = registry();
-        let Some(active) = reg.active() else {
-            return JsValue::FALSE;
-        };
-        reg.set_awaiting_dns_json(&active, &json);
-        JsValue::TRUE
+        match fauna_client_accounts::persist_awaiting_dns(&registry(), &secret_hex, &record) {
+            Ok(actor_id) => JsValue::from(actor_id),
+            Err(_) => JsValue::UNDEFINED,
+        }
     })
 }
 
@@ -432,14 +466,14 @@ fn seed_launch_clock_from_storage() {
 // stored `nest_url` is not itself dialable (a typed loopback handle resolves to
 // `https://`, a harness nest serves plain HTTP) reached `LoggedIn` through the
 // wizard and then failed every silent challenge the launch route ran. The SPA
-// keeps the override in `sessionStorage` (`$lib/api`'s
+// keeps the override in `sessionStorage` (`#lib/api`'s
 // `NEST_DIAL_OVERRIDE_KEY`, written at module load from the harness's query
 // param, before this constructor can run); it is read here for the same
 // reasons the clock seed is — synchronously, ahead of `start()`, and again
 // after any reload that re-instantiates this module. Compile-gated like the
 // clock (convention 15).
 
-/// The `sessionStorage` key `$lib/api` keeps the dial override under.
+/// The `sessionStorage` key `#lib/api` keeps the dial override under.
 #[cfg(all(target_arch = "wasm32", feature = "test-helpers"))]
 const NEST_DIAL_OVERRIDE_KEY: &str = "fauna_e2e_nest_dial_override";
 

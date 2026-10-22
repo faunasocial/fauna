@@ -9,7 +9,7 @@
   //
   // A paint shell over the shared `ConnectedAppsMachine`
   // (`libs/fauna-client-connected-apps`, its own wasm chunk —
-  // `$lib/wasm-connected-apps`): roster composition, scope words, the class key,
+  // `#lib/wasm-connected-apps`): roster composition, scope words, the class key,
   // *lasts-until* and which verb revokes a row are the machine's, so this file
   // never picks a revoke verb — a row's `key` is opaque. Reference painter:
   // `apps/fauna-tui/src/settings/connected_apps.rs`.
@@ -17,28 +17,30 @@
   // The lift: the AT Protocol page's consent cards + connected-app rows, the
   // Nostr page's bunker rows and Mail & Calendar's app-password rows render HERE
   // and no longer on their old pages. The mail rows ride a mail-settings machine
-  // the chunk builds for itself (`$lib/wasm-connected-apps`); a mail row alone
+  // the chunk builds for itself (`#lib/wasm-connected-apps`); a mail row alone
   // carries the type / login / secret leaves, and its secret is read on demand
   // (`revealSecret`), never part of the snapshot.
   import { onDestroy, onMount } from 'svelte';
   import { afterNavigate } from '$app/navigation';
-  import { identity } from '$lib/store';
-  import { sharedRpcPort } from '$lib/rpc';
-  import { resolveComposed, resolveLocalized } from '$lib/i18n/localized';
+  import { identity } from '#lib/store';
+  import { sharedRpcPort } from '#lib/rpc';
+  import { resolveComposed, resolveLocalized } from '#lib/i18n/localized';
   import {
     composeRequestCard,
+    composeRequestInstall,
     composeRosterRow,
     createConnectedAppsMachine,
     factsSeparator,
+    lineSeparator,
     type ConnectedAppRow,
     type ConnectedAppsMachine,
     type ConnectedAppsSnapshot,
     type ConsentCardRow,
-  } from '$lib/wasm-connected-apps';
-  import { ensureWasm, resolveMuaUsername } from '$lib/wasm';
-  import { t } from '$lib/i18n/strings';
-  import { localTimestamp } from '$lib/value-format';
-  import { IDS } from '$lib/generated/uiIds';
+  } from '#lib/wasm-connected-apps';
+  import { ensureWasm, resolveMuaUsername } from '#lib/wasm';
+  import { t } from '#lib/i18n/strings';
+  import { localTimestamp } from '#lib/value-format';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The parent settings page owns the single error surface (`error-message`).
   let { error = $bindable('') } = $props();
@@ -143,6 +145,14 @@
     fold();
   }
 
+  // Non-optimistic: the machine writes, re-reads, and the toggle paints the
+  // re-read's `external_apps_off`, never a local guess.
+  async function toggleExternalApps(): Promise<void> {
+    if (!machine) return;
+    await machine.setExternalAppsEnabled(!!snap?.external_apps_off);
+    fold();
+  }
+
   async function unblock(clientId: string): Promise<void> {
     if (!machine) return;
     await machine.unblock(clientId);
@@ -192,13 +202,19 @@
   // publisher — client id / the scopes / the permission sets / the oracle
   // summary / the facts line. Web resolves each `ComposedText` through its own
   // string table and joins; instants are formatted by `localTimestamp`
-  // (`$lib/value-format`, `format_unix_local_ms`'s shape — wasm has no timezone
+  // (`#lib/value-format`, `format_unix_local_ms`'s shape — wasm has no timezone
   // database). One text node, not a block per line: the e2e text read is
   // `textContent`, which has no break between blocks.
   function rowText(row: ConnectedAppRow): string {
     const text = composeRosterRow(row);
     const facts = text.facts.map(resolveComposed).join(factsSeparator());
     return [...text.lines.map(resolveComposed), facts].join('\n');
+  }
+
+  // Whether the row links to its plugin's settings card on the Bridges page —
+  // the shared composition decides (`opens_settings_card`).
+  function opensSettingsCard(row: ConnectedAppRow): boolean {
+    return composeRosterRow(row).opens_settings_card;
   }
 </script>
 
@@ -210,6 +226,7 @@
   {#if (snap?.requests ?? []).length > 0}
     <h3>{t.connected_apps.requests_heading}</h3>
     {#each snap?.requests ?? [] as request (request.consent_id_hex)}
+      {@const install = composeRequestInstall(request)}
       <div class="card" data-testid={IDS.CONNECTED_APPS_REQUEST_CARD}>
         <!-- The card's lines are composed once in shared Rust
              (`compose::request_card_lines`): heading, who is asking, the scopes
@@ -218,6 +235,18 @@
         {#each composeRequestCard(request).map(resolveComposed) as line, i}
           {#if i < 3}<p>{line}</p>{:else}<div class="scopes">{line}</div>{/if}
         {/each}
+        <!-- An admin's hosted-plugin install card: what approving would run on
+             the nest, one leaf per fact (`compose::request_install_text`), between
+             the scopes and the binding code. -->
+        {#if install}
+          <h4 data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL}>{resolveComposed(install.heading)}</h4>
+          <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_FORM} data-form={request.install?.execution_form ?? ''}>{resolveComposed(install.form)}</p>
+          <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_PUBLISHER}>{resolveComposed(install.publisher)}</p>
+          <p data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_DIGEST}>{resolveComposed(install.digest)}</p>
+          <div class="scopes" data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_KINDS}>{install.kinds.map(resolveComposed).join(lineSeparator())}</div>
+          <div class="scopes" data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_HOSTS}>{install.hosts.map(resolveComposed).join(lineSeparator())}</div>
+          <div class="scopes" data-testid={IDS.CONNECTED_APPS_REQUEST_INSTALL_SETTINGS}>{install.settings.map(resolveComposed).join(lineSeparator())}</div>
+        {/if}
         <p data-testid={IDS.CONNECTED_APPS_REQUEST_CODE} data-code={request.code}>
           {t.atproto_settings.consent_code({ code: request.code })}
         </p>
@@ -258,7 +287,19 @@
     >{t.connected_apps.connect_submit}</button>
   </div>
 
-  <!-- 3. The roster — the three-state list: nothing until the read returned,
+  <!-- 3. The external-apps switch, then the roster it pauses — at every
+       integration level (the flag is the account's). An absent snapshot paints
+       the flag's own default, ON. The hint carries no id (ui.yaml gives it none). -->
+  <button
+    class="btn toggle"
+    class:on={!snap?.external_apps_off}
+    data-testid={IDS.ATPROTO_EXTERNAL_APPS_ENABLE}
+    data-state={snap?.external_apps_off ? 'off' : 'on'}
+    onclick={toggleExternalApps}
+  >{t.atproto_settings.external_apps_toggle}</button>
+  <p class="muted small">{t.atproto_settings.external_apps_hint}</p>
+
+  <!-- The roster — the three-state list: nothing until the read returned,
        then rows or the empty state. -->
   <h3>{t.connected_apps.roster_heading}</h3>
   {#if snap?.loaded}
@@ -275,6 +316,9 @@
         data-status={row.paused ? 'paused' : row.connected ? 'connected' : 'not_connected'}
       >
         <div class="row-text">{rowText(row)}</div>
+        {#if opensSettingsCard(row)}
+          <a class="btn small" href="/app/bridges" data-testid={IDS.CONNECTED_APPS_ITEM_SETTINGS_LINK}>{t.connected_apps.settings_link}</a>
+        {/if}
         {#if row.mail}
           {@const login = mailLogin(row.mail.mua_username)}
           <span class="badge" data-testid={IDS.CONNECTED_APPS_ITEM_TYPE}>{resolveLocalized(row.mail.kind)}</span>

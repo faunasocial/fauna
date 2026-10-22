@@ -1076,6 +1076,20 @@ where
         Ok(())
     }
 
+    /// *Free up space* for a whole bound on-demand location
+    /// (`FreeLocationSpace`; `on-demand-files.md` § The free-up-space gesture
+    /// where the OS offers none): the agent frees every file under `path` that
+    /// is on this device, not kept, and provably recorded. Answers once the
+    /// sweep is accepted; its progress and outcome are re-read off
+    /// `ListLocations` ([`BindingRow::free_space`]), never assumed. Sent only
+    /// for a row [`LocationBindingsModel::free_space_verb`] offers it on.
+    pub async fn free_location_space(&self, path: String) -> Result<(), AgentControlError> {
+        self.inner
+            .agent_request(RequestMethod::FreeLocationSpace { path })
+            .await?;
+        Ok(())
+    }
+
     /// Nudge the agent's resident engine serving `folder` to pull remote
     /// changes **now** (`RequestMethod::PullFolderNow`), off its rescan cadence.
     /// Sent when the client receives a `PushEvent::SyncChanged` for the set.
@@ -1588,9 +1602,9 @@ where
     }
 
     /// Write the sign-out marker into the agent's credential-store namespace —
-    /// the one location both processes resolve identically (`CredentialStore::new`
-    /// applies the same `FAUNA_KEYRING_APP` override on both sides, so an e2e
-    /// redirect moves the capability and its marker together).
+    /// the one location both processes resolve identically
+    /// ([`agent_credential_store`] on both sides, so an e2e redirect moves the
+    /// capability and its marker together, and so does the headless file).
     ///
     /// Best-effort and deliberately non-fatal: a machine whose store cannot be
     /// written is no worse off than before this reconcile existed.
@@ -1608,10 +1622,46 @@ where
             tracing::warn!("sign-out marker: encode failed; skipping");
             return;
         };
-        let store = fauna_credential_store::CredentialStore::new(fauna_ipc::sync::CRED_NAMESPACE);
+        let store = app_view_of_agent_credential_store();
         store.set(fauna_ipc::sync::SIGNED_OUT_KEY, &record);
         tracing::info!("sign-out recorded for the sync agent's signed-out reconcile");
     }
+}
+
+/// The sync agent's credential store — namespace
+/// [`fauna_ipc::sync::CRED_NAMESPACE`], resolved by
+/// [`fauna_credential_store::CredentialStore::new_with_unattended_fallback`]
+/// over `state_base`, the agent's unscoped state base
+/// (`sync-agent-credentials.md` § Credential model): the e2e file dir when the
+/// harness sets one, else a `0600` file already holding the namespace there,
+/// else a usable OS store, else that `0600` file — the headless arm, for an
+/// agent no human can unlock a keyring for.
+///
+/// The one resolution both processes use: the agent over its own
+/// `SyncPaths::flat_base_dir`, the app over the production base
+/// ([`app_view_of_agent_credential_store`]), so the app's sign-out marker lands
+/// where the agent reads its capability. Data-present wins on both sides, so
+/// once the agent's file exists the app writes beside it even where its own
+/// session could reach a keyring.
+pub fn agent_credential_store(
+    state_base: std::path::PathBuf,
+) -> fauna_credential_store::CredentialStore {
+    fauna_credential_store::CredentialStore::new_with_unattended_fallback(
+        fauna_ipc::sync::CRED_NAMESPACE,
+        state_base,
+    )
+}
+
+/// The app's handle on the agent's store: [`agent_credential_store`] over the
+/// production state base on the three desktop OSes the agent runs on; the
+/// plain env-routed store elsewhere (no agent) or with no absolute home (the
+/// agent refuses to start there too).
+fn app_view_of_agent_credential_store() -> fauna_credential_store::CredentialStore {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    if let Ok(base) = fauna_account_store::root::platform_state_base() {
+        return agent_credential_store(base);
+    }
+    fauna_credential_store::CredentialStore::new(fauna_ipc::sync::CRED_NAMESPACE)
 }
 
 /// The agent's store reply as the audit pass takes it — the one conversion
@@ -1675,7 +1725,7 @@ fn recover_job_from(
 /// contract).
 pub fn read_signed_out_marker() -> Option<fauna_ipc::sync::SignedOutMarker> {
     use fauna_client_accounts::SecretStore;
-    let store = fauna_credential_store::CredentialStore::new(fauna_ipc::sync::CRED_NAMESPACE);
+    let store = app_view_of_agent_credential_store();
     let record = store.get(fauna_ipc::sync::SIGNED_OUT_KEY)?;
     fauna_ipc::sync::SignedOutMarker::decode_record(&record)
 }
@@ -2244,6 +2294,157 @@ pub struct BindingRow {
     /// renders nothing; [`LocationBindingsModel::mode_toggle`] turns a code
     /// into the row's [`OnDemandNotice`].
     pub mount_error: Option<String>,
+    /// The recorded bytes of the whole bound set, placeholders included —
+    /// [`LocationInfo::total_bytes`], the denominator of the on-this-device
+    /// line. Mirrored with [`Self::on_device_bytes`].
+    pub total_bytes: u64,
+    /// Of [`Self::total_bytes`], the bytes on this device —
+    /// [`LocationInfo::on_device_bytes`], mirrored by
+    /// [`LocationBindingsModel::reconcile`] and
+    /// [`LocationBindingsModel::fold_parks`] (a sweep moves it with no gesture
+    /// of the app's). `None` for an always-resident binding and from an agent
+    /// that predates the reading.
+    pub on_device_bytes: Option<u64>,
+    /// The latest *Free up space* sweep of this location —
+    /// [`LocationInfo::free_space`], mirrored like [`Self::on_device_bytes`].
+    /// ⚠ Derived, never stored: the agent's lifetime, as
+    /// [`Self::deletes_held`].
+    pub free_space: Option<fauna_ipc::sync::FreeSpaceRun>,
+}
+
+impl BindingRow {
+    /// Mirror the agent's free-up-space readings — the reconcile's and the
+    /// watch's shared half, so neither home can drift from the other.
+    fn mirror_space(&mut self, agent: &LocationInfo) {
+        self.total_bytes = agent.total_bytes;
+        self.on_device_bytes = agent.on_device_bytes;
+        self.free_space = agent.free_space;
+    }
+}
+
+/// How one bound row's *Free up space* verb renders
+/// ([`LocationBindingsModel::free_space_verb`]; `on-demand-files.md` § The
+/// free-up-space gesture where the OS offers none): the button
+/// (`folder-location-free-space-button`), the standing reading
+/// (`folder-location-on-device`) and the latest sweep's outcome
+/// (`folder-location-free-space-result`). Every number is the agent's
+/// reading — the verb is never optimistic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeSpaceVerb {
+    /// A sweep is walking the location now — the button's `running` state.
+    pub running: bool,
+    /// Bytes of the location on this device (`0` when the agent reports none).
+    pub on_device_bytes: u64,
+    /// The location's recorded bytes, placeholders included.
+    pub total_bytes: u64,
+    /// The latest sweep, absent until one has run.
+    pub latest: Option<fauna_ipc::sync::FreeSpaceRun>,
+}
+
+impl FreeSpaceVerb {
+    /// The button's label key.
+    pub const BUTTON_KEY: &'static str = "devices.sync_locations.free_space_button";
+    /// The button's label while a sweep runs.
+    pub const RUNNING_KEY: &'static str = "devices.sync_locations.free_space_running";
+    /// The standing reading: `{on_device}` of `{total}` on this device.
+    pub const ON_DEVICE_KEY: &'static str = "devices.sync_locations.free_space_on_device";
+    /// The latest sweep's outcome with nothing kept: `{files}` freed, `{size}`.
+    pub const RESULT_KEY: &'static str = "devices.sync_locations.free_space_result";
+    /// The outcome when files were kept because this device may hold the only
+    /// copy: `{files}`, `{size}`, `{kept}`.
+    pub const RESULT_KEPT_KEY: &'static str = "devices.sync_locations.free_space_result_kept";
+    /// The sentence appended for files kept because the user pinned them:
+    /// `{count}`.
+    pub const KEPT_PINNED_KEY: &'static str = "devices.sync_locations.free_space_kept_pinned";
+    /// Every key above, for the apps' "each line resolves" tests.
+    pub const KEYS: [&'static str; 6] = [
+        Self::BUTTON_KEY,
+        Self::RUNNING_KEY,
+        Self::ON_DEVICE_KEY,
+        Self::RESULT_KEY,
+        Self::RESULT_KEPT_KEY,
+        Self::KEPT_PINNED_KEY,
+    ];
+
+    /// The button's label, resolved through `lookup`
+    /// (`fauna_i18n::strings::lookup`).
+    pub fn button_label<F, S>(&self, lookup: F) -> String
+    where
+        F: Fn(&str) -> Option<S>,
+        S: AsRef<str>,
+    {
+        let key = if self.running {
+            Self::RUNNING_KEY
+        } else {
+            Self::BUTTON_KEY
+        };
+        fauna_core::localized::LocalizedText::key(key).resolve(lookup)
+    }
+
+    /// The standing on-this-device line.
+    pub fn on_device_line<F, S>(&self, lookup: F) -> String
+    where
+        F: Fn(&str) -> Option<S> + Copy,
+        S: AsRef<str>,
+    {
+        fauna_core::localized::LocalizedText::key_args(
+            Self::ON_DEVICE_KEY,
+            [
+                (
+                    "on_device",
+                    fauna_core::format::byte_size(self.on_device_bytes).resolve(lookup),
+                ),
+                (
+                    "total",
+                    fauna_core::format::byte_size(self.total_bytes).resolve(lookup),
+                ),
+            ],
+        )
+        .resolve(lookup)
+    }
+
+    /// The latest sweep's outcome line, `None` until a sweep has run. Files the
+    /// gate kept are said to be kept *because this device may hold the only
+    /// copy* — the one count covers an unrecorded change and an own record in a
+    /// metadata-only folder alike, and waiting drains only the first.
+    pub fn result_line<F, S>(&self, lookup: F) -> Option<String>
+    where
+        F: Fn(&str) -> Option<S> + Copy,
+        S: AsRef<str>,
+    {
+        let run = self.latest?;
+        let size = fauna_core::format::byte_size(run.freed_bytes).resolve(lookup);
+        let files = run.freed_files.to_string();
+        let mut line = if run.kept_unsynced > 0 {
+            fauna_core::localized::LocalizedText::key_args(
+                Self::RESULT_KEPT_KEY,
+                [
+                    ("files", files),
+                    ("size", size),
+                    ("kept", run.kept_unsynced.to_string()),
+                ],
+            )
+            .resolve(lookup)
+        } else {
+            fauna_core::localized::LocalizedText::key_args(
+                Self::RESULT_KEY,
+                [("files", files), ("size", size)],
+            )
+            .resolve(lookup)
+        };
+        if run.kept_pinned > 0 {
+            line.push(' ');
+            line.push_str(
+                &fauna_core::localized::LocalizedText::key_arg(
+                    Self::KEPT_PINNED_KEY,
+                    "count",
+                    run.kept_pinned.to_string(),
+                )
+                .resolve(lookup),
+            );
+        }
+        Some(line)
+    }
 }
 
 /// What a bound row's `folder-location-mode-toggle` says beside the switch
@@ -2430,6 +2631,9 @@ impl LocationBindingsModel {
             mode,
             // A (re-)bind restarts the root; the next agent row carries its answer.
             mount_error: None,
+            total_bytes: 0,
+            on_device_bytes: None,
+            free_space: None,
         });
         PendingBind {
             path,
@@ -2529,6 +2733,7 @@ impl LocationBindingsModel {
                         row.access_revoked = agent.access_revoked;
                         row.mode = agent.mode.clone();
                         row.mount_error = agent.on_demand_mount_error.clone();
+                        row.mirror_space(agent);
                     }
                     _ => {
                         actions.to_bind.push(PendingBind::from_row(row));
@@ -2546,6 +2751,7 @@ impl LocationBindingsModel {
                         row.access_revoked = agent.access_revoked;
                         row.mode = agent.mode.clone();
                         row.mount_error = agent.on_demand_mount_error.clone();
+                        row.mirror_space(agent);
                     }
                     _ => {
                         // The agent lost it (config reset / a divergent set) —
@@ -2579,6 +2785,9 @@ impl LocationBindingsModel {
                     deletes_skipped_unreadable: 0,
                     mode: agent.mode.clone(),
                     mount_error: agent.on_demand_mount_error.clone(),
+                    total_bytes: agent.total_bytes,
+                    on_device_bytes: agent.on_device_bytes,
+                    free_space: agent.free_space,
                 });
             }
         }
@@ -2650,7 +2859,9 @@ impl LocationBindingsModel {
     /// The same watch carries [`BindingRow::mount_error`], which is the same
     /// kind of level: an on-demand root's mount is attempted after the flip's
     /// reply, so only a later `ListLocations` can say it failed (or that a
-    /// retry stood).
+    /// retry stood). So are the free-up-space readings
+    /// ([`BindingRow::on_device_bytes`], [`BindingRow::free_space`]): a sweep
+    /// accepted by one reply moves them on later ticks.
     pub fn fold_parks(&mut self, agent_rows: &[LocationInfo]) {
         for row in &mut self.rows {
             if let Some(agent) = agent_rows.iter().find(|a| {
@@ -2658,6 +2869,7 @@ impl LocationBindingsModel {
             }) {
                 row.access_revoked = agent.access_revoked;
                 row.mount_error = agent.on_demand_mount_error.clone();
+                row.mirror_space(agent);
             }
         }
     }
@@ -2711,6 +2923,25 @@ impl LocationBindingsModel {
                 }),
             }),
         }
+    }
+
+    /// How `row`'s *Free up space* verb renders, or `None` where it is absent
+    /// (`on-demand-files.md` § The free-up-space gesture where the OS offers
+    /// none). The ONE rule for every app: the verb is present exactly when the
+    /// row renders its mode switch ([`Self::mode_toggle`]), the row is
+    /// on-demand, and its placeholder surface stands (no
+    /// [`BindingRow::mount_error`]).
+    pub fn free_space_verb(&self, row: &BindingRow) -> Option<FreeSpaceVerb> {
+        self.mode_toggle(row)?;
+        if row.mode != "on-demand" || row.mount_error.is_some() {
+            return None;
+        }
+        Some(FreeSpaceVerb {
+            running: row.free_space.is_some_and(|run| run.running),
+            on_device_bytes: row.on_device_bytes.unwrap_or(0),
+            total_bytes: row.total_bytes,
+            latest: row.free_space,
+        })
     }
 
     /// Repaint **one** set's hold — what an
@@ -4119,6 +4350,150 @@ mod tests {
         );
         model.fold_parks(&[agent_row("/home/a/Docs", Some("docs"))]);
         assert_eq!(model.rendered()[0].mount_error, None);
+    }
+
+    /// A row offering *Free up space*: on-demand, on a host that can serve it,
+    /// with the agent's readings.
+    fn free_space_model(
+        free_space: Option<fauna_ipc::sync::FreeSpaceRun>,
+    ) -> LocationBindingsModel {
+        let mut model = LocationBindingsModel::default();
+        model.fold_service_status(&status(Some(true), None));
+        model.reconcile(&[LocationInfo {
+            mode: "on-demand".to_string(),
+            total_bytes: 3000,
+            on_device_bytes: Some(1000),
+            free_space,
+            ..agent_row("/home/a/Docs", Some("docs"))
+        }]);
+        model
+    }
+
+    /// The test lookup: each template keyed by its last segment, so the
+    /// shared rule is pinned without the string table.
+    fn free_space_lookup(key: &str) -> Option<&'static str> {
+        Some(match key.rsplit('.').next()? {
+            "free_space_button" => "Free up space",
+            "free_space_running" => "Freeing",
+            "free_space_on_device" => "{on_device} of {total}",
+            "free_space_result" => "Freed {files} ({size})",
+            "free_space_result_kept" => "Freed {files} ({size}); kept {kept}: only copy",
+            "free_space_kept_pinned" => "Pinned {count}",
+            _ => return None,
+        })
+    }
+
+    /// The verb is present exactly where the switch is, on an on-demand row
+    /// whose placeholder surface stands — the one rule every app paints.
+    #[test]
+    fn free_space_verb_follows_the_switch_and_the_mount() {
+        let model = free_space_model(None);
+        let verb = model.free_space_verb(&model.rendered()[0]).unwrap();
+        assert_eq!(
+            verb,
+            FreeSpaceVerb {
+                running: false,
+                on_device_bytes: 1000,
+                total_bytes: 3000,
+                latest: None,
+            }
+        );
+        assert_eq!(
+            verb.result_line(free_space_lookup),
+            None,
+            "no sweep has run"
+        );
+
+        // An always-resident row has nothing to free.
+        let mut model = model_with_row("always", None);
+        model.fold_service_status(&status(Some(true), None));
+        assert!(model.mode_toggle(&model.rendered()[0]).is_some());
+        assert_eq!(model.free_space_verb(&model.rendered()[0]), None);
+
+        // A root running without its placeholder surface frees nothing.
+        let mut model = model_with_row("on-demand", Some(fauna_ipc::sync::ON_DEMAND_MOUNT_FAILED));
+        model.fold_service_status(&status(Some(true), None));
+        assert_eq!(model.free_space_verb(&model.rendered()[0]), None);
+
+        // No switch, no verb (macOS: the File Provider extension's).
+        let mut model = free_space_model(None);
+        model.fold_service_status(&status(
+            Some(false),
+            Some(fauna_ipc::sync::ON_DEMAND_REASON_NOT_AGENT_HOSTED),
+        ));
+        assert_eq!(model.mode_toggle(&model.rendered()[0]), None);
+        assert_eq!(model.free_space_verb(&model.rendered()[0]), None);
+    }
+
+    /// Every line is the agent's reading, and a file the gate kept is said to
+    /// be kept because this device may hold the only copy.
+    #[test]
+    fn free_space_verb_lines_read_the_agents_tally() {
+        let running = fauna_ipc::sync::FreeSpaceRun {
+            running: true,
+            ..Default::default()
+        };
+        let model = free_space_model(Some(running));
+        let verb = model.free_space_verb(&model.rendered()[0]).unwrap();
+        assert!(verb.running);
+        assert_eq!(verb.button_label(free_space_lookup), "Freeing");
+
+        let done = fauna_ipc::sync::FreeSpaceRun {
+            running: false,
+            freed_files: 1,
+            freed_bytes: 1000,
+            kept_unsynced: 0,
+            kept_pinned: 0,
+        };
+        let model = free_space_model(Some(done));
+        let verb = model.free_space_verb(&model.rendered()[0]).unwrap();
+        assert_eq!(verb.button_label(free_space_lookup), "Free up space");
+        let size = fauna_core::format::byte_size(1000).resolve(free_space_lookup);
+        assert_eq!(
+            verb.result_line(free_space_lookup).unwrap(),
+            format!("Freed 1 ({size})")
+        );
+        assert_eq!(
+            verb.on_device_line(free_space_lookup),
+            format!(
+                "{} of {}",
+                fauna_core::format::byte_size(1000).resolve(free_space_lookup),
+                fauna_core::format::byte_size(3000).resolve(free_space_lookup)
+            )
+        );
+
+        let kept = fauna_ipc::sync::FreeSpaceRun {
+            kept_unsynced: 2,
+            kept_pinned: 3,
+            ..done
+        };
+        let model = free_space_model(Some(kept));
+        let verb = model.free_space_verb(&model.rendered()[0]).unwrap();
+        assert_eq!(
+            verb.result_line(free_space_lookup).unwrap(),
+            format!("Freed 1 ({size}); kept 2: only copy Pinned 3")
+        );
+    }
+
+    /// The readings ride the status-tick watch as well as the reconcile: a
+    /// sweep moves them with no gesture of the app's.
+    #[test]
+    fn free_space_verb_readings_ride_the_watch() {
+        let mut model = free_space_model(None);
+        model.fold_parks(&[LocationInfo {
+            mode: "on-demand".to_string(),
+            total_bytes: 3000,
+            on_device_bytes: Some(0),
+            free_space: Some(fauna_ipc::sync::FreeSpaceRun {
+                freed_files: 1,
+                freed_bytes: 1000,
+                ..Default::default()
+            }),
+            ..agent_row("/home/a/Docs", Some("docs"))
+        }]);
+        let row = &model.rendered()[0];
+        assert_eq!(row.on_device_bytes, Some(0));
+        assert_eq!(row.free_space.unwrap().freed_files, 1);
     }
 
     /// macOS: on-demand is the File Provider extension's, so the agent's

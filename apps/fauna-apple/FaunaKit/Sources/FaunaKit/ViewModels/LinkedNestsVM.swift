@@ -162,6 +162,25 @@ public final class LinkedNestsVM: MachineBackedVM {
         }
     }
 
+    /// The store-change notice's re-read (account-runtime.md § Multi-instance
+    /// concurrency, the own-pump notice, part 4 — the Nests custody facet):
+    /// re-folds the facet and the escrow-holder set only. Unlike
+    /// ``loadCustody()`` it drives no ceremony pass (a notice is not a page
+    /// load, and the drive is itself a store writer), and it sets only what
+    /// differs; the pairing list is the nest's, not the store's, and is left
+    /// to the page's own refresh.
+    func resyncCustody() async {
+        guard let api = configuredApi else { return }
+        if let facet = try? await api.loadCustodyFacet() {
+            let rows = Self.nestAnchored(facet.rows)
+            if rows != custodyNestRows { custodyNestRows = rows }
+        }
+        if let holders = await custodyEscrowHolders() {
+            let set = Set(holders.map { $0.lowercased() })
+            if set != escrowHolders { escrowHolders = set }
+        }
+    }
+
     private func applyCustodyFacet(_ facet: CustodyFacetView) {
         custodyNestRows = Self.nestAnchored(facet.rows)
     }

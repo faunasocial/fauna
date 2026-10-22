@@ -13,7 +13,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.navigation.NavController
 import com.fauna.app.R
-import com.fauna.app.core.ShellLog
 import com.fauna.app.core.OnboardingHost
 import com.fauna.app.ui.components.CopyButton
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -49,17 +48,16 @@ class IdentityCreatedVM @Inject constructor(
      * so backing out and cancelling leaves the live session exactly as it was.
      * The rule lives in shared Rust, not in an app-side `if`.
      *
-     * Failure surfaces log-only (the cross-app convention for a failed store
-     * write); navigation proceeds either way — if persistence failed the user
-     * re-onboards next launch, the same outcome the wizard already handles.
+     * Failure is loud (long-term-store.md § Save-failure handling): the machine's
+     * `identityCommitFailed` returns the wizard to this confirm screen with the
+     * error on `error-message` (see [commitConfirmedIdentity]); confirming again
+     * is the retry. Returns whether the identity is committed — the caller
+     * navigates on only then. [persistFailedTemplate] is the resolved
+     * `onboarding.session_error.persist_successor` string.
      */
-    fun confirm() {
+    fun confirm(persistFailedTemplate: String): Boolean {
         val secret = host.machine.confirmGeneratedIdentity()
-        try {
-            registry.confirmIdentity(secret, host.appendMode)
-        } catch (e: Exception) {
-            ShellLog.w("IdentityCreatedVM", "persist_confirmed_identity (registry commit + read-back) failed: ${e.message}")
-        }
+        return commitConfirmedIdentity(host, registry, secret, persistFailedTemplate, "IdentityCreatedVM")
     }
 }
 
@@ -68,6 +66,7 @@ fun IdentityCreatedScreen(
     navController: NavController,
     vm: IdentityCreatedVM = hiltViewModel(),
 ) {
+    val persistFailedTemplate = stringResource(R.string.onboarding_session_error_persist_successor)
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -134,10 +133,13 @@ fun IdentityCreatedScreen(
 
             Button(
                 onClick = {
-                    vm.confirm()
-                    // The machine decides: the recovery-kit offer (android
-                    // declares setRendersRecoveryKit), else handle entry.
-                    navController.navigate(routeForStep(vm.host.machine.step()))
+                    // A failed write leaves the machine on this confirm step
+                    // with the error painted; stay put.
+                    if (vm.confirm(persistFailedTemplate)) {
+                        // The machine decides: the recovery-kit offer (android
+                        // declares setRendersRecoveryKit), else handle entry.
+                        navController.navigate(routeForStep(vm.host.machine.step()))
+                    }
                 },
                 modifier = Modifier.testTag(Ids.IDENTITY_CONTINUE_BUTTON),
             ) { Text(stringResource(R.string.onboarding_identity_created_continue)) }

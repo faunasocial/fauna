@@ -26,6 +26,7 @@ import SwiftUI
 public struct MailExportView: View {
     @Environment(FaunaClient.self) private var client: FaunaClient?
     @State private var vm = MailExportVM()
+    @State private var cancelArmed = false
 
     /// Synchronous echo of a mailbox toggle, by mailbox name — read in preference
     /// to the snapshot so a driver's immediate `state` read-back is never stale
@@ -238,15 +239,34 @@ public struct MailExportView: View {
                     .automationActivate(Ids.mailExportResumeButton) {
                         Task { await vm.dispatch(.resume) }
                     }
-                Button(L.mailExport.cancelButton, role: .destructive) { Task { await vm.dispatch(.cancel) } }
+                Button(cancelLabel, role: .destructive) { tapCancel() }
                     .accessibilityIdentifier(Ids.mailExportCancelButton)
-                    .automationActivate(Ids.mailExportCancelButton) {
-                        Task { await vm.dispatch(.cancel) }
-                    }
+                    .automationActivate(Ids.mailExportCancelButton, text: { cancelLabel }) { tapCancel() }
             }
             automationText(Ids.mailExportErrorLog, (vm.snapshot?.errorLog ?? []).joined(separator: "\n"))
                 .font(.caption.monospaced())
             mailboxProgressList
+        }
+    }
+
+    /// The cancel button's label: `Cancel`, relabelled `Confirm?` once armed.
+    /// Shared by the `Button` title and its `.automationActivate` `text:`.
+    private var cancelLabel: String {
+        cancelArmed ? L.common.confirmQ : L.mailExport.cancelButton
+    }
+
+    /// Two-click inline cancel arm-then-confirm (no modal), the same shape as
+    /// `MailImportView.tapCancel`; the arm disarms itself after 4 s.
+    private func tapCancel() {
+        if cancelArmed {
+            cancelArmed = false
+            Task { await vm.dispatch(.cancel) }
+        } else {
+            cancelArmed = true
+            Task {
+                try? await Task.sleep(for: .seconds(4))
+                cancelArmed = false
+            }
         }
     }
 

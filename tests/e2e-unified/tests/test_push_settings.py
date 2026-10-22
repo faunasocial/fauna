@@ -60,6 +60,11 @@ SWITCHER_LIST = "account-switcher-list"
 ACCOUNT_PAGE_NAV = {
     "nav": {"stack": [{"view": "settings"}, {"view": "settings", "id": "account"}]}
 }
+# The row an app's toggle writes, where it is not the desktops' `ws-device`:
+# android subscribes a Web Push endpoint its UnifiedPush distributor issued
+# (`common.md` § Transports) — under e2e the debug build's stand-in
+# distributor's (`E2ePushDistributor.kt`).
+_TRANSPORT = {"android": "web-push"}
 
 
 def _rows(nest_url: str, actor: str) -> list[dict]:
@@ -67,6 +72,16 @@ def _rows(nest_url: str, actor: str) -> list[dict]:
     q = urllib.parse.urlencode({"actor_id": actor})
     with urllib.request.urlopen(
         f"{nest_url}/api/v1/test/push/subscriptions?{q}", timeout=RPC_ROUNDTRIP_S
+    ) as r:
+        return json.load(r)
+
+
+def _presence(nest_url: str, actor: str) -> dict:
+    """What a dispatch would read for the actor now: the device ids its live
+    connections announced, and whether any announced none."""
+    q = urllib.parse.urlencode({"actor_id": actor})
+    with urllib.request.urlopen(
+        f"{nest_url}/api/v1/test/push/presence?{q}", timeout=RPC_ROUNDTRIP_S
     ) as r:
         return json.load(r)
 
@@ -168,6 +183,24 @@ def _launch(app, app_path, nest_instance, request, tmp_path, seed, keyring_app):
     ``tmp_path``, so a relaunch reads the same install (the intent bit is
     install-scoped: tui's config base, windows' data dir — which the windows
     driver never deletes when the test supplies it)."""
+    if app == "android":
+        # android's install is the app's own filesDir on the device: the
+        # driver's first launch starts it fresh, its relaunches keep it
+        # (`drivers/android.py`, `fresh_install`).
+        from tests.test_account_switcher_android import _launch_config
+
+        config = {
+            "url": nest_instance["url"],
+            "seed_credentials": seed,
+            "environment": _seeded_environment(request, nest_instance),
+            **_launch_config(request),
+        }
+        driver = create_driver(app)
+        # The journeys drive the toggle, not the OS permission dialog.
+        driver.grant_notifications()
+        driver.launch(config)
+        _wait_signed_in(driver)
+        return driver, config
     config = {
         "app_path": app_path,
         "url": nest_instance["url"],
@@ -229,6 +262,14 @@ def test_linux_push_turned_off_stays_off_across_a_relaunch(
     _off_stays_off_across_a_relaunch("linux", linux_app_path, nest_instance, request, tmp_path)
 
 
+@pytest.mark.android
+@pytest.mark.feature("notifications")
+def test_android_push_turned_off_stays_off_across_a_relaunch(
+    nest_instance, android_app_path, request, tmp_path
+):
+    _off_stays_off_across_a_relaunch("android", android_app_path, nest_instance, request, tmp_path)
+
+
 def _off_stays_off_across_a_relaunch(app, app_path, nest_instance, request, tmp_path):
     url = nest_instance["url"]
     actor, secret = _register_user(nest_instance)
@@ -244,10 +285,10 @@ def _off_stays_off_across_a_relaunch(app, app_path, nest_instance, request, tmp_
         _open_account_page(driver)
         assert not _settled_toggle(driver), "a fresh install is never opted in"
 
-        # On → this install's ws-device row exists.
+        # On → this install's row exists, on the app's transport.
         driver.click(TOGGLE)
         rows = _wait_rows(url, actor, 1)
-        assert rows[0]["transport"] == "ws-device", rows
+        assert rows[0]["transport"] == _TRANSPORT.get(app, "ws-device"), rows
         _wait_toggle(driver, True)
 
         # Off → the row is gone and the toggle reads off.
@@ -300,6 +341,15 @@ def test_linux_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting
     nest_instance, linux_app_path, request, tmp_path
 ):
     _follows_whoever_is_signed_in("linux", linux_app_path, nest_instance, request, tmp_path)
+
+
+@pytest.mark.android
+@pytest.mark.feature("notifications")
+@pytest.mark.feature("multiple-accounts")
+def test_android_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting(
+    nest_instance, android_app_path, request, tmp_path
+):
+    _follows_whoever_is_signed_in("android", android_app_path, nest_instance, request, tmp_path)
 
 
 def _follows_whoever_is_signed_in(app, app_path, nest_instance, request, tmp_path):
@@ -378,6 +428,14 @@ def test_linux_sign_out_drops_the_row_and_the_next_sign_in_rearms(
     _sign_out_drops_and_sign_in_rearms("linux", linux_app_path, nest_instance, request, tmp_path)
 
 
+@pytest.mark.android
+@pytest.mark.feature("notifications")
+def test_android_sign_out_drops_the_row_and_the_next_sign_in_rearms(
+    nest_instance, android_app_path, request, tmp_path
+):
+    _sign_out_drops_and_sign_in_rearms("android", android_app_path, nest_instance, request, tmp_path)
+
+
 def _sign_out_drops_and_sign_in_rearms(app, app_path, nest_instance, request, tmp_path):
     from actions.settings import SettingsActions
 
@@ -406,6 +464,9 @@ def _sign_out_drops_and_sign_in_rearms(app, app_path, nest_instance, request, tm
         # re-arms with no Settings visit and no prompt.
         assert driver.preserve_state_across_relaunch()
         driver.teardown()
+        # android's install survives every relaunch and its pin only withholds
+        # the seed; this relaunch re-seeds, as tui's does over its pinned base.
+        config.pop("preserve_store", None)
         driver.launch(config)  # re-seeds the same identity over the same install
         _wait_signed_in(driver)
         _wait_rows(url, actor, 1)
@@ -427,10 +488,6 @@ def _sign_out_drops_and_sign_in_rearms(app, app_path, nest_instance, request, tm
 # three journeys above.
 
 
-def _checked(driver) -> bool:
-    return driver.get_attr(TOGGLE, "checked") == "true"
-
-
 # No `feature` marker: this is not a witness of `notifications.md` outcome 9
 # (off stays off; push follows whoever is signed in) — nothing can be switched
 # on here to be switched off. It witnesses the control's failure half only.
@@ -439,13 +496,13 @@ def _checked(driver) -> bool:
 def test_an_apple_install_that_cannot_register_stays_off_and_says_why(
     logged_in_app, nest_instance, test_user
 ):
-    driver = logged_in_app
+    driver = logged_in_app.driver
     url = nest_instance["url"]
     actor = test_user["actor_id_hex"]
 
     driver.set_state(GENERAL_PAGE_NAV)
     driver.wait_for(SECTION, timeout=15)
-    assert not _checked(driver), "a fresh install is never opted in"
+    assert not _settled_toggle(driver), "a fresh install is never opted in"
     assert _rows(url, actor) == [], "a launch registered a row nobody asked for"
 
     if driver.is_ios():
@@ -464,8 +521,210 @@ def test_an_apple_install_that_cannot_register_stays_off_and_says_why(
     driver.click(TOGGLE)
     driver.wait_for(ERROR, timeout=15)
     assert driver.get_text(ERROR), "the failure line rendered empty"
-    assert not _checked(driver), _diagnose(driver)
+    assert not _settled_toggle(driver), _diagnose(driver)
     assert _rows(url, actor) == [], "a failed enable left a row behind"
+
+
+# The Apple presence announce, witnessed at the nest the way the web leg's
+# open-tab test witnesses web's (`common.md` § Registration → *Every connection
+# announces*): an open Apple app announces the device it serves, so the user's
+# OTHER device's row is still dialled. An Apple app announcing nothing would
+# quiet every relay row of the actor — the compatibility rider of § Dispatch
+# Logic — and the other device would never hear of the message. No APNs row is
+# needed: the announce rides session start whether or not the install opted in.
+@pytest.mark.macos
+@pytest.mark.ios
+@pytest.mark.standalone_only
+def test_an_open_apple_app_announces_its_device_so_the_users_other_device_is_still_pushed(
+    logged_in_app, nest_instance, test_user
+):
+    """``standalone_only``: the other device's row dials a loopback listener
+    this process owns, which only a locally spawned test-hooks nest accepts
+    and can reach."""
+    from helpers.push_dispatch import actor_client as _actor_client
+    from helpers.push_dispatch import PushEndpoint as _PushEndpoint
+    from helpers.push_dispatch import WebPushDevice as _Device
+    from helpers.push_dispatch import await_settled as _await_settled
+    from tests.api.test_push_dispatch import (
+        _announce,
+        _invite,
+    )
+
+    driver = logged_in_app.driver
+    url = nest_instance["url"]
+    actor = test_user["actor_id_hex"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+    inviter = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    phone = _Device()
+    # The causal anchor that the app's session start ran: its Settings page is
+    # up. The announce itself is awaited below by its effect at the nest.
+    driver.set_state(GENERAL_PAGE_NAV)
+    driver.wait_for(SECTION, timeout=15)
+
+    with _PushEndpoint() as phone_endpoint, _actor_client(url, test_user) as console:
+        # Setup on another device's behalf: the trigger is a stranger's
+        # conversation Welcome, which only an open inbox accepts (restored
+        # after — `test_user` is the session's), and the user's other device
+        # holds a web-push row of its own, its app closed.
+        mode = console.call("fauna.inbox.mode.get", {})["mode"]
+        console.call("fauna.inbox.mode.set", {"mode": "open"})
+        try:
+            console.call(
+                "fauna.push.subscribe",
+                {"device_id": "presence-other-device", "endpoint": phone_endpoint.url,
+                 "key_p256dh": phone.p256dh_b64, "key_auth": phone.auth_b64,
+                 "transport": "web-push"},
+            )
+            # The setup connection is live too: it announces a device that holds
+            # no row, so it quiets nothing (an unannounced one would quiet every
+            # row and hide what the app does).
+            _announce(console, "presence-setup-console")
+            seen: list[dict] = []
+
+            def app_announced() -> bool:
+                # Session start announces asynchronously: wait until the nest
+                # reads the app's device among the actor's live connections and
+                # no connection left unannounced.
+                seen.append(_presence(url, actor))
+                p = seen[-1]
+                return not p["any_unannounced"] and bool(
+                    set(p["announced"]) - {"presence-setup-console"}
+                )
+
+            wait_until(
+                app_announced,
+                UI_SETTLE_S,
+                diagnose=lambda: (
+                    "every live connection of the Apple app must announce its "
+                    "device (common.md § Registration → Every connection "
+                    f"announces); the nest reads {seen[-1] if seen else None!r}"
+                ),
+            )
+            _announce(console, "presence-setup-console")  # `_announce` says why
+            counters = _invite(url, inviter, test_user, _await_settled(url))
+            assert counters["dialled_delta"] == 1, (
+                "with the Apple app open, exactly the other device's row must be "
+                f"dialled (common.md § Dispatch Logic); dialled {counters['dialled_delta']}, "
+                f"presence {_presence(url, actor)!r}"
+            )
+            wait_until(
+                phone_endpoint.has_new,
+                PUSH_DIAL_S,
+                diagnose=lambda: "the other device's row was dialled but no POST reached it",
+            )
+        finally:
+            console.call("fauna.push.unsubscribe", {"device_id": "presence-other-device"})
+            console.call("fauna.inbox.mode.set", {"mode": mode})
+
+
+# ── The desktop presence leg (tui, linux) ────────────────────────────────────
+#
+# The same presence journey as the Apple leg above, for the apps that hold two
+# live connections per account — the session client and the account runtime's
+# own device-bound store-principal client. Both must announce (`common.md` §
+# Registration → *Every connection announces*): the second one announced
+# nothing until 2026-10-16, which quieted every relay row of the actor. The
+# per-connection presence is the failure message, so a silent connection names
+# itself.
+
+
+@pytest.mark.tui
+@pytest.mark.standalone_only
+def test_an_open_tui_announces_its_device_so_the_users_other_device_is_still_pushed(
+    nest_instance, tui_app_path, request, tmp_path
+):
+    _open_desktop_app_announces("tui", tui_app_path, nest_instance, request, tmp_path)
+
+
+@pytest.mark.linux
+@pytest.mark.standalone_only
+def test_linux_an_open_app_announces_its_device_so_the_users_other_device_is_still_pushed(
+    nest_instance, linux_app_path, request, tmp_path
+):
+    _open_desktop_app_announces("linux", linux_app_path, nest_instance, request, tmp_path)
+
+
+def _open_desktop_app_announces(app, app_path, nest_instance, request, tmp_path):
+    """``standalone_only``: the other device's row dials a loopback listener
+    this process owns, which only a locally spawned test-hooks nest accepts
+    and can reach. No row of the app's own is needed: the announce rides
+    session start whether or not the install opted in."""
+    from helpers.push_dispatch import actor_client as _actor_client
+    from helpers.push_dispatch import PushEndpoint as _PushEndpoint
+    from helpers.push_dispatch import WebPushDevice as _Device
+    from helpers.push_dispatch import await_settled as _await_settled
+    from tests.api.test_push_dispatch import (
+        _announce,
+        _invite,
+    )
+
+    url = nest_instance["url"]
+    admin_sk = nest_instance["admin"]["signing_key"]
+    recipient = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    inviter = create_actor_and_register(nest_instance["port"], admin_signing_key=admin_sk)
+    actor = recipient["actor_id_hex"]
+    seed = build_registry_seed(
+        [{"actor_id": actor, "secret_hex": bytes(recipient["signing_key"]).hex(),
+          "nest_url": url, "device_id": f"presence-{app}", "handle": "presence"}],
+        active=actor,
+    )
+    phone = _Device()
+
+    with _PushEndpoint() as phone_endpoint, _actor_client(url, recipient) as console:
+        # Setup on another device's behalf: the trigger is a stranger's
+        # conversation Welcome, which only an open inbox accepts, and the
+        # user's other device holds a web-push row of its own, its app closed.
+        console.call("fauna.inbox.mode.set", {"mode": "open"})
+        console.call(
+            "fauna.push.subscribe",
+            {"device_id": "presence-other-device", "endpoint": phone_endpoint.url,
+             "key_p256dh": phone.p256dh_b64, "key_auth": phone.auth_b64,
+             "transport": "web-push"},
+        )
+        # The setup connection is live too: it announces a device that holds no
+        # row, so it quiets nothing (an unannounced one would quiet every row
+        # and hide what the app does).
+        _announce(console, "presence-setup-console")
+
+        driver, _config = _launch(
+            app, app_path, nest_instance, request, tmp_path, seed, f"push-presence-{app}"
+        )
+        try:
+            seen: list[dict] = []
+
+            def app_announced() -> bool:
+                # Session start and the account runtime's client announce
+                # asynchronously: wait until the nest reads the app's device
+                # among the actor's live connections and none left unannounced.
+                seen.append(_presence(url, actor))
+                p = seen[-1]
+                return not p["any_unannounced"] and bool(
+                    set(p["announced"]) - {"presence-setup-console"}
+                )
+
+            wait_until(
+                app_announced,
+                UI_SETTLE_S,
+                diagnose=lambda: (
+                    f"every live connection of the {app} app must announce its "
+                    "device (common.md § Registration → Every connection "
+                    f"announces); the nest reads per-connection {seen[-1] if seen else None!r}"
+                ),
+            )
+            _announce(console, "presence-setup-console")  # `_announce` says why
+            counters = _invite(url, inviter, recipient, _await_settled(url))
+            assert counters["dialled_delta"] == 1, (
+                f"with the {app} app open, exactly the other device's row must be "
+                f"dialled (common.md § Dispatch Logic); dialled {counters['dialled_delta']}, "
+                f"presence {_presence(url, actor)!r}"
+            )
+            wait_until(
+                phone_endpoint.has_new,
+                PUSH_DIAL_S,
+                diagnose=lambda: "the other device's row was dialled but no POST reached it",
+            )
+        finally:
+            driver.teardown()
 
 
 # ── The web leg ──────────────────────────────────────────────────────────────
@@ -489,9 +748,16 @@ def _open_general_page(driver) -> None:
     driver.wait_for(SECTION, timeout=15)
 
 
-def _web_launch(spa_url: str, endpoint: str = WEB_PUSH_STAND_IN):
+def _web_launch(spa_url: str, endpoint: str = WEB_PUSH_STAND_IN, seed: dict | None = None):
     driver = create_driver("web")
-    driver.launch({"url": spa_url + "/app/", "push_service_stand_in": endpoint})
+    # The literal IS the launch's shape: a dict with no `app_path` is the browser
+    # driver's, the escrow-trust seed's one declared absence (wasm has no
+    # environment to read) — `test_r14_trust_seed_self_launch.py` reads the
+    # shape off this call, so the config is not built up by name first. A
+    # `None` seed is the no-seed launch (`drivers/web.py` seeds only a truthy one).
+    driver.launch(
+        {"url": spa_url + "/app/", "push_service_stand_in": endpoint, "seed_credentials": seed}
+    )
     return driver
 
 
@@ -527,9 +793,9 @@ def test_web_push_follows_whoever_is_signed_in_and_switching_keeps_the_setting(
 
     url = nest_instance["url"]
     seed, user, user_secret, admin, _admin_secret = _seed_two_accounts(nest_instance, spa_url)
-    driver = _web_launch(spa_url)
+    driver = _web_launch(spa_url, seed=seed)
     try:
-        _auth_on_account_page(driver, seed, user_secret, "user", user, spa_url)
+        _auth_on_account_page(driver, user_secret, "user", user, spa_url)
         _open_general_page(driver)
         assert not _settled_toggle(driver), "a fresh install is never opted in"
 
@@ -614,9 +880,9 @@ def test_web_an_open_tab_quiets_its_own_row_and_no_other(nest_instance, spa_url)
              "transport": "web-push"},
         )
 
-        driver = _web_launch(spa_url, endpoint=browser_endpoint.url)
+        driver = _web_launch(spa_url, endpoint=browser_endpoint.url, seed=seed)
         try:
-            _auth_on_account_page(driver, seed, secret, "presence", actor, spa_url)
+            _auth_on_account_page(driver, secret, "presence", actor, spa_url)
             _open_general_page(driver)
             driver.click(TOGGLE)
             rows = _wait_rows(url, actor, 2)

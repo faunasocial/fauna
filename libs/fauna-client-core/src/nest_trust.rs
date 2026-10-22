@@ -2106,7 +2106,7 @@ mod rotation_tests {
                         cert_binding: Some(Box::new(CertBinding::sign(
                             &self.new, &self.spki, &nonce,
                         ))),
-                        extra: Default::default(),
+                        ..Default::default()
                     })
                     .unwrap()
                 }
@@ -2288,7 +2288,7 @@ mod rotation_tests {
                         expires_at: 2_000_000_000,
                         expires_in: 300,
                         cert_binding: Some(Box::new(binding)),
-                        extra: Default::default(),
+                        ..Default::default()
                     })
                     .unwrap()
                 }

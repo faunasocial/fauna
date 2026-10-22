@@ -153,11 +153,25 @@ impl std::fmt::Display for UnknownFilterKind {
 
 impl std::error::Error for UnknownFilterKind {}
 
-/// The rule-kind tags [`encode_filter_rule`] accepts, in the order every
-/// app's create-dialog dropdown presents them (linux and tui each hand-copied
-/// this exact set as their own dropdown-options array before this constant
-/// existed — priority #2/#3).
+/// The rule-kind tags [`encode_filter_rule_inputs`] accepts, in the order the
+/// shared filter form's dropdown presents them: every v1 condition
+/// (`email-filters.md` § Email filter rules). A form that collects only the one
+/// free-text value offers [`SINGLE_VALUE_RULE_KINDS`] instead.
 pub const SUPPORTED_RULE_KINDS: &[&str] = &[
+    "SenderIs",
+    "SenderDomain",
+    "SubjectContains",
+    "BodyContains",
+    "HeaderExists",
+    "HeaderContains",
+    "SpamScoreAtLeast",
+];
+
+/// The rule kinds a form with a single free-text value field can encode
+/// ([`encode_filter_rule`]) — [`SUPPORTED_RULE_KINDS`] minus the two
+/// conditions with a second input (`HeaderContains`'s value,
+/// `SpamScoreAtLeast`'s score).
+pub const SINGLE_VALUE_RULE_KINDS: &[&str] = &[
     "SenderIs",
     "SenderDomain",
     "SubjectContains",
@@ -165,18 +179,33 @@ pub const SUPPORTED_RULE_KINDS: &[&str] = &[
     "HeaderExists",
 ];
 
-/// The action tags [`encode_filter_action`] accepts, in dropdown order.
-pub const SUPPORTED_ACTION_KINDS: &[&str] = &["Allow", "Discard", "Reject", "Forward"];
+/// The action tags [`encode_filter_action`] accepts, in dropdown order: every
+/// v1 action. A form that does not yet collect an action's inputs leaves its
+/// tag out of its own dropdown and passes that narrower list to
+/// [`filter_is_editable_for`].
+pub const SUPPORTED_ACTION_KINDS: &[&str] = &[
+    "Allow",
+    "Discard",
+    "Reject",
+    "Forward",
+    "FileInto",
+    "AddLabel",
+    "AutoReply",
+];
+
+/// An `AutoReply`'s once-per-sender interval when the form leaves it blank:
+/// seven days, the Sieve `vacation` default (RFC 5230 §4.1).
+pub const DEFAULT_AUTO_REPLY_INTERVAL_HOURS: u32 = 7 * 24;
 
 /// Build the typed [`EmailFilterRule`] for a create-dialog `(kind, value)` pair.
 ///
 /// `kind` is the PascalCase variant name (the canonical tag — `"SenderIs"`,
 /// `"SenderDomain"`, `"SubjectContains"`, `"BodyContains"`, `"HeaderExists"`);
 /// `value` is the single free-text field (an address / domain / substring /
-/// header name). Covers the single-string-value conditions the create UI offers
-/// (`smtp-server.md` § Email filter rules). The multi-field / non-string
-/// conditions (`HeaderContains`, `SpamScoreAtLeast`) are deferred until a UI
-/// collects their extra inputs — they map to `Err` here, like any unknown kind.
+/// header name). Covers [`SINGLE_VALUE_RULE_KINDS`] — the form shape whose only
+/// input is that one field. The two conditions with a second input
+/// (`HeaderContains`, `SpamScoreAtLeast`) map to `Err` here, like any unknown
+/// kind; [`encode_filter_rule_inputs`] encodes every kind.
 pub fn encode_filter_rule(kind: &str, value: &str) -> Result<EmailFilterRule, UnknownFilterKind> {
     Ok(match kind {
         "SenderIs" => EmailFilterRule::SenderIs {
@@ -196,6 +225,199 @@ pub fn encode_filter_rule(kind: &str, value: &str) -> Result<EmailFilterRule, Un
         },
         other => return Err(UnknownFilterKind(other.to_string())),
     })
+}
+
+/// Every input the shared filter form collects for its condition — what
+/// [`encode_filter_rule_inputs`] reads and [`describe_filter_rule_inputs`]
+/// returns. The [`FilterActionInputs`] shape on the condition side: one typed
+/// struct, serde-shaped for the web form, version-locked and refusing an
+/// unknown key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FilterRuleInputs {
+    /// The condition tag — one of [`SUPPORTED_RULE_KINDS`].
+    pub kind: String,
+    /// The `filter-rule-value` field: an address, a domain, a substring, or
+    /// (for both header conditions) the header name.
+    pub value: String,
+    /// `HeaderContains`' value — the substring the named header must contain
+    /// (`filter-rule-header-value`).
+    pub header_value: String,
+    /// `SpamScoreAtLeast`'s score in points, as typed (`filter-rule-spam-score`;
+    /// `"5"`, `"7.5"`), read by [`parse_spam_score_milli`].
+    pub spam_score: String,
+}
+
+impl FilterRuleInputs {
+    /// The form's initial state for condition `kind`: every input empty.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            value: String::new(),
+            header_value: String::new(),
+            spam_score: String::new(),
+        }
+    }
+}
+
+impl Default for FilterRuleInputs {
+    /// A fresh form: the first dropdown entry with every input empty.
+    fn default() -> Self {
+        Self::new(SUPPORTED_RULE_KINDS[0])
+    }
+}
+
+/// Why the shared filter form's condition inputs don't encode (see
+/// [`encode_filter_rule_inputs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterRuleError {
+    /// The condition tag isn't one of [`SUPPORTED_RULE_KINDS`].
+    UnknownKind(String),
+    /// A `SpamScoreAtLeast` whose score fails [`parse_spam_score_milli`].
+    SpamScore(InvalidSpamScore),
+}
+
+impl std::fmt::Display for FilterRuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterRuleError::UnknownKind(kind) => write!(f, "unknown email filter kind: {kind}"),
+            FilterRuleError::SpamScore(e) => write!(f, "spam score: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for FilterRuleError {}
+
+/// Build the typed [`EmailFilterRule`] from the shared filter form's condition
+/// inputs. The single-value kinds read `value` exactly as [`encode_filter_rule`]
+/// does; `HeaderContains` takes the header name from `value` and the substring
+/// from `header_value`; `SpamScoreAtLeast` takes `spam_score`, parsed to the
+/// wire's milli-points by [`parse_spam_score_milli`].
+pub fn encode_filter_rule_inputs(
+    inputs: &FilterRuleInputs,
+) -> Result<EmailFilterRule, FilterRuleError> {
+    Ok(match inputs.kind.as_str() {
+        "HeaderContains" => EmailFilterRule::HeaderContains {
+            name: inputs.value.clone(),
+            value: inputs.header_value.clone(),
+        },
+        "SpamScoreAtLeast" => EmailFilterRule::SpamScoreAtLeast {
+            milli: parse_spam_score_milli(&inputs.spam_score)
+                .map_err(FilterRuleError::SpamScore)?,
+        },
+        kind => encode_filter_rule(kind, &inputs.value)
+            .map_err(|UnknownFilterKind(k)| FilterRuleError::UnknownKind(k))?,
+    })
+}
+
+/// Reverse of [`encode_filter_rule_inputs`] — the form inputs that reproduce a
+/// stored [`EmailFilterRule`], for populating an edit form. `None` only for a
+/// condition a newer build added ([`EmailFilterRule::Unknown`]).
+pub fn describe_filter_rule_inputs(rule: &EmailFilterRule) -> Option<FilterRuleInputs> {
+    Some(match rule {
+        EmailFilterRule::HeaderContains { name, value } => FilterRuleInputs {
+            value: name.clone(),
+            header_value: value.clone(),
+            ..FilterRuleInputs::new("HeaderContains")
+        },
+        EmailFilterRule::SpamScoreAtLeast { milli } => FilterRuleInputs {
+            spam_score: format_spam_score_milli(*milli),
+            ..FilterRuleInputs::new("SpamScoreAtLeast")
+        },
+        rule => {
+            let (kind, value) = describe_filter_rule(rule)?;
+            FilterRuleInputs {
+                value,
+                ..FilterRuleInputs::new(kind)
+            }
+        }
+    })
+}
+
+/// Why a typed spam score is not one (see [`parse_spam_score_milli`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidSpamScore {
+    /// Not a non-negative decimal with at most three places (`5`, `7.5`).
+    NotANumber,
+    /// Too large for the wire's milli-point integer.
+    TooLarge,
+}
+
+impl std::fmt::Display for InvalidSpamScore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvalidSpamScore::NotANumber => {
+                write!(f, "must be a number of points, such as 5 or 7.5")
+            }
+            InvalidSpamScore::TooLarge => write!(f, "is too large"),
+        }
+    }
+}
+
+impl std::error::Error for InvalidSpamScore {}
+
+/// A spam score typed in points (`"5"`, `"7.5"`, `" 0.25 "`) → the wire's
+/// milli-points (`5000`, `7500`, `250`) — `mail-spam.md` § Combined-score
+/// formula carries the score as milli because dag-cbor forbids floats. Parsed
+/// as a decimal string, never through a float, so `0.1` is exactly `100`. At
+/// most three decimal places (one milli-point); no sign.
+pub fn parse_spam_score_milli(text: &str) -> Result<i32, InvalidSpamScore> {
+    let text = text.trim();
+    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && frac.is_empty()) || !digits(whole) || !digits(frac) || frac.len() > 3 {
+        return Err(InvalidSpamScore::NotANumber);
+    }
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().map_err(|_| InvalidSpamScore::TooLarge)?
+    };
+    let frac: i64 = format!("{frac:0<3}")
+        .parse()
+        .map_err(|_| InvalidSpamScore::NotANumber)?;
+    whole
+        .checked_mul(1000)
+        .and_then(|w| w.checked_add(frac))
+        .and_then(|m| i32::try_from(m).ok())
+        .ok_or(InvalidSpamScore::TooLarge)
+}
+
+/// Milli-points → the points a form shows (`7500` → `"7.5"`, `5000` → `"5"`):
+/// the reverse of [`parse_spam_score_milli`], so an edit round-trips exactly.
+pub fn format_spam_score_milli(milli: i32) -> String {
+    let sign = if milli < 0 { "-" } else { "" };
+    let abs = milli.unsigned_abs();
+    let (whole, frac) = (abs / 1000, abs % 1000);
+    if frac == 0 {
+        format!("{sign}{whole}")
+    } else {
+        let frac = format!("{frac:03}");
+        format!("{sign}{whole}.{}", frac.trim_end_matches('0'))
+    }
+}
+
+/// Why a typed rule order is not one (see [`parse_filter_priority`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidFilterPriority;
+
+impl std::fmt::Display for InvalidFilterPriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rule order must be a whole number")
+    }
+}
+
+impl std::error::Error for InvalidFilterPriority {}
+
+/// The `filter-priority-input` buffer → the rule's `priority` (rules run in
+/// `priority ASC, id ASC` order, `email-filters.md` § Email filter rules). A
+/// blank field is `0`, the order every rule had before the form collected it.
+pub fn parse_filter_priority(text: &str) -> Result<i32, InvalidFilterPriority> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    text.parse().map_err(|_| InvalidFilterPriority)
 }
 
 /// Every input the shared filter form collects for its action — what
@@ -222,17 +444,35 @@ pub struct FilterActionInputs {
     /// `Forward`'s copy mode as the form shows it: the "keep a local copy"
     /// checkbox, checked by default (`copy`); unchecked is `redirect`.
     pub keep_local_copy: bool,
+    /// `FileInto`'s target mailbox (`filter-file-into-mailbox`).
+    pub file_into_mailbox: String,
+    /// `AddLabel`'s label (`filter-add-label`).
+    pub label: String,
+    /// `AutoReply`'s subject (`filter-auto-reply-subject`).
+    pub auto_reply_subject: String,
+    /// `AutoReply`'s body (`filter-auto-reply-body`).
+    pub auto_reply_body: String,
+    /// `AutoReply`'s once-per-sender interval in hours, as typed
+    /// (`filter-auto-reply-interval-hours`); blank is
+    /// [`DEFAULT_AUTO_REPLY_INTERVAL_HOURS`].
+    pub auto_reply_interval_hours: String,
 }
 
 impl FilterActionInputs {
     /// The form's initial state for action `kind`: every other input at its
-    /// default (no reject reason, no destination, keep-a-local-copy checked).
+    /// default (no reject reason, no destination, keep-a-local-copy checked,
+    /// every text field empty).
     pub fn new(kind: impl Into<String>) -> Self {
         Self {
             kind: kind.into(),
             reject_reason: String::new(),
             forward_address: String::new(),
             keep_local_copy: true,
+            file_into_mailbox: String::new(),
+            label: String::new(),
+            auto_reply_subject: String::new(),
+            auto_reply_body: String::new(),
+            auto_reply_interval_hours: String::new(),
         }
     }
 }
@@ -252,6 +492,18 @@ pub enum FilterActionError {
     UnknownKind(String),
     /// A `Forward` whose destination fails [`validate_forward_target`].
     ForwardAddress(ForwardTargetError),
+    /// A `FileInto` with no mailbox named.
+    FileIntoMailboxEmpty,
+    /// A `FileInto` whose target fails [`validate_file_into_mailbox`].
+    FileIntoMailbox(InvalidFileIntoMailbox),
+    /// An `AddLabel` whose label fails [`validate_label`].
+    Label(InvalidLabel),
+    /// An `AutoReply` with no subject.
+    AutoReplySubjectEmpty,
+    /// An `AutoReply` with no message.
+    AutoReplyBodyEmpty,
+    /// An `AutoReply` interval that is not a whole number of hours above zero.
+    AutoReplyInterval,
 }
 
 impl std::fmt::Display for FilterActionError {
@@ -261,6 +513,19 @@ impl std::fmt::Display for FilterActionError {
                 write!(f, "unknown email filter kind: {kind}")
             }
             FilterActionError::ForwardAddress(e) => write!(f, "forward address: {e}"),
+            FilterActionError::FileIntoMailboxEmpty => write!(f, "mailbox: must not be empty"),
+            FilterActionError::FileIntoMailbox(e) => write!(f, "mailbox: {e}"),
+            FilterActionError::Label(e) => write!(f, "label: {e}"),
+            FilterActionError::AutoReplySubjectEmpty => {
+                write!(f, "automatic reply subject: must not be empty")
+            }
+            FilterActionError::AutoReplyBodyEmpty => {
+                write!(f, "automatic reply message: must not be empty")
+            }
+            FilterActionError::AutoReplyInterval => write!(
+                f,
+                "automatic reply interval: must be a whole number of hours above zero"
+            ),
         }
     }
 }
@@ -276,8 +541,13 @@ impl std::error::Error for FilterActionError {}
 /// `forward_address`, checked with [`validate_forward_target`] against no
 /// hosted-domain list — the same check the nest applies to a rule's
 /// destination (only forward-all is barred from a domain we host) — and
-/// `keep_local_copy` (unchecked ⇒ `redirect: true`). The richer actions no form
-/// collects yet (`FileInto`, `AutoReply`, `AddLabel`) map to `UnknownKind`.
+/// `keep_local_copy` (unchecked ⇒ `redirect: true`). A `FileInto` takes the
+/// trimmed `file_into_mailbox`, which must be named and pass
+/// [`validate_file_into_mailbox`]; an `AddLabel` the trimmed `label`, checked
+/// with [`validate_label`] — the same checks the nest applies at create. An
+/// `AutoReply` takes a subject and a message, both required, and the interval
+/// in hours (blank ⇒ [`DEFAULT_AUTO_REPLY_INTERVAL_HOURS`], else a whole number
+/// above zero).
 pub fn encode_filter_action(
     inputs: &FilterActionInputs,
 ) -> Result<EmailFilterAction, FilterActionError> {
@@ -299,16 +569,56 @@ pub fn encode_filter_action(
                 redirect: !inputs.keep_local_copy,
             }
         }
+        "FileInto" => {
+            let mailbox = inputs.file_into_mailbox.trim();
+            if mailbox.is_empty() {
+                return Err(FilterActionError::FileIntoMailboxEmpty);
+            }
+            validate_file_into_mailbox(mailbox).map_err(FilterActionError::FileIntoMailbox)?;
+            EmailFilterAction::FileInto {
+                mailbox: mailbox.to_string(),
+            }
+        }
+        "AddLabel" => {
+            let label = inputs.label.trim();
+            validate_label(label).map_err(FilterActionError::Label)?;
+            EmailFilterAction::AddLabel {
+                label: label.to_string(),
+            }
+        }
+        "AutoReply" => {
+            let subject = inputs.auto_reply_subject.trim();
+            if subject.is_empty() {
+                return Err(FilterActionError::AutoReplySubjectEmpty);
+            }
+            if inputs.auto_reply_body.trim().is_empty() {
+                return Err(FilterActionError::AutoReplyBodyEmpty);
+            }
+            let interval = inputs.auto_reply_interval_hours.trim();
+            let interval_hours = if interval.is_empty() {
+                DEFAULT_AUTO_REPLY_INTERVAL_HOURS
+            } else {
+                match interval.parse::<u32>() {
+                    Ok(hours) if hours > 0 => hours,
+                    _ => return Err(FilterActionError::AutoReplyInterval),
+                }
+            };
+            EmailFilterAction::AutoReply {
+                subject: subject.to_string(),
+                body: inputs.auto_reply_body.clone(),
+                interval_hours,
+            }
+        }
         other => return Err(FilterActionError::UnknownKind(other.to_string())),
     })
 }
 
 /// Reverse of [`encode_filter_rule`] — the create-dialog `(kind, value)` pair
 /// that reproduces a stored [`EmailFilterRule`], for populating an edit form.
-/// `None` for the richer variants no dialog collects (`HeaderContains`,
-/// `SpamScoreAtLeast`) — the same boundary `encode_filter_rule` enforces on
-/// write, held on read too, so an edit form never silently narrows a rule it
-/// can't fully represent.
+/// `None` for the two conditions with a second input (`HeaderContains`,
+/// `SpamScoreAtLeast`; [`describe_filter_rule_inputs`] covers them) — the same
+/// boundary `encode_filter_rule` enforces on write, held on read too, so a
+/// single-value form never silently narrows a rule it can't fully represent.
 pub fn describe_filter_rule(rule: &EmailFilterRule) -> Option<(&'static str, String)> {
     Some(match rule {
         EmailFilterRule::SenderIs { address } => ("SenderIs", address.clone()),
@@ -327,10 +637,10 @@ pub fn describe_filter_rule(rule: &EmailFilterRule) -> Option<(&'static str, Str
 /// Reverse of [`encode_filter_action`] — the form inputs that reproduce a
 /// stored [`EmailFilterAction`], for populating an edit form: a `Reject`
 /// carries its reason and a `Forward` its destination and copy mode
-/// (`redirect` ⇒ keep-a-local-copy unchecked), so a form that holds every
-/// field saves the action back unchanged. `None` for the richer variants no
-/// form collects (`FileInto`, `AutoReply`, `AddLabel`), same boundary as
-/// `encode_filter_action`.
+/// (`redirect` ⇒ keep-a-local-copy unchecked), and the other actions their own
+/// inputs, so a form that holds every field saves the action back unchanged.
+/// `None` only for an action a newer build added
+/// ([`EmailFilterAction::Unknown`]).
 pub fn describe_filter_action(action: &EmailFilterAction) -> Option<FilterActionInputs> {
     Some(match action {
         EmailFilterAction::Allow => FilterActionInputs::new("Allow"),
@@ -344,10 +654,25 @@ pub fn describe_filter_action(action: &EmailFilterAction) -> Option<FilterAction
             keep_local_copy: !redirect,
             ..FilterActionInputs::new("Forward")
         },
-        EmailFilterAction::FileInto { .. }
-        | EmailFilterAction::AutoReply { .. }
-        | EmailFilterAction::AddLabel { .. }
-        | EmailFilterAction::Unknown(_) => return None,
+        EmailFilterAction::FileInto { mailbox } => FilterActionInputs {
+            file_into_mailbox: mailbox.clone(),
+            ..FilterActionInputs::new("FileInto")
+        },
+        EmailFilterAction::AddLabel { label } => FilterActionInputs {
+            label: label.clone(),
+            ..FilterActionInputs::new("AddLabel")
+        },
+        EmailFilterAction::AutoReply {
+            subject,
+            body,
+            interval_hours,
+        } => FilterActionInputs {
+            auto_reply_subject: subject.clone(),
+            auto_reply_body: body.clone(),
+            auto_reply_interval_hours: interval_hours.to_string(),
+            ..FilterActionInputs::new("AutoReply")
+        },
+        EmailFilterAction::Unknown(_) => return None,
     })
 }
 
@@ -391,20 +716,33 @@ pub fn filter_action_label(action: &EmailFilterAction) -> LocalizedText {
     }
 }
 
-/// Whether a stored filter can be opened in the shared edit dialog: exactly
-/// one rule, and both the rule and the action fall in the create-dialog's
-/// dropdown-covered subset (`describe_filter_rule` / `describe_filter_action`
-/// both `Some`). Clients gate their per-row edit affordance on this so a
-/// filter only a raw API call could have produced (multi-rule, or a richer
-/// rule/action) never opens a form that would silently narrow it on save.
+/// Whether a stored filter can be opened in the full shared form — every
+/// condition's inputs ([`FilterRuleInputs`]) and every action's
+/// ([`FilterActionInputs`]): exactly one condition, and both it and the action
+/// describe (`describe_filter_rule_inputs` / `describe_filter_action` both
+/// `Some`). Clients gate their per-row edit affordance on this so a filter only
+/// a raw API call could have produced — several conditions, none at all (the
+/// match-all auto-respond setting, `email-filters.md` § The auto-respond
+/// setting), or a kind a newer build added — never opens a form that would
+/// silently narrow it on save.
 pub fn filter_is_editable(filter: &EmailFilter) -> bool {
-    filter_is_editable_for(&filter.rules, &filter.action, SUPPORTED_ACTION_KINDS)
+    filter_parts_are_editable(&filter.rules, &filter.action)
 }
 
-/// [`filter_is_editable`] over a stored filter's `rules` + `action`, for a form
-/// that covers only `action_kinds` — a form that lacks an action kind's inputs
-/// leaves that kind out, so it never opens a stored rule it would narrow on
-/// save.
+/// [`filter_is_editable`] over a filter's conditions and action alone — the
+/// shape an FFI caller holds, which carries the rows' parts rather than the
+/// whole [`EmailFilter`].
+pub fn filter_parts_are_editable(rules: &[EmailFilterRule], action: &EmailFilterAction) -> bool {
+    rules.len() == 1
+        && describe_filter_rule_inputs(&rules[0]).is_some()
+        && describe_filter_action(action).is_some()
+}
+
+/// The edit gate for a form that has only the single value field
+/// ([`SINGLE_VALUE_RULE_KINDS`]) and covers only `action_kinds` — a form that
+/// lacks an action kind's inputs leaves that kind out, so it never opens a
+/// stored rule it would narrow on save. [`filter_is_editable`] is the full
+/// form's gate.
 pub fn filter_is_editable_for(
     rules: &[EmailFilterRule],
     action: &EmailFilterAction,
@@ -2310,7 +2648,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_filter_action_is_none_for_kinds_no_dialog_collects() {
+    fn file_into_add_label_and_auto_reply_round_trip_through_the_form() {
         for action in [
             EmailFilterAction::FileInto {
                 mailbox: "Reading".into(),
@@ -2324,8 +2662,126 @@ mod tests {
                 label: "Newsletters".into(),
             },
         ] {
-            assert_eq!(describe_filter_action(&action), None, "{action:?}");
+            let inputs = describe_filter_action(&action).expect("form-covered");
+            assert!(SUPPORTED_ACTION_KINDS.contains(&inputs.kind.as_str()));
+            assert_eq!(encode_filter_action(&inputs).unwrap(), action);
         }
+    }
+
+    #[test]
+    fn the_richer_actions_refuse_what_the_nest_would() {
+        let inputs = |kind: &str, f: &dyn Fn(&mut FilterActionInputs)| {
+            let mut i = FilterActionInputs::new(kind);
+            f(&mut i);
+            encode_filter_action(&i)
+        };
+        assert_eq!(
+            inputs("FileInto", &|_| {}),
+            Err(FilterActionError::FileIntoMailboxEmpty)
+        );
+        assert_eq!(
+            inputs("FileInto", &|i| i.file_into_mailbox = "Sent".into()),
+            Err(FilterActionError::FileIntoMailbox(
+                InvalidFileIntoMailbox::Sent
+            ))
+        );
+        assert_eq!(
+            inputs("AddLabel", &|i| i.label = "\\Seen".into()),
+            Err(FilterActionError::Label(InvalidLabel::SystemFlag))
+        );
+        assert_eq!(
+            inputs("AutoReply", &|i| i.auto_reply_body = "Back soon".into()),
+            Err(FilterActionError::AutoReplySubjectEmpty)
+        );
+        assert_eq!(
+            inputs("AutoReply", &|i| i.auto_reply_subject = "Away".into()),
+            Err(FilterActionError::AutoReplyBodyEmpty)
+        );
+        assert_eq!(
+            inputs("AutoReply", &|i| {
+                i.auto_reply_subject = "Away".into();
+                i.auto_reply_body = "Back soon".into();
+                i.auto_reply_interval_hours = "0".into();
+            }),
+            Err(FilterActionError::AutoReplyInterval)
+        );
+        // A blank interval is the Sieve vacation default; the subject is
+        // trimmed, the message is sent as typed.
+        assert_eq!(
+            inputs("AutoReply", &|i| {
+                i.auto_reply_subject = " Away ".into();
+                i.auto_reply_body = "Back soon\n".into();
+            }),
+            Ok(EmailFilterAction::AutoReply {
+                subject: "Away".into(),
+                body: "Back soon\n".into(),
+                interval_hours: DEFAULT_AUTO_REPLY_INTERVAL_HOURS,
+            })
+        );
+    }
+
+    #[test]
+    fn every_condition_round_trips_through_the_rule_inputs() {
+        for rule in [
+            EmailFilterRule::SenderIs {
+                address: "a@b.example".into(),
+            },
+            EmailFilterRule::HeaderExists {
+                name: "List-Id".into(),
+            },
+            EmailFilterRule::HeaderContains {
+                name: "List-Id".into(),
+                value: "announce".into(),
+            },
+            EmailFilterRule::SpamScoreAtLeast { milli: 7500 },
+            EmailFilterRule::SpamScoreAtLeast { milli: 250 },
+        ] {
+            let inputs = describe_filter_rule_inputs(&rule).expect("form-covered");
+            assert!(SUPPORTED_RULE_KINDS.contains(&inputs.kind.as_str()));
+            assert_eq!(encode_filter_rule_inputs(&inputs).unwrap(), rule);
+        }
+        assert_eq!(
+            encode_filter_rule_inputs(&FilterRuleInputs {
+                spam_score: "five".into(),
+                ..FilterRuleInputs::new("SpamScoreAtLeast")
+            }),
+            Err(FilterRuleError::SpamScore(InvalidSpamScore::NotANumber))
+        );
+        assert_eq!(
+            encode_filter_rule_inputs(&FilterRuleInputs::new("Bogus")),
+            Err(FilterRuleError::UnknownKind("Bogus".into()))
+        );
+    }
+
+    #[test]
+    fn a_spam_score_is_read_as_decimal_points_never_through_a_float() {
+        assert_eq!(parse_spam_score_milli("5"), Ok(5000));
+        assert_eq!(parse_spam_score_milli(" 7.5 "), Ok(7500));
+        assert_eq!(parse_spam_score_milli("0.1"), Ok(100));
+        assert_eq!(parse_spam_score_milli(".25"), Ok(250));
+        assert_eq!(parse_spam_score_milli("12.345"), Ok(12345));
+        for bad in ["", ".", "-1", "1.2345", "1e3", "x"] {
+            assert_eq!(
+                parse_spam_score_milli(bad),
+                Err(InvalidSpamScore::NotANumber),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            parse_spam_score_milli("99999999999"),
+            Err(InvalidSpamScore::TooLarge)
+        );
+        assert_eq!(format_spam_score_milli(5000), "5");
+        assert_eq!(format_spam_score_milli(7500), "7.5");
+        assert_eq!(format_spam_score_milli(12345), "12.345");
+        assert_eq!(format_spam_score_milli(250), "0.25");
+    }
+
+    #[test]
+    fn a_blank_rule_order_is_zero() {
+        assert_eq!(parse_filter_priority(""), Ok(0));
+        assert_eq!(parse_filter_priority(" -3 "), Ok(-3));
+        assert_eq!(parse_filter_priority("first"), Err(InvalidFilterPriority));
     }
 
     #[test]
@@ -2419,7 +2875,21 @@ mod tests {
         };
         assert!(!filter_is_editable(&multi_rule));
 
-        // A rule the dialog can't collect.
+        // No condition at all: the match-all auto-respond setting, edited on
+        // mail-settings, never in the rule form.
+        let auto_respond = EmailFilter {
+            rules: vec![],
+            action: EmailFilterAction::AutoReply {
+                subject: "Automatic reply".into(),
+                body: "Away".into(),
+                interval_hours: 168,
+            },
+            ..multi_rule.clone()
+        };
+        assert!(!filter_is_editable(&auto_respond));
+
+        // A condition with a second input: the full form opens it, a
+        // single-value form does not.
         let uncovered_rule = EmailFilter {
             id: 2,
             name: "n".into(),
@@ -2431,9 +2901,15 @@ mod tests {
             created_at: 0,
             extra: Default::default(),
         };
-        assert!(!filter_is_editable(&uncovered_rule));
+        assert!(filter_is_editable(&uncovered_rule));
+        assert!(!filter_is_editable_for(
+            &uncovered_rule.rules,
+            &uncovered_rule.action,
+            SUPPORTED_ACTION_KINDS
+        ));
 
-        // An action the dialog can't collect.
+        // An action a narrower form does not collect: the full form opens it,
+        // a form whose action kinds leave it out does not.
         let uncovered_action = EmailFilter {
             id: 3,
             name: "n".into(),
@@ -2447,7 +2923,12 @@ mod tests {
             created_at: 0,
             extra: Default::default(),
         };
-        assert!(!filter_is_editable(&uncovered_action));
+        assert!(filter_is_editable(&uncovered_action));
+        assert!(!filter_is_editable_for(
+            &uncovered_action.rules,
+            &uncovered_action.action,
+            &["Allow", "Discard", "Reject", "Forward"]
+        ));
     }
 
     // ── validate_forward_target ──

@@ -2012,7 +2012,7 @@ async fn actor_members_list_core(
 /// derives its channel first) and the federated
 /// `fauna.federation.folder.actors.fetch` (which gates the foreign member and
 /// resolves the claimed set first, then blanks every `handle` — ids-only across
-/// nests; `federation.md` § Cross-nest…, *The cross-nest writer roster read*).
+/// nests; `federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster read*).
 /// The `actor_channels` roster (the owner as the `role == "owner"` row) unioned
 /// with the cross-nest `channel_foreign_members`, each member carrying its
 /// `folder_member_access` grant — and, on the owner row and each `writer` row,
@@ -2099,7 +2099,7 @@ pub(crate) async fn actor_roster_for_channel(
 /// member, verbatim and oldest first, from every succession this nest holds
 /// (its own accounts' and the peer-delivered ones). A reader-access row
 /// carries none: the read discloses a retired id for a writer only
-/// (`federation.md` § Cross-nest…, *The cross-nest writer roster read*). The
+/// (`federation-shared-folders.md` § Cross-nest…, *The cross-nest writer roster read*). The
 /// nest vouches for nothing here — a reader verifies each link itself.
 async fn carried_succession_statements(
     db: &crate::db::CacheDb,
@@ -2190,7 +2190,7 @@ fn actor_members_list_handler() -> RpcHandler {
 
 // ── fauna.folders.members.list_actors_remote ────────────────────────────────
 
-/// The cross-nest writer roster read's client leg (`federation.md` §
+/// The cross-nest writer roster read's client leg (`federation-shared-folders.md` §
 /// Cross-nest…, *The cross-nest writer roster read*): a foreign set's roster
 /// lives on its home nest, so this nest originates
 /// `fauna.federation.folder.actors.fetch` there and threads the home nest's
@@ -3345,7 +3345,7 @@ fn content_key_put_handler() -> RpcHandler {
 
 /// The cross-nest owner label this nest forwards on a relayed content-key
 /// read — the relaying nest's half of *The cross-nest owner label*'s trust
-/// rule (`federation.md` § Cross-nest shared folders + channel append): the
+/// rule (`federation-shared-folders.md` § Cross-nest shared folders + channel append): the
 /// home nest's stamped pair rides on only when its domain is ALREADY bound to
 /// the verified identity behind `peer_url` in the pool's domain cache. This is
 /// the polled path, so the reply is never delayed: a cold domain forwards
@@ -6277,7 +6277,7 @@ mod tests {
     /// refused because the resulting claim is permanent and unreleasable, and a
     /// held claim froze the group under the claimant-only commit gate of the
     /// time (since re-ratified to roster-membership admission, 2026-08-24 —
-    /// `federation.md` § Cross-nest shared folders + channel append); the
+    /// `federation-shared-folders.md` § Cross-nest shared folders + channel append); the
     /// refusal stands regardless, on the claim's permanence and the
     /// claim-read gate's owner suppression. See
     /// `db::channels::claim_folder_channel` for the full reasoning and why
@@ -6332,7 +6332,7 @@ mod tests {
     }
 
     /// The relaying nest's half of the cross-nest owner label's trust rule
-    /// (`federation.md` § Cross-nest shared folders + channel append → *The
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The
     /// cross-nest owner label*): the read reply forwards the home nest's pair
     /// only on a WARM binding of its domain to the peer's verified identity; a
     /// mismatch forwards nothing; a cold domain forwards nothing this poll and

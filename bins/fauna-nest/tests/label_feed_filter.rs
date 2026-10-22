@@ -156,6 +156,8 @@ async fn has_label_filter_works_for_authors_query() {
             &[author.to_vec()],
             None,
             10,
+            fauna_nest::db::feeds::FeedAudience::OnBox,
+            fauna_nest::db::feeds::FeedLocality::NestWide,
         )
         .await
         .unwrap();

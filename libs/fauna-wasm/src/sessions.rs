@@ -7,7 +7,7 @@
 //!
 //! Two inputs differ from the UniFFI face, both because of where web keeps
 //! them: this tab's own session ids live in the SPA's bearer cache
-//! (`$lib/own-session-ids.ts`, the documented TypeScript twin of
+//! (`#lib/own-session-ids.ts`, the documented TypeScript twin of
 //! `OwnSessionIds`), so they are handed in on every call; and the roster is the
 //! rows the SPA's Devices machine already rendered. Times cross as epoch
 //! seconds and the SPA formats them itself (`ui/sessions.md` § State & data

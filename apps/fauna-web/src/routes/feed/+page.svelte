@@ -1,48 +1,48 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { onStoreChange } from '$lib/store-change';
-  import { identity, reconnectTick, onActorChange } from '$lib/store';
-  import { registerActorScopedReset } from '$lib/actorScope';
+  import { onStoreChange } from '#lib/store-change';
+  import { identity, reconnectTick, onActorChange } from '#lib/store';
+  import { registerActorScopedReset } from '#lib/actorScope';
   import { get } from 'svelte/store';
-  import { getFeedManager, feedSnapshot, refreshFeed, scheduleDraftSave } from '$lib/feed';
-  import { CueCapture, hydrateCuesOnce } from '$lib/feed-cues';
-  import { clearSent } from '$lib/compose-sent';
-  import { contentRender, hydrateContentPolicy } from '$lib/contentPolicy.svelte';
-  import { registerRegionBlockCounter } from '$lib/region.svelte';
-  import RegionPlaceholder from '$lib/components/RegionPlaceholder.svelte';
-  import { notifyBuffer } from '$lib/familyNotify';
-  import { syncFeedRoomPosts } from '$lib/conversations';
-  import { decodePost, ensureWasm, processAndSealPublicPost, sealComposeAttachment, logMessage, markdownToDocument, classifySources, type BridgeIdentity, parseWeightPermille, formatWeightPermille, ruleTypeOptions, builtinFactorOptions, ruleSummaryLabel, ruleRequiredLabel, canAddRule, legalTakedownTombstone, type RuleTypeOption } from '$lib/wasm';
-  import { consumePendingSearchNav } from '$lib/search';
-  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, mediaImageHash, proxiedPostImage, resolvingLinkPreviewUrls } from '$lib/document';
-  import { readProvenanceFromBytes } from '$lib/c2pa';
-  import { hexToBytes } from '$lib/hex';
-  import { toArrayBufferView } from '$lib/bytes';
-  import { getPost, uploadBlobMultipart, fetchBlob, fetchNestPath, nodeUrl } from '$lib/api';
-  import { trainedTopicsList, webPaywallMintToken, webPublishSet, webPublishUnset, sharedRpcPort, type TrainedTopicRow } from '$lib/rpc';
-  import { webPostPageUrl, webTokenedUrl } from '$lib/wasm';
-  import { bestEffortCopyToClipboard, siteLink, ensureWebPageHydrated } from '$lib/web-publish';
-  import { resolveLocalized } from '$lib/i18n/localized';
-  import { verbErrorCopy as verbErrorCopyOf } from '$lib/feed-verb-error';
-  import { feedRefusalI18nKey, postOffersThreadView, threadPostAuthorLabel, contentLabelBadgeFor, type ContentLabelEntry, type ContentRender, type RegionPlaceholder as RegionPlaceholderValue } from '$lib/wasm';
-  import { byteSize } from '$lib/value-format';
-  import { isSafeNavUrl } from '$lib/safe-url';
-  import { createLabelerCatalogMachine } from '$lib/wasm-labeler-catalog';
-  import FeedComposeBar from '$lib/components/FeedComposeBar.svelte';
-  import MarkdownToolbar from '$lib/components/MarkdownToolbar.svelte';
-  import PostCard from '$lib/components/PostCard.svelte';
-  import ReportHost from '$lib/components/ReportHost.svelte';
-  import { reportPostTarget, type ReportTarget } from '$lib/wasm';
-  import ProxiedImage from '$lib/components/ProxiedImage.svelte';
-  import QuotedPost from '$lib/components/QuotedPost.svelte';
-  import TipSurface from '$lib/components/payments/TipSurface.svelte';
-  import { contactOverlays, contactsRevision } from '$lib/conversations';
-  import { sourceGlyphEmoji } from '$lib/source-glyph';
-  import { t } from '$lib/i18n/strings';
+  import { getFeedManager, feedSnapshot, refreshFeed, scheduleDraftSave } from '#lib/feed';
+  import { CueCapture, hydrateCuesOnce } from '#lib/feed-cues';
+  import { clearSent } from '#lib/compose-sent';
+  import { hydrateContentPolicy } from '#lib/contentPolicy.svelte';
+  import { registerRegionBlockCounter } from '#lib/region.svelte';
+  import { registerNestBlockCounter } from '#lib/nestRules.svelte';
+  import RegionPlaceholder from '#lib/components/RegionPlaceholder.svelte';
+  import { notifyBuffer } from '#lib/familyNotify';
+  import { syncFeedRoomPosts } from '#lib/conversations';
+  import { ensureWasm, processAndSealPublicPost, sealComposeAttachment, logMessage, markdownToDocument, classifySources, type BridgeIdentity, parseWeightPermille, formatWeightPermille, ruleTypeOptions, builtinFactorOptions, ruleSummaryLabel, ruleRequiredLabel, canAddRule, legalTakedownTombstone, adminBlockNotice, type RuleTypeOption } from '#lib/wasm';
+  import { consumePendingSearchNav } from '#lib/search';
+  import { documentToHtml, documentHasBlockedRemoteImages, quotedPostBlock, mediaImageHash, proxiedPostImage } from '#lib/document';
+  import { readProvenanceFromBytes } from '#lib/c2pa';
+  import { uploadBlobMultipart } from '#lib/api';
+  import { trainedTopicsList, sharedRpcPort } from '#lib/rpc';
+  import { ensureWebPageHydrated } from '#lib/web-publish';
+  import { resolveLocalized, resolveLocalizedNested } from '#lib/i18n/localized';
+  import { postOffersThreadView, threadPostAuthorLabel } from '#lib/wasm';
+  import { byteSize } from '#lib/value-format';
+  import { createLabelerCatalogMachine } from '#lib/wasm-labeler-catalog';
+  import FeedComposeBar from '#lib/components/FeedComposeBar.svelte';
+  import MarkdownToolbar from '#lib/components/MarkdownToolbar.svelte';
+  import FeedPostCard from '#lib/components/FeedPostCard.svelte';
+  import FeedReplyDialog from '#lib/components/FeedReplyDialog.svelte';
+  import FeedTrainSheet from '#lib/components/FeedTrainSheet.svelte';
+  import { createFeedPostHost, authorName, contentLabelFor } from '#lib/feed-post-host.svelte';
+  import ContentLabelBadge from '#lib/components/ContentLabelBadge.svelte';
+  import ReportHost from '#lib/components/ReportHost.svelte';
+  import { type ReportTarget } from '#lib/wasm';
+  import ProxiedImage from '#lib/components/ProxiedImage.svelte';
+  import QuotedPost from '#lib/components/QuotedPost.svelte';
+  import TipSurface from '#lib/components/payments/TipSurface.svelte';
+  import { contactsRevision } from '#lib/conversations';
+  import { sourceGlyphEmoji } from '#lib/source-glyph';
+  import { t } from '#lib/i18n/strings';
   import type { WasmFeedManager } from '../../../static/fauna_wasm.js';
   import type { LabelerCatalogMachine } from '../../../static/fauna_wasm_labeler_catalog.js';
-  import type { LabelerCatalogSnapshot } from '$lib/labeler-catalog-machine';
-  import { IDS } from '$lib/generated/uiIds';
+  import type { LabelerCatalogSnapshot } from '#lib/labeler-catalog-machine';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The create-feed form's rule triple — the shared `fauna_feed::FilterRuleInput`
   // the manager encodes via `encode_filter_rule` (feed.md § Where logic lives —
@@ -56,134 +56,24 @@
   // feed's own composition — `FeedManager::create_feed` does the split.
   type FactorWeightInput = { factor: string; weight_permille: number; global: boolean };
 
-  function blobUrl(hash: string): string {
-    return `${nodeUrl()}/api/v1/blob/${hash}`;
-  }
-
-  // ── Post media (media.md § Encryption at rest — one per-post key seals a
-  //    restricted post's body and all its attachments together) ──────────────
-  //
-  // A public post's blob is plaintext on the wire, so `<img src>` IS the render:
-  // the browser fetches and decodes it natively, and only that path can use the
-  // nest's `?thumb=1` smaller blob. A tier-restricted post's attachment is
-  // AEAD-sealed under the same per-post key its body opened under, so no URL can
-  // ever render it — the bytes have to come here, through the manager, and go
-  // back out as an object URL.
-  //
-  // Which of the two is NOT a judgment this page makes: `isSealedMedia` is the
-  // shared manager's own answer (it holds the keys), so web and apple — the two
-  // apps whose image path is a URL rather than bytes — ask instead of guessing.
-  // The other five route every hash through `openMediaBytes` unconditionally.
-  // Either way the post card just paints the string it is handed.
-  //
-  // Cache contract is the conversations-attachment one: a miss returns `null` and
-  // is NOT cached, so the next render retries; the fetch is kicked off once per
-  // hash and repaints via `$state` when it lands. Object URLs are revoked on
-  // destroy so a reactive re-render doesn't leak one per tick.
-  let sealedMediaUrls = $state<Record<string, string>>({});
-  const sealedMediaPending = new Map<string, Promise<string | null>>();
-
-  // Fetch + open one sealed item into an object URL — the one opener a sealed
-  // post image (`mediaUrl`) and a sealed post video (`playbackUrl`) share. A
-  // concurrent ask for the same hash joins the fetch already in flight.
-  function openSealedMedia(hash: string): Promise<string | null> {
-    const cached = sealedMediaUrls[hash];
-    if (cached) return Promise.resolve(cached);
-    let pending = sealedMediaPending.get(hash);
-    if (!pending) {
-      pending = (async () => {
-        try {
-          const id = $identity;
-          if (!id) return null;
-          const bytes = await fetchBlob(id.secretHex, hash);
-          const opened = manager?.openMediaBytes(hash, bytes);
-          // `undefined` means the item did not open — leave it uncached and paint
-          // nothing, exactly as for bytes the browser cannot decode. Never hand
-          // AEAD ciphertext to an <img> or a <video>.
-          if (opened && opened.length > 0) {
-            const url = URL.createObjectURL(new Blob([toArrayBufferView(opened)]));
-            sealedMediaUrls[hash] = url;
-            return url;
-          }
-          return null;
-        } catch (e) {
-          logMessage('warn', 'fauna_web::feed', `sealed post media (card stays blank): ${e}`);
-          return null;
-        } finally {
-          sealedMediaPending.delete(hash);
-        }
-      })();
-      sealedMediaPending.set(hash, pending);
-    }
-    return pending;
-  }
-
-  function mediaUrl(hash: string): string | null {
-    let isSealed = false;
-    try {
-      isSealed = manager?.isSealedMedia(hash) ?? false;
-    } catch {
-      isSealed = false;
-    }
-    // The common case, and every case before a gated post is unlocked: the plain
-    // blob URL, thumbnail variant and all.
-    if (!isSealed) return blobUrl(hash);
-
-    const cached = sealedMediaUrls[hash];
-    if (cached) return cached;
-    void openSealedMedia(hash);
-    return null;
-  }
-
-  // A bridged post's `ProxiedImage` (render-model.md § D6c): its nest-relative path fetched
-  // with the session bearer (`fetchNestPath`, the blob loader's own call with a different
-  // argument) into an object URL, cached by path — a subresource `<img src>` cannot carry the
-  // bearer. The proxy's answer is plaintext, so there is no open step. `null` while in flight or
-  // after a failure (a failure is NOT cached, so the next render retries, as `mediaUrl` does).
-  let proxiedMediaUrls = $state<Record<string, string>>({});
-  const proxiedMediaPending = new Set<string>();
-
-  function proxiedMediaUrl(path: string): string | null {
-    const cached = proxiedMediaUrls[path];
-    if (cached) return cached;
-    const id = $identity;
-    if (!id || proxiedMediaPending.has(path)) return null;
-    proxiedMediaPending.add(path);
-    void (async () => {
-      try {
-        const bytes = await fetchNestPath(id.secretHex, path);
-        if (bytes.length > 0 && !destroyed) {
-          proxiedMediaUrls[path] = URL.createObjectURL(new Blob([toArrayBufferView(bytes)]));
-        }
-      } catch (e) {
-        logMessage('warn', 'fauna_web::feed', `proxied post media (placeholder stays): ${e}`);
-      } finally {
-        proxiedMediaPending.delete(path);
-      }
-    })();
-    return null;
-  }
-
-  // What a tapped `video-thumbnail` plays (render-model.md § D6c → *Inline
-  // playback*). The decision is the shared manager's `playbackSource`; this page
-  // only turns its answer into a `<video src>`: a nest-relative URL gets the nest
-  // origin, a sealed item goes through the same opener a sealed image does.
-  // `null` = nothing playable — the player's native error UI is the surface.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async function playbackUrl(block: any): Promise<string | null> {
-    if (!manager) { loadError = t.common.still_loading; return null; }
-    try {
-      const source = await manager.playbackSource(block);
-      if (source && 'Url' in source) return `${nodeUrl()}${source.Url.url}`;
-      if (source && 'Sealed' in source) return await openSealedMedia(source.Sealed.hash);
-      logMessage('warn', 'fauna_web::feed', `video not playable: ${JSON.stringify(source)}`);
-      return null;
-    } finally {
-      refreshFeed();
-    }
-  }
-
   let manager: WasmFeedManager | null = null;
+
+  // The feed card's host over the timeline manager (`#lib/feed-post-host`):
+  // post media, the reveal sets, the content-policy render, the card's verbs,
+  // the reply dialog and the training sheet — the one wiring the profile's
+  // Posts tab shares over its author window (`profile.md` § The Posts tab).
+  // The closures read this page's state late, so their declaration order
+  // below is irrelevant.
+  const host = createFeedPostHost({
+    manager: () => manager,
+    posts: () => posts,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    latestPosts: () => (get(feedSnapshot) as any)?.posts ?? [],
+    refreshFeed,
+    setError: (message) => { loadError = message; },
+    destroyed: () => destroyed,
+  });
+  const { mediaUrl, proxiedMediaUrl, revealContent, regionPlaceholderFor, postRender, unlockGated } = host;
   // Reactive "the feed manager is built" flag (the plain `manager` ref above is
   // not `$state`, so the compose bar can't gate on it directly). Flips true once
   // onMount resolves `getFeedManager()` (~1s after login, gated on the WS-RPC
@@ -241,16 +131,10 @@
   // The shared report sheet (`report-sheet`), opened by `feed-post-report-button`.
   let reportTarget = $state<ReportTarget | null>(null);
   function openReport(postId: string): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const post = posts.find((p: any) => p.post_id === postId);
-    if (!post) return;
+    const target = host.reportTargetFor(postId);
+    if (!target) return;
     reportError = '';
-    reportTarget = reportPostTarget(
-      post.post_id,
-      post.author,
-      post.body ?? '',
-      !!(post.gated_tier || post.gated_room),
-    );
+    reportTarget = target;
   }
   let composeError = $derived(resolveLocalized(snap?.compose?.error));
   // The manager's own `attached_file` — never the local `composeFile` pick
@@ -421,7 +305,7 @@
   // The select's room answer (feed.md § Encryption at rest → *Room-restricted —
   // the app half*): '' or a room's hex channel id, from `snap.own_rooms` — the
   // rooms the author can address a post to, re-read on the conversations tick
-  // (`$lib/conversations`' `syncFeedRoomPosts`). Exclusive with a tier and a
+  // (`#lib/conversations`' `syncFeedRoomPosts`). Exclusive with a tier and a
   // sale; resolved index-wise by FeedComposeBar like the other two.
   let gateRoom = $state('');
   let ownRooms = $derived<{ room: string; label: string }[]>(snap?.own_rooms ?? []);
@@ -443,7 +327,7 @@
 
   // The composer's user-authored fields as one value. `handleCompose` reads it
   // ONCE, at the click, and sends only that; its success path clears only the
-  // fields that still hold what was sent (`$lib/compose-sent`). Both halves exist
+  // fields that still hold what was sent (`#lib/compose-sent`). Both halves exist
   // because the submit awaits for a long time — uploads, the create, the reload —
   // and the user can go on typing throughout it.
   type ComposeFields = {
@@ -512,88 +396,31 @@
   let dialogTextarea: HTMLTextAreaElement | undefined = $state();
   let dialogDragging = $state(false);
 
-  // ── Muted-keyword collapse + trained-topic training verbs
-  //    (topic-factors.md § Scoring / § Training signals) ──────────────────────
-  //
-  // Both ride the shared FeedManager (`isMuted` / `trainTargetFactor` /
-  // `exampleLabelFor` / `trainPost` / `untrainPost`) — no client-side derivation.
-  // The card cannot reach the manager, so the page reads these per post and hands
-  // them down as props (the `onrevealremote` shape).
-
-  /** Posts the user un-collapsed this session. Session-local RENDER state — the
-   *  term stays muted (un-muting the word is what stops future collapse). The
-   *  linux twin is `REVEALED_MUTED_POSTS`; the conversation twin is
-   *  `revealedMuted` on the conversations page. */
-  let revealedMuted = $state<Set<string>>(new Set());
-
-  function isPostMuted(postId: string): boolean {
-    if (revealedMuted.has(postId)) return false;
-    try {
-      return manager?.isMuted(postId) ?? false;
-    } catch {
-      return false;
-    }
-  }
-
-  function revealMuted(postId: string): void {
-    // Copy-on-write: Svelte tracks the reassignment, not an in-place mutation.
-    const next = new Set(revealedMuted);
-    next.add(postId);
-    revealedMuted = next;
-  }
-
-  /** Posts the user un-collapsed past a content-policy `collapse` floor this
-   *  session — the separate reveal set the content pillar keeps (linux's
-   *  `REVEALED_CONTENT_POSTS`; distinct from `revealedMuted`). A `block` floor is
-   *  never revealable. */
-  let revealedContent = $state<Set<string>>(new Set());
-  function revealContent(postId: string): void {
-    const next = new Set(revealedContent);
-    next.add(postId);
-    revealedContent = next;
-  }
-  // The shared content-policy render for a post — the region, the guardian
-  // floor and the viewer's own thresholds composed strictest-wins in Rust
-  // (`contentRender`). A REGION placeholder paints ahead of every other arm
-  // (tui's order); `block` then paints the family notice ahead of the muted
-  // arm; `collapse` collapses with a session-local reveal (one reveal set for
-  // the region and the family collapse). Reads the module `$state`, so these
-  // re-run when `hydrateContentPolicy` or a region refresh lands.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function postRender(post: any): ContentRender {
-    return contentRender(post.labels, {
-      contentIdHex: post.post_id,
-      authorHex: post.author,
-      text: post.body ?? '',
-      hashtags: post.tags ?? [],
-      hasMedia: !!post.has_media,
-    });
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function regionPlaceholderFor(post: any): RegionPlaceholderValue | null {
-    const placeholder = postRender(post).placeholder;
-    if (!placeholder) return null;
-    return placeholder.verb === 'block' || !revealedContent.has(post.post_id) ? placeholder : null;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function isContentBlocked(post: any): boolean {
-    return postRender(post).verdict === 'block';
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function isContentReported(post: any): boolean {
-    return postRender(post).reported === true;
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function isContentCollapsed(post: any): boolean {
-    return !revealedContent.has(post.post_id) && postRender(post).verdict === 'collapse';
-  }
+  // ── Muted-keyword collapse, the content-policy render and the trained-topic
+  //    verbs live on the card host (`#lib/feed-post-host`); the page keeps the
+  //    region-block walk and the in-context trained topic, both read off its
+  //    own snapshot. ──
   // Convention 17's verdict-side walk (`region-block-never-silent`): the loaded
   // cards the region blocks, plus an open detail it blocks.
+  const regionBlocks = (r: ReturnType<typeof postRender>) =>
+    !!r.placeholder && 'region' in r.placeholder && r.placeholder.verb === 'block';
+  const nestBlocks = (r: ReturnType<typeof postRender>) =>
+    !!r.placeholder && 'domain' in r.placeholder && r.placeholder.verb === 'block';
   onMount(() =>
     registerRegionBlockCounter('feed', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let n = posts.filter((p: any) => postRender(p).placeholder?.verb === 'block').length;
-      if (detailPost && postRender(detailPost).placeholder?.verb === 'block') n += 1;
+      let n = posts.filter((p: any) => regionBlocks(postRender(p))).length;
+      if (detailPost && regionBlocks(postRender(detailPost))) n += 1;
+      return n;
+    }),
+  );
+  // The nest's twin (`nest-block-never-silent`): the loaded cards a nest rule
+  // blocks, plus an open detail it blocks.
+  onMount(() =>
+    registerNestBlockCounter('feed', () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let n = posts.filter((p: any) => nestBlocks(postRender(p))).length;
+      if (detailPost && nestBlocks(postRender(detailPost))) n += 1;
       return n;
     }),
   );
@@ -602,194 +429,15 @@
    *  target sheet). Re-derived from `snap` so switching feeds re-reads it. */
   let trainTarget = $derived.by<string | null>(() => {
     void snap; // re-run whenever the manager pushes a new snapshot
-    try {
-      return manager?.trainTargetFactor() ?? null;
-    } catch {
-      return null;
-    }
+    return host.trainTargetFactor();
   });
 
-  /** This post's badge label, `"category:confidence"` (the `ContentLabelBadge`
-   *  wire format) — the highest-confidence entry of `PostSummary.labels`
-   *  (`moderation.md` § Per-row badge data path). `undefined` when unlabelled. */
-  function contentLabelFor(post: { labels?: ContentLabelEntry[] }): string | undefined {
-    return contentLabelBadgeFor(post.labels);
-  }
-
-  /** This post's example marker for the in-context factor ('more'/'less'/null). */
-  function trainMarkerFor(postId: string): string | null {
-    if (!trainTarget) return null;
-    try {
-      return manager?.exampleLabelFor(postId, trainTarget) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** The post awaiting a factor choice, when no in-context factor resolved. */
-  let trainSheetFor = $state<{ post_id: string; verb: 'more' | 'less' } | null>(null);
-  let trainSheetTopics = $state<TrainedTopicRow[]>([]);
-
-  // ── Reply compose dialog (feed.md § Implementation status today: reply is
-  //    COMPOSED via FeedManager::reply, never interact — its native arm
-  //    discards body). Minimal modal mirroring linux's build_reply_dialog:
-  //    a text field + submit, no cancel needed beyond click-outside/Escape. ──
-  let replyTargetId = $state<string | null>(null);
-  let replyText = $state('');
-  /** The dialog's explicit-public answer (`feed-reply-public-confirm`) —
-   *  unchecked at every open, never remembered (restricted-posts.md § Encryption
-   *  at rest → *Ruling 5's build — the shape*, (e)). */
-  let replyPublicConfirm = $state(false);
-  /** The reply target's manager-derived audience (`reply_audience`, `Some`
-   *  exactly under a restricted post) and its card fields — the dialog states
-   *  them and never decides them. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let replyTarget = $derived.by<any>(() =>
-    replyTargetId ? (posts.find((p: any) => p.post_id === replyTargetId) ?? null) : null,
-  );
-  let replyAudienceCopy = $derived.by<string>(() => {
-    const p = replyTarget;
-    switch (p?.reply_audience) {
-      case 'SealedToRoom':
-        return t.feed.post.reply_audience_room({ room: p.room_label ?? '' });
-      case 'SealedToTier':
-        return t.feed.post.reply_audience_tier({ tier: p.gated_tier ?? '' });
-      case 'PublicByConfirmation':
-        return t.feed.post.reply_audience_public;
-      default:
-        return '';
-    }
-  });
-  /** A post author's name through the private overlay's one resolver — the
-   *  viewer's nickname, else a bridged author's display name / handle, else
-   *  the short id (contacts.md § The private overlay → *Where the nickname
-   *  paints*). Read inside a `$derived` that touches `$contactsRevision`. */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function authorName(p: any): string {
-    return contactOverlays().peerLabel(
-      p.author_display?.display_name ?? null,
-      p.author_display?.handle ?? null,
-      p.author,
-    ).primary;
-  }
-
-  let replyTargetAuthor = $derived.by<string>(() => {
-    void $contactsRevision;
-    if (!replyTargetId) return '';
-    const p = posts.find((p: any) => p.post_id === replyTargetId);
-    return p ? authorName(p) : '';
-  });
   let detailAuthor = $derived.by<string>(() => {
     void $contactsRevision;
     return detailPost ? authorName(detailPost) : '';
   });
 
-  /** A rejected feed verb as `error-message` paints it (`$lib/feed-verb-error`):
-   *  a stated refusal reads in the user's language through the shared
-   *  `refusal_i18n_key`; every other failure keeps its own text. */
-  function verbErrorCopy(e: unknown): string {
-    return verbErrorCopyOf(e, feedRefusalI18nKey);
-  }
-
-  function closeReplyDialog(): void {
-    replyTargetId = null;
-    replyText = '';
-    replyPublicConfirm = false;
-  }
-
-  async function submitReply(): Promise<void> {
-    // The reply button gates on `replyText.trim()` alone — never on
-    // `feedReady` — so this handler is genuinely reachable with a null
-    // manager, and a bare return would discard the typed reply with no
-    // feedback at all (web.md § Async manager readiness).
-    if (!manager) { loadError = t.common.still_loading; return; }
-    if (!replyTargetId) return;
-    const text = replyText.trim();
-    if (!text) return;
-    const postId = replyTargetId;
-    const publicConfirmed =
-      replyPublicConfirm && replyTarget?.reply_audience === 'PublicByConfirmation';
-    closeReplyDialog();
-    try {
-      if (publicConfirmed) {
-        // The one door that composes words public under a restricted target.
-        await manager.replyPublicConfirmed(postId, text);
-      } else {
-        // The composer's fall-through, reused (restricted-posts.md (c)):
-        // prepare answers the sealed body or nothing to upload; bytes go
-        // through the same upload + submitGatedPost/abortGatedSubmit pair as
-        // the composer's gated post, and null falls through to `reply`.
-        const sealed: Uint8Array | null = await manager.prepareSealedReply(postId, text);
-        if (sealed) {
-          const id = $identity;
-          try {
-            if (!id) throw new Error('no identity for a sealed reply');
-            const sidecar = manager.gatedUploadSidecar();
-            const hash = await uploadBlobMultipart(id.secretHex, sidecar, sealed);
-            await manager.submitGatedPost(hash);
-          } catch (e) {
-            manager.abortGatedSubmit(String(e));
-            throw e;
-          }
-        } else {
-          await manager.reply(postId, text);
-        }
-      }
-      loadError = '';
-    } catch (e) {
-      logMessage('warn', 'fauna_web::feed', `reply error: ${e}`);
-      loadError = verbErrorCopy(e);
-    } finally {
-      refreshFeed();
-    }
-  }
-
-  async function trainPost(postId: string, verb: 'more' | 'less'): Promise<void> {
-    if (!trainTarget) {
-      // No dominant trained factor — ask which topic to train (the sheet).
-      const id = $identity;
-      if (!id) return;
-      try {
-        trainSheetTopics = (await trainedTopicsList(id.secretHex)).filter((r) => r.factor_key);
-      } catch {
-        trainSheetTopics = [];
-      }
-      trainSheetFor = { post_id: postId, verb };
-      return;
-    }
-    await trainInto(postId, verb, trainTarget);
-  }
-
-  /** Toggle-shaped: tapping the marked verb again untrains (the manager applies
-   *  the exact inverse delta); flipping verbs re-trains. */
-  async function trainInto(postId: string, verb: 'more' | 'less', factor: string): Promise<void> {
-    try {
-      if (manager?.exampleLabelFor(postId, factor) === verb) {
-        await manager?.untrainPost(postId, factor);
-      } else {
-        await manager?.trainPost(postId, factor, verb);
-      }
-      refreshFeed();
-    } catch (e: unknown) {
-      logMessage('warn', 'fauna_web::feed', `train failed: ${e}`);
-    }
-  }
-
-  // Rich-render augmentation caches (feed.md § Where logic lives — web keeps the
-  // structuredView body-decode for structured cards / markdown / multi-media;
-  // the snapshot owns the list, these only enrich rendering). Decoded bodies keyed
-  // by post id; `null` ⇒ resolved-empty (stop retrying). The quoted-post embed is no
-  // longer cached here — it is folded into `post.document` by the manager and read
-  // from the block (render-model.md § D6), so a resolution just `refreshFeed()`s.
-  let decodedPosts = $state<Record<string, any>>({});
-  const decoding = new Set<string>();
-  const mediaResolving = new Set<string>();
-  const quoteResolving = new Set<string>();
-  const previewResolving = new Set<string>();
-  const unlockOfferResolving = new Set<string>();
-  const tipsResolving = new Set<string>();
-
-  /// Every cache above is ACTOR-SCOPED and must die with the actor.
+  /// The card host's augmentation caches are ACTOR-SCOPED and must die with the actor.
   ///
   /// They are all keyed by post id alone, and each doubles as a fire-once guard
   /// (`augmentPost` skips a post whose id is already in the set). That is only
@@ -812,13 +460,7 @@
   /// is the only client that must reset them explicitly.
   function resetActorScopedAugmentation(): void {
     stopCueCapture();
-    decodedPosts = {};
-    decoding.clear();
-    mediaResolving.clear();
-    quoteResolving.clear();
-    previewResolving.clear();
-    unlockOfferResolving.clear();
-    tipsResolving.clear();
+    host.resetAugmentation();
   }
 
   // Post-detail dialog (ui.yaml feed transition `click post-card → post_detail`).
@@ -894,11 +536,15 @@
    *  holding the id, so `target` stays `null` and the `{#if detailPost}` gate
    *  keeps the dialog closed — the same graceful degrade a stale id always
    *  got. */
-  async function openPostDetail(postId: string): Promise<void> {
+  async function openPostDetail(postId: string, home?: string | null): Promise<void> {
     detailPostId = postId;
     if (!manager) { loadError = t.common.still_loading; return; }
     try {
-      await manager.resolvePost(postId);
+      // A post homed on another nest (a room-search hit on a foreign-homed
+      // room) opens through the relay door with the home handed back
+      // unchanged (`feed.md` § The cross-nest deep-link relay).
+      if (home) await manager.resolvePostFrom(postId, home);
+      else await manager.resolvePost(postId);
     } catch (e) {
       logMessage('warn', 'fauna_web::feed', `resolve post detail failed: ${e}`);
     }
@@ -926,7 +572,7 @@
     // the teaser.
     if (target.gated_tier && !target.gated_unlocked) void unlockGated(target.post_id);
   }
-  let detailDecoded = $derived(detailPost ? decodedPosts[detailPost.post_id] : null);
+  let detailDecoded = $derived(detailPost ? host.decodedPosts[detailPost.post_id] : null);
   let detailRegion = $derived(detailPost ? regionPlaceholderFor(detailPost) : null);
   // The detail's folded embeds, read from `detailPost.document` (render-model.md § D6).
   let detailQuotedBlock = $derived(detailPost ? quotedPostBlock(detailPost.document) : null);
@@ -973,7 +619,7 @@
   let scrollContainer: HTMLElement | undefined;
 
   // ── Engagement-cue capture (engagement-cues.md § Cue vocabulary &
-  //    derivation): the shell is `$lib/feed-cues`; this page only builds it over
+  //    derivation): the shell is `#lib/feed-cues`; this page only builds it over
   //    the live manager, says whether the post list is what the user sees (a
   //    post-detail or compose dialog covers it), and stops it on the way out. ──
   let cueCapture: CueCapture | null = null;
@@ -1019,125 +665,8 @@
   $effect(() => {
     const list = posts; // dependency: re-run when the post list changes
     if (!manager) return; // manager-gate-ok: $effect ordering guard, not a user action
-    for (const p of list) augmentPost(p);
+    for (const p of list) host.augmentPost(p);
   });
-
-  function augmentPost(p: any): void {
-    const id = p.post_id as string;
-    if ((p.source === 'fauna' || p.source === 'nostr') && decodedPosts[id] === undefined && !decoding.has(id)) {
-      decoding.add(id);
-      void fetchAndDecodePost(id);
-    }
-    // The guard is the snapshot's `media_hash == null` — `== null`, never falsiness: an
-    // all-remote post resolves to `media_hash: ""` (render-model.md § D6c — a truthful
-    // "resolved, nothing"). `mediaResolving` only dedupes a resolve in flight: once the post
-    // reads resolved its id is forgotten, so a post a reload lands unresolved (one the shared
-    // manager never resolved — it re-folds every media it did resolve onto the landed page,
-    // so a live card keeps its media and player) resolves it again — as tui and linux do,
-    // whose guard is the snapshot alone. Before, the id stayed for the actor's life and a reload painted the
-    // card without its media for good. A resolve that left the post unresolved (the
-    // `posts.get` failed) keeps its id: no retry loop.
-    if (p.has_media && p.media_hash == null && !mediaResolving.has(id)) {
-      mediaResolving.add(id);
-      // resolve_media fetches+decodes the body to fill PostSummary.media_hash
-      // (the feed index never carries it — feed.md § The read model). Refresh to
-      // pull the populated hash into the snapshot store.
-      void manager!.resolveMedia(id).then(() => {
-        refreshFeed();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
-        if (after && after.media_hash != null) mediaResolving.delete(id);
-      });
-    }
-    // Either embed field folds through the same call: a QUOTE embeds its
-    // target, a REPOST ROW embeds its original (feed.md § Interaction bar →
-    // Repost, ratified 2026-08-10).
-    // The guard is the snapshot: the embed is still unfolded. `quoteResolving`
-    // only dedupes a resolve in flight (the `mediaResolving` shape above): a
-    // reload rebuilds every post unfolded, and the shared manager forgets what it
-    // resolved so the next resolve reads what the nest serves now — a quoted post
-    // taken down since shows the tombstone (feed.md § The read model). Before,
-    // the id stayed for the actor's life and the embed was never asked again.
-    const qid = (p.quoted_post_id ?? p.reposted_post_id) as string | undefined;
-    if (qid && quotedPostBlock(p.document) === null && !quoteResolving.has(qid)) {
-      quoteResolving.add(qid);
-      // resolve_quoted_post folds a `QuotedPost` block into the quoting/reposting
-      // post's document (render-model.md § D6); refresh to pull the folded block
-      // into the snapshot store, where PostCard / the detail read it (like
-      // resolveMedia). The id is released once the post reads folded; a resolve
-      // that left it unfolded keeps it: no retry loop.
-      void manager!.resolveQuotedPost(qid).then(() => {
-        refreshFeed();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
-        if (after && quotedPostBlock(after.document) !== null) quoteResolving.delete(qid);
-      });
-    }
-    // Link previews (render-model.md § D4): the producer emits a `LinkPreview`
-    // block (Resolving) for each bare-url paragraph; resolve_link_preview calls
-    // fauna.linkpreview.resolve and re-emits it Resolved/Failed. Fire once per url;
-    // refresh to pull the resolved state into the snapshot store, where PostCard
-    // paints the card (the same shape as resolveMedia / resolveQuotedPost).
-    for (const url of resolvingLinkPreviewUrls(p.document)) {
-      if (!previewResolving.has(url)) {
-        previewResolving.add(url);
-        void manager!.resolveLinkPreview(url).then(() => refreshFeed());
-      }
-    }
-    // The buyer's price read (gap (2c), monetization.md § Per-post
-    // pay-to-unlock → the buyer's price read is post-addressed) — fire once
-    // per post for a designated `post-unlock-*` tier; refresh to pull the
-    // resolved offer into the snapshot store, where PostCard paints it.
-    // `unlockOfferResolving` dedupes only a resolve in flight, the media shape
-    // above: a reload rebuilds every post with `unlock_offer` unset, so an id
-    // kept for the actor's life left a resolved price gone for good after the
-    // reader's own next post (measured 2026-10-09 on web: the offer painted,
-    // the reload dropped it, the guard never fired again). tui and linux guard
-    // on the snapshot alone and re-resolve. A resolve that answered no offer
-    // (the author's own post, an undesignated tier) keeps its id: no retry loop.
-    const gatedTier = p.gated_tier as string | undefined;
-    if (gatedTier?.startsWith('post-unlock-') && !p.unlock_offer && !unlockOfferResolving.has(id)) {
-      unlockOfferResolving.add(id);
-      void manager!.resolvePostUnlockOffer(id).then(() => {
-        refreshFeed();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
-        if (after && after.unlock_offer != null) unlockOfferResolving.delete(id);
-      });
-    }
-    // The tip surface (monetization.md § Tips). No data trigger exists —
-    // nothing in the feed projection says whether a post has tips — so the
-    // guard is the resolved field alone, and the resolve is fire-once
-    // *because* it writes a view on every outcome (an untipped post resolves
-    // to zeroes). The id is released once the post reads resolved, as for the
-    // unlock offer above, so a reload that rebuilds the post without its view
-    // resolves it again.
-    if (!p.tips && !tipsResolving.has(id)) {
-      tipsResolving.add(id);
-      void manager!.resolvePostTips(id).then(() => {
-        refreshFeed();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const after = (get(feedSnapshot) as any)?.posts?.find((q: any) => q.post_id === id);
-        if (after && after.tips != null) tipsResolving.delete(id);
-      });
-    }
-  }
-
-  async function fetchAndDecodePost(postId: string): Promise<void> {
-    const id = $identity;
-    if (!id) return;
-    try {
-      const bytes = await getPost(id.secretHex, postId);
-      const decoded = await decodePost(bytes);
-      decodedPosts = { ...decodedPosts, [postId]: decoded };
-    } catch (e) {
-      // A post whose stored bytes aren't envelope-wrapped, or a transient fetch
-      // failure: cache `null` so the snapshot preview body renders and we stop
-      // retrying (the snapshot list is unaffected — this only enriches rendering).
-      decodedPosts = { ...decodedPosts, [postId]: null };
-      logMessage('warn', 'fauna_web::feed', `decode post error (post ${postId}): ${e}`);
-    }
-  }
 
   // ── Feed selection + paging (manager-driven) ─────────────────────────────────
 
@@ -1554,121 +1083,6 @@
     stageComposeFile(file, new Uint8Array(buf));
   }
 
-  // ── Interactions (like/reply/repost/quote) ──
-  //
-  // Through the manager, NOT a direct `interactWithPost` RPC. The four counts on
-  // the bar render from the snapshot (`PostSummary.{like,reply,repost,quote}
-  // _count`, feed.md § Interaction bar), and `manager.interact` is what folds
-  // the nest's post-act counters back into it — the old direct call threw the
-  // reply away, which is why a tapped ♥ stayed at 0 here. `refreshFeed()` pulls
-  // the re-notified snapshot in, mirroring `handleDeletePost`.
-  //
-  // `reply`/`quote` are COMPOSED, not recorded (feed.md § Implementation status
-  // today): `interact(id, "reply"/"quote", body)` looks identical and creates
-  // NOTHING — the nest's native arm discards `body` outright. `manager.quote`
-  // fires immediately with empty commentary (the quote-commentary composer is a
-  // deferred fleet-wide follow-on, § Layout & flow); `manager.reply` needs typed
-  // text, so `reply` opens the compose dialog instead of firing immediately
-  // (linux twin: `client.rs::interact_with_post` + `build_reply_dialog`).
-  async function handleInteract(postId: string, action: string): Promise<void> {
-    if (!manager) { loadError = t.common.still_loading; return; }
-    if (action === 'reply') {
-      replyTargetId = postId;
-      replyText = '';
-      return;
-    }
-    try {
-      // Two verbs, not one (feed.md § User actions). `like` is the manager's
-      // TOGGLE off `viewer_liked`: both directions ride the same interact door
-      // on the same post id, so nothing is composed — but the bare `interact`
-      // call below can only ever like, never un-like, because the nest's like
-      // arm is idempotent per (actor, post). That made a like permanent here.
-      // `quote` COMPOSES a post carrying `Reference::Quote`; routed through
-      // `interact` it creates nothing at all on a native post.
-      if (action === 'like') {
-        await manager.like(postId);
-      } else if (action === 'quote') {
-        await manager.quote(postId, '');
-      } else if (action === 'repost') {
-        // `repost` is the manager's TOGGLE off `viewer_repost_id` (feed.md
-        // § Interaction bar → Repost, ratified 2026-08-10): off → composes the
-        // caller's empty-body `Reference::Repost` post; on → un-reposts it —
-        // never routed through the bare `interact` below, which creates
-        // nothing on a native post.
-        await manager.repost(postId);
-      } else {
-        await manager.interact(postId, action, null);
-      }
-      loadError = '';
-    } catch (e) {
-      logMessage('warn', 'fauna_web::feed', `interact error: ${e}`);
-      loadError = verbErrorCopy(e);
-    } finally {
-      refreshFeed();
-    }
-  }
-
-  // ── Gated post unlock (feed.md § Encryption at rest; monetization.md § Pillars
-  //    2+3). Web twin of linux `client.rs::unlock_gated_post`: resolve the sealed
-  //    blob hash (one lazy fauna.posts.get + decode), fetch its bytes on the bulk
-  //    plane, and hand them to the manager to decrypt + swap the full body into the
-  //    snapshot; the refresh repaints the open detail. Best-effort — a locked post
-  //    (not entitled / rotated-out period) just keeps its teaser. ──
-  async function unlockGated(postId: string): Promise<void> {
-    const id = $identity;
-    if (!manager || !id) return; // manager-gate-ok: best-effort detail augmentation — the post keeps its teaser
-    try {
-      const hash = await manager.gatedBlobHash(postId);
-      if (!hash) return;
-      const bytes = await fetchBlob(id.secretHex, hash);
-      await manager.unlockGatedPost(postId, bytes);
-    } catch (e) {
-      logMessage('warn', 'fauna_web::feed', `gated unlock (post stays teased): ${e}`);
-    } finally {
-      refreshFeed();
-    }
-  }
-
-  // ── The self-serve teaser purchase (gap (2c), monetization.md § Per-post
-  //    pay-to-unlock → the buyer's price read is post-addressed):
-  //    `gated-post-buy-button` subscribes against the resolved offer's
-  //    tier_name — the existing subscribe flow, no claim code needed. ──
-  async function buyUnlockOffer(postId: string): Promise<void> {
-    if (!manager) { loadError = t.common.still_loading; return; }
-    try {
-      await manager.buyUnlockOffer(postId);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      loadError = t.feed.error_buy_unlock({ message: msg });
-    } finally {
-      // The manager clears the post's `unlock_offer` and re-notifies on
-      // success, so a landed purchase un-renders its own affordance (nothing
-      // left to buy; re-showing the price invites a duplicate subscribe).
-      // Web is the only client that must pull that in by hand — tui and linux
-      // register a `FeedSnapshotObserver` and repaint off `notify()`, while
-      // the wasm face has no observer seam at all and the browser owns the
-      // loop instead (see the snapshot-derived view block at the top of this
-      // file: every async manager method is followed by `refreshFeed()`).
-      // Without it the buy button stays on screen forever after a *successful*
-      // buy — the shape every sibling handler here already avoids with this
-      // same `finally`.
-      refreshFeed();
-    }
-  }
-
-  // The payment link is nest/author-supplied; refuse to open a non-https
-  // scheme (security.md § Transport trust) —
-  // the same check the profile page's subscription-offer-payment-link
-  // applies before opening a payment link.
-  function openUnlockPaymentLink(url: string): void {
-    if (typeof window === 'undefined') return;
-    if (!isSafeNavUrl(url)) {
-      loadError = t.subscriptions.unsafe_payment_url;
-      return;
-    }
-    window.open(url, '_blank', 'noopener');
-  }
-
   // ── Create-feed form ───────────────────────────────────────────────────────
 
   function addRule(): void {
@@ -1723,85 +1137,6 @@
     } finally {
       refreshFeed();
       creatingFeed = false;
-    }
-  }
-
-  /** Own-post delete (feed-post-delete-confirm-button; feed.md § State & data
-   *  shape → Post deletion). The manager drops the post from its loaded window
-   *  and re-notifies on success — `refreshFeed()` just pulls that in, mirroring
-   *  `handleDeleteFeed`. */
-  async function handleDeletePost(postId: string): Promise<void> {
-    if (!manager) { loadError = t.common.still_loading; return; }
-    try {
-      await manager.deletePost(postId);
-    } catch (e) {
-      logMessage('warn', 'fauna_web::feed', `delete post failed: ${e}`);
-    } finally {
-      refreshFeed();
-    }
-  }
-
-  // ── Own-post web-publishing verbs (web-content-hosting.md
-  //    § Published-post management; `$lib/web-publish` is the shared
-  //    origin/posts store the `web-settings` section also reads/writes). ──
-
-  // The last web/paywall link copied from the ⋯ menu, keyed by post so a
-  // re-render can tell which card's `copied` attr + confirmation line to show.
-  let webLinkCopied = $state<{ postId: string; kind: 'web' | 'paywall'; url: string } | null>(
-    null,
-  );
-
-  async function publishPostToWeb(postId: string): Promise<void> {
-    try {
-      // `null` slug: the default is the nest's to mint, never a client-chosen one.
-      await webPublishSet($identity?.secretHex ?? '', hexToBytes(postId), null);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      loadError = t.web_publish.error_publish({ message: msg });
-    } finally {
-      // Re-read rather than editing locally: the card's `web_slug` — which
-      // drives the whole verb family — repaints from the nest's own answer.
-      refreshFeed();
-    }
-  }
-
-  async function unpublishPostFromWeb(postId: string): Promise<void> {
-    try {
-      await webPublishUnset($identity?.secretHex ?? '', hexToBytes(postId));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      loadError = t.web_publish.error_unpublish({ message: msg });
-    } finally {
-      refreshFeed();
-    }
-  }
-
-  // Purely local — the origin and the slug are both already resolved on
-  // screen, so the public link costs no round trip.
-  async function copyPostWebLink(postId: string): Promise<void> {
-    const origin = $siteLink?.origin;
-    const post = posts.find((p: any) => p.post_id === postId);
-    if (!origin || !post?.web_slug) return;
-    const url = webPostPageUrl(origin, post.web_slug);
-    await bestEffortCopyToClipboard(url);
-    webLinkCopied = { postId, kind: 'web', url };
-  }
-
-  // A fresh mint per click: the token is short-lived by ratified design and
-  // re-minting is free, so re-copying always yields a link that works from
-  // now rather than a cached one that already expired.
-  async function copyPostPaywallLink(postId: string): Promise<void> {
-    const post = posts.find((p: any) => p.post_id === postId);
-    const origin = $siteLink?.origin;
-    if (!origin || !post?.web_slug) return;
-    try {
-      const minted = await webPaywallMintToken($identity?.secretHex ?? '', post.web_slug);
-      const url = webTokenedUrl(origin, minted.path, minted.token);
-      await bestEffortCopyToClipboard(url);
-      webLinkCopied = { postId, kind: 'paywall', url };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      loadError = t.web_publish.error_paywall_link({ message: msg });
     }
   }
 
@@ -1920,7 +1255,7 @@
     // construction outcome `account-scoping.md` § The scoping taxonomy bans.
     // `media/+page.svelte` and `+layout.svelte` already register this early;
     // this page is held to the same shape by
-    // `$lib/actor-scope-registration-contract.test.ts`. Nothing below needs
+    // `#lib/actor-scope-registration-contract.test.ts`. Nothing below needs
     // wasm to REGISTER — the handlers await it themselves where they need it.
     //
     // The three `[feed] mount` lines below are the page's boot witness, and they
@@ -1948,7 +1283,7 @@
     // multi-actor e2e arms read as product bugs.
     //
     // The `secretHex` keying and the cache drop that fixed that are now the SPA's
-    // one shape rather than this page's private one (`$lib/actorScope` +
+    // one shape rather than this page's private one (`#lib/actorScope` +
     // `onActorChange`, account-scoping.md § The scoping taxonomy's in-memory
     // corollary): `resetActorScopedAugmentation` is registered as a drop, so it
     // runs — with every other surface's drop — before any rebuild handler.
@@ -2030,12 +1365,12 @@
       syncFeedRoomPosts();
       await loadAll();
       // A `SearchNav::Post` deep-link left by the Search page
-      // (`$lib/search`'s `consumePendingSearchNav`) — after `loadAll()` so
+      // (`#lib/search`'s `consumePendingSearchNav`) — after `loadAll()` so
       // `openPostDetail`'s own `resolvePost` call (which it runs regardless)
       // sees the freshest loaded window before deciding whether a fetch is
       // needed.
       const pendingNav = consumePendingSearchNav();
-      if (pendingNav?.kind === 'post') await openPostDetail(pendingNav.postId);
+      if (pendingNav?.kind === 'post') await openPostDetail(pendingNav.postId, pendingNav.home);
     });
 
     console.debug('[feed] mount: seam registered, awaiting wasm');
@@ -2063,7 +1398,7 @@
     });
   });
 
-  // The store-change notice (`$lib/store-change`): the sealed scorers — muted
+  // The store-change notice (`#lib/store-change`): the sealed scorers — muted
   // keywords, trained factors — load only inside the manager's reload, so the
   // open feed re-pulls its current source, the reconnect arm's own re-drive.
   const unsubStoreChange = onStoreChange(() => {
@@ -2081,8 +1416,7 @@
     clearTimeout(searchTimer);
     // Opened post media (the conversations-attachment rule): a reactive re-render
     // must not leak a fresh blob URL each tick, and these hold decrypted bytes.
-    for (const u of Object.values(sealedMediaUrls)) URL.revokeObjectURL(u);
-    for (const u of Object.values(proxiedMediaUrls)) URL.revokeObjectURL(u);
+    host.destroy();
     notifyBuffer.destroy();
   });
 </script>
@@ -2336,38 +1670,12 @@
       <!-- Not yet authoritative (a read in flight or an error): neither empty state. -->
     {:else}
       {#each posts as post (post.post_id)}
-        <PostCard
+        <FeedPostCard
           {post}
+          {host}
           {bridgeRoster}
-          decoded={decodedPosts[post.post_id]}
-          {blobUrl}
-          {mediaUrl}
-          {proxiedMediaUrl}
-          {playbackUrl}
-          contentLabel={contentLabelFor(post)}
-          oninteract={handleInteract}
-          onrevealremote={(id) => { manager?.revealRemoteImages(id); refreshFeed(); }}
-          onbuyunlockoffer={buyUnlockOffer}
-          onopenpaymentlink={openUnlockPaymentLink}
-          muted={isPostMuted(post.post_id)}
-          onrevealmuted={revealMuted}
-          contentBlocked={isContentBlocked(post)}
-          contentReported={isContentReported(post)}
+          {trainTarget}
           onreport={openReport}
-          contentCollapsed={isContentCollapsed(post)}
-          onrevealcontent={revealContent}
-          regionPlaceholder={regionPlaceholderFor(post)}
-          trainTarget={trainTarget}
-          trainMarker={trainMarkerFor(post.post_id)}
-          ontrain={trainPost}
-          isOwn={post.author === $identity?.actorId}
-          ondelete={handleDeletePost}
-          onpublishweb={publishPostToWeb}
-          onunpublishweb={unpublishPostFromWeb}
-          oncopyweblink={copyPostWebLink}
-          oncopypaywalllink={copyPostPaywallLink}
-          webLinkOrigin={$siteLink?.origin ?? null}
-          webLinkCopied={webLinkCopied?.postId === post.post_id ? webLinkCopied : null}
           onselect={() => {
             // A REPOST ROW's own detail would be blank (the repost post is empty
             // by construction) — activation opens the ORIGINAL's detail instead
@@ -2386,92 +1694,11 @@
   </div>
 </div>
 
-{#if replyTargetId}
-  <!-- Reply compose dialog (feed.md § Implementation status today — reply is
-       COMPOSED via FeedManager::reply, never `interact`, whose native arm
-       discards `body`). Prior art: linux's build_reply_dialog; no cancel
-       button needed beyond click-outside/Escape, matching the train-target
-       sheet below. -->
-  <div
-    class="compose-overlay"
-    role="dialog"
-    aria-modal="true"
-    aria-label={t.common.reply}
-    tabindex="-1"
-    onclick={(e) => { if (e.target === e.currentTarget) closeReplyDialog(); }}
-    onkeydown={(e) => { if (e.key === 'Escape') closeReplyDialog(); }}
-  >
-    <div class="compose-dialog" data-testid={IDS.FEED_REPLY_DIALOG}>
-      <h3>{t.feed.post.replying_to_user({ user: replyTargetAuthor })}</h3>
-      {#if replyAudienceCopy}
-        <p class="compose-dialog-audience" data-testid={IDS.FEED_REPLY_AUDIENCE}>{replyAudienceCopy}</p>
-      {/if}
-      <textarea
-        class="compose-dialog-textarea"
-        data-testid={IDS.FEED_REPLY_TEXT_FIELD}
-        placeholder={t.feed.post.write_reply}
-        rows="4"
-        bind:value={replyText}
-      ></textarea>
-      {#if replyTarget?.reply_audience === 'PublicByConfirmation'}
-        <label class="compose-dialog-public-confirm">
-          <input
-            type="checkbox"
-            data-testid={IDS.FEED_REPLY_PUBLIC_CONFIRM}
-            data-checked={replyPublicConfirm ? 'true' : 'false'}
-            bind:checked={replyPublicConfirm}
-          />
-          {t.feed.post.reply_public_confirm}
-        </label>
-      {/if}
-      <div class="compose-dialog-actions">
-        <button class="btn-secondary" onclick={closeReplyDialog}>{t.common.cancel}</button>
-        <button
-          class="btn-primary"
-          data-testid={IDS.FEED_REPLY_SUBMIT_BUTTON}
-          disabled={!replyText.trim()}
-          onclick={submitReply}
-        >{t.common.reply}</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-{#if trainSheetFor}
-  <!-- Factor-target sheet (topic-factors.md § Authoring surface): shown ONLY when
-       the current feed has no dominant trained factor, so *more/less like this*
-       cannot train in context. Picking a topic trains this post into it. -->
-  <div
-    class="compose-overlay"
-    role="dialog"
-    aria-modal="true"
-    aria-label={t.feed.train_target_title}
-    tabindex="-1"
-    onclick={(e) => { if (e.target === e.currentTarget) trainSheetFor = null; }}
-    onkeydown={(e) => { if (e.key === 'Escape') trainSheetFor = null; }}
-  >
-    <div class="compose-dialog" data-testid={IDS.FEED_POST_TRAIN_TARGET_SHEET}>
-      <h3>{t.feed.train_target_title}</h3>
-      {#if trainSheetTopics.length === 0}
-        <p class="muted">{t.personalization.trained_topics_empty}</p>
-      {:else}
-        {#each trainSheetTopics as topic (topic.id)}
-          <button
-            class="btn-secondary"
-            onclick={async () => {
-              const target = trainSheetFor;
-              trainSheetFor = null;
-              if (target && topic.factor_key) {
-                await trainInto(target.post_id, target.verb, topic.factor_key);
-              }
-            }}
-          >{topic.name}</button>
-        {/each}
-      {/if}
-      <a href="/app/settings/personalization" class="btn-secondary">{t.personalization.trained_factor_create}</a>
-    </div>
-  </div>
-{/if}
+<!-- The card's reply compose dialog and factor-target sheet, over the
+     timeline's card host (`#lib/components/FeedReplyDialog.svelte`,
+     `FeedTrainSheet.svelte` — the profile's Posts tab paints the same two). -->
+<FeedReplyDialog {host} />
+<FeedTrainSheet {host} />
 
 {#if showComposeDialog}
   <div class="compose-overlay" role="dialog" aria-modal="true" aria-label={t.feed.post.compose_post} tabindex="-1" onclick={(e) => { if (e.target === e.currentTarget) showComposeDialog = false; }} onkeydown={(e) => { if (e.key === 'Escape') showComposeDialog = false; }}>
@@ -2610,6 +1837,19 @@
         {/if}
         <button class="icon-btn" aria-label={t.common.close} onclick={closeDetail}>&times;</button>
       </div>
+      <!-- `content-label-badge`: the shared highest-confidence pick over the opened
+           post's labels. A room's relayed verdicts fold onto a deep-linked post at
+           unlock, so this is where a member sees them with no timeline card
+           (feed-read-model.md § the cross-nest deep-link relay). -->
+      {#if contentLabelFor(detailPost)}
+        <div class="post-detail-label"><ContentLabelBadge label={contentLabelFor(detailPost) ?? ''} /></div>
+      {/if}
+      {#if detailPost.admin_block_reason && detailPost.body}
+        <!-- The author's own read keeps the body; the shared admin-block notice
+             (moderation.md § Admin block of a reported item) paints beside it.
+             No dedicated id is approved, so it is chrome. -->
+        <p class="muted">{resolveLocalizedNested(adminBlockNotice(detailPost.admin_block_reason))}</p>
+      {/if}
       {#if detailPost.legal_takedown_ref}
         <!-- Legal-takedown tombstone (moderation.md § Legal takedown — "the
              post-detail body area when PostSummary.legal_takedown_ref is set";
@@ -2621,6 +1861,11 @@
              `msg.legal_takedown_ref` branch (`../conversations/+page.svelte`)
              and the quoted-post card's own paint. -->
         <div class="post-detail-body message-legal-takedown" data-testid={IDS.FEED_POST_DETAIL_BODY}>{resolveLocalized(legalTakedownTombstone(detailPost.legal_takedown_ref))}</div>
+      {:else if detailPost.admin_block_reason && !detailPost.body}
+        <!-- Admin-blocked post (moderation.md § Admin block of a reported item): the
+             nest withheld the body from every viewer but its author, so the shared
+             notice stands in the body area exactly as the tombstone above does. -->
+        <div class="post-detail-body message-legal-takedown" data-testid={IDS.FEED_POST_DETAIL_BODY}>{resolveLocalizedNested(adminBlockNotice(detailPost.admin_block_reason))}</div>
       {:else if detailRegion}
         <!-- A REGION verdict withholds the detail's body as it does the card's
              (`region-blocking.md` § The blocked render): the placeholder in place
@@ -2631,6 +1876,40 @@
           placeholder={detailRegion}
           onreveal={() => { if (detailPost) revealContent(detailPost.post_id); }}
         />
+      {:else if host.isContentBlocked(detailPost)}
+        <!-- The family arm withholds the detail's body as it does the card's
+             (`family-safety.md` § Content policy): the fixed frame in place of
+             body/tags/media, NO reveal, the guardian rule's reason beside it
+             (`nest-rules.md` § The shared rule editor → *The reason is the
+             member's to read*). Without this arm a guardian-blocked post opened
+             from its placeholder card painted its body. -->
+        <div class="post-detail-body content-policy-collapse">
+          <span
+            class="muted"
+            data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+            data-state="blocked"
+            data-source={host.isContentReported(detailPost) ? 'reported' : undefined}
+          >{host.isContentReported(detailPost) ? t.moderation.report.hidden_placeholder : t.family.content_blocked_notice}</span>
+          {#if host.guardianReasonFor(detailPost)}
+            <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON}>{host.guardianReasonFor(detailPost)}</span>
+          {/if}
+        </div>
+      {:else if host.isContentCollapsed(detailPost)}
+        <div class="post-detail-body content-policy-collapse">
+          <span
+            class="muted"
+            data-testid={IDS.CONTENT_POLICY_BLOCKED_NOTICE}
+            data-state="collapsed"
+          >{t.family.content_collapsed_notice}</span>
+          {#if host.guardianReasonFor(detailPost)}
+            <span class="muted" data-testid={IDS.CONTENT_POLICY_BLOCKED_REASON}>{host.guardianReasonFor(detailPost)}</span>
+          {/if}
+          <button
+            class="btn-secondary small"
+            data-testid={IDS.CONTENT_POLICY_COLLAPSED_REVEAL_BUTTON}
+            onclick={() => { if (detailPost) revealContent(detailPost.post_id); }}
+          >{t.family.content_reveal_button}</button>
+        </div>
       {:else}
         <!-- Detail-specific exception (render-model.md § D3): `detailDoc` is a client-built
              document the manager can't project `revealed` onto, so the body uses the per-call
@@ -2658,7 +1937,7 @@
                `null` for the tick between the unlock and the opened object URL,
                and the card paints nothing rather than a broken image. A public
                post's hash resolves synchronously, exactly as before. -->
-          {@const detailMediaSrc = mediaUrl(detailMediaHash)}
+          {@const detailMediaSrc = mediaUrl(detailMediaHash, detailPost)}
           {#if detailMediaSrc}
             <div class="post-media">
               <img data-testid={IDS.POST_IMAGE} data-blob-hash={detailMediaHash} src={detailMediaSrc} alt="post media" class="detail-media-img" />

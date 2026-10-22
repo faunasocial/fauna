@@ -58,11 +58,11 @@ Stamped 2026-09-22 at e9f79fdf25.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| linux | ✅ full | 0.1.4-dev+52904896 standalone |
-| windows | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| macos | ⚠ partial | 0.1.4-dev+52904896 standalone |
-| ios | ⚠ partial | 0.1.4-dev+52904896 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ✅ full | 0.1.4-dev+ea391d07 standalone |
+| windows | ✅ full | 0.1.5-dev+61b844ca standalone |
+| macos | ⚠ partial | 0.1.5-dev+61b844ca standalone |
+| ios | ⚠ partial | 0.1.5-dev+61b844ca standalone |
 | android |  no run recorded | |
 | tui | ✅ full | 0.1.2-dev+7663afa6 standalone |
 
@@ -81,11 +81,11 @@ Stamped 2026-09-22 at e9f79fdf25.
 | 7 | app | `tests/e2e-unified/tests/test_settings.py::test_status_shows_your_encryption_state_read_only` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 8 | app | `tests/e2e-unified/tests/test_settings.py::test_status_names_the_build_you_are_running` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
 | 9 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_events_bytes_move_the_one_storage_number_mail_reads` | nest (linux): passed |
-| 10 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_admin_turned_off_shows_restricted_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
+| 10 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_feature_the_admin_turned_off_shows_restricted_with_its_reason` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 11 | app | `tests/e2e-unified/tests/test_family.py::test_family_guardian_feature_limit_reaches_the_wards_status` | web (linux): passed, linux (linux): passed, windows (windows): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_an_admin_authors_a_limit_on_the_nest_page_and_it_binds_with_attribution` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_looser_value_is_never_refused_but_says_it_has_no_effect` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating` | web (linux): passed, linux (linux): passed, tui (linux): passed |
-| 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_the_editor_writes_disable_offline_and_are_never_queued` | web (linux): passed, linux (linux): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_an_admin_authors_a_limit_on_the_nest_page_and_it_binds_with_attribution` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 12 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_a_looser_value_is_never_refused_but_says_it_has_no_effect` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_you_set_your_own_limit_and_the_row_above_binds_without_renavigating` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
+| 13 | app | `tests/e2e-unified/tests/test_feature_limits.py::test_the_editor_writes_disable_offline_and_are_never_queued` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, ios (macos): passed, tui (linux): passed |
 | 14 | nest | `tests/e2e-unified/tests/api/test_shared_storage_quota.py::test_an_event_past_the_storage_ceiling_is_refused_and_moves_nothing` | nest (linux): passed |
 <!-- features-render:end -->

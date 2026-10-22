@@ -36,7 +36,7 @@ Stamped 2026-10-01 at 308c995169.
 6. [app] A pending helper's card shows its technical role and its key, to check against the helper's own log — `docs/goal/behavior/mail-bridge-lifecycle.md` § Pending approval
    - `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves`
 7. [app] The admin rejects a pending helper from its card, after confirming that it will not be able to connect again, and it leaves the list — `docs/goal/behavior/mail-bridge-lifecycle.md` § Pending approval
-   - (none)
+   - `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_rejecting_a_pending_bridge_asks_first`
 8. [nest] A helper the admin rejected stays rejected: it never returns as pending or approves itself, even once mail is on — `docs/goal/behavior/mail-bridge-lifecycle.md` § Onboarding auto-approval
    - `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on`
 9. [app] Cancelling a key rotation leaves the helper approved with its key unchanged — `docs/goal/behavior/admin.md` § Approved-bridges roster
@@ -65,13 +65,13 @@ Stamped 2026-10-01 at 308c995169.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+cdb1bad0 standalone |
-| linux | ⚠ partial | 0.1.4-dev+ea391d07 standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
+| linux | ⚠ partial | 0.1.4-dev+db13d1ca.dirty standalone |
 | windows | ⚠ partial | 0.1.2-dev+a704dbe4.dirty standalone |
 | macos | ⚠ partial | 0.1.2-dev+8b423269 standalone |
 | ios |  no run recorded | |
 | android |  no run recorded | |
-| tui | ⚠ partial | 0.1.2-dev+9746302c.dirty standalone |
+| tui | ⚠ partial | 0.1.4-dev+b5779216.dirty standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|
@@ -83,11 +83,11 @@ Stamped 2026-10-01 at 308c995169.
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_list_then_approve_flow` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_reject_flow` | nest (linux): passed, nest (macos): passed |
 | 3 | nest | `tests/e2e-unified/tests/api/test_mail_bridge_approval.py::test_non_admin_denied` | nest (linux): passed, nest (macos): passed |
-| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_rekey_rotation.py::test_admin_revoke_re_keys_mta_hands_free` | — |
+| 4 | nest | `tests/e2e-unified/tests/platform/docker/test_bridge_rekey_rotation.py::test_admin_revoke_re_keys_mta_hands_free` | nest (linux): failed |
 | 4 | nest | `tests/e2e-unified/tests/test_mail_bridge_rekey.py::test_revoked_keyfile_re_keys_in_process` | nest (linux): passed, nest (macos): passed, nest (windows): passed |
 | 5 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_admin_rotates_approved_mta_service_user_key` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
 | 6 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_admin_bridges_pending_lists_and_approves` | web (linux): passed, linux (linux): passed, windows (windows): passed, macos (macos): passed, tui (linux): passed |
-| 7 | app | (none) | — |
+| 7 | app | `tests/e2e-unified/tests/test_admin_bridges_pending.py::test_rejecting_a_pending_bridge_asks_first` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 8 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_rejected_helper_stays_rejected_once_mail_is_on` | nest (linux): passed |
 | 9 | app | `tests/e2e-unified/tests/test_admin_bridges_rotate.py::test_cancelling_a_rotation_leaves_the_helper_approved` | web (linux): passed, linux (linux): passed, tui (linux): passed |
 | 10 | nest | `tests/e2e-unified/tests/api/test_bridge_auto_approval_rules.py::test_a_dav_only_nest_approves_the_mda_and_holds_the_mta` | nest (linux): passed |

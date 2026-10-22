@@ -14,7 +14,7 @@ sealed and unsealed only on your device.
 
 ## Coverage contract
 
-Stamped 2026-09-21 at 24a69fec75.
+Stamped 2026-10-21 at 77c610862e.
 
 1. [app] The address book lists your cards and opening one shows its details — `docs/goal/behavior/carddav-server.md` § What a CardDAV address book *is*, in Fauna terms
    - `tests/e2e-unified/tests/test_addressbook.py::test_address_book_lists_and_details_mda_sealed_card`
@@ -23,7 +23,7 @@ Stamped 2026-09-21 at 24a69fec75.
    - `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge`
 3. [app] A card added from another app appears while you stay on the address book — `docs/goal/behavior/carddav-server.md` § MDA ↔ nest WS-RPC contract
    - `tests/e2e-unified/tests/test_addressbook.py::test_a_card_added_from_another_app_appears_while_on_the_address_book`
-4. [nest] Your cards come back from a snapshot restore, and a contacts app that had already synced is told to fetch them again rather than handed an update that quietly leaves the restored card out — `docs/goal/behavior/carddav-server.md` § Storage model
+4. [nest] When a contacts snapshot your nest holds is restored, your cards come back, and a contacts app that had already synced is told to fetch them again rather than handed an update that quietly leaves the restored card out — `docs/goal/behavior/carddav-server.md` § Storage model
    - `tests/e2e-unified/tests/test_dav_content_at_rest_e2e.py::test_card_restore_tells_the_contacts_app_to_reconverge`
 
 ## Status

@@ -204,7 +204,7 @@ def _generate(source_dir: Path) -> tuple[str, int]:
         "//     One abstract <X>FakeBase : I<X> per generated UniFFI interface; every\n"
         "//     member is virtual and throws NotSupportedException, so a hand-written\n"
         "//     fake only needs to override the members it actually implements.\n"
-        "//     See docs/goal/architecture/merge-gate-check.md § Merge-gate check (win).\n"
+        "//     See docs/goal/architecture/merge-gate-check-win.md § Merge-gate check (win).\n"
         "// </auto-generated>\n\n"
         "#nullable enable\n\n"
     )

@@ -23,6 +23,18 @@ pub struct FollowRequestRow {
     pub name: Option<String>,
 }
 
+impl FollowRequestRow {
+    /// The row as one line of text: the display name with the address in
+    /// brackets, or the address alone when the nest knows no name. Decided here
+    /// so every app paints the same sentence (priority #3).
+    pub fn display(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name} ({})", self.address),
+            None => self.address.clone(),
+        }
+    }
+}
+
 /// Build the row a [`BridgeFollowRequest`] paints as.
 pub fn follow_request_row(request: &BridgeFollowRequest) -> FollowRequestRow {
     let handle = match &request.extra {
@@ -84,6 +96,14 @@ mod tests {
             assert_eq!(row.address, "https://remote.example/users/bob");
             assert_eq!(row.name, None);
         }
+    }
+
+    #[test]
+    fn a_row_reads_as_the_name_then_the_address_in_brackets() {
+        let named = follow_request_row(&request(Some("Bob"), handle("@bob@remote.example")));
+        assert_eq!(named.display(), "Bob (@bob@remote.example)");
+        let unnamed = follow_request_row(&request(None, handle("@bob@remote.example")));
+        assert_eq!(unnamed.display(), "@bob@remote.example");
     }
 
     #[test]

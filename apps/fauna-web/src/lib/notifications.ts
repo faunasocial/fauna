@@ -5,7 +5,8 @@
 // `UnifiedNotification` keeps the `type` key, so we rename on the way out.
 
 import * as rpc from './rpc';
-import { notificationDestination, notificationText, type NotificationDestination, type NotificationText } from './wasm';
+import { notificationDestination, notificationMuted, notificationRetained, notificationText, type NotificationDestination, type NotificationText } from './wasm';
+import type { MutedKeyword } from './rpc';
 import { resolveLocalized } from './i18n/localized';
 import { withLocalDeadlines } from './notificationDeadlines';
 
@@ -28,8 +29,15 @@ export interface UnifiedNotification {
   /** Where opening the row leads — decided in shared Rust off the row as it
    *  arrived (`notifications.md` § Deep-link destinations); `null` = inert. */
   destination: NotificationDestination | null;
+  /** True while the dismiss is greyed: a security notice inside its retention
+   *  window, decided in shared Rust at fetch time (`notifications.md` § Retention
+   *  rule 2). The nest's refusal stays the authority. */
+  retained: boolean;
   is_read: boolean;
   created_at: number;
+  /** The row as it arrived — what the muted-word collapse decides on, at render
+   *  and over the current list (`notifications.md` § Muted words). */
+  wire: unknown;
 }
 
 export interface NotificationListResponse {
@@ -57,8 +65,10 @@ export async function getNotifications(
       // § Localized body).
       text: withLocalDeadlines(notificationText(n)),
       destination: notificationDestination(n),
+      retained: notificationRetained(n, Date.now() * 1000),
       is_read: n.is_read,
       created_at: n.created_at,
+      wire: n,
     })),
     cursor: reply.cursor ?? null,
   };
@@ -80,6 +90,35 @@ export function navigableDestination(
  *  through this app's own catalog, or its verbatim `summary` as-is. */
 export function notificationRowText(n: UnifiedNotification): string {
   return n.text.kind === 'localized' ? resolveLocalized(n.text) : n.text.text;
+}
+
+/** Does a muted word collapse this row (`notifications.md` § Muted words)? The
+ *  shared decision over the row as it arrived and the current muted list. */
+export function isNotificationMuted(n: UnifiedNotification, mutedKeywords: MutedKeyword[]): boolean {
+  return mutedKeywords.length > 0 && notificationMuted(n.wire, mutedKeywords);
+}
+
+/** Delete one row (`notification-dismiss`). A `fauna.notifications.retained`
+ *  refusal rejects like any other error. */
+export async function dismissNotification(
+  secretHex: string,
+  id: number,
+): Promise<{ dismissed: boolean }> {
+  return rpc.notificationsDismiss(secretHex, id);
+}
+
+/** Delete every row up to the newest `created_at` the page has loaded
+ *  (`notification-clear`); `null` on an empty page, where there is nothing to
+ *  bound a clear. Rows loaded but collapsed still count (§ Muted words rule 4). */
+export function clearUpTo(rows: UnifiedNotification[]): number | null {
+  return rows.length === 0 ? null : Math.max(...rows.map((n) => n.created_at));
+}
+
+export async function clearNotifications(
+  secretHex: string,
+  upTo: number,
+): Promise<{ cleared: number }> {
+  return rpc.notificationsClear(secretHex, upTo);
 }
 
 export async function markNotificationsRead(

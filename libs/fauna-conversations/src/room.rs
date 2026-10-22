@@ -113,7 +113,9 @@ pub fn transport_room(participant_count: usize) -> RoomSnapshot {
         labelers: None,
         awaiting_key: false,
         moderation_unverified: false,
+        bridge_disconnected: false,
         pending_invites: None,
+        search: None,
     }
 }
 
@@ -269,7 +271,7 @@ impl RoomClass {
 
 /// The room's standing notice — what `thread-room-notice` states on the
 /// thread header while one holds (`ui/conversations.md` § Element IDs).
-/// Derived from two shared room facts, so no app re-decides which one speaks.
+/// Derived from three shared room facts, so no app re-decides which one speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum RoomNotice {
@@ -281,14 +283,27 @@ pub enum RoomNotice {
     /// ([`RoomSnapshot::moderation_unverified`]; `conversation-rooms.md` §
     /// Roles and authorization → *Members verify what they paint*).
     ModerationUnverified,
+    /// A bridged room no live bridge serves — readable, never writable
+    /// ([`RoomSnapshot::bridge_disconnected`]; `apps/bridges.md` § Phase G →
+    /// *When the bridge stops serving*).
+    BridgeDisconnected,
 }
 
 impl RoomNotice {
-    /// The notice that holds for these two room facts, or `None` when neither
-    /// does (the element is then absent). `AwaitingKey` wins when both hold:
-    /// nothing sealed opens, so there is no moderation in view to speak of.
-    pub fn for_facts(awaiting_key: bool, moderation_unverified: bool) -> Option<Self> {
-        if awaiting_key {
+    /// The notice that holds for these room facts, or `None` when none does
+    /// (the element is then absent). `AwaitingKey` wins over unverified
+    /// moderation: nothing sealed opens, so there is no moderation in view to
+    /// speak of. A disconnected bridge is a transport-only room's fact and the
+    /// other two hold only on end-to-end and community rooms, so it never
+    /// competes; it is checked first all the same.
+    pub fn for_facts(
+        awaiting_key: bool,
+        moderation_unverified: bool,
+        bridge_disconnected: bool,
+    ) -> Option<Self> {
+        if bridge_disconnected {
+            Some(RoomNotice::BridgeDisconnected)
+        } else if awaiting_key {
             Some(RoomNotice::AwaitingKey)
         } else if moderation_unverified {
             Some(RoomNotice::ModerationUnverified)
@@ -303,6 +318,7 @@ impl RoomNotice {
         match self {
             RoomNotice::AwaitingKey => "awaiting-key",
             RoomNotice::ModerationUnverified => "moderation-unverified",
+            RoomNotice::BridgeDisconnected => "bridge-disconnected",
         }
     }
 
@@ -312,6 +328,7 @@ impl RoomNotice {
         match self {
             RoomNotice::AwaitingKey => unified::ROOM_NOTICE_AWAITING_KEY,
             RoomNotice::ModerationUnverified => unified::ROOM_NOTICE_MODERATION_UNVERIFIED,
+            RoomNotice::BridgeDisconnected => unified::ROOM_NOTICE_BRIDGE_DISCONNECTED,
         }
     }
 }
@@ -360,11 +377,15 @@ pub fn room_class_attr_token(class: RoomClass) -> String {
 }
 
 /// FFI-exported twin of [`RoomNotice::for_facts`] — which notice, if any,
-/// `thread-room-notice` states for a room's `awaiting_key` and
-/// `moderation_unverified`.
+/// `thread-room-notice` states for a room's `awaiting_key`,
+/// `moderation_unverified` and `bridge_disconnected`.
 #[cfg_attr(feature = "uniffi", uniffi::export)]
-pub fn room_notice_for(awaiting_key: bool, moderation_unverified: bool) -> Option<RoomNotice> {
-    RoomNotice::for_facts(awaiting_key, moderation_unverified)
+pub fn room_notice_for(
+    awaiting_key: bool,
+    moderation_unverified: bool,
+    bridge_disconnected: bool,
+) -> Option<RoomNotice> {
+    RoomNotice::for_facts(awaiting_key, moderation_unverified, bridge_disconnected)
 }
 
 /// FFI-exported twin of [`RoomNotice::label`].
@@ -730,6 +751,18 @@ pub struct RoomSnapshot {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = false))]
     pub moderation_unverified: bool,
+    /// Whether this is a **bridged room no live bridge serves**: the
+    /// principal that carried it was revoked, or re-consented without the
+    /// bridge — the nest's `rooms.list` `disconnected`
+    /// (`apps/bridges.md` § Phase G → *When the bridge stops serving*). The
+    /// room stays readable and is never writable until a bridge declaring the
+    /// same id adopts it: [`RoomSnapshot::gate`] withholds the reply bar on it
+    /// (`ThreadCapabilities::can_send`), and this is what says why. `false`
+    /// for every other class. Painted as `thread-room-notice`'s `bridge-disconnected`
+    /// state ([`RoomSnapshot::notice`]).
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = false))]
+    pub bridge_disconnected: bool,
     /// The invitations pending on this room that the viewer may withdraw,
     /// oldest first (`conversation-rooms.md` § Join rules and invites →
     /// *Pending invitations are visible to whoever may withdraw them*). The
@@ -748,6 +781,13 @@ pub struct RoomSnapshot {
     #[serde(default)]
     #[cfg_attr(feature = "uniffi", uniffi(default = None))]
     pub pending_invites: Option<Vec<RoomPendingInviteSnapshot>>,
+    /// The room's search strip while it is open on this thread
+    /// (`ConversationsManager::room_search`, `close_room_search`); `None`
+    /// while it is closed. View state, projected by the manager on every emit
+    /// — never the rail's answer.
+    #[serde(default)]
+    #[cfg_attr(feature = "uniffi", uniffi(default = None))]
+    pub search: Option<RoomSearchSnapshot>,
 }
 
 /// One invitation pending on a room, as the room's member surface paints it
@@ -800,6 +840,100 @@ impl RoomPendingInviteSnapshot {
     }
 }
 
+/// The room's search strip, as the thread view paints it — view state on the
+/// detail, never a draft (`room-search.md` § The surface). Present while the
+/// strip is open on this thread; selecting another thread clears it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RoomSearchSnapshot {
+    /// The query submitted last, empty while none has been.
+    pub query: String,
+    pub status: RoomSearchStatus,
+    /// The hits, in the order the home nest served them — best first, message
+    /// and post hits interleaved on one rank scale, never re-sorted. Empty
+    /// unless `status` is `Done`; `Done` with no rows is the empty state
+    /// (`room-search-no-results`).
+    pub results: Vec<RoomSearchResultSnapshot>,
+}
+
+/// Where a room search stands. No element paints `Searching`: an e2e waits on
+/// a row, the empty state or the error, never on a timer (`room-search.md`
+/// § Errors & edge cases).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RoomSearchStatus {
+    /// The strip is open and nothing has been submitted.
+    Idle,
+    /// A query is out at the home nest.
+    Searching,
+    /// The nest answered; `results` is its answer.
+    Done,
+    /// The nest refused or could not be reached; the message is on the page's
+    /// `error-message`, and the result region stays blank.
+    Failed,
+}
+
+/// What a room-search hit points at — `room-search-result-item[i]`'s `kind`
+/// attribute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RoomSearchResultKind {
+    Message,
+    Post,
+}
+
+impl RoomSearchResultKind {
+    /// The `kind` attribute drivers read: `message` or `post`.
+    pub fn attr_token(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Post => "post",
+        }
+    }
+}
+
+/// Where a room-search row opens — a typed target, the Search page's
+/// `SearchNav` shape (`room-search.md` § The surface → *Opening a hit*).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum RoomSearchNav {
+    /// Open through `ConversationsManager::select_thread_and_message`.
+    Message {
+        thread_id: crate::thread::ThreadId,
+        message_id: crate::message::MessageId,
+    },
+    /// Open through the feed manager's deep-link door: `resolve_post_from`
+    /// with `home_nest_url` when it is `Some` — the room's recorded home when
+    /// that is another nest — else `resolve_post`.
+    Post {
+        post_id: String,
+        home_nest_url: Option<String>,
+    },
+}
+
+/// One row of the room's search results. Every word on it is this device's
+/// own — the nest sends positions, ids and ranks and no text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct RoomSearchResultSnapshot {
+    pub kind: RoomSearchResultKind,
+    /// The sender of a message hit this device holds. `None` on a message it
+    /// has not received yet, and on a post hit until the post-read seam lands
+    /// (`room-search.md` § Implementation status today).
+    pub sender_display: Option<String>,
+    /// When it was sent, epoch millis; `None` exactly when `sender_display` is.
+    pub sent_at_ms: Option<i64>,
+    /// The row's words: a held message's first line, or the shared
+    /// *not on this device yet* copy for a position this device has not
+    /// received (`pending`). Empty on a post hit until the post-read seam
+    /// lands.
+    pub text: String,
+    /// A message hit whose position this device has not received yet. It
+    /// still opens: the selection lights on the emit that fetches it.
+    pub pending: bool,
+    pub navigation: RoomSearchNav,
+}
+
 /// One room invitation standing for this account, as the conversation list
 /// paints it (`room-invitation[i]`, with `room-invitation-accept-button[i]` and
 /// `room-invitation-decline-button[i]`) — already verified against its signer
@@ -837,7 +971,11 @@ impl RoomSnapshot {
     /// The room's standing notice, if one holds — what `thread-room-notice`
     /// paints ([`RoomNotice::for_facts`]).
     pub fn notice(&self) -> Option<RoomNotice> {
-        RoomNotice::for_facts(self.awaiting_key, self.moderation_unverified)
+        RoomNotice::for_facts(
+            self.awaiting_key,
+            self.moderation_unverified,
+            self.bridge_disconnected,
+        )
     }
 
     /// Whether this room carries a policy (roles are enforced).
@@ -875,6 +1013,15 @@ impl RoomSnapshot {
 
     pub fn gate(&self, mut caps: ThreadCapabilities) -> ThreadCapabilities {
         caps.encryption = self.class.into();
+        // The room's search door serves a community room's live floor member
+        // of any rank, and refuses every other class (`room-search.md` § The
+        // surface). Assigned, never only raised, like `encryption`.
+        caps.can_search_room = self.class == RoomClass::Community && self.my_role.is_some();
+        // A bridged room no live bridge serves is readable, never writable
+        // (`apps/bridges.md` § Phase G → *When the bridge stops serving*):
+        // the bar is withheld, so the notice's "you can't send" is the whole
+        // answer. Narrowing only, before the policy arm, which never reopens it.
+        caps.can_send = caps.can_send && !self.bridge_disconnected;
         let (Some(policy), Some(role)) = (&self.policy, self.my_role) else {
             return caps;
         };
@@ -903,24 +1050,50 @@ mod tests {
     use crate::capabilities::derive_capabilities;
     use crate::thread::ThreadFlavor;
 
-    /// The room's notice: absent while neither fact holds, each fact alone
-    /// names its own state, and `awaiting-key` wins when both hold; the FFI
-    /// twins say the same.
+    /// The room's notice: absent while no fact holds, each fact alone names
+    /// its own state, and `awaiting-key` wins over unverified moderation; the
+    /// FFI twins say the same.
     #[test]
     fn the_room_notice_is_absent_without_a_fact_and_awaiting_key_wins_over_unverified_moderation() {
-        assert_eq!(RoomNotice::for_facts(false, false), None);
+        assert_eq!(RoomNotice::for_facts(false, false, false), None);
         assert_eq!(
-            RoomNotice::for_facts(false, true),
+            RoomNotice::for_facts(false, true, false),
             Some(RoomNotice::ModerationUnverified)
         );
         assert_eq!(
-            RoomNotice::for_facts(true, false),
+            RoomNotice::for_facts(true, false, false),
             Some(RoomNotice::AwaitingKey)
         );
         assert_eq!(
-            RoomNotice::for_facts(true, true),
+            RoomNotice::for_facts(true, true, false),
             Some(RoomNotice::AwaitingKey)
         );
+        assert_eq!(
+            RoomNotice::for_facts(false, false, true),
+            Some(RoomNotice::BridgeDisconnected)
+        );
+        assert_eq!(
+            RoomNotice::BridgeDisconnected.attr_token(),
+            "bridge-disconnected"
+        );
+        assert_eq!(
+            RoomNotice::BridgeDisconnected.label(),
+            fauna_i18n::strings::conversations::unified::ROOM_NOTICE_BRIDGE_DISCONNECTED
+        );
+        assert_eq!(
+            room_notice_for(false, false, true),
+            Some(RoomNotice::BridgeDisconnected)
+        );
+        // The snapshot asks the same derivation: a transport room is
+        // connected until its rail says otherwise.
+        let mut room = transport_room(1);
+        assert_eq!(room.notice(), None);
+        let open = derive_capabilities(Rail::Bridged, ThreadFlavor::OneToOne);
+        assert!(room.gate(open).can_send);
+        room.bridge_disconnected = true;
+        assert_eq!(room.notice(), Some(RoomNotice::BridgeDisconnected));
+        // ...and the bar the notice explains is withheld.
+        assert!(!room.gate(open).can_send);
         assert_eq!(RoomNotice::AwaitingKey.attr_token(), "awaiting-key");
         assert_eq!(
             RoomNotice::ModerationUnverified.attr_token(),
@@ -930,7 +1103,10 @@ mod tests {
             RoomNotice::AwaitingKey.label(),
             RoomNotice::ModerationUnverified.label()
         );
-        assert_eq!(room_notice_for(true, true), Some(RoomNotice::AwaitingKey));
+        assert_eq!(
+            room_notice_for(true, true, false),
+            Some(RoomNotice::AwaitingKey)
+        );
         assert_eq!(
             room_notice_label(RoomNotice::ModerationUnverified),
             RoomNotice::ModerationUnverified.label()
@@ -1188,7 +1364,9 @@ mod tests {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: None,
+            search: None,
         }
     }
 
@@ -1235,7 +1413,9 @@ mod tests {
             labelers: None,
             awaiting_key: false,
             moderation_unverified: false,
+            bridge_disconnected: false,
             pending_invites: None,
+            search: None,
         };
         let caps = policy_less.gate(base);
         assert!(caps.can_invite && caps.can_remove_members && caps.supports_rename);

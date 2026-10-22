@@ -3969,6 +3969,64 @@ async fn a_first_custody_record_provisions_the_owners_reserved_backup_set() {
     );
 }
 
+/// **The landing axis** (`reserved-folders.md` § __mail Sync → *The landing
+/// set*): on a nest that already minted the owner's `__mail` rail — every nest
+/// holding mail, within a minute — a delivered copy of their own corpus lands
+/// seal-less under `__landing/mail` as a custody copy, while the same record
+/// into `__mail` still meets the rail and is refused at the seal gate.
+#[tokio::test]
+async fn a_delivered_corpus_lands_under_the_landing_name_beside_a_live_rail() {
+    let (state, _tmp) = state_with_blob_store().await;
+    let router = record_router();
+    let actor = [0x7cu8; 32];
+    let device = [0x7eu8; 32];
+    state
+        .db
+        .register_sync_device(&actor, &device, "ipad", None, "write")
+        .await
+        .unwrap();
+    state
+        .db
+        .get_or_create_reserved_folder(&actor, "mail")
+        .await
+        .expect("the rail mints");
+
+    let manifest = seed_delivered_segment(&state).await;
+    let path = format!("{}/seg-00000001.dat", hex::encode(actor));
+    let landing = fauna_sync_engine::segment_backup::landing_set_name("mail", &actor).unwrap();
+    let reply: fauna_protocol::sync::SyncChangeRecordReply = decode(
+        &dispatch(
+            &router,
+            Arc::clone(&state),
+            actor,
+            "fauna.sync.changes.record",
+            custody_record(&landing, device, &path, manifest),
+        )
+        .await
+        .expect("a delivered corpus must land under the landing name"),
+    )
+    .unwrap();
+    assert_eq!(reply.seq, 0, "landing custody is never sequenced");
+    let fs = state
+        .db
+        .get_folder_for_actor(&landing, &actor)
+        .await
+        .unwrap()
+        .expect("the landing set is provisioned");
+    assert!(fs.custody_copy, "the landing set is a custody copy");
+
+    let err = dispatch(
+        &router,
+        Arc::clone(&state),
+        actor,
+        "fauna.sync.changes.record",
+        custody_record("__mail", device, &path, manifest),
+    )
+    .await
+    .expect_err("a seal-less record into the live rail stays refused");
+    assert_eq!(err.code, "fauna.sync.path_seal_required");
+}
+
 /// Idempotent, exactly as the federated arm is: a second delivery pass over the
 /// same set does not mint a second set and does not fail. A re-seed that tore
 /// mid-delivery re-runs, and re-running must converge.

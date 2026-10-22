@@ -4306,9 +4306,9 @@ public class BackupDestinationStatusTests
 
 public class ModerationViewModelQueueTests
 {
-    // FfiObligationAction(id, content_type, content_id, category, confidence_per_mille, action, timestamp)
+    // FfiObligationAction(id, content_type, content_id, category, confidence_per_mille, action, timestamp, issuer_nest)
     private static FfiObligationAction Row(string category, byte action, ushort perMille, string contentId) =>
-        new(0L, "post", contentId, category, perMille, action, 0L);
+        new(0L, "post", contentId, category, perMille, action, 0L, null);
 
     [Fact]
     public async Task Load_PopulatesQueueFromModerationActionsSeam()

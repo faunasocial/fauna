@@ -5,11 +5,13 @@
 # x-deliver-key header. Without this, the endpoint returns 503
 # (inbox_routes.rs:521).
 #
-# --blob-dir is required so the BackupService initializes; without
+# The blob dir is what makes the BackupService initialize; without
 # it, /api/v1/email/deliver falls through to a deliver_local
 # fallback that stores messages in a fauna-internal payload format
-# that IMAP SEARCH HEADER cannot query. config/default.toml lists
-# blob_dir but nest's main.rs only reads it from CLI today.
+# that IMAP SEARCH HEADER cannot query. nest reads it from
+# /data/nest.toml's `blob_dir` when --blob-dir is absent; the flag
+# here pins the same path, so a volume whose nest.toml predates the
+# key still gets one.
 # FAUNA_FRONTED_BY_ROUTER=1 declares this nest's client-facing listener is
 # fronted by the always-up fauna-sni-router (which owns the external :443 and
 # forwards to nest's internal :${FAUNA_PORT:-3000}). This is bucket-2 IPC wiring

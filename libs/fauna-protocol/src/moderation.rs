@@ -70,6 +70,11 @@ pub struct ObligationAction {
     pub action: u8,
     /// Microsecond timestamp.
     pub timestamp: i64,
+    /// The handle domain of the nest whose admin decided, on a row another
+    /// nest delivered (`moderation.md` § Legal takedown → *The author homed on
+    /// another nest*); absent on this nest's own decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_nest: Option<String>,
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -699,6 +704,76 @@ pub struct AbuseReportResolveReply {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.moderation.admin_block{,.list} ───────────────────────────────
+
+/// `fauna.moderation.admin_block` — Admin: block (or, with `restore`, unblock)
+/// the item an open report names (`moderation.md` § Admin block of a reported
+/// item). The fourth verb on a report-queue row and the one lever that exists
+/// only on a report: the report is the block's citation, as the legal reference
+/// is the takedown's, so the request names the report and never the content —
+/// the nest resolves the subject from the report row. An `actor` subject is
+/// refused (a block is of one item). One transaction on the nest: the second
+/// withhold flag, an `ObligationAction::Blocked` row on the author's queue, the
+/// `moderation:admin-block` audit row and the report resolved `acted`.
+/// `restore == true` clears the flag, audits the overturn and re-serves the
+/// same bytes; the report stays resolved and the obligation row stays as
+/// history. Blocking never deletes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModerationAdminBlockRequest {
+    /// The report whose subject is blocked / unblocked.
+    pub report_id: String,
+    /// `false` (default) = block; `true` = unblock.
+    #[serde(default)]
+    pub restore: bool,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModerationAdminBlockReply {
+    /// `"blocked"` or `"restored"`.
+    pub status: String,
+    /// The blocked item's id — a post's 32-byte hex cid, a conversation
+    /// record's 32-byte hex digest.
+    pub content_id: String,
+    /// `"post"` or `"conversation"` — the same vocabulary as
+    /// `ModerationLegalTakedownRequest.content_type`.
+    pub content_type: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.moderation.admin_block.list` — Admin: every item this nest's admin
+/// currently blocks, newest first — the `admin-nest-blocked-section` list the
+/// Unblock verb acts from. A blocked item's report is resolved and has left
+/// the open queue, so this is the only place an admin finds it again. Empty
+/// request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModerationAdminBlockListRequest {
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// One blocked item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AdminBlockEntry {
+    /// The report the block cites — what `admin_block { restore: true }` takes.
+    pub report_id: String,
+    pub subject: AbuseReportSubject,
+    pub reason: AbuseReportReason,
+    /// Microsecond timestamp of the block (the report's resolution).
+    pub blocked_at: i64,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ModerationAdminBlockListReply {
+    pub items: Vec<AdminBlockEntry>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 // ── fauna.federation.abuse_report.{deliver,withdraw,outcome} ───────────
 //
 // The forwarding triad (`moderation.md` § Routing). Nest-signature attributed;
@@ -760,6 +835,68 @@ pub struct AbuseReportFederationAck {
     pub extra: BTreeMap<String, Value>,
 }
 
+// ── fauna.federation.moderation.{obligation.deliver,appeal} ────────────
+//
+// The transparency triple's appeal leg across a nest boundary (`moderation.md`
+// § Legal takedown → *The author homed on another nest*). Nest-signature
+// attributed: the issuing nest pushes the author's queue row to their home,
+// and the home relays the author's appeal back to the issuer.
+
+/// Deliver the author's obligation row to the nest that hosts them. The
+/// receiver stores it only for an author it hosts (and, for a `post`, one that
+/// author wrote), keyed on (verified origin, `issuer_ref`) — a re-delivery is
+/// free.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ObligationDeliverRequest {
+    /// The issuer's own row id — the dedupe key, and what an appeal names back.
+    #[serde(rename = "ref")]
+    pub issuer_ref: String,
+    /// `"post"` or `"conversation"`.
+    pub content_type: String,
+    /// The 32-byte hex content id the decision was taken against.
+    pub content_id: String,
+    /// The author's 32-byte hex actor id.
+    pub author: String,
+    /// The obligation-action discriminant — taken-down (7) or blocked (10).
+    pub action: u8,
+    /// The enforcement descriptor (`"illegal"`, or the block's report reason).
+    pub category: String,
+    /// Microsecond timestamp of the decision.
+    pub timestamp: i64,
+    /// The issuer's handle domain.
+    pub issuer_nest_id: String,
+    /// The issuer's own URL (`https://<domain>`), declared so the home can relay
+    /// an appeal to a nest it may never have dialled. Peer-declared: honoured
+    /// only against the channel's verified origin, a dial-proven address first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_nest_url: Option<String>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The empty ack of an obligation delivery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ObligationDeliverAck {
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// The author's appeal of a delivered row, relayed by their home nest to the
+/// issuer, which records it as it records a local author's. Replies
+/// [`ModerationAppealReply`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ObligationAppealRelayRequest {
+    /// The issuer's row id, as the delivery carried it.
+    #[serde(rename = "ref")]
+    pub issuer_ref: String,
+    pub content_id: String,
+    /// The appellant — the row's author, 32-byte hex.
+    pub author: String,
+    pub reason: String,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,8 +947,51 @@ mod tests {
                 confidence_per_mille: 880,
                 action: 2,
                 timestamp: 1_700_000_000_000_000,
+                issuer_nest: None,
                 extra: BTreeMap::new(),
             }],
+            extra: BTreeMap::new(),
+        });
+        re_encodes_identically(&ModerationActionsReply {
+            actions: vec![ObligationAction {
+                id: 43,
+                content_type: "conversation".into(),
+                content_id: "ef".repeat(32),
+                category: "illegal".into(),
+                confidence_per_mille: 1000,
+                action: 7,
+                timestamp: 1_700_000_000_000_001,
+                issuer_nest: Some("a.example".into()),
+                extra: BTreeMap::new(),
+            }],
+            extra: BTreeMap::new(),
+        });
+    }
+
+    #[test]
+    fn obligation_federation_round_trips() {
+        let deliver = ObligationDeliverRequest {
+            issuer_ref: "17".into(),
+            content_type: "post".into(),
+            content_id: "ab".repeat(32),
+            author: "cd".repeat(32),
+            action: 7,
+            category: "illegal".into(),
+            timestamp: 1_700_000_000_000_000,
+            issuer_nest_id: "a.example".into(),
+            issuer_nest_url: Some("https://a.example".into()),
+            extra: BTreeMap::new(),
+        };
+        re_encodes_identically(&deliver);
+        // The dedupe key rides as `ref` on the wire.
+        let fields: BTreeMap<String, Value> = decode(&encode_canonical(&deliver).unwrap()).unwrap();
+        assert!(fields.contains_key("ref"), "{:?}", fields.keys());
+        re_encodes_identically(&ObligationDeliverAck::default());
+        re_encodes_identically(&ObligationAppealRelayRequest {
+            issuer_ref: "17".into(),
+            content_id: "ab".repeat(32),
+            author: "cd".repeat(32),
+            reason: "I hold the rights".into(),
             extra: BTreeMap::new(),
         });
     }
@@ -873,6 +1053,43 @@ mod tests {
             ModerationLegalTakedownRequest::default().content_type,
             "post"
         );
+    }
+
+    #[test]
+    fn admin_block_round_trips() {
+        re_encodes_identically(&ModerationAdminBlockRequest {
+            report_id: "ab".repeat(16),
+            restore: false,
+            extra: BTreeMap::new(),
+        });
+        re_encodes_identically(&ModerationAdminBlockRequest {
+            report_id: "ab".repeat(16),
+            restore: true,
+            extra: BTreeMap::new(),
+        });
+        re_encodes_identically(&ModerationAdminBlockReply {
+            status: "blocked".into(),
+            content_id: "cd".repeat(32),
+            content_type: "post".into(),
+            extra: BTreeMap::new(),
+        });
+        re_encodes_identically(&ModerationAdminBlockListReply {
+            items: vec![AdminBlockEntry {
+                report_id: "ab".repeat(16),
+                subject: AbuseReportSubject::Message {
+                    channel: "ef".repeat(32),
+                    record_cid: "01".repeat(32),
+                },
+                reason: AbuseReportReason::Harassment,
+                blocked_at: 1_700_000_000_000_000,
+                extra: BTreeMap::new(),
+            }],
+            extra: BTreeMap::new(),
+        });
+        let bytes = encode_canonical(&ModerationAdminBlockListRequest::default()).unwrap();
+        let _: ModerationAdminBlockListRequest = decode(&bytes).unwrap();
+        // `restore` defaults to a block when omitted.
+        assert!(!ModerationAdminBlockRequest::default().restore);
     }
 
     #[test]

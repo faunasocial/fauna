@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { browser } from '$app/environment';
   import { onMount, onDestroy } from 'svelte';
-  import { logMessage } from '$lib/wasm';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { logMessage } from '#lib/wasm';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
+
+  // Not under SSR (the prerender pass) — what Kit 2's `$app/environment`
+  // `browser` said.
+  const browser = !import.meta.env.SSR;
 
   let { error = $bindable(''), warning = $bindable(''), info = $bindable('') } = $props();
 
@@ -60,7 +63,7 @@
       // shipped: a `grep -rl "__fauna_" /usr/share/fauna-web` inside
       // `ghcr.io/faunasocial/nest:latest` found this one name (and only this
       // one) in the production SPA. The guard is the same in-component idiom
-      // `$lib/onboarding/machine.svelte.ts` uses for the hooks that must run at
+      // `#lib/onboarding/machine.svelte.ts` uses for the hooks that must run at
       // module load; a production `vite build` folds it to false and strips the
       // block.
       if (__FAUNA_E2E_AUTOMATION__) {

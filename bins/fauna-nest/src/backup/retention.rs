@@ -267,6 +267,38 @@ pub fn parse_folder_retention(raw: Option<&str>) -> FolderRetention {
     }
 }
 
+/// The retention a reserved message-kind row (`__<kind>`, `__conv/<hex>`)
+/// keeps when nobody has chosen one — `backup-restore.md` § 8 → *Message-kind
+/// rows*: the newest 48 by count, never keep-everything, because the nest cuts
+/// those rows on its own hourly cadence. Count, not age: the change check makes
+/// a count bound adaptive (§ 8 says why).
+pub const MESSAGE_KIND_DEFAULT_RETENTION: fauna_folders_machine::state::RetentionPolicy =
+    fauna_folders_machine::state::RetentionPolicy {
+        max_snapshots: 48,
+        max_age_days: 0,
+    };
+
+/// The ONE seam every prune consumer reads a set's policy through — both
+/// automatic paths ([`crate::backup::prune::schedule_auto_prune`]) and the
+/// `prune_set_policy` handler: the column's parse, except that an unset column
+/// on a reserved message-kind row resolves to
+/// [`MESSAGE_KIND_DEFAULT_RETENTION`]. A custody copy of a kind row is another
+/// location's mirror, not a rail this nest captures, and keeps the folder rule.
+pub fn effective_folder_retention(fs: &crate::db::FolderRow) -> FolderRetention {
+    match parse_folder_retention(fs.retention_policy.as_deref()) {
+        FolderRetention::NotSet if is_message_kind_row(fs) => {
+            FolderRetention::Policy(MESSAGE_KIND_DEFAULT_RETENTION)
+        }
+        other => other,
+    }
+}
+
+/// Is this the scope's own reserved message-kind row (not a custody copy)?
+fn is_message_kind_row(fs: &crate::db::FolderRow) -> bool {
+    !crate::db::snapshots::is_reserved_custody_copy(fs.custody_copy, &fs.name)
+        && fauna_protocol::segments::parse_reserved_backup_set_name(&fs.name).is_some()
+}
+
 /// Select the snapshots an automatic prune may retire, under the per-set
 /// **bounds** policy.
 ///

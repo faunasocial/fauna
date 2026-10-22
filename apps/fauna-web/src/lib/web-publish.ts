@@ -50,7 +50,7 @@ export const siteLink = derived<[typeof webPage, typeof identity], SiteLinkView 
 );
 
 /** Clear the cache on an actor switch (`registerActorScopedReset`,
- *  `$lib/actorScope`) — a bare module-level store survives a switch
+ *  `#lib/actorScope`) — a bare module-level store survives a switch
  *  otherwise, and the next actor would see the FIRST actor's published posts
  *  and origin until their own visit to Settings → Web overwrote it.
  *

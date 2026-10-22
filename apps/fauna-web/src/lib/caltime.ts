@@ -31,7 +31,7 @@ import {
 
 export type { OverlapColumn, DayEventPlacement, CalendarViewMode };
 
-// The week start is the LOCALE's, probed once in `$lib/weekStart` (web must
+// The week start is the LOCALE's, probed once in `#lib/weekStart` (web must
 // not consume the native-only Rust probe — see that module). Re-exported here
 // so callers reach one name; `WEEK_START_MONDAY` survives as the explicit
 // Monday constant and as the fallback, not as anybody's default.

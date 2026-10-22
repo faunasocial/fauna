@@ -167,6 +167,10 @@ e2e-agent = [
     # release-profile e2e tui cannot verify the harness's fake IMAP source, and
     # § The two TLS modes leaves no plaintext alternative.
     "fauna-client-mail-settings/test-helpers",
+    # `token_refresh::set_clock_offset_secs` — convention 14's fake clock for
+    # the submission-token refresh (the `mail_token_refresh_advance_clock`
+    # agent command).
+    "fauna-client-mail-settings/e2e-agent",
     # The e2e ACME directory seed (FAUNA_E2E_ACME_*) — `fauna-client-dns`'s
     # native machine builder installs the pebble `ManualOrderTestSeam` from it.
     # A debug build reaches it through the crate's own `debug_assertions` arm;
@@ -327,6 +331,15 @@ fauna-client-family = { path = "../../libs/fauna-client-family" }
 # fetch-and-verify, the render's third rule source and the bundled scorers
 # (through `fauna_labeler::region`). tui owns only the locale leaf and paint.
 fauna-client-region = { path = "../../libs/fauna-client-region" }
+# Nest rules (`nest-rules.md`): the shared rule editor the admin's mounting
+# paints, and the member's nest-rules book (verify, keep, the render's nest
+# source, the rules surface's summary). tui owns only paint and where it lives.
+# `scorers`: a nest document's `wasm` labelers run on the device, as the region
+# plane's already do here.
+fauna-client-policy = { path = "../../libs/fauna-client-policy", features = ["scorers"] }
+# The rule editor's labeler picker: the publisher's subscribed labelers and a
+# picked one's module (`rule_editor.rs`).
+fauna-client-labelers = { path = "../../libs/fauna-client-labelers" }
 # Three consumers: `build_linked_nests_machine(..)` backs the Settings → Nests
 # page (2026-07-24) and resolves the just-connected nest's own `nest_actor_id`,
 # and `native_backup_{destination_connector,
@@ -425,7 +438,7 @@ fauna-client-posts = { path = "../../libs/fauna-client-posts" }
 # (testing.md convention 15), exactly as linux does it. (The real
 # `ConversationsSession` — MLS engine + NestConversationsRpc + receive loop —
 # lands with the real-MLS e2e slice.)
-fauna-conversations = { path = "../../libs/fauna-conversations" }
+fauna-conversations = { path = "../../libs/fauna-conversations", features = ["local-clock"] }
 # The real dual-rail conversations session's transport seams (NestConversationsRpc,
 # the SMTP sink, the mail/scheduling/inbox-drain sources, the folder gate, the
 # push source) — the same crate linux's conv_backend wires in-process.
@@ -610,6 +623,8 @@ fauna-media = { path = "../../libs/fauna-media" }
 # download rides (`ui/backups.md` § Where logic lives → *Single-file byte
 # download* — the shared client-side walk; only the save step is ours). linux
 # takes the same feature for the same button.
+# `pull-back`: the nest-held pull-back restore the Backups re-seed confirm runs
+# on a nest-kind row (`reseed_pull::pull_back_from_destination`).
 # `account-runtime`: the W3 (account-data-plane.md § Workstreams) account-store lifecycle — tui is the lead app for
 # the read-path inversion (`account-data-plane.md` § The client-side
 # lifecycle): `session::establish` assembles `AccountStoreRuntime`, the push
@@ -617,6 +632,7 @@ fauna-media = { path = "../../libs/fauna-media" }
 # through the handle.
 fauna-sync-engine = { workspace = true, features = [
     "engine-lifecycle",
+    "pull-back",
     "account-runtime",
     "web",
 ] }

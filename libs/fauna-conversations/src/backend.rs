@@ -39,6 +39,14 @@ pub struct RailInboundMessage {
     /// `legalTakedownTombstone(reference)` in place of the bubble body. `None`
     /// for every normal message.
     pub legal_takedown_ref: Option<String>,
+    /// `Some(reason_token)` iff this nest's admin blocked this message after a
+    /// report (`moderation.md` § Admin block of a reported item) — the
+    /// [`legal_takedown_ref`](Self::legal_takedown_ref) twin: the envelope was
+    /// withheld, the driver builds a notice inbound carrying only the reason,
+    /// and the client renders the shared `adminBlockNotice(reason)` — or, on
+    /// the author's own devices (whom the nest serves the body, decision 4),
+    /// the decoded message carrying the reason, painted beside the bubble.
+    pub admin_block_reason: Option<String>,
     /// This record's account-data-plane identity, when the rail has one — see
     /// [`crate::message::MessageSnapshot::plane_ref`]. Set by the FaunaMls
     /// driver, which is the layer that holds all three inputs the derivation
@@ -103,9 +111,15 @@ pub(crate) fn bucket_inbound_common(
             deleted: false,
             is_own,
             legal_takedown_ref: msg.legal_takedown_ref,
+            admin_block_reason: msg.admin_block_reason,
             labels: vec![],
             plane_ref: msg.plane_ref,
             can_delete: false,
+            undelivered: false,
+            warmup_hold: None,
+            scan_result_lines: Vec::new(),
+            delivered_to: None,
+            withheld: None,
         },
     }
 }
@@ -275,6 +289,11 @@ impl SelfAddress {
     }
 }
 
+/// One of the account's own alias rows as the "Delivered to" tag reads it
+/// (`mail-aliases.md` § Label) — re-exported so the mail sink and the apps'
+/// tests name it without a `fauna-mail` dependency of their own.
+pub use fauna_mail::aliases::delivered::AliasLabelRow;
+
 /// Transport seam for outbound mail submission.
 ///
 /// `SmtpBackend` assembles the RFC 5322 message in shared Rust (see
@@ -323,6 +342,39 @@ pub trait OutboundMailSink: MaybeSendSync {
     ) -> Result<Option<crate::list_send::ListSendProgress>, String> {
         Ok(None)
     }
+
+    /// The perimeter scan verdict of one message the account received
+    /// (`fauna.bridges.get_message_scan_result`), keyed by the nest's 32-byte
+    /// segment-record id and already projected to the lines its
+    /// `dm-message-scan-result` row paints
+    /// ([`fauna_core::mail_scan::scan_result_lines`];
+    /// `mail-content-scanning.md` § User sees their own message's row).
+    /// `Ok(None)` when the nest holds no scan row this account may read — the
+    /// nest's one `not_found` for "not yours" and "never scanned" alike; `Err`
+    /// for anything worth asking again. Default: none, for a sink with no nest.
+    async fn message_scan_result(
+        &self,
+        _nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String> {
+        Ok(None)
+    }
+
+    /// The account's own `mail.account.scan_result_visible` switch
+    /// (`fauna.bridges.get_mail_switches`; `mail-content-scanning.md`
+    /// § Per-account opt-out for visible scan details): `false` hides the
+    /// `dm-message-scan-result` row from every received bubble. `Err` for a
+    /// read worth asking again. Default `true` — the catalog default — for a
+    /// sink with no nest.
+    async fn scan_result_visible(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// The account's own alias rows (`fauna.bridges.list_account_aliases`),
+    /// cut to the fields the "Delivered to" tag reads
+    /// (`mail-aliases.md` § Label). Default: none, for a sink with no nest.
+    async fn account_alias_labels(&self) -> Result<Vec<AliasLabelRow>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// One of the two server-side mailboxes the mail receive path reads
@@ -338,6 +390,22 @@ pub trait OutboundMailSink: MaybeSendSync {
 pub enum MailFeed {
     Inbox,
     Sent,
+}
+
+/// The fresh-IP warm-up's hold on one of the user's own sent messages, as the
+/// nest's `Sent` read reports it (`InboxMessage.warmup_hold`;
+/// `mail-deliverability.md` § Enforcement at submission time): when the ramp
+/// lets it go and how many held messages are ahead of it. Painted as
+/// `dm-message-warmup-deferred` under the message's bubble, worded by the
+/// shared [`crate::message::warmup_deferred_text`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct MailWarmupHold {
+    /// When the message will be delivered — epoch **seconds** (the next
+    /// 00:00 UTC after it was submitted).
+    pub release_at_secs: i64,
+    /// Held messages submitted before this one (`0` = next in line).
+    pub messages_ahead: u32,
 }
 
 /// One decrypted inbound mail record, as handed back by an [`InboundMailSource`].
@@ -387,6 +455,10 @@ pub struct InboundMailRecord {
     /// thread's unread set at ingest, whatever its date; one carrying it never
     /// does. Meaningless on a `Sent` record, whose messages are own.
     pub has_seen_flag: bool,
+    /// The warm-up's hold on a `Sent` record the nest is still holding back
+    /// ([`MailWarmupHold`]); `None` on every `INBOX` record, on a sent message
+    /// the warm-up never held, and once its release has passed.
+    pub warmup_hold: Option<MailWarmupHold>,
 }
 
 /// IMAP's read flag, as the mail feeds spell it in a record's flag set.
@@ -576,6 +648,10 @@ pub struct BridgedRecord {
     /// claimed timestamp (`ui/nostr.md` § Implementation status today, the
     /// lesson the family's ordering rule carries).
     pub timestamp_ms: i64,
+    /// `true` on a Sent copy the bridge never took — the nest's
+    /// `BridgedMessageInfo.undelivered` (`apps/bridges.md` § Phase G →
+    /// *When the bridge stops serving*, consequence 3).
+    pub undelivered: bool,
 }
 
 /// What the nest answered for a typed address — the bridge whose declared
@@ -710,6 +786,13 @@ pub struct FetchedRecord {
     /// decrypting an empty envelope (`moderation.md` § Categories & enforcement
     /// item 1). `None` for every normal message.
     pub legal_takedown_ref: Option<String>,
+    /// The **admin-block reason token** (`ChannelFetchEntry.admin_block`): `Some`
+    /// iff this nest's admin blocked the record after a report, so its envelope
+    /// is withheld and the walk renders the shared notice in its place
+    /// (`moderation.md` § Admin block of a reported item) — unless the caller
+    /// is the record's attested author, whom the nest serves the envelope
+    /// beside the reason (decision 4). `None` for every normal message.
+    pub admin_block_reason: Option<String>,
     /// A **community room's** category verdicts for this message, from the
     /// labelers the room names (`conversation-rooms.md` § The three classes →
     /// *What the home nest does with its read*, purpose 2). The nest serves
@@ -1019,6 +1102,19 @@ pub trait ConversationsRpc: MaybeSendSync {
         Ok(None)
     }
 
+    /// `fauna.moderation.actions` — the caller's own queue rows, kept to the
+    /// conversation records the nest withholds
+    /// ([`crate::message::WithheldRecord::from_queue_row`] is the filter):
+    /// what [`crate::ConversationsManager::refresh_withheld_messages`] matches
+    /// against the author's own copies (`moderation.md` § Legal takedown →
+    /// *App render*). Default none: a seam with no nest behind it withholds
+    /// nothing.
+    async fn own_withheld_records(
+        &self,
+    ) -> Result<Vec<crate::message::WithheldRecord>, ConvRpcError> {
+        Ok(Vec::new())
+    }
+
     /// `fauna.actor.by_handle` — resolve a bare handle (its localpart, no
     /// domain) to its actor on the logged-in nest. `Ok(None)` when the handle
     /// is unknown or malformed *here* (so the manager's resolution chain falls
@@ -1120,12 +1216,19 @@ pub trait ConversationsRpc: MaybeSendSync {
     /// the impl then POSTs DIRECT to that nest under a short-lived write token
     /// its own nest relays (`fauna.conversations.blob.write_token.get`); `None`
     /// is a same-nest channel, uploaded under the member's own session bearer.
+    /// `home_nest_actor_id` is that foreign home's identity, exactly as
+    /// [`Self::blob_get`] carries it: the root a native plane graduates its pin
+    /// against before the token and the bytes leave, so a home serving the
+    /// self-signed floor accepts the upload; `None` keeps the WebPKI floor
+    /// (`transport-trust.md` § The post arm). Ignored without a foreign
+    /// `home_nest_url`.
     /// `channel_id_hex` is what the token is minted for. Idempotent —
     /// re-putting an existing blob is a no-op.
     async fn blob_put(
         &self,
         channel_id_hex: String,
         home_nest_url: Option<String>,
+        home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
         bytes: Vec<u8>,
     ) -> Result<(), ConvRpcError>;
@@ -1134,7 +1237,13 @@ pub trait ConversationsRpc: MaybeSendSync {
     /// the channel's **home** nest (`GET /api/v1/blob/{sealed_cid_hex}` —
     /// public, no bearer; a foreign home is reached DIRECT, integrity resting on
     /// the content address exactly as a cross-nest shared-folder read does).
-    /// `home_nest_url` carries the same `ChannelHome` signal as [`Self::blob_put`].
+    /// `home_nest_url` carries the same `ChannelHome` signal as [`Self::blob_put`];
+    /// `home_nest_actor_id` is that foreign home's identity as the member's own
+    /// nest verified it on the Welcome (`FaunaMlsBackend::channel_home_actor_id`)
+    /// — the root a native plane graduates its pin against before the first
+    /// byte, so a home serving the self-signed floor is reached; `None` keeps the
+    /// WebPKI floor (`transport-trust.md` § The post arm). Ignored without a
+    /// foreign `home_nest_url`.
     /// `Ok(None)` when the blob is absent (not yet uploaded / GC'd), so the
     /// receive path skips that attachment rather than stalling the feed; `Err`
     /// on transport failure. The caller (`poll_inbound_conv`) opens the returned
@@ -1143,6 +1252,7 @@ pub trait ConversationsRpc: MaybeSendSync {
         &self,
         channel_id_hex: String,
         home_nest_url: Option<String>,
+        home_nest_actor_id: Option<String>,
         sealed_cid_hex: String,
     ) -> Result<Option<Vec<u8>>, ConvRpcError>;
 }
@@ -1285,18 +1395,19 @@ pub struct WelcomeNudge {
     /// [`WelcomeChannelKind::Folder`] welcome (`WelcomePayload.access`) —
     /// threaded into the accept-time foreign-set record so the client
     /// knows whether to offer a folder binding. **Advisory-for-UI only, never an
-    /// authz input** (`federation.md` § Cross-nest → *Recipient-side access
+    /// authz input** (`federation-shared-folders.md` § Cross-nest → *Recipient-side access
     /// discovery*). `None` for other kinds or a non-conforming relay that omits it ⇒ reader.
     pub access: Option<String>,
     /// The home nest's deployment `nest_actor_id` (`WelcomePayload.home_nest_actor_id`)
-    /// for a cross-nest [`WelcomeChannelKind::Folder`] welcome — threaded into the
-    /// accept-time foreign-set record as the byte-plane SPKI-pin trust
-    /// root. `None` for other kinds / same-nest / a relay-unaware origin.
+    /// for a cross-nest welcome, as the recipient's own nest verified it — the
+    /// byte-plane SPKI-pin trust root, recorded beside the channel's home (a
+    /// room's attachment read) and on a folder's accept-time foreign-set
+    /// record. `None` for same-nest / a relay-unaware nest.
     pub home_nest_actor_id: Option<String>,
     /// The sharer's handle + handle domain (`WelcomePayload.shared_by_handle` /
     /// `shared_by_domain`) — the cross-nest owner label, paired only when the
     /// recipient's own nest bound the domain to the origin's key
-    /// (`federation.md` § Cross-nest shared folders + channel append → *The
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append → *The
     /// cross-nest owner label*). Recorded on the accept-time foreign-set record
     /// when both halves are present. Display-only.
     pub shared_by_handle: Option<String>,
@@ -1899,7 +2010,7 @@ pub struct RoomRosterKnownMember {
     /// nest's own `users` row for a local member, or, for a member homed on
     /// another nest, the `handle@domain` that member's own home nest announced
     /// on the member's relayed drain and the serving nest verified
-    /// (`federation.md` § Cross-nest shared folders + channel append, the
+    /// (`federation-shared-folders.md` § Cross-nest shared folders + channel append, the
     /// id→handle bullet). `None` for a foreign member whose home nest has not
     /// announced one yet — it keeps its elided actor id, and the read asks
     /// again later — a handle-less local user, or a nest/bridge principal.
@@ -2723,6 +2834,22 @@ pub trait RoomCeremonyRpc: MaybeSendSync {
         home_nest_url: Option<String>,
     ) -> Result<u32, ConvRpcError>;
 
+    /// `fauna.conversations.room.search` — the room's own search, run by its
+    /// home nest over the derived corpus (`room-search.md` § Where logic
+    /// lives), asking for one default page and for the room's posts too.
+    /// Answers the hits best first, as served, never re-sorted.
+    ///
+    /// `home_nest_url` carries the same `ChannelHome` signal as
+    /// [`Self::room_leave`]: `Some` routes the search over the distinct relay
+    /// kind `room.search_remote` to the room's home, because a member's own
+    /// nest holds no corpus for a room homed elsewhere.
+    async fn room_search(
+        &self,
+        room_id_hex: String,
+        query: String,
+        home_nest_url: Option<String>,
+    ) -> Result<Vec<RoomSearchHitRef>, ConvRpcError>;
+
     /// `fauna.conversations.room.set_policy` — store a replacement policy at
     /// `stored + 1`. `policy` is a canonical dag-cbor `SignedRoomPolicy`.
     /// Answers the version now stored.
@@ -2776,19 +2903,60 @@ pub trait RoomCeremonyRpc: MaybeSendSync {
     ) -> Result<RoomReceptionKeyBound, ConvRpcError>;
 }
 
-/// The room plane's four **nest-backed** client seams, registered together:
+/// What a room search's **post** hit paints, read from the post's envelope —
+/// the plaintext floor every follower of its author already sees
+/// (`restricted-posts.md` § Encryption at rest → *Plaintext floor for a stored
+/// post*), in this crate's own vocabulary. Never the sealed body: a room post's
+/// `body` IS its public teaser.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSearchPostEnvelope {
+    /// The author's actor id, hex — what a row names when the room knows no
+    /// better name for them.
+    pub author_actor_hex: String,
+    /// The bridged author's own face (display name, else handle) when the
+    /// nest served one; `None` for a Fauna author and on the relay.
+    pub author_display: Option<String>,
+    /// The envelope's `created_at`, in milliseconds.
+    pub created_at_ms: i64,
+    /// The post's teaser — its plaintext body's text.
+    pub teaser: String,
+}
+
+/// The **post-read seam** behind the room's search (`room-search.md`
+/// § The surface → *What a hit row paints*): a post hit's author, time and
+/// teaser through the post door — `fauna.posts.get`, or the
+/// `fauna.posts.get_remote` relay to the room's home on this nest's miss —
+/// never through the feed's one deep-link slot, and never decoded by an app.
+/// The `RoomPostKeys` seam turned around: there the feed takes the room's keys
+/// from this side, here this side takes a post's envelope from the post door.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait RoomSearchPostReader: MaybeSendSync {
+    /// The envelope of the post `post_id_hex` names. `home_nest_url` is the
+    /// room's recorded home when it is another nest, where a post this nest
+    /// does not hold is read through the relay. Any failure — not found, taken
+    /// down, undecodable, unreachable — is an error: the row stays word-less
+    /// and the search stands.
+    async fn read_room_search_post(
+        &self,
+        post_id_hex: String,
+        home_nest_url: Option<String>,
+    ) -> Result<RoomSearchPostEnvelope, ConvRpcError>;
+}
+
+/// The room plane's five **nest-backed** client seams, registered together:
 /// the floor-roster report and read, the community class's generation read,
-/// and its ceremony (`conversation-rooms.md` § The floor roster,
+/// its ceremony, and the post read behind its search (`conversation-rooms.md` § The floor roster,
 /// § The three classes → *Community*).
 ///
 /// Every glue site registers them through this one bundle
 /// (`FaunaMlsBackend::set_room_seams`, or its session twin) rather than one
-/// setter per seam, so no app can wire two of them and forget the other two.
+/// setter per seam, so no app can wire some of them and forget the rest.
 /// Two glue sites once did exactly that and were left unable to found, join or
 /// open a community room. A new nest-backed room seam becomes a field here,
 /// which every glue site then picks up.
 ///
-/// The fifth room seam, [`GroupReceptionKeys`], is not in the bundle: it rests
+/// The sixth room seam, [`GroupReceptionKeys`], is not in the bundle: it rests
 /// on the account plane rather than on the nest, so it is registered from the
 /// account-store-ready edge (`fauna_client_account_runtime::conversation_seams`).
 pub struct RoomSeams {
@@ -2796,21 +2964,28 @@ pub struct RoomSeams {
     pub reader: std::sync::Arc<dyn RoomRosterReader>,
     pub generations: std::sync::Arc<dyn RoomGenerationReader>,
     pub ceremony: std::sync::Arc<dyn RoomCeremonyRpc>,
+    pub posts: std::sync::Arc<dyn RoomSearchPostReader>,
 }
 
 impl RoomSeams {
-    /// All four seams from the one conversations-RPC object that implements
+    /// All five seams from the one conversations-RPC object that implements
     /// them, which is what every production glue site holds
     /// (`NestConversationsRpc` natively, `WsConversationsRpc` on web).
     pub fn from_rpc<R>(rpc: &std::sync::Arc<R>) -> RoomSeams
     where
-        R: RoomRosterReporter + RoomRosterReader + RoomGenerationReader + RoomCeremonyRpc + 'static,
+        R: RoomRosterReporter
+            + RoomRosterReader
+            + RoomGenerationReader
+            + RoomCeremonyRpc
+            + RoomSearchPostReader
+            + 'static,
     {
         RoomSeams {
             reporter: rpc.clone(),
             reader: rpc.clone(),
             generations: rpc.clone(),
             ceremony: rpc.clone(),
+            posts: rpc.clone(),
         }
     }
 }
@@ -2854,6 +3029,30 @@ pub struct PendingRoomInvitation {
     /// § Join rules and invites → *A cross-nest invitation*), and it is what
     /// the acceptance is relayed to.
     pub room_node: Option<String>,
+}
+
+/// One hit of a community room's search, as [`RoomCeremonyRpc::room_search`]
+/// serves it — a reference, never text (`community-rooms.md` § The three
+/// classes: the door answers *where*, never *what*), in this crate's own
+/// vocabulary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomSearchHitRef {
+    /// A message at this position in the room's log.
+    Message { seq: i64 },
+    /// A room-restricted post addressed to the room, by its hex id.
+    Post { post_id_hex: String },
+}
+
+/// A room search's answer, as [`ConversationBackend::room_search`] hands it to
+/// the manager: the hits as served, plus what a row is resolved against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomSearchAnswer {
+    /// The room's channel, hex — a message hit's id is `conv:{channel}:{seq}`.
+    pub channel_hex: String,
+    pub hits: Vec<RoomSearchHitRef>,
+    /// The room's home when it is another nest — what a post hit opens
+    /// through.
+    pub home_nest_url: Option<String>,
 }
 
 /// One invitation pending on a community room, as
@@ -3782,7 +3981,7 @@ pub trait RailBackend: MaybeSendSync {
     /// seat on: a folder channel has no thread, so an owner the member shares
     /// no conversation with was on no roster, and the folder commit walk's
     /// hold behind a parked succession statement waits on exactly that owner's
-    /// settle (`federation.md` § Cross-nest shared folders + channel append →
+    /// settle (`federation-shared-folders.md` § Cross-nest shared folders + channel append →
     /// *The marker follows the owner's verified succession*). Same door, same
     /// grade, same once-per-session guard as a roster peer; bounded by the
     /// seats this device holds. Default empty.
@@ -3948,6 +4147,31 @@ pub trait RailBackend: MaybeSendSync {
         Err(BackendError::NotSupported)
     }
 
+    /// Search the community room `thread_id` is, by its home nest
+    /// (`room-search.md` § Where logic lives): the same-nest door for a room
+    /// this account's nest homes, the relay for one homed elsewhere, picked by
+    /// the channel's recorded home. Default `NotSupported`: no other rail has
+    /// a home nest that reads its rooms.
+    async fn room_search(
+        &self,
+        _thread_id: ThreadId,
+        _query: String,
+    ) -> Result<RoomSearchAnswer, BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
+    /// A room search's post hit's envelope, through the rail's post-read seam
+    /// ([`RoomSearchPostReader`]) — what the manager paints the hit's row
+    /// with. `home_nest_url` is the hit's [`RoomSearchAnswer::home_nest_url`].
+    /// Default `NotSupported`: no other rail searches a room.
+    async fn read_room_search_post(
+        &self,
+        _post_id_hex: String,
+        _home_nest_url: Option<String>,
+    ) -> Result<RoomSearchPostEnvelope, BackendError> {
+        Err(BackendError::NotSupported)
+    }
+
     /// Walk this account out of the room `thread` is — the roles table's
     /// *leave (remove self)* row, and the producer of the departing-member
     /// report the nest has always admitted (`conversation-rooms.md`
@@ -4067,6 +4291,57 @@ pub trait RailBackend: MaybeSendSync {
         _participants: &[TypedAddress],
     ) -> Option<crate::snapshot::GuardianState> {
         None
+    }
+
+    /// Whether the message `id` is one the rail knows never left: the
+    /// bridged rail's Sent copy whose bridge was disconnected with it still
+    /// queued — what the manager projects onto
+    /// [`crate::message::MessageSnapshot::undelivered`] for the viewer's own
+    /// messages (`apps/bridges.md` § Phase G → *When the bridge stops
+    /// serving*). Cheap like [`Self::guardian_state`]: a lock and a lookup.
+    /// Default `false`: only the bridged rail learns it.
+    fn message_undelivered(&self, _id: &MessageId) -> bool {
+        false
+    }
+
+    /// The scan-verdict lines of a received message, by the nest's
+    /// segment-record id — what
+    /// [`crate::ConversationsManager::refresh_message_scan_results`] asks for
+    /// each received mail message of an opened thread
+    /// ([`OutboundMailSink::message_scan_result`] has the contract). Default
+    /// none: only the mail rail's messages are scanned.
+    async fn message_scan_result(
+        &self,
+        _nest_message_id: Vec<u8>,
+    ) -> Result<Option<Vec<fauna_core::localized::LocalizedText>>, String> {
+        Ok(None)
+    }
+
+    /// Whether the account shows the scan-verdict row at all — what
+    /// [`crate::ConversationsManager::refresh_message_scan_results`] asks
+    /// before reading any verdict ([`OutboundMailSink::scan_result_visible`]
+    /// has the contract). Default `true`: a rail with no scanned messages has
+    /// nothing to hide.
+    async fn scan_result_visible(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
+    /// The account's own alias rows, for the "Delivered to" tag of a received
+    /// message — what [`crate::ConversationsManager::refresh_delivered_aliases`]
+    /// reads when a thread opens ([`OutboundMailSink::account_alias_labels`]
+    /// has the contract). Default none: only the mail rail delivers on an
+    /// alias.
+    async fn account_alias_labels(&self) -> Result<Vec<AliasLabelRow>, String> {
+        Ok(Vec::new())
+    }
+
+    /// The viewer's own conversation records the nest withholds — what
+    /// [`crate::ConversationsManager::refresh_withheld_messages`] reads when a
+    /// thread opens ([`ConversationsRpc::own_withheld_records`] has the
+    /// contract). Default none: only the fauna-native rail's records are on
+    /// the nest's queue.
+    async fn own_withheld_records(&self) -> Result<Vec<crate::message::WithheldRecord>, String> {
+        Ok(Vec::new())
     }
 
     /// Whether this device, as far as the rail can tell, still **holds its

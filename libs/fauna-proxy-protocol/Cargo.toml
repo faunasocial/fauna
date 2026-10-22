@@ -10,3 +10,8 @@ license.workspace = true
 # and nest parses this on its TLS accept path; keeping the codec dependency-free
 # keeps both binaries lean and the parsing surface auditable (the security
 # review flagged untrusted-input parsers as the zero-day surface).
+
+[dev-dependencies]
+# Test-only: property tests over the three stranger-facing parsers. The shipped
+# codec stays std-only.
+proptest = { workspace = true }

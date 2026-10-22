@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { dayColumnLayout } from '$lib/caltime';
-  import { t } from '$lib/i18n/strings';
-  import { IDS } from '$lib/generated/uiIds';
+  import { dayColumnLayout } from '#lib/caltime';
+  import { t } from '#lib/i18n/strings';
+  import { IDS } from '#lib/generated/uiIds';
 
   // The Outlook-style week/day time grid (events.md § Week & day timeline views).
   // ONE renderer drives both the week view (7 day-columns) and the day view (a
@@ -10,7 +10,7 @@
   // linux's shared `build_day_column_fixed` feeds both `week_grid` + `day_grid`.
   // The all-day/timed classification, timed minute geometry, and overlap
   // column-packing are shared Rust (`fauna_core::caltime::day_column_layout`,
-  // via `$lib/caltime`); the gutter, columns and pixel-positioning are this
+  // via `#lib/caltime`); the gutter, columns and pixel-positioning are this
   // per-app rendering shell.
 
   interface EventItem {

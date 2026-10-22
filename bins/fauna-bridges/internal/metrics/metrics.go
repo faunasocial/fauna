@@ -80,7 +80,8 @@ var WSRPCCallSeconds = prometheus.NewHistogramVec(
 
 // SMTPConnectionsTotal counts SMTP listener accepts, by listener port
 // (25 / 465 / 587) and outcome ("accepted", "capped", and on the submission
-// ports "per_ip_shed" when a connection is shed by the per-IP concurrent cap).
+// ports "per_ip_shed" when a connection is shed by the per-IP concurrent cap and
+// "preauth_deadline" when one is closed on the pre-auth connection deadline).
 var SMTPConnectionsTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "smtp_connections_total",
@@ -92,8 +93,9 @@ var SMTPConnectionsTotal = prometheus.NewCounterVec(
 // MDAConnectionsTotal counts MDA listener accepts, by listener
 // ("imap-993" / "imap-143" / "dav-443" — the last is the shared CalDAV+CardDAV
 // 443 listener, matching the slog `listener` label) and outcome ("accepted" /
-// "capped" / "per_ip_shed" — the last when a connection is shed by the per-IP
-// concurrent cap). The IMAP/DAV analog of
+// "capped" / "per_ip_shed" — when a connection is shed by the per-IP
+// concurrent cap — / "preauth_deadline" — when an IMAP connection is closed on
+// connlimit.PreAuthDeadline). The IMAP/DAV analog of
 // SMTPConnectionsTotal: both surface the per-listener global-connection-cap
 // (internal/connlimit) saturation, plus the per-IP cap's sheds, so a connection
 // flood is visible without a disk-filling log.

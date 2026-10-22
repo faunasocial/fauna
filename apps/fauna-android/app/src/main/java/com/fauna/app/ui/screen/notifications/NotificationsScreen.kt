@@ -33,9 +33,12 @@ import com.fauna.ffi.FfiNotifItem
 import com.fauna.ffi.FfiNotificationDestination
 import com.fauna.ffi.FfiNotificationText
 import com.fauna.ffi.notificationDestinationFor
+import com.fauna.ffi.notificationMutedFor
+import com.fauna.ffi.notificationRetainedFor
 import com.fauna.ffi.notificationTextFor
 import java.net.URLEncoder
 import social.fauna.generated.Ids
+import uniffi.fauna_core.MutedKeyword
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +55,11 @@ fun NotificationsScreen(
     val unreadCount by vm.unreadCount.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val error by vm.errorMessage.collectAsState()
+    val mutedKeywords by vm.mutedKeywords.collectAsState()
+    // Session-local reveal of muted-collapsed rows (notifications.md § Muted
+    // words rule 3) — the mute itself stays. The conversation's and the feed's
+    // `revealedMuted` precedent.
+    val revealedMuted = remember { mutableStateListOf<Long>() }
     val appMessages = LocalAppMessages.current
     val listState = rememberLazyListState()
 
@@ -89,14 +97,24 @@ fun NotificationsScreen(
             }
         }
 
-        OutlinedButton(
-            onClick = { vm.markAllRead() },
-            enabled = unreadCount > 0,
-            modifier = Modifier
-                .padding(horizontal = 16.dp)
-                .testTag(Ids.NOTIFICATION_MARK_READ)
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(stringResource(R.string.bridges_mark_all_read))
+            OutlinedButton(
+                onClick = { vm.markAllRead() },
+                enabled = unreadCount > 0,
+                modifier = Modifier.testTag(Ids.NOTIFICATION_MARK_READ)
+            ) {
+                Text(stringResource(R.string.bridges_mark_all_read))
+            }
+            OutlinedButton(
+                onClick = { vm.clearAll() },
+                enabled = notifications.isNotEmpty(),
+                modifier = Modifier.testTag(Ids.NOTIFICATION_CLEAR)
+            ) {
+                Text(stringResource(R.string.notifications_clear_all))
+            }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -126,9 +144,13 @@ fun NotificationsScreen(
                             val dest = remember(notif, hasFamilyRelationship) {
                                 navigableDestination(notif, hasFamilyRelationship)
                             }
-                            NotificationRow(
+                            NotificationListRow(
                                 notification = notif,
+                                mutedKeywords = mutedKeywords,
+                                revealed = notif.id in revealedMuted,
+                                onReveal = { if (notif.id !in revealedMuted) revealedMuted.add(notif.id) },
                                 onOpen = dest?.let { d -> { openDestination(d, navController, context) } },
+                                onDismiss = { vm.dismiss(notif.id) },
                             )
                             HorizontalDivider()
                         }
@@ -178,8 +200,105 @@ private fun openDestination(
     }
 }
 
+/**
+ * One row of the list: collapsed when the shared decision says a muted word
+ * hides it (`notification_muted_for` — the relayed text only, Hide only, never
+ * a security notice; notifications.md § Muted words) and the user has not
+ * revealed it this session, else the full row.
+ */
 @Composable
-private fun NotificationRow(notification: FfiNotifItem, onOpen: (() -> Unit)?) {
+internal fun NotificationListRow(
+    notification: FfiNotifItem,
+    mutedKeywords: List<MutedKeyword>,
+    revealed: Boolean,
+    onReveal: () -> Unit,
+    onOpen: (() -> Unit)?,
+    onDismiss: () -> Unit = {},
+) {
+    val muted = remember(notification, mutedKeywords) {
+        notificationMutedFor(notification, mutedKeywords)
+    }
+    if (muted && !revealed) {
+        MutedNotificationRow(notification, onReveal, onDismiss)
+    } else {
+        NotificationRow(notification, onOpen, onDismiss)
+    }
+}
+
+/**
+ * `notification-dismiss` — on every row, collapsed or open (§ Muted words rule
+ * 4). Disabled on a security notice inside its retention window, by the shared
+ * predicate, not a local type check (notifications.md § Retention rule 2); the
+ * nest's refusal stays the authority.
+ */
+@Composable
+private fun DismissButton(notification: FfiNotifItem, onDismiss: () -> Unit) {
+    TextButton(
+        onClick = onDismiss,
+        enabled = !notificationRetainedFor(notification, System.currentTimeMillis() * 1000L),
+        modifier = Modifier.testTag(Ids.NOTIFICATION_DISMISS),
+    ) {
+        Text(stringResource(R.string.notifications_dismiss))
+    }
+}
+
+/**
+ * A muted-collapsed row (§ Muted words rule 3): the type icon and the unread
+ * mark stay, the placeholder stands in for the sentence, and the one gesture is
+ * the reveal. Not clickable and not a `notification-item`, so a muted sender's
+ * name never paints as a control. The unread badge still counts it (rule 4).
+ * A plain [Row], not a [ListItem]: a ListItem merges its children's semantics,
+ * which would fold the placeholder's id into the row.
+ */
+@Composable
+private fun MutedNotificationRow(
+    notification: FfiNotifItem,
+    onReveal: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val (icon, description) = typeToIcon(notification.notifType)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Icon(
+            icon, contentDescription = description,
+            modifier = Modifier.testTag(Ids.NOTIFICATION_TYPE_ICON),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            stringResource(R.string.muted_words_collapsed),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f).testTag(Ids.NOTIFICATION_MUTED),
+        )
+        TextButton(
+            onClick = onReveal,
+            modifier = Modifier.testTag(Ids.NOTIFICATION_MUTED_REVEAL_BUTTON),
+        ) {
+            Text(stringResource(R.string.muted_words_reveal))
+        }
+        DismissButton(notification, onDismiss)
+        if (!notification.isRead) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
+    }
+}
+
+@Composable
+private fun NotificationRow(
+    notification: FfiNotifItem,
+    onOpen: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
     val (icon, description) = typeToIcon(notification.notifType)
     ListItem(
         leadingContent = {
@@ -199,13 +318,16 @@ private fun NotificationRow(notification: FfiNotifItem, onOpen: (() -> Unit)?) {
             )
         },
         trailingContent = {
-            if (!notification.isRead) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!notification.isRead) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                }
+                DismissButton(notification, onDismiss)
             }
         },
         // A row the shared decision places is a real control; one it does not is

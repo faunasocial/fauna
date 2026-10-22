@@ -324,6 +324,18 @@ class HttpBridgeDriver(PlatformDriver):
             f"load?), NOT dead",
             file=sys.stderr,
         )
+        # What the bridge's own watchdog saw while it was stuck (the web
+        # bridge's `[bridge-watchdog]`/`[bridge-sample]` lines: the request it
+        # is in, its Python stack, the Chromium tree's RSS and CPU). A driver
+        # without a drained bridge log, or a bridge with no watchdog, prints
+        # nothing here.
+        watch = [
+            str(ln).rstrip()
+            for ln in list(getattr(self, "_bridge_log", None) or [])
+            if "[bridge-watchdog]" in str(ln) or "[bridge-sample]" in str(ln)
+        ][-8:]
+        if watch:
+            print("\n".join(watch), file=sys.stderr)
         self._note_pegged(method, path, timeout)
         raise TimeoutError(
             f"{method} {path} timed out after {timeout}s; /health silent for "
@@ -1496,11 +1508,27 @@ class HttpBridgeDriver(PlatformDriver):
         still holds (convention 10, `e2e-launch-isolation.md` → *A discarded
         driver retires its machine*). Stopping the app WITHOUT discarding the
         machine — every relaunch, `recover()` included — is `_stop_app`, which
-        each driver implements and never calls this."""
+        each driver implements and never calls this.
+
+        A discarded machine's replica vault goes with it: the vault exists only
+        to carry replicas across this machine's relaunches, and left behind it
+        is one more stray dir in the temp dir (`testing.md` § Test temp-dir
+        hygiene). A machine a pin keeps is not discarded, so its vault stays."""
+        discards = self._discards_machine_at_teardown()
         try:
             self._retire_discarded_machine()
         finally:
             self._stop_app(**kwargs)
+            if discards:
+                self._drop_replica_vault()
+
+    def _drop_replica_vault(self) -> None:
+        """Remove the replica vault dir and forget what it held, so a later
+        launch of this driver object starts a fresh one."""
+        vault_root = self.__dict__.pop("_replica_vault_dir", None)
+        self.__dict__.pop("_replica_vault", None)
+        if vault_root:
+            shutil.rmtree(vault_root, ignore_errors=True)
 
     def _stop_app(self, **kwargs) -> None:
         """Stop the app process and release what the launch holds, keeping the

@@ -23,6 +23,7 @@
 //! shared code ([`super::ImapSession::connect_starttls`]) precisely so the
 //! protocol half is not reimplemented per platform.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -78,11 +79,24 @@ pub enum NativeTransportError {
 #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
 pub const E2E_EXTRA_CA_ENV: &str = "FAUNA_E2E_IMAP_EXTRA_CA_PEM";
 
+/// The preset-host redirect seed's env var: a comma-separated list of
+/// `<host>=<ip>:<port>` entries, each moving where [`NativeImapConnector::connect`]
+/// DIALS that host — and nothing else (`e2e-gated-seeds.md` § The preset-host
+/// redirect seed).
+///
+/// Read only by [`NativeImapConnector::e2e_host_redirects`], and gated like
+/// [`E2E_EXTRA_CA_ENV`] so a release artifact carries not even the name.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+pub const E2E_HOST_MAP_ENV: &str = "FAUNA_E2E_IMAP_HOST_MAP";
+
 /// Dials source IMAP servers. One connector serves many connections; build it
 /// once per import session.
 pub struct NativeImapConnector {
     mode: TlsMode,
     roots: RootCertStore,
+    /// `(host, dial address)` pairs from the preset-host redirect seed — always
+    /// empty in a shipped build, where nothing fills it.
+    redirects: Vec<(String, SocketAddr)>,
 }
 
 impl NativeImapConnector {
@@ -102,7 +116,13 @@ impl NativeImapConnector {
         // extends this connector's OWN store, which is exactly why the shared
         // function hands back an owned one.
         let roots = fauna_tls_bootstrap::webpki_root_store();
-        Self { mode, roots }.e2e_extra_root()
+        Self {
+            mode,
+            roots,
+            redirects: Vec::new(),
+        }
+        .e2e_extra_root()
+        .e2e_host_redirects()
     }
 
     /// The e2e source-trust seed: additionally trust the PEM in
@@ -176,6 +196,46 @@ impl NativeImapConnector {
         self
     }
 
+    /// The preset-host redirect seed: dial each host [`E2E_HOST_MAP_ENV`] maps
+    /// at its entry's loopback address instead (`e2e-gated-seeds.md` § The
+    /// preset-host redirect seed).
+    ///
+    /// **Why this exists.** An Outlook pick dials the fixed preset
+    /// `outlook.office365.com:993` — a constant no human chooses and no app
+    /// field offers for change — so the Outlook import's `AUTHENTICATE XOAUTH2`
+    /// leg had no server a test could reach without reaching Microsoft's.
+    ///
+    /// **Why it is safe.** Compiled out of a shipped build, like
+    /// [`Self::e2e_extra_root`]; it moves only the dial, never the name the
+    /// handshake verifies (so the far end must still present a leaf for the
+    /// mapped host chaining to a trusted anchor); and it points nowhere but
+    /// loopback — any other address panics even here, as a malformed value
+    /// does, because only the harness sets this variable.
+    #[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+    fn e2e_host_redirects(mut self) -> Self {
+        let Ok(value) = std::env::var(E2E_HOST_MAP_ENV) else {
+            return self;
+        };
+        self.redirects = parse_host_map(&value);
+        self
+    }
+
+    /// The production twin: a shipped build has no redirect seed, so every
+    /// host is dialled as given.
+    #[cfg(not(any(test, debug_assertions, feature = "test-helpers")))]
+    fn e2e_host_redirects(self) -> Self {
+        self
+    }
+
+    /// Where the seed sends `host`, if it maps it. DNS names compare without
+    /// regard to ASCII case.
+    fn redirect_for(&self, host: &str) -> Option<SocketAddr> {
+        self.redirects
+            .iter()
+            .find(|(mapped, _)| mapped.eq_ignore_ascii_case(host))
+            .map(|(_, addr)| *addr)
+    }
+
     /// Additionally trust the PEM-encoded certificate(s) in `pem`.
     ///
     /// For the self-hosted case § Wizard steps' *Generic IMAP* option exists to
@@ -216,12 +276,17 @@ impl NativeImapConnector {
     ) -> Result<NativeTlsTransport, NativeTransportError> {
         fauna_tls_bootstrap::ensure_tls_provider();
 
-        let tcp = TcpStream::connect((host, port)).await.map_err(|source| {
-            NativeTransportError::Connect {
-                host: host.to_string(),
-                port,
-                source,
-            }
+        // A host the preset-host redirect seed maps is dialled at its entry;
+        // everything after the dial — the verified name, the SNI, every error —
+        // keeps the host and port the caller gave.
+        let dialled = match self.redirect_for(host) {
+            Some(addr) => TcpStream::connect(addr).await,
+            None => TcpStream::connect((host, port)).await,
+        };
+        let tcp = dialled.map_err(|source| NativeTransportError::Connect {
+            host: host.to_string(),
+            port,
+            source,
         })?;
         // IMAP is a request/response protocol with small commands; Nagle would
         // stall each one waiting for a coalescing partner that never comes.
@@ -243,6 +308,39 @@ impl NativeImapConnector {
         }
         Ok(transport)
     }
+}
+
+/// Parse [`E2E_HOST_MAP_ENV`]'s value into `(host, dial address)` pairs.
+///
+/// A blank value is unset. Each comma-separated entry is `<host>=<ip>:<port>`;
+/// a malformed entry, or an address that is not loopback, panics naming the
+/// variable — only the harness sets it, so a bad value is a harness bug, and
+/// a seed that could point a connection off the box is not one to degrade
+/// quietly.
+#[cfg(any(test, debug_assertions, feature = "test-helpers"))]
+fn parse_host_map(value: &str) -> Vec<(String, SocketAddr)> {
+    let mut redirects = Vec::new();
+    for entry in value.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+        let parsed = entry.split_once('=').and_then(|(host, addr)| {
+            let host = host.trim();
+            let addr = addr.trim().parse::<SocketAddr>().ok()?;
+            (!host.is_empty()).then(|| (host.to_string(), addr))
+        });
+        let Some((host, addr)) = parsed else {
+            panic!(
+                "{E2E_HOST_MAP_ENV} entry {entry:?} is not `<host>=<ip>:<port>`. \
+                 Only the e2e harness sets this variable, so this is a harness bug."
+            );
+        };
+        assert!(
+            addr.ip().is_loopback(),
+            "{E2E_HOST_MAP_ENV} maps {host} to {addr}, which is not a loopback \
+             address. The seed may point a connection only into the harness's own \
+             box; only the e2e harness sets this variable, so this is a harness bug."
+        );
+        redirects.push((host, addr));
+    }
+    redirects
 }
 
 /// The pipe's TLS state. `Upgrading` exists only for the instant
@@ -397,7 +495,7 @@ impl ImapClock for TokioClock {
 /// device-code grant. Trusts the WebPKI roots, plus — in a test-capable
 /// build only — the source-IMAP trust seed's PEM ([`E2E_EXTRA_CA_ENV`]),
 /// which is how the fake identity far end is trusted with no second trust
-/// variable (`e2e-automation-surface-gating.md` § The Microsoft authority
+/// variable (`e2e-gated-seeds.md` § The Microsoft authority
 /// seed).
 pub struct NativeOAuthHttp {
     client: reqwest::Client,
@@ -540,6 +638,55 @@ mod tests {
              NativeTlsTransport::handshake) so it does not overflow the small \
              foreign FFI poll stack FfiMailImportClient::connect is polled on."
         );
+    }
+
+    /// The preset-host redirect seed's parser (`e2e-gated-seeds.md` § The
+    /// preset-host redirect seed): the harness's value round-trips; the
+    /// process-environment half is `tests/imap_client_host_map_seed.rs`'s.
+    #[test]
+    fn the_host_map_parses_loopback_entries_and_treats_blank_as_unset() {
+        assert!(parse_host_map("  ").is_empty());
+        let map = parse_host_map("outlook.office365.com=127.0.0.1:40993, other.test=[::1]:7,");
+        assert_eq!(
+            map,
+            vec![
+                (
+                    "outlook.office365.com".to_string(),
+                    "127.0.0.1:40993".parse().unwrap()
+                ),
+                ("other.test".to_string(), "[::1]:7".parse().unwrap()),
+            ]
+        );
+    }
+
+    /// Loopback only, even under the gate: the seed may move a dial nowhere
+    /// but into the harness's own box (`e2e-gated-seeds.md` § The preset-host
+    /// redirect seed, the terms). Pinned by name by
+    /// `test_mail_import_tls_seam_gating.py`.
+    #[test]
+    #[should_panic(
+        expected = "FAUNA_E2E_IMAP_HOST_MAP maps outlook.office365.com to 192.0.2.1:993"
+    )]
+    fn the_host_map_refuses_a_non_loopback_target() {
+        parse_host_map("outlook.office365.com=192.0.2.1:993");
+    }
+
+    #[test]
+    #[should_panic(expected = "FAUNA_E2E_IMAP_HOST_MAP entry \"outlook.office365.com\"")]
+    fn the_host_map_refuses_a_malformed_entry() {
+        parse_host_map("outlook.office365.com");
+    }
+
+    /// A mapped host is found whatever its case; an unmapped one is not.
+    #[test]
+    fn a_mapped_host_is_redirected_and_an_unmapped_one_is_not() {
+        let mut connector = NativeImapConnector::new(TlsMode::Implicit);
+        connector.redirects = parse_host_map("outlook.office365.com=127.0.0.1:40993");
+        assert_eq!(
+            connector.redirect_for("Outlook.Office365.com"),
+            Some("127.0.0.1:40993".parse().unwrap())
+        );
+        assert_eq!(connector.redirect_for("imap.gmail.com"), None);
     }
 
     /// Regression guard for `Connection::next_event`'s fix (connection.rs):

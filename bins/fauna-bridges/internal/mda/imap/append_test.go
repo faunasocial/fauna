@@ -442,6 +442,44 @@ func TestAppendRefusesALiteralOverTheCeilingUnread(t *testing.T) {
 	}
 }
 
+// TestAppendBoundsTheReadOfALiteralThatUnderAnnounces pins the read-side half
+// of the same bound: a literal that announces a small size but keeps sending is
+// refused with BAD after at most ceiling+1 bytes, never buffered whole. The
+// ceiling is lowered through appendLiteralCeiling so the run stays small.
+func TestAppendBoundsTheReadOfALiteralThatUnderAnnounces(t *testing.T) {
+	const ceiling = 64
+	prev := appendLiteralCeiling
+	appendLiteralCeiling = func() int64 { return ceiling }
+	t.Cleanup(func() { appendLiteralCeiling = prev })
+
+	caller := &appendCaller{}
+	sess := authedSession(t, caller, fixtureIndexKey)
+	lit := &finiteLiteralReader{countingLiteralReader{announced: 1}, 10 * ceiling}
+
+	_, err := sess.Append("INBOX", lit, nil)
+	var imapErr *imap.Error
+	if !errors.As(err, &imapErr) || imapErr.Type != imap.StatusResponseTypeBad {
+		t.Fatalf("Append of an under-announced oversized literal = %v, want an IMAP BAD", err)
+	}
+	if lit.read > ceiling+1 {
+		t.Errorf("read %d bytes of the literal, want at most %d", lit.read, ceiling+1)
+	}
+}
+
+// finiteLiteralReader is a countingLiteralReader that ends after limit bytes,
+// so a walk that lost its read bound terminates (and is caught by its count).
+type finiteLiteralReader struct {
+	countingLiteralReader
+	limit int64
+}
+
+func (f *finiteLiteralReader) Read(p []byte) (int, error) {
+	if f.read >= f.limit {
+		return 0, io.EOF
+	}
+	return f.countingLiteralReader.Read(p)
+}
+
 // TestAppendEncryptsHintToIndexKeyWhenProvisioned pins the seal-to-
 // self hint contract: when actorIndexKey is set, the hint ciphertext
 // is sealed to the index pubkey (NOT the MLS pubkey).  Verified via

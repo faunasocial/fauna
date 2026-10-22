@@ -39,7 +39,7 @@ from tests.api.bare import sign_and_encode_post
 
 pytestmark = pytest.mark.tier_3
 
-INFO_PAGE_MARKER = "Fauna Nest API"
+INFO_PAGE_MARKER = "<h1>Fauna nest</h1>"
 # A real (non-empty) handle domain so the subdomain resolver has a `.<domain>`
 # suffix to strip — the shared `nest_instance` runs it empty, which is why the
 # serve proof needs its own nest.

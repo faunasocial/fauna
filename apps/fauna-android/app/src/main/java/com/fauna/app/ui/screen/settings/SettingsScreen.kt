@@ -18,8 +18,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.fauna.app.BuildConfig
 import com.fauna.app.R
+import com.fauna.app.ui.screen.onboarding.TermsLinkButton
 import com.fauna.app.ui.viewmodel.SettingsAdminGateVM
 import com.fauna.app.ui.viewmodel.SettingsFamilyGateVM
+import com.fauna.ffi.faunaFfiBuildVersion
 import social.fauna.generated.Ids
 
 @Composable
@@ -132,6 +134,31 @@ fun SettingsScreen(
         if (isAdmin) {
             item { SettingsRow(Icons.Default.Shield, stringResource(R.string.settings_nest_admin), testTag = Ids.ADMIN_TAB) { navController.navigate("settings/admin") } }
         }
+
+        item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
+
+        // Section 3 — About: the one product version every app and the nest share
+        // (`product-version.md` § The model), read from shared Rust
+        // (`faunaFfiBuildVersion`), and the terms link beside it, which opens the
+        // shared `fauna_core::TERMS_URL` in the browser
+        // (`terms-and-content-guidelines.md` § The decisions, item 4 (b)).
+        item {
+            Text(
+                stringResource(R.string.settings_about),
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+        item {
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.settings_general_page_version)) },
+                trailingContent = {
+                    Text(faunaFfiBuildVersion(), modifier = Modifier.testTag(Ids.SETTINGS_APP_VERSION))
+                },
+            )
+        }
+        item { TermsLinkButton(Ids.SETTINGS_TERMS_LINK, Modifier.padding(horizontal = 8.dp)) }
     }
 }
 

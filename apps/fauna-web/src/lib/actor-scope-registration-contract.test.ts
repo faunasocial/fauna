@@ -9,7 +9,7 @@
 //
 // ── The class ─────────────────────────────────────────────────────────────
 //
-// A page that owns actor-scoped state registers two things with `$lib/actorScope`:
+// A page that owns actor-scoped state registers two things with `#lib/actorScope`:
 //
 //     registerActorScopedReset(dropMyCaches);   // the drop
 //     onActorChange(async (id) => { ...rebuild... });   // the rebuild
@@ -39,7 +39,7 @@
 // Inside an `onMount(async …)`, no `await` may precede the first
 // `registerActorScopedReset(` / `onActorChange(` (or `onSignedInActorChange(`). A page whose registration is
 // module-level or in a synchronous `onMount` satisfies this trivially — that is
-// the shape `media/+page.svelte` and `+layout.svelte` already have, and the one
+// the shape `media/+page.svelte` and `RootShell.svelte` already have, and the one
 // the others are held to.
 //
 // Handlers that genuinely need wasm keep awaiting it THEMSELVES: `getFeedManager()`
@@ -58,8 +58,8 @@ import { stripComments } from "./source-contract.ts";
  *  route which stops registering fails this contract loudly instead of
  *  silently dropping out of it. */
 const SURFACES: Record<string, URL> = {
-  "routes/+layout.svelte": new URL(
-    "../routes/+layout.svelte",
+  "lib/components/RootShell.svelte": new URL(
+    "./components/RootShell.svelte",
     import.meta.url,
   ),
   "routes/feed/+page.svelte": new URL(

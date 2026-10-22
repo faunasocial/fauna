@@ -128,7 +128,7 @@ def test_admin_logs_copy_present(admin_app):
 
 
 @pytest.mark.feature("admin-logs")
-def test_admin_logs_lists_the_newest_activity_first(admin_app, nest_instance):
+def test_admin_logs_lists_the_newest_activity_first(admin_app, planted_bridges):
     """observability.md § 3. Surfaces: the nest's activity is listed newest
     first. Two helper lines two minutes apart are planted; the newer one is
     above the older, and no row anywhere on the page sits above a newer one."""
@@ -136,7 +136,7 @@ def test_admin_logs_lists_the_newest_activity_first(admin_app, nest_instance):
     now = int(time.time() * 1000)
     older = helper_event("info", at_ms=now - 120_000)
     newer = helper_event("info", at_ms=now - 1_000)
-    LogPlaneHelper(nest_instance).plant_events(older, newer)
+    LogPlaneHelper(planted_bridges).plant_events(older, newer)
 
     _reopen_logs(app)
     rows = _rows_once(
@@ -155,7 +155,7 @@ def test_admin_logs_lists_the_newest_activity_first(admin_app, nest_instance):
 
 
 @pytest.mark.feature("admin-logs")
-def test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines(admin_app, nest_instance):
+def test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines(admin_app, planted_bridges):
     """observability.md § Admission, attribution, and the remote ring: a
     helper's event lands in the one admin log beside the nest's own lines, in
     time order, under the helper's own name (`<source>:<event>`).
@@ -166,10 +166,10 @@ def test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines(admin_app, n
     second helper makes it log another after. Top to bottom the page must read
     second's line, the helper's event, first's line."""
     app = admin_app
-    first = LogPlaneHelper(nest_instance)
+    first = LogPlaneHelper(planted_bridges)
     event = helper_event("warn", message="tls handshake failed")
     first.plant_events(event)
-    second = LogPlaneHelper(nest_instance)
+    second = LogPlaneHelper(planted_bridges)
 
     def _nest_line(rows, bridge_id):
         return next(
@@ -201,7 +201,7 @@ def test_admin_logs_shows_a_helpers_event_among_the_nests_own_lines(admin_app, n
 
 
 @pytest.mark.feature("admin-logs")
-def test_admin_logs_severity_filter_shows_only_that_severity(admin_app, nest_instance):
+def test_admin_logs_severity_filter_shows_only_that_severity(admin_app, planted_bridges):
     """observability.md § 3. Surfaces: choosing Error shows only error lines.
     A helper plants one info and one error line, so the unfiltered page holds
     both and the filter has something to remove: after choosing Error every
@@ -209,7 +209,7 @@ def test_admin_logs_severity_filter_shows_only_that_severity(admin_app, nest_ins
     the count has fallen."""
     app = admin_app
     info, error = helper_event("info"), helper_event("error")
-    LogPlaneHelper(nest_instance).plant_events(info, error)
+    LogPlaneHelper(planted_bridges).plant_events(info, error)
 
     _reopen_logs(app)
     rows_all = _rows_once(
@@ -235,7 +235,7 @@ def test_admin_logs_severity_filter_shows_only_that_severity(admin_app, nest_ins
 
 
 @pytest.mark.feature("admin-logs")
-def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, nest_instance):
+def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, planted_bridges):
     """observability.md § 3. Surfaces: copy puts the lines the page shows on
     the clipboard — under a filter, the filtered lines and not the whole ring.
     The clipboard is read where the OS (or, for tui, the terminal) holds it."""
@@ -250,7 +250,7 @@ def test_admin_logs_copy_puts_the_shown_lines_on_the_clipboard(admin_app, nest_i
             tracked="tests/e2e-unified/drivers/base.py get_clipboard_text",
         )
     info, error = helper_event("info"), helper_event("error")
-    LogPlaneHelper(nest_instance).plant_events(info, error)
+    LogPlaneHelper(planted_bridges).plant_events(info, error)
 
     _reopen_logs(app)
     _rows_once(

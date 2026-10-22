@@ -204,6 +204,49 @@ def test_admit_with_a_guardian_yields_a_supervised_ward(admin_app, nest_instance
     )
 
 
+@pytest.mark.feature("family-safety")
+def test_admit_with_a_guardian_and_band_records_the_band_on_the_ward(admin_app, nest_instance):
+    """The Admit section's band select (`family-safety.md` § App surface →
+    *Age-band surfaces*): beside a picked guardian the admin picks an age band
+    and admits; the admitted account's OWN `fauna.family.status` reads that band
+    back (`age_band.band`). A select that did nothing admits a ward with no band
+    — the failure this reads back to catch. The guardian is fixture setup; the
+    admit itself goes through the UI."""
+    from helpers.admin_wire import admit_adult
+
+    admin_app.admin.require_admit_guardian_supported()
+    admin_app.admin.require_admit_age_band_supported()
+    guardian_handle = f"bandguardian-{int(time.time() * 1000)}"
+    admit_adult(nest_instance, guardian_handle)
+    sk = SigningKey.generate()
+    actor_hex = bytes(sk.verify_key).hex()
+    handle = f"bandward-{actor_hex[:10]}"
+
+    admin_app.admin.navigate_users()
+    admin_app.admin.admit_user(
+        actor_hex, handle=handle, tier="free", guardian=guardian_handle, age_band="13-15",
+    )
+
+    last: list = []
+    token = _poll(time.time() + ADMIT_BUDGET_S,
+                  lambda: mint_token_via_handshake(nest_instance["url"], sk), last)
+    assert token, (
+        f"the admitted ward never authenticated within {ADMIT_BUDGET_S}s. "
+        f"last refusal: {last!r}; page error: {admin_app.admin.users_action_error_text()!r}"
+    )
+
+    with WsRpcAdminClient(
+        nest_instance["url"], actor_id=bytes(sk.verify_key), signing_key=bytes(sk),
+    ) as me:
+        ward_status = me.call("fauna.family.status", {})
+    band = (ward_status.get("age_band") or {}).get("band")
+    assert band == "13-15", (
+        f"the admitted ward must carry the band picked beside the guardian; its "
+        f"family status reads {ward_status!r}; page error: "
+        f"{admin_app.admin.users_action_error_text()!r}"
+    )
+
+
 @pytest.mark.feature("admin-users")
 def test_a_mistyped_person_id_is_caught_on_the_page_and_nothing_is_sent(admin_app, nest_instance):
     """A person id that is not 64 hex characters is refused on the page with

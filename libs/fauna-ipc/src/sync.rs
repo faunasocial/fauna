@@ -143,6 +143,15 @@ pub enum RequestMethod {
     FreeSpace {
         path: String,
     },
+    /// Free every file under a bound on-demand location that is on this
+    /// device, not kept and provably recorded — the location-grain *Free up
+    /// space* (`on-demand-files.md` § The free-up-space gesture where the OS
+    /// offers none). `path` is the location's root. The agent answers once the
+    /// sweep is accepted; its outcome is read back off
+    /// [`LocationInfo::free_space`].
+    FreeLocationSpace {
+        path: String,
+    },
 
     // Cloud files
     SetLocationSyncMode {
@@ -604,6 +613,7 @@ impl RequestMethod {
             Self::PinFile { .. } => "PinFile",
             Self::UnpinFile { .. } => "UnpinFile",
             Self::FreeSpace { .. } => "FreeSpace",
+            Self::FreeLocationSpace { .. } => "FreeLocationSpace",
             Self::SetLocationSyncMode { .. } => "SetLocationSyncMode",
             Self::ShareFile { .. } => "ShareFile",
             Self::GetFileDevices { .. } => "GetFileDevices",
@@ -1700,6 +1710,40 @@ pub struct LocationInfo {
     /// an enum for the reason `on_demand_unavailable_reason` is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_demand_mount_error: Option<String>,
+    /// The recorded sizes of this location's rows that are **not**
+    /// placeholders — what a *Free up space* press could at most reclaim
+    /// (`on-demand-files.md` § The free-up-space gesture where the OS offers
+    /// none). Read against [`total_bytes`](Self::total_bytes), which counts
+    /// every tracked row placeholder or not, so the pair is "on this device of
+    /// the set's bytes". `None` for an always-resident binding (everything is
+    /// on this device) and from an agent that predates the field.
+    #[serde(default)]
+    pub on_device_bytes: Option<u64>,
+    /// The latest *Free up space* sweep of this location in this agent's
+    /// lifetime (`RequestMethod::FreeLocationSpace`); `None` until one has run.
+    ///
+    /// ⚠ **Derived, never stored** — the lifetime rule
+    /// [`EngineInfo::deletes_held`] has: a restarted agent reports `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_space: Option<FreeSpaceRun>,
+}
+
+/// One *Free up space* sweep's tally ([`LocationInfo::free_space`]). Every
+/// file with bytes on this device lands in exactly one count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeSpaceRun {
+    /// The sweep is still walking the location; the counts so far.
+    pub running: bool,
+    /// Files whose bytes were given back (now placeholders).
+    pub freed_files: u64,
+    /// The recorded sizes of [`freed_files`](Self::freed_files).
+    pub freed_bytes: u64,
+    /// Files kept because this device may hold the only copy: a change the
+    /// nest has not recorded yet, or this seat's own record in a
+    /// metadata-only folder (one count — the dehydration gate's refusal).
+    pub kept_unsynced: u64,
+    /// Files kept because they are pinned (*always keep on this device*).
+    pub kept_pinned: u64,
 }
 
 /// [`LocationInfo::on_demand_mount_error`]: the mount helper refused this
@@ -2422,6 +2466,7 @@ mod tests {
             RequestMethod::PinFile { path: "p".into() },
             RequestMethod::UnpinFile { path: "p".into() },
             RequestMethod::FreeSpace { path: "p".into() },
+            RequestMethod::FreeLocationSpace { path: "p".into() },
             RequestMethod::SetLocationSyncMode {
                 path: "p".into(),
                 mode: "on-demand".into(),

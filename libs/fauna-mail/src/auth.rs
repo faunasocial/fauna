@@ -28,6 +28,34 @@ pub enum AuthError {
     Unparseable,
     #[error("DNS resolver initialization failed: {0}")]
     ResolverInit(String),
+    /// The lookups outran [`VERIFY_DEADLINE`]. Transient — the MTA tempfails
+    /// (451) — never a verdict: a sender controls the DNS its own SPF and
+    /// DKIM lookups reach, and a verdict computed without them would let a
+    /// hung DKIM key fail a victim domain's DMARC open.
+    #[error("authentication verification exceeded its deadline")]
+    Timeout,
+}
+
+/// The longest one message's SPF + DKIM + DMARC + ARC verification may take
+/// before it is abandoned as [`AuthError::Timeout`] (the port-25 memory budget,
+/// `docs/goal/behavior/smtp-server.md` § Connection-time limits). Generous
+/// beside a legitimate message's handful of cached lookups; it bounds how long
+/// a sender's deliberately silent DNS holds a DATA buffer.
+pub const VERIFY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The one process-wide authenticator the exported entry points share, built
+/// from the system resolver configuration on first use, so every message's
+/// lookups hit one resolver and its cache instead of a fresh resolver per
+/// message. A failed build is not stored: the next message tries again.
+fn shared_authenticator() -> Result<&'static mail_auth::MessageAuthenticator, AuthError> {
+    static SHARED: std::sync::OnceLock<mail_auth::MessageAuthenticator> =
+        std::sync::OnceLock::new();
+    if let Some(a) = SHARED.get() {
+        return Ok(a);
+    }
+    let built = mail_auth::MessageAuthenticator::new_system_conf()
+        .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
+    Ok(SHARED.get_or_init(|| built))
 }
 
 // ── verify_inbound ────────────────────────────────────────────────────────────
@@ -38,8 +66,9 @@ pub enum AuthError {
 /// the canonical wire form, so we never accept a re-serialized
 /// `ParsedMessage` here). `mail_from` is the SMTP envelope sender address.
 /// `client_ip` is the connecting MTA's IP as a string (e.g. `"192.0.2.1"`).
-/// `client_helo` is the HELO/EHLO hostname. The DNS resolver is built from
-/// system configuration.
+/// `client_helo` is the HELO/EHLO hostname. The DNS resolver, built once from
+/// system configuration, is shared across calls; the lookups are bounded by
+/// `VERIFY_DEADLINE`.
 ///
 /// Note: `client_ip` is accepted as `String` because `std::net::IpAddr` has
 /// no UniFFI binding. An unparseable IP falls back to `127.0.0.1`.
@@ -55,16 +84,17 @@ pub async fn verify_inbound(
     client_ip: &str,
     client_helo: &str,
 ) -> Result<AuthVerdicts, AuthError> {
-    use mail_auth::{AuthenticatedMessage, MessageAuthenticator};
-
-    let auth_msg = AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
-    let resolver = MessageAuthenticator::new_system_conf()
-        .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
-    Ok(
-        verify_parsed(&resolver, &auth_msg, mail_from, client_ip, client_helo)
-            .await
-            .verdicts,
+    let resolver = shared_authenticator()?;
+    verify_inbound_observed_within(
+        resolver,
+        VERIFY_DEADLINE,
+        raw,
+        mail_from,
+        client_ip,
+        client_helo,
     )
+    .await
+    .map(|o| o.verdicts)
 }
 
 /// Verify SPF, DKIM, DMARC, and ARC for an inbound message, and return the
@@ -73,7 +103,8 @@ pub async fn verify_inbound(
 /// The same pipeline and inputs as `verify_inbound`; the observation carries
 /// what an RFC 7489 aggregate report needs and the verdicts flatten away (the
 /// From and envelope domains, the aligned DKIM and SPF results, each DKIM
-/// signature's raw result). The MTA calls this one at the SMTP perimeter.
+/// signature's raw result). The MTA calls this one at the SMTP perimeter, so
+/// it shares one resolver across messages and is bounded by `VERIFY_DEADLINE`.
 #[cfg_attr(feature = "uniffi", fauna_uniffi_async::export)]
 pub async fn verify_inbound_observed(
     raw: &[u8],
@@ -81,12 +112,16 @@ pub async fn verify_inbound_observed(
     client_ip: &str,
     client_helo: &str,
 ) -> Result<InboundAuthOutcome, AuthError> {
-    use mail_auth::{AuthenticatedMessage, MessageAuthenticator};
-
-    let auth_msg = AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
-    let resolver = MessageAuthenticator::new_system_conf()
-        .map_err(|e| AuthError::ResolverInit(e.to_string()))?;
-    Ok(verify_parsed(&resolver, &auth_msg, mail_from, client_ip, client_helo).await)
+    let resolver = shared_authenticator()?;
+    verify_inbound_observed_within(
+        resolver,
+        VERIFY_DEADLINE,
+        raw,
+        mail_from,
+        client_ip,
+        client_helo,
+    )
+    .await
 }
 
 /// [`verify_inbound`] over a caller-supplied authenticator instead of one built
@@ -122,8 +157,35 @@ pub async fn verify_inbound_observed_with(
     client_ip: &str,
     client_helo: &str,
 ) -> Result<InboundAuthOutcome, AuthError> {
+    verify_inbound_observed_within(
+        resolver,
+        VERIFY_DEADLINE,
+        raw,
+        mail_from,
+        client_ip,
+        client_helo,
+    )
+    .await
+}
+
+/// [`verify_inbound_observed_with`] under a caller-chosen deadline in place of
+/// [`VERIFY_DEADLINE`] — every entry point's one body, and the seam a test uses
+/// to watch the deadline fire without waiting it out.
+pub async fn verify_inbound_observed_within(
+    resolver: &mail_auth::MessageAuthenticator,
+    deadline: std::time::Duration,
+    raw: &[u8],
+    mail_from: &str,
+    client_ip: &str,
+    client_helo: &str,
+) -> Result<InboundAuthOutcome, AuthError> {
     let auth_msg = mail_auth::AuthenticatedMessage::parse(raw).ok_or(AuthError::Unparseable)?;
-    Ok(verify_parsed(resolver, &auth_msg, mail_from, client_ip, client_helo).await)
+    tokio::time::timeout(
+        deadline,
+        verify_parsed(resolver, &auth_msg, mail_from, client_ip, client_helo),
+    )
+    .await
+    .map_err(|_| AuthError::Timeout)
 }
 
 /// The DKIM → SPF → DMARC → ARC pipeline both entry points share.
@@ -195,7 +257,7 @@ async fn verify_parsed(
                 })
             })
             .collect(),
-        spf_result: spf_result_token(spf).to_string(),
+        spf_result: spf.rfc_token().to_string(),
     };
 
     InboundAuthOutcome {
@@ -219,19 +281,6 @@ fn dkim_result_token(r: &mail_auth::DkimResult) -> &'static str {
         DkimResult::PermError(_) => "permerror",
         DkimResult::TempError(_) => "temperror",
         DkimResult::None => "none",
-    }
-}
-
-/// RFC 7489 §A.1 `SPFResultType` token for an SPF verdict.
-fn spf_result_token(v: SpfVerdict) -> &'static str {
-    match v {
-        SpfVerdict::None => "none",
-        SpfVerdict::Pass => "pass",
-        SpfVerdict::Fail => "fail",
-        SpfVerdict::SoftFail => "softfail",
-        SpfVerdict::Neutral => "neutral",
-        SpfVerdict::PermError => "permerror",
-        SpfVerdict::TempError => "temperror",
     }
 }
 

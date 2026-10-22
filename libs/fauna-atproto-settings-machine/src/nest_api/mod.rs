@@ -133,6 +133,10 @@ pub struct NestConsentInstall {
     pub hosts: Vec<String>,
     pub ingress_paths: Vec<String>,
     pub development: bool,
+    /// The section rides a user's bind card, not an admin's install card —
+    /// whose approve mints the account's grant (the wire's
+    /// `ConsentInstallInfo::bind`).
+    pub bind: bool,
 }
 
 /// One field of a plugin's settings schema: what the card's settings summary
@@ -166,6 +170,7 @@ impl From<fauna_protocol::atproto_pds::ConsentInstallInfo> for NestConsentInstal
             hosts: i.hosts,
             ingress_paths: i.ingress_paths,
             development: i.development,
+            bind: i.bind,
         }
     }
 }

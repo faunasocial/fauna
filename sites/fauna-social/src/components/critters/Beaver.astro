@@ -1,0 +1,53 @@
+---
+interface Props { size?: number; delay?: string; pack?: boolean; }
+const { size = 110, delay = '0s', pack = false } = Astro.props;
+---
+{/* `pack` puts the red backpack on — the toolkit. A front-facing beaver
+    hides most of a pack, so it is told three ways: the red sides showing
+    past the hips, the straps over the chest, and a hammer over the left
+    shoulder (the right paw is the one that waves). */}
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="60" cy="134" rx="30" ry="5" class="critter-shadow" />
+  <!-- tail -->
+  <ellipse cx="94" cy="122" rx="20" ry="10" transform="rotate(-20 94 122)" fill="#4f3527" />
+  {pack && (
+    <g>
+      <rect x="25" y="76" width="66" height="48" rx="12" fill="#c8412f" />
+      <rect x="25" y="102" width="66" height="22" rx="10" fill="#a5342a" />
+      <g transform="rotate(-18 30 70)">
+        <rect x="27.5" y="58" width="5" height="26" rx="2" fill="#8a6444" />
+        <rect x="20" y="52" width="18" height="8" rx="2" fill="#6d675a" />
+      </g>
+    </g>
+  )}
+  <!-- waving arm -->
+  <g class="wave" style="transform-origin: 76px 90px;">
+    <ellipse cx="82" cy="80" rx="5.5" ry="12" transform="rotate(-30 82 80)" fill="#5f4430" />
+    <circle cx="86" cy="68" r="4.5" fill="#7a5340" />
+  </g>
+  <!-- body -->
+  <ellipse cx="58" cy="102" rx="27" ry="28" fill="#7a5340" />
+  <ellipse cx="58" cy="108" rx="17" ry="18" fill="#a5825f" />
+  {pack && (
+    <g stroke="#c8412f" stroke-width="5" stroke-linecap="round" fill="none">
+      <path d="M44 80 Q42 100 47 124" />
+      <path d="M72 80 Q74 100 69 124" />
+    </g>
+  )}
+  <ellipse cx="40" cy="98" rx="5.5" ry="11" transform="rotate(25 40 98)" fill="#5f4430" />
+  <!-- head -->
+  <circle cx="40" cy="36" r="5" fill="#7a5340" />
+  <circle cx="76" cy="36" r="5" fill="#7a5340" />
+  <circle cx="40" cy="36" r="2.5" fill="#4f3527" />
+  <circle cx="76" cy="36" r="2.5" fill="#4f3527" />
+  <circle cx="58" cy="54" r="23" fill="#7a5340" />
+  <ellipse cx="58" cy="64" rx="13" ry="10" fill="#a5825f" />
+  <circle cx="49" cy="48" r="3" fill="#2b2a24" />
+  <circle cx="67" cy="48" r="3" fill="#2b2a24" />
+  <ellipse cx="58" cy="57" rx="4.5" ry="3.5" fill="#2b2a24" />
+  <rect x="53.5" y="63" width="4" height="9" rx="1.5" fill="#fffdf5" />
+  <rect x="58.5" y="63" width="4" height="9" rx="1.5" fill="#fffdf5" />
+  <ellipse cx="46" cy="132" rx="8" ry="4" fill="#5f4430" />
+  <ellipse cx="70" cy="132" rx="8" ry="4" fill="#5f4430" />
+</svg>

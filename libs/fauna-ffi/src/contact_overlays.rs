@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use fauna_client_account_runtime::contact_overlays::StagedSave;
 use fauna_conversations::ConversationsManager;
-use fauna_core::contact_overlay::{OverlayEditor, OverlayForm};
+use fauna_core::contact_overlay::{OverlayEditor, OverlayForm, label_suggestions};
 use fauna_core::format::PeerLabel;
 use fauna_core::localized::LocalizedText;
 
@@ -116,6 +116,15 @@ impl FfiContactOverlays {
     /// The derived label vocabulary — every live label across every person.
     pub fn vocabulary(&self) -> Vec<String> {
         self.manager.contacts().vocabulary()
+    }
+
+    /// The completion under the private section's label add field
+    /// (`profile-label-suggestion`): the vocabulary labels `typed` starts,
+    /// minus the `staged` ones. The app paints none until the field holds
+    /// text; a pick stages through the editor's `add_label` exactly as if
+    /// typed.
+    pub fn label_suggestions(&self, typed: String, staged: Vec<String>) -> Vec<String> {
+        label_suggestions(&self.manager.contacts().vocabulary(), &typed, &staged)
     }
 
     /// The private section's editor for `actor_id` (hex) — one per Profile

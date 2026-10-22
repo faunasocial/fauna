@@ -14,7 +14,7 @@ use fauna_core::custody_grant::{CUSTODY_GRANT_ID_LEN, CustodyGrant, CustodyScope
 use fauna_core::data::{
     AccountLoadHint, DelegationConfig, Facet, FacetFeature, InboxMode, MailConfig, MailCredential,
     MailCredentialKind, NestEntry, NestRole, ParticipantRef, Post, PostBody, PostId, Profile,
-    Reference, TaskAssignment, Timestamp,
+    ProfileAudience, Reference, TaskAssignment, Timestamp,
 };
 use fauna_core::delegation::{
     HeavyTaskCapability, KIND_INDEX, ParticipantClass, ParticipantDescriptor, current_candidates,
@@ -174,6 +174,7 @@ fn a_profile_with_an_unknown_role_hint_and_mode_decodes_and_carries_them() {
         load_hint: Some(AccountLoadHint::Full),
         inbox_mode: InboxMode::Open,
         recovery_head: None,
+        audience: ProfileAudience::ThisNest,
         updated_at: Timestamp(3),
     };
     let mut newer = tree(&profile);
@@ -198,6 +199,61 @@ fn a_profile_with_an_unknown_role_hint_and_mode_decodes_and_carries_them() {
         "an unknown inbox mode acts as Closed"
     );
     assert_eq!(older.inbox_mode.to_wire(), None, "and has no stored token");
+}
+
+// ── Profile: ProfileAudience ──────────────────────────────────────────────
+
+/// The cross-nest opt-in (`profile.md` § Where logic lives → *The remote
+/// read*): `Everyone` round-trips, an absent field reads as the closed
+/// default, and an audience a newer build names is carried whole and never
+/// counts as `Everyone`.
+#[test]
+fn a_profile_audience_round_trips_defaults_closed_and_carries_an_unknown_value() {
+    #[derive(Serialize)]
+    enum NewerProfileAudience {
+        Followers,
+    }
+
+    let mut profile = Profile {
+        actor_id: ActorId([3; 32]),
+        display_name: None,
+        bio: None,
+        avatar: None,
+        banner: None,
+        links: vec![],
+        nests: vec![],
+        admin_nests: vec![],
+        load_hint: None,
+        inbox_mode: InboxMode::Open,
+        recovery_head: None,
+        audience: ProfileAudience::Everyone,
+        updated_at: Timestamp(4),
+    };
+    let everyone: Profile = decode_carrying(&tree(&profile));
+    assert_eq!(everyone.audience, ProfileAudience::Everyone);
+    assert!(everyone.audience.is_everyone());
+
+    profile.audience = ProfileAudience::ThisNest;
+    let mut absent = tree(&profile);
+    let Value::Map(map) = &mut absent else {
+        panic!("a profile encodes as a map")
+    };
+    assert!(map.remove("audience").is_some());
+    let older: Profile = canonical_decode(&canonical_encode(&absent).unwrap()).unwrap();
+    assert_eq!(
+        older.audience,
+        ProfileAudience::ThisNest,
+        "a profile written before the field is not readable across nests"
+    );
+
+    let mut newer = tree(&profile);
+    *at(&mut newer, &["audience"]) = tree(&NewerProfileAudience::Followers);
+    let carried: Profile = decode_carrying(&newer);
+    assert!(matches!(carried.audience, ProfileAudience::Unknown(_)));
+    assert!(
+        !carried.audience.is_everyone(),
+        "an unknown audience is never served across nests"
+    );
 }
 
 // ── MailConfig and DelegationConfig: MailCredentialKind, ParticipantRef ──
@@ -228,6 +284,7 @@ fn newer_mail_and_delegation_records_with_unknown_variants_decode_whole() {
             created_at: 1_700_000_000,
             updated_at: Default::default(),
             wrapped_under: None,
+            token_minted_at: None,
             revoked_at_unix: None,
             burned: None,
         }],

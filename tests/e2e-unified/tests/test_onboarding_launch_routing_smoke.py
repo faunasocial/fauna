@@ -446,7 +446,7 @@ def test_smoke_d_unreachable_dns_fail_shows_retry_surface(launch_harness):
     procedure-doc case D.)
 
     On web the `isSafeNodeUrl` guard that would reject a non-loopback `http` host
-    lives only in the app-level `$lib/api.ts` path, NOT the launch machine, so the
+    lives only in the app-level `#lib/api.ts` path, NOT the launch machine, so the
     launch challenge still dials `ws://…invalid` → NXDOMAIN → transient."""
     bogus_url = "http://nest.smoke-does-not-resolve.invalid:8080"
     driver = launch_harness.launch_and_route(

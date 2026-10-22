@@ -255,7 +255,9 @@ fn decrypt_keypair(
 fn spawn_publish(event: Event, relay_urls: Vec<String>, dial_policy: RelayDialPolicy) {
     // spawn-ok(request-scoped): holds no `AppState` and no nest key material —
     // the event arrives already signed, and the task only walks a fixed relay
-    // list, each hop bounded by `RelayClient`'s own connect/publish timeouts.
+    // list, each hop bounded by `RelayClient`'s own connect and publish
+    // timeouts (`RELAY_CONNECT_TIMEOUT`, the 10 s OK wait) — a silent
+    // relay costs this detached task, never a request or the sync worker.
     // Nothing it can do after a rotation depends on the superseded identity.
     tokio::spawn(async move {
         for url in &relay_urls {

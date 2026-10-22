@@ -159,6 +159,11 @@ pub struct TestPostSpec {
     /// the client's fire-once resolve guard would then attempt the real read.
     #[serde(default)]
     pub unlock_offer: Option<UnlockOfferView>,
+    /// A pre-set [`PostSummary::unlock_purchase_pending`] — the bought-and-
+    /// pending state the manager's buy writes, projected directly for the same
+    /// tier_2 reason as `unlock_offer`. Default `false`, a fresh feed load.
+    #[serde(default)]
+    pub unlock_purchase_pending: bool,
     /// A pre-resolved tip surface (`monetization.md` § Tips) — the same
     /// pre-fold pattern as `unlock_offer` above, and for the same reason: a
     /// real `fauna.tips.list` round-trip needs a live nest that has *ingested a
@@ -232,6 +237,13 @@ pub struct TestQuotedSpec {
     /// (empty) body. Default `false` = an ordinary quote.
     #[serde(default)]
     pub not_found: bool,
+    /// The QUOTED post was blocked by this nest's admin after a report
+    /// (`moderation.md` § Admin block of a reported item) — the report reason's
+    /// token. When set with an empty body, a client paints the shared notice in
+    /// place of the body; with a body (the author's own read), beside it.
+    /// Default `None` = an ordinary quote.
+    #[serde(default)]
+    pub admin_block_reason: Option<String>,
 }
 
 impl TestPostSpec {
@@ -249,6 +261,7 @@ impl TestPostSpec {
             authoring_origin: q.authoring_origin,
             legal_takedown_ref: q.legal_takedown_ref.clone(),
             not_found: q.not_found,
+            admin_block_reason: q.admin_block_reason.clone(),
         });
         let mut document = crate::manager::build_post_document(&self.body, quote.as_ref(), &[]);
         // Project any pre-resolved link preview onto the matching `LinkPreview`
@@ -299,7 +312,7 @@ impl TestPostSpec {
             labels: self.labels,
             unlock_offer: self.unlock_offer,
             tips: self.tips,
-            unlock_purchase_pending: false,
+            unlock_purchase_pending: self.unlock_purchase_pending,
             // No spec field: a taken-down post has no body/author/tags to
             // specify, so a test wanting one mints it with the single-purpose
             // `PostSummary::taken_down` rather than by hollowing out a spec.

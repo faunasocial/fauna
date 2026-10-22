@@ -7,35 +7,45 @@
     listBridgeFollows,
     addBridgeFollow,
     removeBridgeFollow,
+    listBridgeFollowRequests,
+    approveBridgeFollowRequest,
+    refuseBridgeFollowRequest,
     type BridgeInfo,
     type BridgeFollow,
-  } from '$lib/bridges';
-  import { identity } from '$lib/store';
-  import { isSafeNavUrl } from '$lib/safe-url';
+    type BridgeFollowRequestRow,
+  } from '#lib/bridges';
+  import { identity } from '#lib/store';
+  import { isSafeNavUrl } from '#lib/safe-url';
   import { onMount } from 'svelte';
-  import MessageBanner from '$lib/components/MessageBanner.svelte';
-  import BridgeCard from '$lib/components/BridgeCard.svelte';
-  import { t } from '$lib/i18n/strings';
-  import { feedSourceOp, isUnifiedBridgesPageBridge, wardAskRules } from '$lib/wasm';
-  import { IDS } from '$lib/generated/uiIds';
-  import { familyFeedSourceRequest } from '$lib/rpc';
-  import { isGuardianApprovalRequired, refusalText } from '$lib/guardian-refusal';
+  import MessageBanner from '#lib/components/MessageBanner.svelte';
+  import BridgeCard from '#lib/components/BridgeCard.svelte';
+  import BridgePlugins from '#lib/components/BridgePlugins.svelte';
+  import BridgePluginCards from '#lib/components/BridgePluginCards.svelte';
+  import { checkIsAdmin } from '#lib/api';
+  import { t } from '#lib/i18n/strings';
+  import { feedSourceOp, isUnifiedBridgesPageBridge, wardAskRules } from '#lib/wasm';
+  import { IDS } from '#lib/generated/uiIds';
+  import { familyFeedSourceRequest } from '#lib/rpc';
+  import { isGuardianApprovalRequired, refusalText } from '#lib/guardian-refusal';
   import {
     addRefusedTriple,
     sourceAskRows,
     type FeedTriple,
-  } from '$lib/ward-asks';
-  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '$lib/wardAsks.svelte';
+  } from '#lib/ward-asks';
+  import { wardAsks, refreshWardAsks, rereadAfterAsk } from '#lib/wardAsks.svelte';
 
   let bridges: BridgeInfo[] = $state([]);
   let loading = $state(true);
   let error = $state('');
   let follows: Record<string, BridgeFollow[]> = $state({});
+  let followRequests: Record<string, BridgeFollowRequestRow[]> = $state({});
+  // The installed-plugins list and its install entry are the admin's alone.
+  let isAdmin = $state(false);
   // The `(bridge_id, operation, target)` triples this session saw refused by
   // the guardian gate (family-safety.md § Feed-source approvals) — the LOCAL
   // half of the ask surface, what turns a refusal the ward just hit into a
   // visible `bridge-source-request-button`. The DURABLE half is the ward's own
-  // `status.feed_requests` (`$lib/wardAsks.svelte`), read first. Keyed on the
+  // `status.feed_requests` (`#lib/wardAsks.svelte`), read first. Keyed on the
   // ask data, never the add-follow buffers (the card clears them at dispatch).
   let refused: FeedTriple[] = $state([]);
 
@@ -78,12 +88,17 @@
       // app with this page applies the same rule.
       bridges = (await listBridges(secret)).filter((b) => isUnifiedBridgesPageBridge(b.id));
       const newFollows: Record<string, BridgeFollow[]> = {};
+      const newRequests: Record<string, BridgeFollowRequestRow[]> = {};
       for (const bridge of bridges) {
         if (bridge.linked && bridge.supports_follows) {
           newFollows[bridge.id] = await listBridgeFollows(secret, bridge.id);
         }
+        if (bridge.linked && bridge.supports_follow_requests) {
+          newRequests[bridge.id] = await listBridgeFollowRequests(secret, bridge.id);
+        }
       }
       follows = newFollows;
+      followRequests = newRequests;
     } catch (e: any) {
       error = e.message;
     }
@@ -106,7 +121,10 @@
     // The ward's own feed-source asks, so a pending / approved ask paints on an
     // open that never saw the refusal (best-effort).
     const secret = $identity?.secretHex;
-    if (secret) void refreshWardAsks(secret);
+    if (secret) {
+      void refreshWardAsks(secret);
+      void checkIsAdmin(secret).then((admin) => (isAdmin = admin)).catch(() => {});
+    }
     refresh();
   });
 
@@ -168,6 +186,20 @@
     }
   }
 
+  /** Approve or refuse a waiting follow request, then re-read (non-optimistic —
+   *  bridges.md § Follow requests). No confirm on either. */
+  async function handleResolveFollowRequest(bridgeId: string, id: string, approve: boolean) {
+    const secret = $identity?.secretHex;
+    if (!secret) return;
+    try {
+      if (approve) await approveBridgeFollowRequest(secret, bridgeId, id);
+      else await refuseBridgeFollowRequest(secret, bridgeId, id);
+      await refresh();
+    } catch (e: any) {
+      error = e.message;
+    }
+  }
+
   async function handleRemoveFollow(bridgeId: string, fId: string) {
     const secret = $identity?.secretHex;
     if (!secret) return;
@@ -191,6 +223,7 @@
     <BridgeCard
       {bridge}
       follows={follows[bridge.id] ?? []}
+      followRequests={followRequests[bridge.id] ?? []}
       sourceAsks={sourceAskRows(wardAskRules, wardAsks().feed, refused, bridge.id)}
       onRequestSource={(triple) => handleRequestSource(bridge, triple)}
       onLink={(mode, fields) => handleLink(bridge, mode, fields)}
@@ -198,6 +231,12 @@
       onSettingChange={(key, value) => handleSettingChange(bridge, key, value)}
       onAddFollow={(id, petname) => handleAddFollow(bridge.id, id, petname)}
       onRemoveFollow={(fId) => handleRemoveFollow(bridge.id, fId)}
+      onResolveFollowRequest={(id, approve) => handleResolveFollowRequest(bridge.id, id, approve)}
     />
   {/each}
+  <!-- Every installed plugin's settings card, for every account. -->
+  <BridgePluginCards bind:error />
+  {#if isAdmin}
+    <BridgePlugins bind:error />
+  {/if}
 {/if}

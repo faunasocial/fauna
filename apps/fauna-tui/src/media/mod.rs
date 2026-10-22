@@ -3045,6 +3045,11 @@ mod tests {
     /// Every member row is joined — the join-filter's answer once the
     /// conversations rail holds the group.
     struct JoinedEverything;
+    impl fauna_media_machine::FolderChannelOwners for JoinedEverything {
+        fn folder_channel_owner(&self, _: &[u8; 32]) -> Option<fauna_core::identity::ActorId> {
+            None
+        }
+    }
     impl fauna_media_machine::MlsQuery for JoinedEverything {
         fn is_joined_shared_set(&self, _mls_group_id_hex: &str) -> bool {
             true

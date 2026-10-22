@@ -41,6 +41,9 @@ pub struct FakeNestApi {
     /// outcome alone (a wrong-but-valid key just reads as `NotRegistered`).
     /// Recording it is what makes the precedence rule testable.
     pub(crate) silent_challenge_secrets: Mutex<Vec<String>>,
+    /// Runs inside `silent_challenge`, before it answers — the seam a test uses
+    /// to act while the probe is "in flight" (e.g. raise the wizard's cancel).
+    pub(crate) silent_challenge_hook: Mutex<Option<SilentChallengeHook>>,
     pub(crate) calls: Mutex<Vec<String>>,
     /// `(handle, mail_domain)` captured from each `claim_admin` call, in order —
     /// so a test can assert the machine threaded the chosen handle's local part
@@ -87,6 +90,16 @@ pub struct FakeNestApi {
     /// `calls` itself: `calls()` and its ~20 existing callers stay exactly
     /// as they read today.
     pub(crate) base_url_calls: Mutex<Vec<(String, String)>>,
+}
+
+/// A callback the fake runs while `silent_challenge` is in flight.
+#[derive(Clone)]
+pub struct SilentChallengeHook(std::sync::Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for SilentChallengeHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SilentChallengeHook")
+    }
 }
 
 /// `(base_url, recovery_secret_hex, actor_id_hex, handle)` as the machine
@@ -136,6 +149,11 @@ impl FakeNestApi {
     }
     pub fn set_silent_challenge_response(&self, r: SilentChallengeOutcome) {
         *self.silent_challenge_response.lock().unwrap() = Some(r);
+    }
+    /// Run `f` inside every `silent_challenge` call, before it answers.
+    pub fn set_silent_challenge_hook(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.silent_challenge_hook.lock().unwrap() =
+            Some(SilentChallengeHook(std::sync::Arc::new(f)));
     }
     pub fn set_restore_escrowed_seed_response(
         &self,
@@ -243,6 +261,10 @@ impl super::NestApi for FakeNestApi {
             .lock()
             .unwrap()
             .push(secret_hex.to_string());
+        let hook = self.silent_challenge_hook.lock().unwrap().clone();
+        if let Some(SilentChallengeHook(f)) = hook {
+            f();
+        }
         self.silent_challenge_response
             .lock()
             .unwrap()
@@ -281,7 +303,7 @@ impl super::NestApi for FakeNestApi {
                     token: Some("tok".into()),
                     expires_at: Some(0),
                     domain: None,
-                    deployment_seed: None,
+                    ..Default::default()
                 })
             })
     }

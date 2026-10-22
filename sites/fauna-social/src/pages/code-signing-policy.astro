@@ -1,0 +1,35 @@
+---
+import Base from '../layouts/Base.astro';
+import Critter from '../components/Critter.astro';
+// Structure and styling only — every word comes from the copy file, imported
+// at build time (docs/sites/fauna-social/README.md § How the markdown becomes
+// the page). Same shape as privacy.astro: heading + illustration + lead, then
+// the body in document order.
+//
+// Added 2026-10-10 for the SignPath Foundation application: a project it
+// signs for must publish a page titled "Code signing policy" on its home
+// page, naming the team roles, crediting the free signing and linking the
+// privacy policy. Like /privacy and /official-apps it has NO nav entry —
+// reachable by URL, from the footer sentence, from /official-apps and from
+// the sitemap, so the visible navigation stays short.
+import { compiledContent, frontmatter as fm } from '../../../../docs/sites/fauna-social/code-signing-policy.md';
+import { fill } from '../data/fill.ts';
+import { takeOpening } from '../data/copy.ts';
+
+const { heading, lead, illustration, rest } = takeOpening(fill(await compiledContent()));
+---
+<Base title={fm.title} description={fm.description}>
+  <div class="wrap page">
+    <article class="prose copy">
+      <div class="page-head">
+        {illustration && <Critter name={illustration} size={90} />}
+        <div>
+          <h1 set:html={heading} />
+          <p class="lead" set:html={lead} />
+        </div>
+      </div>
+
+      <Fragment set:html={rest} />
+    </article>
+  </div>
+</Base>

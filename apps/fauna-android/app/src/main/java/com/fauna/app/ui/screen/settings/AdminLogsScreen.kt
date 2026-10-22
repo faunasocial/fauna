@@ -12,6 +12,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -24,6 +25,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -35,6 +37,7 @@ import com.fauna.app.ui.components.LogEntryList
 import com.fauna.app.ui.components.LogLevelFilter
 import com.fauna.app.ui.components.renderLogs
 import com.fauna.app.ui.navigation.LocalAppMessages
+import com.fauna.app.ui.util.resolveLocalized
 import com.fauna.app.ui.viewmodel.AdminLogsVM
 import uniffi.fauna_log.LogRow
 import social.fauna.generated.Ids
@@ -58,6 +61,8 @@ fun AdminLogsScreen(
 ) {
     val entries by vm.entries.collectAsState()
     val error by vm.error.collectAsState()
+    val auditView by vm.auditView.collectAsState()
+    val context = LocalContext.current
     val appMessages = LocalAppMessages.current
     var filterIndex by remember { mutableIntStateOf(0) }
 
@@ -68,12 +73,28 @@ fun AdminLogsScreen(
     // the pre-computed rows so it stays Robolectric-safe.
     val rendered = remember(entries, filterIndex) { renderLogs(entries, filterIndex) }
 
+    // The audit section's rows, chain line and cursor are the shared fold's;
+    // the page adds only the absolute local time ahead of each row.
+    val auditRows = remember(auditView) {
+        auditView?.rows?.map {
+            com.fauna.ffi.formatUnixLocalMs(it.tsMs) + "  " +
+                (resolveLocalized(context, it.text) ?: "")
+        }.orEmpty()
+    }
+    val auditStatus = remember(auditView) {
+        auditView?.let { resolveLocalized(context, it.integrityText) }.orEmpty()
+    }
+
     AdminLogsContent(
         rows = rendered.rows,
         copyText = rendered.copyText,
         filterIndex = filterIndex,
         onFilterChange = { filterIndex = it },
         onBack = { navController.exitAdminToPrimary() },
+        auditRows = auditRows,
+        auditStatus = auditStatus,
+        auditMoreEnabled = auditView?.moreBeforeId != null,
+        onAuditMore = { vm.auditMore() },
     )
 }
 
@@ -85,6 +106,10 @@ fun AdminLogsContent(
     filterIndex: Int,
     onFilterChange: (Int) -> Unit,
     onBack: () -> Unit,
+    auditRows: List<String> = emptyList(),
+    auditStatus: String = "",
+    auditMoreEnabled: Boolean = false,
+    onAuditMore: () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -133,6 +158,36 @@ fun AdminLogsContent(
             )
 
             LogEntryList(rows, emptyText = stringResource(R.string.admin_logs_page_empty))
+
+            // The admin audit log section (`admin.md` § The admin audit log on
+            // `admin-logs`), below the log lines.
+            Column(
+                modifier = Modifier.testTag(Ids.ADMIN_AUDIT_SECTION),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    stringResource(R.string.admin_logs_page_audit_title),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                auditRows.forEach { row ->
+                    Text(
+                        row,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.testTag(Ids.ADMIN_AUDIT_ENTRY),
+                    )
+                }
+                Text(
+                    auditStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(Ids.ADMIN_AUDIT_INTEGRITY_STATUS),
+                )
+                Button(
+                    onClick = onAuditMore,
+                    enabled = auditMoreEnabled,
+                    modifier = Modifier.testTag(Ids.ADMIN_AUDIT_MORE_BUTTON),
+                ) { Text(stringResource(R.string.admin_logs_page_audit_more)) }
+            }
         }
     }
 }

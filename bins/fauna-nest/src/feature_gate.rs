@@ -148,6 +148,29 @@ pub async fn gate(state: &AppState, actor_id: &[u8; 32], op: &GateOp) -> Result<
     }
 }
 
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the nest page's feature-limit document — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`authorization-server.md`
+/// § Scope grammar → *The admin arms* names the set).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        (
+            "fauna.features.policy.get",
+            authored_read_handler(KIND_POLICY_GET, RuleTier::Admin),
+        ),
+        (
+            "fauna.features.policy.update",
+            policy_update_handler(KIND_POLICY_UPDATE, RuleTier::Admin),
+        ),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
+
 /// `fauna.features.status` — the transparency read (§ Transparency &
 /// auditability, boundary 4: *"there is no restriction you cannot see"*).
 ///

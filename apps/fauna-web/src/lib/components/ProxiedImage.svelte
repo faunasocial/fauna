@@ -6,7 +6,7 @@
   // C2PA badge: the bytes are the proxy's live answer, never a stored blob the check could
   // address. A click opens the lightbox, as on a blob image.
   import Lightbox from './Lightbox.svelte';
-  import { IDS } from '$lib/generated/uiIds';
+  import { IDS } from '#lib/generated/uiIds';
 
   interface Props {
     path: string;

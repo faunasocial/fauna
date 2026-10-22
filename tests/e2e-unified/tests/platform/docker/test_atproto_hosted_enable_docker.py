@@ -81,6 +81,11 @@ pytestmark = [
 ]
 
 CLAIM_CODE = "ATPUD1"
+# A hosted level is refused on a box with no public domain
+# (`fauna.bridges.atproto.domain_not_public`, the real-domain gate of
+# `atproto-pds-bridge.md` § Enable UX), so the box is claimed with a
+# registerable domain (a reserved one: nothing here resolves it).
+DOMAIN = "nest.example.com"
 
 
 @pytest.fixture()
@@ -96,7 +101,7 @@ def docker_nest():
     start_container(name, port, env={"FAUNA_CLAIM_CODE": CLAIM_CODE})
     try:
         wait_for_health(port, name)
-        admin = claim_admin_api(port, CLAIM_CODE, handle="admin")
+        admin = claim_admin_api(port, CLAIM_CODE, handle="admin", mail_domain=DOMAIN)
         yield {
             "name": name,
             "port": port,

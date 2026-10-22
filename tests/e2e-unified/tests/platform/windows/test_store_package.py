@@ -519,8 +519,9 @@ GRADE_PUBLISHER = "CN=00000000-0000-0000-0000-000000000000"
 _MACHINE = {"x64": 0x8664, "arm64": 0xAA64, "x86": 0x14C}
 
 
-def _pe(machine, cor_flags=None):
-    """A minimal PE32+ image: one section, and a CLR header when `cor_flags` is set."""
+def _pe(machine, cor_flags=None, chpe=False):
+    """A minimal PE32+ image: one section, a CLR header when `cor_flags` is set, and a
+    load config carrying CHPE metadata (an ARM64X hybrid image) when `chpe` is set."""
     opt_size = 112 + 16 * 8
     data = bytearray(0x400)
     data[0:2] = b"MZ"
@@ -535,6 +536,10 @@ def _pe(machine, cor_flags=None):
     if cor_flags is not None:
         struct.pack_into("<II", data, dirs + 14 * 8, 0x1000, 72)   # CLR runtime header
         struct.pack_into("<I", data, 0x200 + 16, cor_flags)        # its Flags
+    if chpe:
+        struct.pack_into("<II", data, dirs + 10 * 8, 0x1080, 0xD0)     # load config
+        struct.pack_into("<I", data, 0x280, 0xD0)                      # its Size
+        struct.pack_into("<Q", data, 0x280 + 0xC8, 0x18000A288)        # CHPEMetadataPointer
     struct.pack_into("<IIII", data, opt + opt_size + 8, 0x200, 0x1000, 0x200, 0x200)
     return bytes(data)
 
@@ -599,6 +604,17 @@ class TestStorePackageGrade:
         path = _msix(tmp_path, arch="arm64", extra={"App/stray.dll": _pe(_MACHINE["x64"])})
         problems = self._grade(builder, path, arch="arm64")
         assert any("App/stray.dll" in p for p in problems), problems
+
+    def test_an_arm64x_hybrid_image_ships_in_the_x64_package(self, builder, tmp_path):
+        """The Windows App SDK's x64 runtime carries ARM64X images (ARM64 machine type
+        plus CHPE metadata in the load config, e.g. Microsoft.Windows.Workloads.
+        Resources_ec.dll) for x64 processes on ARM64 Windows; the 0.1.5 Store dry run
+        refused one. A plain ARM64 image in the x64 package is still a stray."""
+        hybrid = _msix(tmp_path, extra={"App/Hybrid_ec.dll": _pe(_MACHINE["arm64"], chpe=True)})
+        assert self._grade(builder, hybrid) == []
+        (tmp_path / "plain").mkdir()
+        plain = _msix(tmp_path / "plain", extra={"App/stray.dll": _pe(_MACHINE["arm64"])})
+        assert any("App/stray.dll" in p for p in self._grade(builder, plain))
 
     def test_an_il_only_managed_assembly_is_arch_neutral(self, builder, tmp_path):
         """AnyCPU .NET assemblies carry the i386 machine type plus the ILONLY flag;

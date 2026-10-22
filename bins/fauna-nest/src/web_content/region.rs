@@ -1,16 +1,20 @@
 //! The nest-as-publisher leg of the region content plane (`region-blocking.md`
-//! § The content plane → *The nest-as-publisher leg*).
+//! § The content plane → *The nest-as-publisher leg*) and of the nest admin's
+//! own rules (`nest-rules.md` § The nest content policy → *The publisher leg*).
 //!
 //! The one nest surface that evaluates content: the public web pages the nest
 //! renders to the open internet from published posts, where the nest is the
-//! publisher and no app exists to apply a region for the visitor. The nest
-//! applies the content policy of its own admin-declared situs — every region on
-//! the registry's parent chain, strictest-wins — through the SAME composed
-//! engine the apps call, with the region source only: a public page has no
-//! viewer thresholds and no guardian. Its inputs are the labels the nest already
-//! holds for the post plus each bundled scorer's factor over the post's public
-//! plaintext; for a gated post that is the public preview, never the sealed
-//! full body.
+//! publisher and no app exists to apply a region or a nest's rules for the
+//! visitor. The nest applies the content policy of its own admin-declared situs
+//! — every region on the registry's parent chain, strictest-wins — and the
+//! admin's own published rules, through the SAME composed engine the apps call,
+//! with the region and nest sources only: a public page has no viewer
+//! thresholds and no guardian. Its inputs are the labels the nest already holds
+//! for the post plus each bundled scorer's factor over the post's public
+//! plaintext — a `wasm` or `list` scorer through the labeler, a nest's
+//! `keywords` scorer through the shared matcher; a `prompt` rule has no runtime
+//! here either and is inert. For a gated post that plaintext is the public
+//! preview, never the sealed full body.
 //!
 //! This module is the nest's only caller of `render_verdict_composed`
 //! (`the_fold_has_exactly_one_caller` pins it): every in-app surface of the same
@@ -22,13 +26,15 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use fauna_core::content_category::ContentLabelEntry;
-use fauna_core::obligation::{RegionAttribution, RenderVerdict, render_verdict_composed};
+use fauna_core::content_policy::{ContentPolicyDocument, Publisher, evaluate_keyword_scorers};
+use fauna_core::obligation::{
+    NestAttribution, NestRuleSet, RegionAttribution, RenderVerdict, render_verdict_composed,
+    rules_from_nest_policy,
+};
 use fauna_core::region_authority::{
     PAYLOAD_KIND_CONTENT_POLICY, PolicyArtifact, RegionRegistry, verify_artifact,
 };
-use fauna_core::region_policy::{
-    BundledScorer, REASON_DEFAULT_KEY, RegionRuleSet, rules_from_region_policy,
-};
+use fauna_core::region_policy::{REASON_DEFAULT_KEY, RegionRuleSet, rules_from_region_policy};
 use fauna_core::scoring::LabelerPostInput;
 use fauna_labeler::region::{PreparedScorer, scorers_in_use};
 
@@ -40,30 +46,127 @@ use crate::db::CacheDb;
 /// stay the same — whichever document version or scorer name carries the bytes.
 type ScorerDigest = [u8; 32];
 
-/// The situs chain's content policies, read once per site render.
-pub(crate) struct SitusPolicies {
+/// The publisher policies the public pages fold — the situs chain's content
+/// policies and the nest's own rules — read once per site render.
+pub(crate) struct PublisherPolicies {
     /// Most specific first, as `RegionRegistry::chain` returns them — the order
     /// the engine attributes a tie in.
     sets: Vec<RegionRuleSet>,
-    /// The bundled scorers some rule in force reads, ready to run.
+    /// The nest admin's own published rules, when any are in force.
+    nest: Option<NestRules>,
+    /// The bundled scorers some rule in force reads, ready to run — the
+    /// regions' and the nest's alike, each producing its own publisher's factor.
     scorers: Vec<(ScorerDigest, Arc<PreparedScorer>)>,
 }
 
-impl SitusPolicies {
-    fn none() -> Self {
-        Self {
-            sets: Vec::new(),
-            scorers: Vec::new(),
-        }
-    }
+/// The nest's own rules, assembled for the fold.
+struct NestRules {
+    set: NestRuleSet,
+    /// Kept for its `keywords` scorers, which the shared matcher runs over each
+    /// post's public plaintext.
+    document: ContentPolicyDocument,
+    publisher: Publisher,
+}
 
-    /// Whether no region rule is in force — no situs, no cached document, or
-    /// only documents that do not apply. A render skips the fold entirely then,
-    /// which is every deployment that declares no region.
+impl PublisherPolicies {
+    /// Whether no rule is in force — no situs, no cached document, no nest
+    /// rules, or only documents that do not apply. A render skips the fold
+    /// entirely then, which is every deployment with neither.
     pub(crate) fn is_inert(&self) -> bool {
         self.sets.iter().all(|set| set.rules.is_empty())
+            && self
+                .nest
+                .as_ref()
+                .is_none_or(|nest| nest.set.rules.is_empty())
+    }
+
+    fn nest_sets(&self) -> &[NestRuleSet] {
+        match &self.nest {
+            Some(nest) => std::slice::from_ref(&nest.set),
+            None => &[],
+        }
     }
 }
+
+/// Read the publisher policies in force: the nest's declared situs chain
+/// ([`situs_rule_sets`]) and the nest's own rules ([`nest_rules`]).
+pub(crate) async fn publisher_policies(
+    db: &CacheDb,
+    registry: &RegionRegistry,
+) -> Result<PublisherPolicies> {
+    let (sets, mut wanted) = situs_rule_sets(db, registry).await?;
+    let nest = nest_rules(db).await?;
+    if let Some(nest) = &nest {
+        wanted.extend(
+            scorers_in_use(&nest.document, &nest.publisher)
+                .into_iter()
+                .map(|scorer| (nest.publisher.clone(), scorer.clone())),
+        );
+    }
+    let scorers = if wanted.is_empty() {
+        Vec::new()
+    } else {
+        // Compiling a module is CPU work — off the async workers.
+        tokio::task::spawn_blocking(move || {
+            wanted
+                .into_iter()
+                .filter_map(|(publisher, scorer)| {
+                    match PreparedScorer::prepare(&publisher, &scorer) {
+                        Ok(prepared) => Some((
+                            *blake3::hash(&scorer.bytes).as_bytes(),
+                            Arc::new(prepared),
+                        )),
+                        Err(e) => {
+                            tracing::warn!(publisher = %publisher.factor_prefix(), scorer = %scorer.name, "bundled scorer unusable, its factor stays absent: {e:#}");
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .await?
+    };
+    Ok(PublisherPolicies {
+        sets,
+        nest,
+        scorers,
+    })
+}
+
+/// The nest admin's own published rules, as stored
+/// (`crate::db::content_policy`), assembled for the fold with the nest source.
+/// The document was validated before it was stored; one that no longer decodes
+/// or applies on this build contributes nothing and is logged, as a region's
+/// does.
+async fn nest_rules(db: &CacheDb) -> Result<Option<NestRules>> {
+    let Some(stored) = db.get_nest_content_policy().await? else {
+        return Ok(None);
+    };
+    let document: ContentPolicyDocument =
+        match fauna_protocol::decode_strict(&stored.policy.document) {
+            Ok(document) => document,
+            Err(e) => {
+                tracing::warn!(
+                    sequence = stored.policy.sequence,
+                    "the nest's stored rules do not decode, not applied: {e}"
+                );
+                return Ok(None);
+            }
+        };
+    let set = rules_from_nest_policy(&document, &stored.domain);
+    if !set.status.is_applied() {
+        tracing::warn!(status = ?set.status, "the nest's rules are in force but do not apply");
+    }
+    Ok(Some(NestRules {
+        set,
+        document,
+        publisher: Publisher::Nest(stored.domain),
+    }))
+}
+
+/// The bundled scorers one publisher's document needs, with the publisher they
+/// run under.
+type WantedScorers = Vec<(Publisher, fauna_core::content_policy::BundledScorer)>;
 
 /// Read the content policies in force for the nest's declared situs.
 ///
@@ -75,12 +178,12 @@ impl SitusPolicies {
 /// region whose document is missing, no longer verifies or does not decode
 /// contributes nothing and is logged; one whose document does not apply
 /// contributes its (empty) rule set, which the engine ignores.
-pub(crate) async fn situs_policies(
+async fn situs_rule_sets(
     db: &CacheDb,
     registry: &RegionRegistry,
-) -> Result<SitusPolicies> {
+) -> Result<(Vec<RegionRuleSet>, WantedScorers)> {
     let Some(situs) = db.get_declared_region().await? else {
-        return Ok(SitusPolicies::none());
+        return Ok(Default::default());
     };
     let chain = match registry.chain(&situs) {
         Ok(chain) => chain,
@@ -88,12 +191,12 @@ pub(crate) async fn situs_policies(
         // refuses rather than applying whichever prefix it reached first.
         Err(e) => {
             tracing::error!(%situs, "region registry chain unusable, no region policy applied: {e}");
-            return Ok(SitusPolicies::none());
+            return Ok(Default::default());
         }
     };
     let now = crate::db::now_epoch_secs().max(0) as u64;
     let mut sets = Vec::with_capacity(chain.len());
-    let mut wanted: Vec<(fauna_core::region_authority::RegionCode, BundledScorer)> = Vec::new();
+    let mut wanted: WantedScorers = Vec::new();
     for region in chain {
         let Some(envelope) = db
             .relay_artifact(&region, PAYLOAD_KIND_CONTENT_POLICY)
@@ -128,37 +231,15 @@ pub(crate) async fn situs_policies(
         if !set.status.is_applied() {
             tracing::warn!(%region, status = ?set.status, "region content policy is in force but does not apply");
         }
+        let publisher = Publisher::Region(region.clone());
         wanted.extend(
-            scorers_in_use(&document, &region)
+            scorers_in_use(&document, &publisher)
                 .into_iter()
-                .map(|scorer| (region.clone(), scorer.clone())),
+                .map(|scorer| (publisher.clone(), scorer.clone())),
         );
         sets.push(set);
     }
-    let scorers = if wanted.is_empty() {
-        Vec::new()
-    } else {
-        // Compiling a module is CPU work — off the async workers.
-        tokio::task::spawn_blocking(move || {
-            wanted
-                .into_iter()
-                .filter_map(|(region, scorer)| {
-                    match PreparedScorer::prepare(&region, &scorer) {
-                        Ok(prepared) => Some((
-                            *blake3::hash(&scorer.bytes).as_bytes(),
-                            Arc::new(prepared),
-                        )),
-                        Err(e) => {
-                            tracing::warn!(%region, scorer = %scorer.name, "bundled scorer unusable, its factor stays absent: {e:#}");
-                            None
-                        }
-                    }
-                })
-                .collect()
-        })
-        .await?
-    };
-    Ok(SitusPolicies { sets, scorers })
+    Ok((sets, wanted))
 }
 
 /// Bundled-scorer answers, per actor, keyed by (post, scorer digest).
@@ -204,23 +285,29 @@ impl ScoreCache {
 }
 
 /// The labels the fold reads for one post: the ones the nest holds, plus each
-/// in-use bundled scorer's factor over the post's public plaintext.
+/// in-use bundled scorer's factor over the post's public plaintext — the
+/// nest's `keywords` scorers through the shared matcher, every other kind
+/// through the labeler.
 ///
 /// A scorer that fails (a trap, exhausted fuel or memory) answers nothing for
 /// the post, and that answer is cached like any other: the module is
 /// deterministic and would fail the same way on the next render.
 pub(crate) async fn post_labels(
     db: &CacheDb,
-    policies: &SitusPolicies,
+    policies: &PublisherPolicies,
     round: &mut ScoreRound,
     post_id: &[u8; 32],
     post: &fauna_core::data::Post,
 ) -> Result<Vec<ContentLabelEntry>> {
     let mut labels = db.post_label_entries(post_id).await?;
-    if policies.scorers.is_empty() {
-        return Ok(labels);
-    }
     let input = Arc::new(LabelerPostInput::from_post(post));
+    if let Some(nest) = &policies.nest {
+        labels.extend(evaluate_keyword_scorers(
+            &nest.document,
+            &nest.publisher,
+            input.text.as_deref().unwrap_or_default(),
+        ));
+    }
     for (digest, scorer) in &policies.scorers {
         let key = (*post_id, *digest);
         let answer = match round.previous.get(&key) {
@@ -252,7 +339,7 @@ pub(crate) async fn post_labels(
     Ok(labels)
 }
 
-/// What a region verdict does to one post's public page.
+/// What a publisher verdict does to one post's public page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageVerdict {
     /// The page shows the reasoned notice in place of the post.
@@ -261,34 +348,50 @@ pub(crate) enum PageVerdict {
     Collapse,
 }
 
-/// A region verdict on one post, with the attribution its placeholder shows.
+/// Whose rule a page's placeholder names.
 #[derive(Debug, Clone)]
-pub(crate) struct RegionPlacement {
-    pub(crate) verdict: PageVerdict,
-    attribution: RegionAttribution,
+enum PageAttribution {
+    /// A situs region's authority.
+    Region(RegionAttribution),
+    /// The nest itself, under its admin's published rules.
+    Nest(NestAttribution),
 }
 
-/// Fold one post's labels through the shared engine with the region source
-/// only. `None` unless a region rule blocks or collapses it — a badge has no
+/// A publisher verdict on one post, with the attribution its placeholder shows.
+#[derive(Debug, Clone)]
+pub(crate) struct PagePlacement {
+    pub(crate) verdict: PageVerdict,
+    attribution: PageAttribution,
+}
+
+/// Fold one post's labels through the shared engine with the region and nest
+/// sources only. `None` unless a rule blocks or collapses it — a badge has no
 /// placeholder, and with no other source in the call a block or collapse is
-/// always the region's.
+/// always a region's or the nest's (a tie goes to the region, `nest-rules.md`
+/// decision 3).
 pub(crate) fn placement(
-    policies: &SitusPolicies,
+    policies: &PublisherPolicies,
     labels: &[ContentLabelEntry],
-) -> Option<RegionPlacement> {
-    let composed = render_verdict_composed(labels, None, None, &policies.sets);
+) -> Option<PagePlacement> {
+    let composed =
+        render_verdict_composed(labels, None, None, &policies.sets, policies.nest_sets());
     let verdict = match composed.verdict {
         RenderVerdict::Block => PageVerdict::Block,
         RenderVerdict::Collapse => PageVerdict::Collapse,
         RenderVerdict::Show | RenderVerdict::Badge => return None,
     };
-    Some(RegionPlacement {
+    let attribution = match (composed.region(), composed.nest()) {
+        (Some(region), _) => PageAttribution::Region(region.clone()),
+        (None, Some(nest)) => PageAttribution::Nest(nest.clone()),
+        (None, None) => return None,
+    };
+    Some(PagePlacement {
         verdict,
-        attribution: composed.region()?.clone(),
+        attribution,
     })
 }
 
-impl RegionPlacement {
+impl PagePlacement {
     /// Whether the post's own body must not reach any page — a block. The
     /// caller also never decrypts a blocked gated post's full body: the sealed
     /// full page is the same post published by the same nest, so it is withheld
@@ -298,10 +401,11 @@ impl RegionPlacement {
     }
 
     /// Rewrite a post's page context into the reasoned placeholder
-    /// (`region-blocking.md` § The blocked render): that it was blocked or
-    /// collapsed, under which region's authority, and the authority's reason
-    /// verbatim — the frame in the words every app uses, the reason never
-    /// paraphrased.
+    /// (`region-blocking.md` § The blocked render; `nest-rules.md` § The nest
+    /// content policy → *The publisher leg*): that it was blocked or collapsed,
+    /// under which region's authority or the nest's own rules, and the
+    /// publisher's reason verbatim — the frame in the words every app uses, the
+    /// reason never paraphrased.
     ///
     /// The title and tags go too, under either verdict: both are read off the
     /// body, and they are what the index, the tag pages and the feed list. A
@@ -309,47 +413,67 @@ impl RegionPlacement {
     /// subscribe to. The markup carries neutral classes and data attributes,
     /// not test ids: the page's element ids await their own approval.
     pub(crate) fn apply(&self, ctx: &mut PostContext) {
-        let region = self.attribution.region.as_str();
-        let authority = self.attribution.authority_name.as_str();
-        let reason = self
-            .attribution
-            .reason
+        let escape = |text: &str| fauna_core::markdown::escape_html_with(text, true);
+        // `class` is the publisher kind (`region` / `nest`): the markup carries
+        // the same neutral shape for both, so the two placeholders differ only
+        // in whose frame and reason they show.
+        let (class, blocked_frame, collapsed_frame, attributes, reason_map) =
+            match &self.attribution {
+                PageAttribution::Region(a) => {
+                    let (region, authority) = (a.region.as_str(), a.authority_name.as_str());
+                    (
+                        "region",
+                        fauna_i18n::strings::region::blocked_notice(region, authority),
+                        fauna_i18n::strings::region::collapsed_notice(region, authority),
+                        format!(
+                            "data-region=\"{}\" data-reason-code=\"{}\"",
+                            escape(region),
+                            escape(&a.reason_code)
+                        ),
+                        &a.reason,
+                    )
+                }
+                PageAttribution::Nest(a) => (
+                    "nest",
+                    fauna_i18n::strings::nest_rules::blocked_notice(&a.domain),
+                    fauna_i18n::strings::nest_rules::collapsed_notice(&a.domain),
+                    format!(
+                        "data-nest=\"{}\" data-reason-code=\"{}\"",
+                        escape(&a.domain),
+                        escape(&a.reason_code)
+                    ),
+                    &a.reason,
+                ),
+            };
+        let reason = reason_map
             .get(REASON_DEFAULT_KEY)
             .map(String::as_str)
             .unwrap_or_default();
-        let escape = |text: &str| fauna_core::markdown::escape_html_with(text, true);
-        let attributes = format!(
-            "data-region=\"{}\" data-reason-code=\"{}\"",
-            escape(region),
-            escape(&self.attribution.reason_code)
-        );
         match self.verdict {
             PageVerdict::Block => {
-                let frame = fauna_i18n::strings::region::blocked_notice(region, authority);
                 ctx.content = format!(
-                    "<div class=\"fauna-region-notice\" data-region-verdict=\"block\" {attributes}>\
-                     <p class=\"fauna-region-notice-frame\">{}</p>\
-                     <p class=\"fauna-region-notice-reason\">{}</p>\
+                    "<div class=\"fauna-{class}-notice\" data-{class}-verdict=\"block\" {attributes}>\
+                     <p class=\"fauna-{class}-notice-frame\">{}</p>\
+                     <p class=\"fauna-{class}-notice-reason\">{}</p>\
                      </div>",
-                    escape(&frame),
+                    escape(&blocked_frame),
                     escape(reason),
                 );
-                ctx.title = frame;
+                ctx.title = blocked_frame;
                 ctx.paywall = None;
             }
             PageVerdict::Collapse => {
-                let frame = fauna_i18n::strings::region::collapsed_notice(region, authority);
                 ctx.content = format!(
-                    "<details class=\"fauna-region-notice\" data-region-verdict=\"collapse\" {attributes}>\
-                     <summary class=\"fauna-region-notice-frame\">{}</summary>\
-                     <p class=\"fauna-region-notice-reason\">{}</p>\
-                     <div class=\"fauna-region-collapsed-content\">{}</div>\
+                    "<details class=\"fauna-{class}-notice\" data-{class}-verdict=\"collapse\" {attributes}>\
+                     <summary class=\"fauna-{class}-notice-frame\">{}</summary>\
+                     <p class=\"fauna-{class}-notice-reason\">{}</p>\
+                     <div class=\"fauna-{class}-collapsed-content\">{}</div>\
                      </details>",
-                    escape(&frame),
+                    escape(&collapsed_frame),
                     escape(reason),
                     ctx.content,
                 );
-                ctx.title = frame;
+                ctx.title = collapsed_frame;
             }
         }
         ctx.tags.clear();
@@ -379,10 +503,10 @@ mod tests {
         }
     }
 
-    fn placement(verdict: PageVerdict) -> RegionPlacement {
-        RegionPlacement {
+    fn placement(verdict: PageVerdict) -> PagePlacement {
+        PagePlacement {
             verdict,
-            attribution: RegionAttribution {
+            attribution: PageAttribution::Region(RegionAttribution {
                 region: fauna_core::region_authority::RegionCode::parse("NO").unwrap(),
                 authority_name: "Fixture \"Authority\"".into(),
                 reason_code: "FX-7".into(),
@@ -390,8 +514,48 @@ mod tests {
                     REASON_DEFAULT_KEY.to_string(),
                     "<b>not</b> markup".to_string(),
                 )]),
-            },
+            }),
         }
+    }
+
+    /// The nest's own rule renders the same neutral shape under the nest's
+    /// frame, naming the nest, with the admin's reason escaped.
+    #[test]
+    fn a_nest_block_names_the_nest_and_its_reason() {
+        let mut ctx = context();
+        PagePlacement {
+            verdict: PageVerdict::Block,
+            attribution: PageAttribution::Nest(NestAttribution {
+                domain: "rules.example".into(),
+                reason_code: "R-1".into(),
+                reason: std::collections::BTreeMap::from([(
+                    REASON_DEFAULT_KEY.to_string(),
+                    "<i>Not</i> here.".to_string(),
+                )]),
+            }),
+        }
+        .apply(&mut ctx);
+        assert_eq!(
+            ctx.title,
+            fauna_i18n::strings::nest_rules::blocked_notice("rules.example")
+        );
+        assert!(
+            ctx.content.starts_with("<div class=\"fauna-nest-notice\""),
+            "{}",
+            ctx.content
+        );
+        assert!(
+            ctx.content.contains("data-nest=\"rules.example\""),
+            "{}",
+            ctx.content
+        );
+        assert!(
+            ctx.content.contains("&lt;i&gt;Not&lt;/i&gt; here."),
+            "{}",
+            ctx.content
+        );
+        assert!(!ctx.content.contains("the body"), "{}", ctx.content);
+        assert!(ctx.tags.is_empty() && ctx.paywall.is_none());
     }
 
     /// Everything read off the body leaves the page under a block — title,

@@ -261,6 +261,32 @@ def build_launch_env(
         # XDG_CONFIG_HOME, so `preserve_state_across_relaunch()` covers it.
         env["FAUNA_E2E_CREDENTIAL_DIR"] = ""
         env["FAUNA_E2E_FORCE_HEADLESS_STORE"] = "1"
+    elif config.get("locked_keyring"):
+        # The same sealed backend, reached the other way: the probe RUNS and
+        # answers locked (cause `KeyringLocked` — a desktop session whose
+        # Secret Service is there but locked), where the headless force skips
+        # it and stands in for the SSH case. Only this launch is the one the
+        # unlock page reports the unusable store on.
+        env["FAUNA_E2E_CREDENTIAL_DIR"] = ""
+        env["FAUNA_E2E_FORCE_LOCKED_KEYRING"] = "1"
+    elif config.get("probed_store"):
+        # The production resolution, unforced: the e2e file backend OFF and no
+        # force var, so the store's own keyring probe decides the arm — the
+        # observable for "no protected store answered" (`KeyringAbsent`)
+        # rather than the force's stand-in for it. On linux the probe asks the
+        # Secret Service on the session bus, so the caller must own that bus
+        # (an empty private one is "no store reachable"): inheriting the
+        # desktop's would resolve the developer's real keyring.
+        if (sys_platform or sys.platform).startswith("linux") and not config.get(
+            "environment", {}
+        ).get("DBUS_SESSION_BUS_ADDRESS"):
+            raise RuntimeError(
+                "probed_store launch without a caller-owned DBUS_SESSION_BUS_ADDRESS: "
+                "the store probe would reach the desktop's own Secret Service"
+            )
+        env["FAUNA_E2E_CREDENTIAL_DIR"] = ""
+        env.pop("FAUNA_E2E_FORCE_HEADLESS_STORE", None)
+        env.pop("FAUNA_E2E_FORCE_LOCKED_KEYRING", None)
     else:
         env["FAUNA_E2E_CREDENTIAL_DIR"] = creds_dir
     env["FAUNA_E2E_AGENT_PORT"] = str(port)
@@ -605,6 +631,14 @@ class TuiDriver(HttpBridgeDriver):
         # output is already in `err`, so `sync_agent_state_base` is None and
         # this contributes nothing.
         return stitch_agent_log(err, detached_agent_log_text(self.sync_agent_state_base))
+
+    def on_device_log_text(self) -> str:
+        """tui's own on-device rolling log file(s) — `fauna.log.<date>` under
+        `<config>/fauna-tui/logs/`, written by `session::install_logging` — or "".
+        linux's twin; unlike `app_stderr_text()` it never falls back to the
+        captured streams, so it answers only what the file holds."""
+        cfg = getattr(self, "_xdg_config", None)
+        return rolling_log_text(os.path.join(cfg, "fauna-tui")) if cfg else ""
 
     def inherited_agent_log_text(self) -> str:
         """On POSIX the agent is an inherited-fd child (its lines are already in

@@ -78,6 +78,7 @@ func TestIMAPBodyDecryptRoundTrip(t *testing.T) {
 		fixtureActorID,
 		fixtureCredentialID,
 		mailfauna.KdfKindArgon2id,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("UnwrapMLSBlob: %v", err)

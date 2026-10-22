@@ -19,12 +19,41 @@ public struct NewThreadComposeForm: View {
         composeSendOrClientError(compose.sendState, clientError: vm.clientErrorMessage)
     }
 
+    /// The picker's live home-nest choice (`checked`) — re-read off the
+    /// `@Observable` vm so a click is seen on the very next read.
+    private var includeHomeNest: Bool { vm.newThreadCompose?.recipientPicker?.includeHomeNest ?? false }
+
+    private func foundsCommunityRoom(_ compose: ComposeState) -> Bool {
+        guard let picker = compose.recipientPicker, picker.includeHomeNest else { return false }
+        return roomProspectiveClass(chips: picker.chips, includeHomeNest: true) == .community
+    }
+
+    /// `recipient-picker-home-nest-toggle`: stages through the manager; the label
+    /// is the shared yes/no sentence and `checked` rides `value`.
+    private func homeNestToggle(_ included: Bool) -> some View {
+        let label = included ? L.conversations.unified.roomHomeNestYes : L.conversations.unified.roomHomeNestNo
+        return Button(label) { vm.setNewThreadHomeNest(!includeHomeNest) }
+            .buttonStyle(.bordered)
+            .tint(included ? Color.accentColor : nil)
+            .accessibilityIdentifier(Ids.recipientPickerHomeNestToggle)
+            // The registered closures re-read the LIVE vm, not the captured frame.
+            .automationActivate(
+                Ids.recipientPickerHomeNestToggle,
+                text: { includeHomeNest ? L.conversations.unified.roomHomeNestYes : L.conversations.unified.roomHomeNestNo },
+                // `checked` is a NAMED attribute: the automation server's
+                // `checked` read takes it from `attributes` (or an "on"/"off"
+                // value), never from a "true"/"false" value.
+                attributes: { ["checked": includeHomeNest ? "true" : "false"] }
+            ) { vm.setNewThreadHomeNest(!includeHomeNest) }
+    }
+
     public var body: some View {
         if let compose = vm.newThreadCompose {
             VStack(alignment: .leading, spacing: 8) {
                 if let picker = compose.recipientPicker {
                     RecipientPicker(
                         state: picker,
+                        bridges: vm.snapshot.bridges,
                         // Live re-read off the @Observable vm (manager snapshot), so the
                         // in-place `recipient-resolve-status` registry read reflects the
                         // manager's synchronous Idle→Resolving flip (and the probe's later
@@ -41,12 +70,26 @@ public struct NewThreadComposeForm: View {
                         onAcceptCurrent: {
                             Task {
                                 await vm.resolveRecipient()
-                                _ = vm.acceptCurrentRecipientChip()
+                                if vm.acceptCurrentRecipientChip() {
+                                    await vm.refreshListSend(nil)
+                                }
                             }
                         },
-                        onAcceptSuggestion: { vm.acceptNewThreadChip($0) }
+                        // A committed chip may address one of the account's own
+                        // lists: re-derive the list-send texts (tui's
+                        // `Op::AcceptRecipientChip` / `Op::AcceptSuggestion`).
+                        onAcceptSuggestion: { addr in
+                            vm.acceptNewThreadChip(addr)
+                            Task { await vm.refreshListSend(nil) }
+                        }
                     )
                 }
+
+                // The home-nest choice — a property of the room, made before its
+                // first message, so it paints whether or not a chip is committed;
+                // the class statement above follows it (`ui/conversations.md` §
+                // Element IDs → *The community room's three controls*).
+                homeNestToggle(includeHomeNest)
 
                 if (compose.recipientPicker?.chips.count ?? 0) >= 2 {
                     automationText(Ids.groupConversationHint, L.conversations.unified.groupConversationHint)
@@ -76,7 +119,12 @@ public struct NewThreadComposeForm: View {
                     onAttachFile: { try vm.attachNewThreadFile(at: $0) },
                     onAttachError: { vm.clientErrorMessage = $0 },
                     onRemoveAttachment: { vm.removeNewThreadAttachment(at: $0) },
-                    onSend: { Task { _ = await vm.sendNewThread() } }
+                    onSend: { Task { _ = await vm.sendNewThread() } },
+                    // The send founds a room (`fauna.conversations.room.create`,
+                    // online-only) exactly when the toggle is on AND the
+                    // prospective class is community — gated only then, so the
+                    // declaration follows the paint both ways.
+                    sendFoundsRoom: foundsCommunityRoom(compose)
                 )
             }
         }

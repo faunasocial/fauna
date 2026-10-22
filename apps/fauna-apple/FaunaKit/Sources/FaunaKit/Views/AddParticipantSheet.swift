@@ -24,6 +24,7 @@ public struct AddParticipantSheet: View {
             Text(L.conversations.unified.threadAddParticipant).font(.headline)
             RecipientPicker(
                 state: state.picker,
+                bridges: vm.snapshot.bridges,
                 // Live re-read off the @Observable vm (manager snapshot) — see the
                 // matching note in NewThreadComposeForm; the add-participant picker
                 // routes through the manager identically.

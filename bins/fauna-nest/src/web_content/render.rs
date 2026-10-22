@@ -510,6 +510,7 @@ pub fn render_single_template(
 
 // ==================== Default built-in templates ====================
 
+// public-text: nest-public-folder-listing
 const DEFAULT_INDEX_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -567,11 +568,13 @@ const DEFAULT_POST_TEMPLATE: &str = r#"<!DOCTYPE html>
   </div>
 </body>
 </html>"#;
+// public-text-end: nest-public-folder-listing
 
 /// The built-in paywall/teaser page for a gated post (web paywall, Pillar 2):
 /// the public preview plus the paywall box — tier, optional price hint, and
 /// the creator's payment link. Pre-rendered static output like every other
 /// page; the full content is never in this template's context.
+// public-text: nest-paywall-doors
 const DEFAULT_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -607,6 +610,7 @@ const DEFAULT_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
   <div class="nav"><a href="/">Home</a></div>
 </body>
 </html>"#;
+// public-text-end: nest-paywall-doors
 
 /// Render the built-in paywall/teaser page for one gated post.
 pub fn render_default_paywall(
@@ -628,6 +632,7 @@ pub fn render_default_paywall(
 /// preview to show (its bytes are the product), so this states the tier and
 /// where to subscribe, and nothing else. Rendered at serve time — a set has no
 /// pre-rendered per-path artifact the way a published post does.
+// public-text: nest-paywall-doors
 const DEFAULT_FOLDER_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -661,6 +666,7 @@ const DEFAULT_FOLDER_PAYWALL_TEMPLATE: &str = r#"<!DOCTYPE html>
   <div class="nav"><a href="/">Home</a></div>
 </body>
 </html>"#;
+// public-text-end: nest-paywall-doors
 
 /// The context the folder teaser renders (no post — see the template doc).
 #[derive(Debug, Serialize)]

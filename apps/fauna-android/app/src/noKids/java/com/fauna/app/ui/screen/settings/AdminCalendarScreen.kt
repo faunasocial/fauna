@@ -192,7 +192,12 @@ private fun CaldavPortField(
                 value = edited,
                 onValueChange = { edited = it.filter(Char::isDigit) },
                 label = { Text(stringResource(R.string.admin_calendar_page_caldav_port_label)) },
-                supportingText = { Text(stringResource(R.string.admin_calendar_page_caldav_port_desc)) },
+                supportingText = {
+                    Text(
+                        stringResource(R.string.admin_calendar_page_caldav_port_desc),
+                        modifier = Modifier.testTag(Ids.ADMIN_CALENDAR_CALDAV_PORT_HELP_TEXT),
+                    )
+                },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 enabled = !working,

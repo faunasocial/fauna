@@ -6,9 +6,9 @@ web's leave door is the tab-leave events the browser actually delivers —
 grants no reliable async work after either, so this leg is deliberately
 best-effort (unlike the native legs' bounded-BLOCKING flush). This test
 dispatches a real `pagehide` DOM event (the root layout's handler,
-`+layout.svelte`, has no `visibilityState` guard on that branch, unlike the
+`RootShell.svelte`, has no `visibilityState` guard on that branch, unlike the
 `visibilitychange` branch which needs the page to actually be backgrounded) and
-proves `$lib/conversations`'s `flushDraftsNow()` runs and lands on the nest —
+proves `#lib/conversations`'s `flushDraftsNow()` runs and lands on the nest —
 modeled on `test_windows_window_close_flush.py` /
 `test_linux_window_close_flush.py` / `test_tui_quit_flush.py`, adapted to the
 one door a script can drive without tearing the page down (a real tab close
@@ -45,7 +45,7 @@ def test_pagehide_forces_conversation_draft_flush(logged_in_app, nest_instance, 
     app.driver.type_text("dm-text-field", draft_body)
 
     # 2. The real leave door: a `pagehide` DOM event, exactly what the browser
-    # delivers on tab close / navigation away — `+layout.svelte`'s handler
+    # delivers on tab close / navigation away — `RootShell.svelte`'s handler
     # calls `flushDraftsNow()` unconditionally on this event (no visibility
     # check, unlike the `visibilitychange` branch).
     app.driver.eval_js("window.dispatchEvent(new Event('pagehide'))")

@@ -51,9 +51,18 @@ public struct AdminMailView: View {
 
                 if let snap = vm.snapshot {
                     enableGroup(snap)
+                    // Read-only readout directly under the enable toggle; omitted
+                    // until the health read answers (`snap.health == nil`).
+                    if let health = snap.health {
+                        MailHealthSection(health: health, armed: snap.armed, isBusy: vm.isBusy,
+                                          onRecheck: { await vm.recheckHealth() },
+                                          onPress: { await vm.press($0) })
+                    }
                     MailSpamPolicySection(policy: snap.spam, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy, baselineResult: snap.baselinePublishResult,
-                                          onPublish: { await vm.publishSpamBaseline() }) { await vm.saveSpam($0) }
+                                          baselineState: snap.baselineState,
+                                          onPublish: { await vm.publishSpamBaseline() },
+                                          onSetStanding: { await vm.setBaselineStandingPublish($0) }) { await vm.saveSpam($0) }
                     MailAuthPolicySection(policy: snap.auth, reloadToken: vm.snapshotVersion,
                                           isBusy: vm.isBusy) { await vm.saveAuth($0) }
                     MailSubmissionPolicySection(policy: snap.submission, reloadToken: vm.snapshotVersion,
@@ -215,6 +224,120 @@ private func parseU64(_ s: String, _ fallback: UInt64) -> UInt64 {
     parseCountU64(input: s) ?? fallback
 }
 
+// MARK: - Mail health readout (mail-deliverability.md § The mail health readout)
+
+/// A dumb render of the shared fold: every sentence is shared Rust
+/// (`mailHealthStateLabel` / `mailHealthCheckStateLabel` / `mailHealthHeartbeatLabel`)
+/// or the nest's own row detail. Rows 5–6 are the heartbeats — their detail paints
+/// the stamp. The warm-up reset is the shared machine's same-button two-click: each
+/// press is `MailPolicyAction.press`, and the button relabels while `armed` names it.
+private struct MailHealthSection: View {
+    let health: MailHealthView
+    let armed: MailPolicyConfirm?
+    let isBusy: Bool
+    let onRecheck: () async -> Void
+    let onPress: (MailPolicyConfirm) async -> Void
+
+    @Environment(\.openURL) private var openURL
+
+    private var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+    private func heartbeat(_ at: Int64?) -> String {
+        let now = nowMs
+        return ValueFormat.render(mailHealthHeartbeatLabel(atSecs: at, nowMs: now),
+                                  fallbackMs: at.map { $0 * 1000 } ?? now)
+    }
+
+    private var statusLine: String {
+        L.admin.mailPage.healthStatusLine(
+            state: renderLocalizedText(mailHealthStateLabel(state: health.state)),
+            delivered: heartbeat(health.lastOutboundDeliveredAt),
+            received: heartbeat(health.lastInboundAcceptedAt))
+    }
+
+    private func detail(_ index: Int, _ check: MailHealthCheckView) -> String {
+        switch index {
+        case 5: return heartbeat(health.lastOutboundDeliveredAt)
+        case 6: return heartbeat(health.lastInboundAcceptedAt)
+        default: return check.detail
+        }
+    }
+
+    var body: some View {
+        let status = statusLine
+        let warmupLabel = armed == .resetWarmup
+            ? L.admin.mailPage.healthWarmupResetConfirm : L.admin.mailPage.healthWarmupReset
+        GroupBox {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L.admin.mailPage.healthTitle)
+                    .font(.headline)
+                    .accessibilityIdentifier(Ids.adminMailHealthSection)
+                    .automationValue(Ids.adminMailHealthSection, text: { L.admin.mailPage.healthTitle })
+                automationText(Ids.adminMailHealthStatus, status)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Same `.id`-on-content remedy as the baseline result: the
+                    // registered closure must re-capture when the line changes.
+                    .id("admin-mail-health-status:\(status)")
+                ForEach(Array(health.checks.enumerated()), id: \.offset) { index, check in
+                    checkRow(index, check)
+                }
+                if let url = health.delistUrl {
+                    Button(L.admin.mailPage.healthDelist) {
+                        if let u = URL(string: url) { openURL(u) }
+                    }
+                    .accessibilityIdentifier(Ids.adminMailHealthDelistLink)
+                    .automationActivate(Ids.adminMailHealthDelistLink,
+                                        text: { L.admin.mailPage.healthDelist },
+                                        attributes: { ["href": url] }) {
+                        if let u = URL(string: url) { openURL(u) }
+                    }
+                }
+                HStack {
+                    Button(L.admin.mailPage.healthRecheck) { Task { await onRecheck() } }
+                        .disabled(isBusy)
+                        .accessibilityIdentifier(Ids.adminMailHealthRecheckButton)
+                        .automationActivate(Ids.adminMailHealthRecheckButton, isEnabled: { !isBusy }) {
+                            Task { await onRecheck() }
+                        }
+                        // The recheck runs two kinds; the self-check is its first.
+                        .faunaGate("fauna.bridges.blocklist_self_check_run")
+                    Button(warmupLabel) { Task { await onPress(.resetWarmup) } }
+                        .disabled(isBusy)
+                        .accessibilityIdentifier(Ids.adminMailHealthWarmupResetButton)
+                        .automationActivate(Ids.adminMailHealthWarmupResetButton,
+                                            isEnabled: { !isBusy }, text: { warmupLabel }) {
+                            Task { await onPress(.resetWarmup) }
+                        }
+                        .faunaGate("fauna.bridges.outbound_warmup_reset")
+                        // The label changes on arm: re-identify so the registered
+                        // `text:` closure re-captures the CURRENT label.
+                        .id("admin-mail-health-warmup-reset-button:\(warmupLabel)")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// One row: a scoped container (its index is the row's) holding the three leaves.
+    private func checkRow(_ index: Int, _ check: MailHealthCheckView) -> some View {
+        let label = L.lookup(check.labelKey)
+        let state = renderLocalizedText(mailHealthCheckStateLabel(state: check.state))
+        let text = detail(index, check)
+        return HStack(alignment: .firstTextBaseline) {
+            automationText(Ids.adminMailHealthCheckLabel, label)
+            automationText(Ids.adminMailHealthCheckState, state)
+                .foregroundStyle(.secondary)
+            automationText(Ids.adminMailHealthCheckDetail, text)
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(Ids.adminMailHealthCheck)
+        .automationValue(Ids.adminMailHealthCheck, text: { "" })
+        .automationScope(Ids.adminMailHealthCheck, index: index)
+        .id("admin-mail-health-check:\(index):\(label):\(state):\(text)")
+    }
+}
+
 // MARK: - Spam / inbound perimeter (put_spam_policy)
 
 private struct MailSpamPolicySection: View {
@@ -224,7 +347,10 @@ private struct MailSpamPolicySection: View {
     let onSave: (SpamPolicyView) async -> Void
     // Deployment baseline (admin opt-in aggregate; publish_spam_baseline).
     let baselineResult: BaselinePublishView?
+    // The served baseline's current state + the standing-publish switch.
+    let baselineState: BaselineStateView?
     let onPublish: () async -> Void
+    let onSetStanding: (Bool) async -> Void
 
     @State private var draft: SpamPolicyView
     // Integer / list fields edit as string buffers (parsed on Save).
@@ -245,22 +371,29 @@ private struct MailSpamPolicySection: View {
     @State private var unlistedRecipientPenalty = ""
 
     init(policy: SpamPolicyView, reloadToken: Int, isBusy: Bool,
-         baselineResult: BaselinePublishView?, onPublish: @escaping () async -> Void,
+         baselineResult: BaselinePublishView?, baselineState: BaselineStateView?,
+         onPublish: @escaping () async -> Void, onSetStanding: @escaping (Bool) async -> Void,
          onSave: @escaping (SpamPolicyView) async -> Void) {
         self.policy = policy
         self.reloadToken = reloadToken
         self.isBusy = isBusy
         self.baselineResult = baselineResult
+        self.baselineState = baselineState
         self.onPublish = onPublish
+        self.onSetStanding = onSetStanding
         self.onSave = onSave
         _draft = State(initialValue: policy)
     }
 
     /// `published` comes straight from the shared BaselinePublishView, so the
-    /// client just picks the message + interpolates.
+    /// client just picks the message + interpolates. `deferred` is checked FIRST:
+    /// a delta-floor deferral also carries `published = false` and must never read
+    /// as "too few contributors".
     private var baselineResultMessage: String {
         guard let r = baselineResult else { return "" }
-        let base = r.published
+        let base = r.deferred
+            ? L.admin.mailPage.spamBaselineWaiting
+            : r.published
             ? L.admin.mailPage.spamBaselinePublished(
                 contributors: String(r.contributors), samples: String(r.sampleCount))
             : L.admin.mailPage.spamBaselineWithheld(contributors: String(r.contributors))
@@ -270,6 +403,26 @@ private struct MailSpamPolicySection: View {
         guard r.skippedContributors > 0 else { return base }
         return base + " " + L.admin.mailPage.spamBaselineSkippedContributors(
             count: String(r.skippedContributors))
+    }
+
+    /// The persisted standing-publish setting (blank state → off).
+    private var standing: Bool { baselineState?.standing ?? false }
+
+    /// "Published over N contributors on <date>." or "No baseline published.",
+    /// then "Waiting for more contributor activity." when the last run was
+    /// deferred; blank until the state read answers (mail-spam.md § Cold start
+    /// Path 2 → *Standing publish*). Mirrors tui `baseline_state_text`.
+    private var baselineStateMessage: String {
+        guard let s = baselineState else { return "" }
+        var line: String
+        if s.published, let at = s.publishedAtMs {
+            line = L.admin.mailPage.spamBaselineStatePublished(
+                contributors: String(s.contributors), date: formatUnixLocalDateMs(ms: at))
+        } else {
+            line = L.admin.mailPage.spamBaselineStateNone
+        }
+        if s.deferred { line += " " + L.admin.mailPage.spamBaselineWaiting }
+        return line
     }
 
     var body: some View {
@@ -345,6 +498,28 @@ private struct MailSpamPolicySection: View {
                 // live `.automationField` binding read. See apple-e2e-automation.md
                 // § Stale-capture discipline (`.id`-on-content remedy).
                 .id("admin-mail-publish-spam-baseline-result:\(baselineResultMessage)")
+            // Standing publish: its OWN dispatch off the persisted state (never a
+            // Spam-group draft), and the served baseline's state line beneath it.
+            Toggle(L.admin.mailPage.spamBaselineStandingLabel, isOn: Binding(
+                get: { standing },
+                set: { on in Task { await onSetStanding(on) } }
+            ))
+            .disabled(isBusy)
+            .accessibilityIdentifier(Ids.adminMailSpamBaselineStandingToggle)
+            .automationActivate(Ids.adminMailSpamBaselineStandingToggle, isEnabled: { !isBusy },
+                                value: { standing ? "on" : "off" }) {
+                Task { await onSetStanding(!standing) }
+            }
+            .faunaGate("fauna.bridges.put_spam_policy")
+            // Same `.id`-on-content remedy as the result text: the closures above
+            // capture this struct copy, so a value change must re-register them.
+            .id("admin-mail-spam-baseline-standing-toggle:\(standing)")
+            Text(L.admin.mailPage.spamBaselineStandingSubtitle).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            automationText(Ids.adminMailSpamBaselineState, baselineStateMessage)
+                .font(.caption)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .id("admin-mail-spam-baseline-state:\(baselineStateMessage)")
         }
         .task(id: reloadToken) { seed() }
     }

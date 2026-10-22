@@ -1,0 +1,38 @@
+---
+interface Props { size?: number; delay?: string; }
+const { size = 110, delay = '0s' } = Astro.props;
+---
+<svg viewBox="0 0 120 140" width={size} height={Math.round((size * 140) / 120)}
+  class="critter" style={`--wave-delay:${delay}`} aria-hidden="true">
+  <ellipse cx="58" cy="134" rx="26" ry="5" class="critter-shadow" />
+  <!-- long tail, sweeping down behind the body -->
+  <path d="M72 106 L110 130 L100 136 L66 116 Z" fill="#3e7c4f" />
+  <path d="M70 100 L104 122 L97 129 L64 110 Z" fill="#5d9152" />
+  <!-- crest, tucked behind the head -->
+  <path d="M46 34 L39 13 L54 28 Z" fill="#f4c95d" />
+  <path d="M58 27 L57 7 L68 24 Z" fill="#e8863a" />
+  <path d="M69 32 L81 15 L77 34 Z" fill="#f4c95d" />
+  <!-- waving wing -->
+  <g class="wave" style="transform-origin: 80px 92px;">
+    <ellipse cx="87" cy="79" rx="8" ry="20" transform="rotate(-32 87 79)" fill="#3e7c4f" />
+    <ellipse cx="91" cy="66" rx="4.5" ry="9" transform="rotate(-32 91 66)" fill="#7fb5d5" />
+  </g>
+  <!-- body -->
+  <ellipse cx="58" cy="98" rx="27" ry="31" fill="#4f9e5c" />
+  <ellipse cx="58" cy="106" rx="17" ry="21" fill="#f4c95d" />
+  <!-- folded wing -->
+  <ellipse cx="33" cy="96" rx="9" ry="21" transform="rotate(12 33 96)" fill="#3e7c4f" />
+  <!-- head -->
+  <circle cx="58" cy="50" r="23" fill="#4f9e5c" />
+  <ellipse cx="58" cy="57" rx="15" ry="12" fill="#e8863a" />
+  <circle cx="48" cy="45" r="5" fill="#ffffff" />
+  <circle cx="68" cy="45" r="5" fill="#ffffff" />
+  <circle cx="48" cy="45" r="2.8" fill="#2b2a24" />
+  <circle cx="68" cy="45" r="2.8" fill="#2b2a24" />
+  <!-- hooked beak -->
+  <path d="M50 56 Q58 52 66 56 Q66 69 58 75 Q50 69 50 56 Z" fill="#33312b" />
+  <path d="M54 68 Q58 71 62 68 Q60 74 58 75 Q56 74 54 68 Z" fill="#6d675a" />
+  <!-- perching feet -->
+  <ellipse cx="48" cy="131" rx="7" ry="4" fill="#f4c95d" />
+  <ellipse cx="68" cy="131" rx="7" ry="4" fill="#f4c95d" />
+</svg>

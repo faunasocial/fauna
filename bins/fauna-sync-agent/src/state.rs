@@ -28,6 +28,12 @@ pub struct SyncServiceState {
     /// `None` until the first eligible folder is served (a folder bound to a file
     /// set, plus a provisioned capability). See [`crate::engine_driver`].
     pub engines: Mutex<Option<RunningEngines>>,
+    /// How many engines the host runs right now, as it last reported
+    /// (`EngineSpec::on_engines_changed`) — 0 with no host. The provision
+    /// handler waits on it to reach 0 before a succession carry renames the
+    /// outgoing scope's DBs (`sync-agent.md` § The per-actor scope follows the
+    /// account across a succession).
+    pub engines_running: watch::Sender<usize>,
     pub ipc_event_tx: broadcast::Sender<fauna_ipc::sync::Event>,
     pub http_client: reqwest::Client,
     /// App-provisioned on-demand hydration capability (BackupKey + actor_id + renewable
@@ -269,6 +275,17 @@ pub struct SyncServiceState {
     /// unbind or a restart that mounts clears it. A plain mutex: every use is
     /// a map operation, never held across an await.
     pub on_demand_mount_errors: std::sync::Mutex<HashMap<std::path::PathBuf, &'static str>>,
+    /// The latest *Free up space* sweep of each on-demand location, by bound
+    /// path — what `LocationInfo::free_space` reports. The root's loop writes
+    /// the tally ([`EngineCommand::FreeLocationSpace`]), `ListLocations` reads
+    /// it. ⚠ Derived, never stored: the lifetime rule `EngineInfo::deletes_held`
+    /// has — a restarted agent reports no sweep. A plain mutex, never held
+    /// across an await.
+    ///
+    /// [`EngineCommand::FreeLocationSpace`]: fauna_sync_engine::always_resident::EngineCommand::FreeLocationSpace
+    pub free_space_runs: std::sync::Mutex<
+        HashMap<String, Arc<std::sync::Mutex<fauna_sync_engine::always_resident::FreeSpaceTally>>>,
+    >,
     /// The account store [`crate::account_host`]'s live stint has mounted —
     /// published once the mount stands, cleared before its teardown. What
     /// [`Self::folder_keys`] reads through.
@@ -436,6 +453,7 @@ impl SyncServiceState {
             start_time: std::time::Instant::now(),
             shutdown_tx,
             engines: Mutex::new(None),
+            engines_running: watch::channel(0).0,
             ipc_event_tx,
             http_client: reqwest::Client::new(),
             capability: crate::bearer::CapabilitySlot::new(None),
@@ -464,6 +482,7 @@ impl SyncServiceState {
             push_tally: Arc::default(),
             on_demand: std::sync::OnceLock::new(),
             on_demand_mount_errors: std::sync::Mutex::default(),
+            free_space_runs: std::sync::Mutex::default(),
             folder_keys: Arc::new(fauna_account_seams::folder_keys::PlaneFolderKeys::new({
                 let slot = Arc::clone(&mounted_store);
                 move || slot.lock().ok().and_then(|held| held.clone())

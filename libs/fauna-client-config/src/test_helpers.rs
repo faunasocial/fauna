@@ -25,6 +25,7 @@ use crate::store_seam::{
     StoreError, SuccessionLedgerStore,
 };
 use fauna_core::mail_rows::{MailRows, MailStateRow};
+use fauna_core::secret::SecretArray32;
 use fauna_core::succession_ledger::SuccessionLedger;
 
 /// The shared in-memory [`SuccessionLedgerStore`] double — one home for its
@@ -875,13 +876,8 @@ impl MailStore for FakeMailStore {
         let mut inner = self.inner.lock().unwrap();
         inner.refused()?;
         let stored = inner.rows.state.clone();
-        if stored.as_ref().is_some_and(|s| s.same_content(&state)) {
-            return Ok(false);
-        }
-        let intent = MailStateRow {
-            updated_at: inner.stamp_above(stored.as_ref().map(|s| s.updated_at)),
-            ..state
-        };
+        let at = inner.stamp_above(stored.as_ref().map(MailStateRow::latest_stamp));
+        let intent = state.written_over(stored.as_ref(), at);
         let joined = match &stored {
             Some(s) => s.merge(&intent),
             None => intent.merge(&intent),
@@ -890,6 +886,21 @@ impl MailStore for FakeMailStore {
             return Ok(false);
         }
         inner.rows.state = Some(joined);
+        inner.landed();
+        Ok(true)
+    }
+
+    async fn clear_rotation(&self, new_msek: SecretArray32) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.refused()?;
+        let Some(stored) = inner.rows.state.clone() else {
+            return Ok(false);
+        };
+        let at = inner.stamp_above(Some(stored.latest_stamp()));
+        let Some(cleared) = MailStateRow::rotation_cleared(&stored, &new_msek, at) else {
+            return Ok(false);
+        };
+        inner.rows.state = Some(stored.merge(&cleared));
         inner.landed();
         Ok(true)
     }
@@ -942,6 +953,31 @@ impl MailStore for FakeMailStore {
         }
         let intent = MailCredential {
             wrapped_under: Some(fingerprint),
+            updated_at: inner.stamp_above(Some(stored.updated_at)),
+            ..stored
+        };
+        let moved = inner.join_credential(intent);
+        if moved {
+            inner.landed();
+        }
+        Ok(moved)
+    }
+
+    async fn mark_token_minted(
+        &self,
+        credential_id: String,
+        minted_at: u64,
+    ) -> Result<bool, StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.refused()?;
+        let Some(stored) = inner.rows.credentials.get(&credential_id).cloned() else {
+            return Ok(false);
+        };
+        if stored.is_marked() || stored.token_minted_at >= Some(minted_at) {
+            return Ok(false);
+        }
+        let intent = MailCredential {
+            token_minted_at: Some(minted_at),
             updated_at: inner.stamp_above(Some(stored.updated_at)),
             ..stored
         };

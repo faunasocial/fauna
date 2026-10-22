@@ -36,7 +36,7 @@ from cryptography.x509.oid import ExtensionOID
 from helpers.tls_spki import served_leaf, spki_sha256_hex
 from helpers.waiting import wait_until
 
-from .helpers import install_acme_default_cert, make_ca_issued_leaf_pem
+from .helpers import install_acme_default_cert, make_ca_issued_leaf_pem, nest_served_leaf
 from .test_dane_tlsa_cert_coupling import (  # noqa: F401 — fixtures
     DOMAIN,
     MX_SNI,
@@ -91,7 +91,7 @@ def test_expired_trusted_default_cert_serves_the_floor(dane_nest):
     rows = _floor_mx_tlsa_rows(_list_records(dane_nest))
     assert len(rows) == 1, f"exactly one floor-MX TLSA on the floor, got {rows}"
     floor_hex = rows[0]["expected"].split()[-1].lower()
-    assert spki_sha256_hex(served_leaf(host, port, MX_SNI)) == floor_hex
+    assert spki_sha256_hex(nest_served_leaf(name, MX_SNI)) == floor_hex
 
     # 1 — A valid trusted chain is served: the reload path is live.
     good_chain, good_key = make_ca_issued_leaf_pem([DOMAIN, MX_SNI])
@@ -126,7 +126,7 @@ def test_expired_trusted_default_cert_serves_the_floor(dane_nest):
     assert spki_sha256_hex(served) == floor_hex, (
         "the stand-in floor must carry the stable floor key (the key the TLSA pins)"
     )
-    mx = served_leaf(host, port, MX_SNI)
+    mx = nest_served_leaf(name, MX_SNI)
     assert _is_self_signed(mx) and spki_sha256_hex(mx) == floor_hex, (
         f"{MX_SNI} must also fall to the floor, served spki={spki_sha256_hex(mx)}"
     )

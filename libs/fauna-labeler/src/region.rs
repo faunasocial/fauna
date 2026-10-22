@@ -1,5 +1,7 @@
-//! Running a region content-policy document's bundled scorers
-//! (`region-blocking.md` § The content plane → *The policy document*, `scorers`).
+//! Running a published content-policy document's bundled scorers
+//! (`region-blocking.md` § The content plane → *The policy document*, `scorers`)
+//! — a region's, or a nest admin's (`nest-rules.md` § The nest content policy:
+//! one grammar, three publishers).
 //!
 //! `fauna_core::region_policy` validates a bundled scorer structurally but can
 //! never run one: this crate depends on `fauna-core`, so running the sandbox from
@@ -9,14 +11,16 @@
 //! growing its own loop, so the list lookup, the sandbox bounds and the factor a
 //! scorer's output carries are spelled once.
 //!
-//! A scorer produces the factor `region:<region>/<name>` for one item, and that
-//! factor joins the item's label list before the region fold. It says nothing
+//! A scorer produces the factor `<publisher>/<name>` (`region:<region>/<name>`,
+//! `nest:<domain>/<name>`) for one item, and that factor joins the item's label
+//! list before the fold. It says nothing
 //! about an item when a `list` does not name the item or a `wasm` module emits no
 //! label — and then no factor joins, so no rule on it can fire.
 
 use anyhow::{Context, Result};
-use fauna_core::region_authority::RegionCode;
-use fauna_core::region_policy::{BundledScorer, ContentPolicyDocument, ScorerKind, scorer_factor};
+use fauna_core::content_policy::{
+    BundledScorer, ContentPolicyDocument, Publisher, ScorerKind, scorer_factor,
+};
 use fauna_core::scoring::{LabelerListArtifact, LabelerPostInput, validate_list_artifact};
 
 use crate::{
@@ -28,7 +32,7 @@ use crate::{
 pub struct PreparedScorer {
     /// The scorer's name within its document.
     pub name: String,
-    /// The factor its output carries, `region:<region>/<name>`.
+    /// The factor its output carries, `<publisher>/<name>`.
     pub factor: String,
     prepared: Prepared,
 }
@@ -52,7 +56,7 @@ impl PreparedScorer {
     /// The list does not validate, or the module does not compile. The
     /// document's own validation already refused a malformed list, so the list
     /// arm fails only on a document that skipped it.
-    pub fn prepare(region: &RegionCode, scorer: &BundledScorer) -> Result<Self> {
+    pub fn prepare(publisher: &Publisher, scorer: &BundledScorer) -> Result<Self> {
         let prepared = match scorer.kind {
             ScorerKind::List => Prepared::List(
                 validate_list_artifact(&scorer.bytes)
@@ -68,10 +72,16 @@ impl PreparedScorer {
                     .with_context(|| format!("bundled wasm scorer {:?}", scorer.name))?;
                 Prepared::Wasm { runtime, module }
             }
+            // Not this crate's to run — see `scorers_in_use`.
+            ScorerKind::Keywords | ScorerKind::Prompt => anyhow::bail!(
+                "bundled scorer {:?} is a {} scorer, which the labeler does not run",
+                scorer.name,
+                fauna_core::content_policy::scorer_kind_name(scorer.kind)
+            ),
         };
         Ok(Self {
             name: scorer.name.clone(),
-            factor: scorer_factor(region, &scorer.name),
+            factor: scorer_factor(publisher, &scorer.name),
             prepared,
         })
     }
@@ -118,19 +128,23 @@ fn per_mille(score: i64) -> u16 {
 /// The scorers of `document` that some rule of it actually reads — a scorer no
 /// rule names produces a factor nothing folds, so it is never run. A document
 /// that does not apply (an unimplemented grammar version, or malformed) has no
-/// rule in force and so contributes none.
+/// rule in force and so contributes none. Only the kinds this crate runs — a
+/// `list` and a `wasm` module — are returned: a `keywords` scorer runs through
+/// `fauna_core::content_policy::evaluate_keyword_scorers`, and a `prompt`
+/// scorer has no runtime on any build yet.
 pub fn scorers_in_use<'d>(
     document: &'d ContentPolicyDocument,
-    region: &RegionCode,
+    publisher: &Publisher,
 ) -> Vec<&'d BundledScorer> {
-    if !document.status(region).is_applied() {
+    if !document.status(publisher).is_applied() {
         return Vec::new();
     }
     document
         .scorers
         .iter()
+        .filter(|scorer| matches!(scorer.kind, ScorerKind::List | ScorerKind::Wasm))
         .filter(|scorer| {
-            let factor = scorer_factor(region, &scorer.name);
+            let factor = scorer_factor(publisher, &scorer.name);
             document.rules.iter().any(|rule| rule.factor == factor)
         })
         .collect()
@@ -145,8 +159,8 @@ mod tests {
 
     use super::*;
 
-    fn region() -> RegionCode {
-        RegionCode::parse("NO").unwrap()
+    fn region() -> Publisher {
+        Publisher::Region(fauna_core::region_authority::RegionCode::parse("NO").unwrap())
     }
 
     fn input(text: &str) -> LabelerPostInput {
@@ -282,5 +296,37 @@ mod tests {
             extra: BTreeMap::new(),
         };
         assert!(scorers_in_use(&doc, &region()).is_empty());
+    }
+
+    /// A nest's document runs under its own namespace, and a `list` — a
+    /// government's instrument only — makes a nest's document malformed, so
+    /// it runs nothing at all (`nest-rules.md` decision 2).
+    #[test]
+    fn a_nest_document_runs_under_its_own_namespace_and_never_a_list() {
+        let nest = Publisher::Nest("rules.example".into());
+        let label = Label {
+            category: "x".into(),
+            confidence: 1.0,
+            source: LabelSource::TextAnalysis,
+        };
+        let wasm = fixed_output_scorer("labeler", &[label]);
+        let doc = ContentPolicyDocument {
+            version: fauna_core::content_policy::GRAMMAR_VERSION,
+            rules: vec![rule("nest:rules.example/labeler")],
+            scorers: vec![wasm.clone()],
+            extra: BTreeMap::new(),
+        };
+        let in_use = scorers_in_use(&doc, &nest);
+        assert_eq!(in_use.len(), 1);
+        assert_eq!(
+            PreparedScorer::prepare(&nest, in_use[0]).unwrap().factor,
+            "nest:rules.example/labeler"
+        );
+
+        let with_list = ContentPolicyDocument {
+            scorers: vec![wasm, list_scorer("ids", vec![([1u8; 32], 900)])],
+            ..doc
+        };
+        assert!(scorers_in_use(&with_list, &nest).is_empty());
     }
 }

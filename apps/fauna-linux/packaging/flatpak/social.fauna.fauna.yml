@@ -63,6 +63,14 @@ finish-args:
   # child (app-lifetime residency, the pre-seam interim).
   - --filesystem=xdg-config/systemd/user:create
   - --talk-name=org.freedesktop.systemd1
+  # The GNOME Files Share entry (apps/linux.md § The file manager's Share entry
+  # (GNOME Files)): the app writes its nautilus-python module, naming the
+  # agent the way the host unit above does, into the HOST's per-user
+  # extension directory through this grant.
+  - --filesystem=xdg-data/nautilus-python/extensions:create
+  # Its KDE Dolphin leg (→ The KDE Dolphin leg): the app writes its KIO
+  # service menu into the HOST's per-user service-menu directory.
+  - --filesystem=xdg-data/kio/servicemenus:create
 modules:
   - name: fauna-linux
     buildsystem: simple

@@ -43,7 +43,7 @@ def unmark_tls_nest(port: int) -> None:
 # The HOST each nest port is reached at — the other half of the authority beside
 # `_TLS_NEST_PORTS`'s scheme. Every local nest is loopback, so the default holds
 # for them; a live box is not, and a port-keyed dial that assumed loopback built
-# `https://127.0.0.1:443` for `https://dev.example.com` (measured 2026-10-04: every
+# `https://127.0.0.1:443` for the dev nest (measured 2026-10-04: every
 # `create_actor_and_register(port)` without a `base_url` was refused on live).
 # Recorded by `conftest._as_nest_handle` from the nest's own `url`. The host is
 # addressing only — never trust: `_is_floor_cert_authority` still keys on a
@@ -131,6 +131,30 @@ class _FloorCertHTTPSHandler(urllib.request.HTTPSHandler):
                 context=ssl._create_unverified_context(),
             )
         return super().https_open(req)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface a 3xx as the response instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def no_redirect_opener() -> urllib.request.OpenerDirector:
+    """An opener that hands a redirect back to the caller (as the
+    ``urllib.error.HTTPError`` urllib raises for an unfollowed 3xx) — for a test
+    whose assertion IS the ``Location`` — under the SAME floor-cert rule as the
+    installed opener.
+
+    ``build_opener`` composes a fresh opener from urllib's defaults, never from
+    the installed one, so a module hand-rolling ``build_opener(NoRedirect)``
+    silently dropped ``_FloorCertHTTPSHandler`` and met a TLS-serving nest's
+    self-signed floor cert bare: every apex well-known probe failed
+    ``CERTIFICATE_VERIFY_FAILED`` against a ``--nest docker`` nest (measured
+    2026-10-14, the CalDAV/CardDAV toggle witnesses). One opener, built here,
+    keeps both halves.
+    """
+    return urllib.request.build_opener(_FloorCertHTTPSHandler(), _NoRedirect())
 
 
 def _install_floor_cert_opener() -> None:

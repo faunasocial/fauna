@@ -116,6 +116,9 @@ public func escalateToLaunchSurface(
 /// account's id (the bug android shipped 2026-09-22). An abandoned append
 /// therefore leaves the store untouched (`onboarding.md` § Multi-account).
 ///
+/// `reportRefused` receives only an error thrown by `registry.addAccount`; the
+/// first-run `LoggedIn` terminal (`persistLoggedIn`) stays log-only.
+///
 /// `dismissWizard`/`switchAccount` are closures: `isAddingAccount` lives on
 /// two distinct `@Observable` state classes (`AppState`/`MacAppState`), and
 /// `switchAccount` itself is genuinely platform-divergent (macOS's
@@ -127,7 +130,8 @@ public func escalateToLaunchSurface(
 public func completeAppendedAccount(
     wizard: OnboardingMachine,
     dismissWizard: () -> Void,
-    switchAccount: (String, Bool) async -> Void
+    switchAccount: (String, Bool) async -> Void,
+    reportRefused: @MainActor (Error) -> Void
 ) async {
     // Read the wizard before dismissing it — the machine is the only holder.
     let secretHex = wizard.effectiveSecret()
@@ -177,6 +181,9 @@ public func completeAppendedAccount(
     } catch {
         logMessage(level: .error, target: "fauna.accounts",
                    message: "[add-account] addAccount failed: \(error); dismissing the wizard")
+        // The wizard is already gone, so the refusal (a full account list: the shared
+        // `add_refused_copy` line in `FfiError.General`) is painted on the switcher.
+        reportRefused(error)
         return
     }
 

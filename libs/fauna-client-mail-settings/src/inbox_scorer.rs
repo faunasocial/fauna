@@ -176,6 +176,49 @@ impl InboxSpamScorer {
     }
 }
 
+/// What one INBOX copy's post-decrypt step decided: the scorer's junk verdict
+/// and whether the copy goes on to the mailed-`REPLY` merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InboxCopyVerdict {
+    /// The scorer filed this copy Junk this call (→ kept out of the thread view).
+    pub junk: bool,
+    /// The copy is handed to `CalDavClient::apply_inbound_reply_from_mail`.
+    pub merge_reply: bool,
+}
+
+/// The ONE place the "score, then may this copy reach the `REPLY` merge?"
+/// decision lives — called by the native `NestMailInboundSource::fetch_page` and
+/// the web `WasmConversationsManager::ingest_sealed_inbound`, neither of which
+/// keeps its own `if` (priority #2).
+///
+/// The scorer runs only for a fresh INBOX delivery (`Sent` is never scored nor
+/// merged; a re-read must not score outside the pass its scorer was built for),
+/// and **always before** the merge decision: a copy the app's own scorer files
+/// Junk is never merged (`inbound-scheduling-authority.md` § The mail rail;
+/// invitation rule 3, `caldav-server.md` § Server-side auto-schedule). `scorer`
+/// `None` (cold start, mail off) is "not junk": the merge's stamp gate still
+/// applies downstream.
+pub fn judge_inbox_copy(
+    scorer: Option<&mut InboxSpamScorer>,
+    is_inbox: bool,
+    is_fresh_delivery: bool,
+    uid: u32,
+    flags: &[String],
+    rfc5322_text: &str,
+) -> InboxCopyVerdict {
+    if !(is_inbox && is_fresh_delivery) {
+        return InboxCopyVerdict {
+            junk: false,
+            merge_reply: false,
+        };
+    }
+    let junk = scorer.is_some_and(|s| s.observe(uid, flags, rfc5322_text));
+    InboxCopyVerdict {
+        junk,
+        merge_reply: !junk,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +365,45 @@ mod tests {
         let (scored, junk) = s.take();
         assert_eq!(scored, vec![42]);
         assert_eq!(junk, vec![42]);
+    }
+
+    const REPLY_AS_SPAM: &str =
+        "Subject: win\r\n\r\ncheap pills viagra casino winner claim your prize now";
+    const REPLY_AS_HAM: &str =
+        "Subject: lunch\r\n\r\nlunch tomorrow at noon the usual place see you there";
+
+    #[test]
+    fn a_junk_verdict_never_reaches_the_reply_merge() {
+        let mut s = InboxSpamScorer::new(spam_trained_model(), 5, knobs());
+        let v = judge_inbox_copy(Some(&mut s), true, true, 1, &[], REPLY_AS_SPAM);
+        assert!(v.junk, "the armed scorer files this copy Junk");
+        assert!(!v.merge_reply, "a Junk copy is never merged");
+    }
+
+    #[test]
+    fn a_clean_fresh_inbox_delivery_is_merged() {
+        let mut s = InboxSpamScorer::new(spam_trained_model(), 5, knobs());
+        let v = judge_inbox_copy(Some(&mut s), true, true, 2, &[], REPLY_AS_HAM);
+        assert!(!v.junk);
+        assert!(v.merge_reply);
+    }
+
+    #[test]
+    fn a_reread_or_the_sent_feed_is_never_merged_nor_scored() {
+        let mut s = InboxSpamScorer::new(spam_trained_model(), 5, knobs());
+        for (inbox, fresh) in [(true, false), (false, true), (false, false)] {
+            let v = judge_inbox_copy(Some(&mut s), inbox, fresh, 3, &[], REPLY_AS_HAM);
+            assert!(!v.merge_reply, "inbox={inbox} fresh={fresh}");
+            assert!(!v.junk);
+        }
+        assert!(s.is_empty(), "none of them was scored");
+    }
+
+    #[test]
+    fn no_scorer_merges_because_the_stamp_gate_still_applies() {
+        let v = judge_inbox_copy(None, true, true, 4, &[], REPLY_AS_SPAM);
+        assert!(!v.junk);
+        assert!(v.merge_reply);
     }
 
     #[test]

@@ -63,6 +63,8 @@ pytestmark = [
     pytest.mark.web,
     pytest.mark.android,
     pytest.mark.windows,
+    pytest.mark.macos,
+    pytest.mark.ios,
 ]
 
 ROOM_POST_TIER = "room"

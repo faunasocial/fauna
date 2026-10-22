@@ -37,13 +37,13 @@ Stamped 2026-09-19 at eb7ece9829.
 <!-- features-render:begin -->
 | App | Status | Stamp |
 |---|---|---|
-| web | ⚠ partial | 0.1.2-dev+55c383bf standalone |
+| web | ⚠ partial | 0.1.5-dev+110d1248 standalone |
 | linux | ⚠ partial | |
 | windows | ⚠ partial | |
 | macos | ⚠ partial | |
 | ios | ⚠ partial | |
 | android |  no run recorded | |
-| tui | ✅ full | 0.1.2-dev+a20190e6 live |
+| tui | ✅ full | 0.1.4-dev+365ed28f standalone |
 
 | Outcome | Surface | Witness | Newest outcome |
 |---|---|---|---|

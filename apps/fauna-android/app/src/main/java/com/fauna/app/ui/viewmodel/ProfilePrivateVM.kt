@@ -77,6 +77,14 @@ class ProfilePrivateVM @Inject constructor(
         return refusal == null
     }
 
+    /**
+     * The completion under the add field: the vocabulary labels [typed] starts,
+     * minus the [staged] ones (shared `label_suggestions`). The section paints
+     * none until something is typed.
+     */
+    fun labelSuggestions(typed: String, staged: List<String>): List<String> =
+        host.contactOverlays().labelSuggestions(typed, staged)
+
     fun removeLabel(index: Int) {
         editor?.removeLabel(index.toUInt())
         reload()

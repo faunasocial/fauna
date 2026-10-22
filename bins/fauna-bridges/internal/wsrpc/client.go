@@ -71,9 +71,8 @@ type ClientConfig struct {
 	// Logger is the per-client logger; defaults to slog.Default().
 	Logger *slog.Logger
 	// HTTPClient is forwarded to websocket.DialOptions.HTTPClient. Nil
-	// uses http.DefaultClient with no timeout, which is fine for tests
-	// against a local httptest server — production passes a client
-	// with a TLS config + sensible timeouts.
+	// uses the AuthClient's own client — the one the bearer is minted over
+	// (NestHTTPClient in production), so the upgrade rides the same TLS.
 	HTTPClient *http.Client
 	// OnPush, if non-nil, is invoked synchronously on the reader
 	// goroutine for every PushFrame. Leave nil to drop pushes.
@@ -195,6 +194,15 @@ const CodeOverQuota = "fauna.bridges.over_quota"
 // `550 5.7.1` — a retry cannot succeed until the user turns sending back on.
 const CodeSendDisabled = "fauna.bridges.send_disabled"
 
+// CodeForwardQueueFull is the `RpcError.code` `forward_message` returns for a
+// forward it did not park: a `redirect` the queue ceiling has no `copy` row
+// left to evict for, or a `copy` that was itself the oldest copy left
+// (`docs/goal/behavior/mail-forwarding.md` § Queue ceiling). The MTA treats it
+// like any un-enqueued forward — a per-rule redirect falls back to local
+// delivery, an admin forwarder answers `451` — and it must stay transient:
+// mapped to a permanent 5xx it would refuse mail the ceiling only delays.
+const CodeForwardQueueFull = "fauna.bridges.forward_queue_full"
+
 // CodeListSubmissionRequiresSendRPC is the `RpcError.code` `enqueue_outbound_mail`
 // returns when the submitting sender is a list address — a permanent refusal
 // (`docs/goal/behavior/mail-mass-mailing.md` § Architectural rules: a list send
@@ -307,9 +315,13 @@ func Dial(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	}
 	wsURL := buildWSURL(cfg.NestEndpoint, cfg.AuthClient.ActorIDHex())
 
+	// Unset → the AuthClient's own client: the bearer was just minted over it
+	// against this same nest, so the upgrade rides the same TLS. A verifying
+	// default here once failed every reconnect x509 against the loopback nest's
+	// self-signed cert, before the upgrade could answer 401.
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = cfg.AuthClient.httpClient
 	}
 	dial := func(bearer string) (*websocket.Conn, *http.Response, error) {
 		return websocket.Dial(ctx, wsURL, &websocket.DialOptions{

@@ -61,6 +61,33 @@ impl<R: RpcRequester> LabelersClient<R> {
             .await
     }
 
+    /// The caller's subscribed labelers a content rule may name — the labeler
+    /// picker's list in the shared rule editor (`nest-rules.md` § The shared
+    /// rule editor: a labeler rule names one of the publisher's
+    /// subscriptions), as hex ids. Only a `wasm` module over `post` content:
+    /// a rule bundles the module itself, and a feed composes only a
+    /// post-kind labeler.
+    pub async fn rule_labelers(&self) -> Result<Vec<String>, R::Error> {
+        Ok(self
+            .list()
+            .await?
+            .labelers
+            .into_iter()
+            .filter(|l| l.subscribed && l.artifact_kind == "wasm" && l.content_kind == "post")
+            .map(|l| l.labeler_id.iter().map(|b| format!("{b:02x}")).collect())
+            .collect())
+    }
+
+    /// The module bytes of one labeler for a content rule to bundle, or `None`
+    /// when it is not a `wasm` module over `post` content.
+    pub async fn rule_module(&self, labeler_id: Vec<u8>) -> Result<Option<Vec<u8>>, R::Error> {
+        let reply = self.inspect(labeler_id).await?;
+        Ok(
+            (reply.artifact_kind == "wasm" && reply.content_kind == "post")
+                .then(|| reply.wasm_bytes.into_vec()),
+        )
+    }
+
     /// `fauna.labelers.inspect` — fetch one labeler's full signed record +
     /// WASM bytes, for the inspect-before-subscribe trust gate.
     pub async fn inspect(&self, labeler_id: Vec<u8>) -> Result<InspectLabelerReply, R::Error> {
@@ -204,6 +231,57 @@ mod tests {
         }
         .expect("encode reply")
         .to_vec()
+    }
+
+    /// The rule editor's labeler picker lists only subscribed `wasm` modules
+    /// over posts, and fetches a module only of that kind.
+    #[test]
+    fn rule_labelers_are_the_subscribed_post_modules() {
+        fn summary(
+            id: u8,
+            subscribed: bool,
+            artifact_kind: &str,
+            content_kind: &str,
+        ) -> LabelerSummary {
+            LabelerSummary {
+                labeler_id: ByteBuf::from(vec![id; 32]),
+                content_kind: content_kind.into(),
+                artifact_kind: artifact_kind.into(),
+                subscribed,
+                ..Default::default()
+            }
+        }
+        fn rule_reply(kind: &'static str) -> Vec<u8> {
+            match kind {
+                "fauna.labelers.list" => fauna_protocol::encode_canonical(&ListLabelersReply {
+                    labelers: vec![
+                        summary(0x01, true, "wasm", "post"),
+                        summary(0x02, false, "wasm", "post"),
+                        summary(0x03, true, "list", "post"),
+                        summary(0x04, true, "wasm", "mail"),
+                    ],
+                    extra: Default::default(),
+                }),
+                "fauna.labelers.inspect" => {
+                    fauna_protocol::encode_canonical(&InspectLabelerReply {
+                        wasm_bytes: ByteBuf::from(b"module".to_vec()),
+                        artifact_kind: "wasm".into(),
+                        content_kind: "post".into(),
+                        ..Default::default()
+                    })
+                }
+                other => panic!("unexpected kind {other}"),
+            }
+            .expect("encode reply")
+            .to_vec()
+        }
+        let rec = std::sync::Arc::new(RecordingRequester::new(rule_reply));
+        let client = LabelersClient::new(rec.clone());
+        assert_eq!(block_on(client.rule_labelers()).unwrap(), ["01".repeat(32)]);
+        assert_eq!(
+            block_on(client.rule_module(vec![1; 32])).unwrap(),
+            Some(b"module".to_vec())
+        );
     }
 
     #[test]

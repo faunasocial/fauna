@@ -219,7 +219,8 @@ pub struct WelcomePayload {
     pub access: Option<String>,
     /// The home nest's deployment `nest_actor_id` — mirrors
     /// [`crate::inbox::WelcomeInbox::home_nest_actor_id`] (the byte-plane SPKI-pin
-    /// trust root for a cross-nest recipient). `None` for same-nest / relay-unaware.
+    /// trust root for a cross-nest recipient of any channel type, verified by
+    /// the recipient's own nest). `None` for same-nest.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub home_nest_actor_id: Option<String>,
     /// The folder's residency — mirrors [`crate::inbox::WelcomeInbox::residency`].
@@ -336,6 +337,25 @@ pub struct SyncChunkWantedPayload {
     /// bytes hash to (`ChunkManifest::store_keys()`). The nest checks the
     /// answer against it before serving.
     pub store_key: String,
+    /// Forward-compat: preserved unknown CBOR-map keys (per § 2.3 rule 4).
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// `fauna.nest.info_changed` — the nest's self-description (`fauna.nest.info`)
+/// changed under its connected members: today, the admin's published rules
+/// took an accepted write (`nest-rules.md` § Acceptance at joining, and a
+/// change of rules → *A change is announced*). Sent to every connected member;
+/// hint-less, because the device re-reads the self-description and finds the
+/// newer sequence there — the push is the nudge, never the source. Lossy like
+/// every push: a member who misses it re-reads on reconnect
+/// ([`StaleSurfaces::on_reconnect`]) or on the `ResyncRequired` sweep.
+pub const KIND_NEST_INFO_CHANGED: &str = "fauna.nest.info_changed";
+
+/// The payload of [`KIND_NEST_INFO_CHANGED`] — nothing but the forward-compat
+/// catch-all.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct NestInfoChangedPayload {
     /// Forward-compat: preserved unknown CBOR-map keys (per § 2.3 rule 4).
     #[serde(flatten, default)]
     pub extra: BTreeMap<String, Value>,
@@ -675,6 +695,9 @@ pub enum PushEvent {
     /// `fauna.sync.chunk.wanted` — the relay asks a connection that announced
     /// a folder for one of its chunks. See [`SyncChunkWantedPayload`].
     SyncChunkWanted(SyncChunkWantedPayload),
+    /// `fauna.nest.info_changed` — the self-description changed; every
+    /// connected member re-reads it. See [`NestInfoChangedPayload`].
+    NestInfoChanged(NestInfoChangedPayload),
     Unknown(Unknown),
 }
 
@@ -767,6 +790,13 @@ pub struct StaleSurfaces {
     /// the rest of the session. Safe to re-fire for the same reason too: every
     /// app's producer keeps the last-loaded thresholds on a failed read.
     pub own_thresholds: bool,
+    /// The nest's self-description — `fauna.nest.info`, which carries the
+    /// nest admin's signed published rules (`nest-rules.md` § Acceptance at
+    /// joining, and a change of rules). Fed by `fauna.nest.info_changed`, which
+    /// the nest sends every connected member on an accepted rules write, and
+    /// re-read on reconnect so a change made while the member was away is found
+    /// by its newer sequence.
+    pub nest_info: bool,
     /// The Settings → Mail → Spam page's training-history list
     /// (`mail-spam.md` § Undo, § Reset) — re-read by the shared
     /// `MailSpamMachine`'s hydrate. Fed by `spam_model_updated` (an undo, or a
@@ -795,6 +825,17 @@ pub struct StaleSurfaces {
     /// until the user moves on), fed by the three import events and page-gated
     /// the same way.
     pub mail_import: bool,
+    /// The Devices & Folders pages: the device / folder / conflict lists
+    /// (`DevicesMachine::refresh`) and every open folder row's per-set reads
+    /// (its device, member, actor and destination rosters). **No single kind
+    /// stales it**: `fauna.sync.changed` stales one set's row, which the call
+    /// site matches by the payload's set (the per-folder fetch stays per-
+    /// payload, see the type's doc); a reconnect or a `ResyncRequired` may have
+    /// swallowed that push and leaves nothing else to re-read the lists, so
+    /// both stale it whole. The re-read is also what retires a row read's
+    /// "connection to the nest was lost" error once the nest is back
+    /// (`folders.md` § Errors & edge cases).
+    pub devices: bool,
 }
 
 impl StaleSurfaces {
@@ -812,9 +853,11 @@ impl StaleSurfaces {
         media: false,
         family: false,
         own_thresholds: false,
+        nest_info: false,
         mail_spam: false,
         mail_export: false,
         mail_import: false,
+        devices: false,
     };
 
     /// **Everything.** A reconnect resets the push `seq` to 0
@@ -838,9 +881,11 @@ impl StaleSurfaces {
             media: true,
             family: true,
             own_thresholds: true,
+            nest_info: true,
             mail_spam: true,
             mail_export: true,
             mail_import: true,
+            devices: true,
         }
     }
 
@@ -914,6 +959,10 @@ impl StaleSurfaces {
                 mail_import: true,
                 ..Self::NONE
             },
+            KIND_NEST_INFO_CHANGED => Self {
+                nest_info: true,
+                ..Self::NONE
+            },
             "fauna.protocol.resync_required" => Self {
                 feed: false,
                 family: false,
@@ -938,9 +987,11 @@ impl StaleSurfaces {
             && (self.media || !other.media)
             && (self.family || !other.family)
             && (self.own_thresholds || !other.own_thresholds)
+            && (self.nest_info || !other.nest_info)
             && (self.mail_spam || !other.mail_spam)
             && (self.mail_export || !other.mail_export)
             && (self.mail_import || !other.mail_import)
+            && (self.devices || !other.devices)
     }
 
     /// Both sets' surfaces — for a caller accumulating several pushes into one
@@ -958,9 +1009,11 @@ impl StaleSurfaces {
             media: self.media || other.media,
             family: self.family || other.family,
             own_thresholds: self.own_thresholds || other.own_thresholds,
+            nest_info: self.nest_info || other.nest_info,
             mail_spam: self.mail_spam || other.mail_spam,
             mail_export: self.mail_export || other.mail_export,
             mail_import: self.mail_import || other.mail_import,
+            devices: self.devices || other.devices,
         }
     }
 
@@ -981,9 +1034,11 @@ impl StaleSurfaces {
             && !self.media
             && !self.family
             && !self.own_thresholds
+            && !self.nest_info
             && !self.mail_spam
             && !self.mail_export
             && !self.mail_import
+            && !self.devices
     }
 }
 
@@ -1050,12 +1105,20 @@ impl PushEvent {
             // *dropped* push could have staled is therefore stale — which is
             // every surface but the three no push feeds (the feed, the family
             // read, the own-threshold read): a dropped push cannot have staled
-            // what no push touches.
+            // what no push touches. The self-description IS push-fed
+            // (`fauna.nest.info_changed`), so a dropped push may have staled it.
             PushEvent::ResyncRequired(_) => StaleSurfaces {
                 feed: false,
                 family: false,
                 own_thresholds: false,
                 ..StaleSurfaces::on_reconnect()
+            },
+            // The admin's published rules changed (`nest-rules.md` § A change
+            // is announced): the device re-reads the self-description and
+            // finds the newer sequence.
+            PushEvent::NestInfoChanged(_) => StaleSurfaces {
+                nest_info: true,
+                ..StaleSurfaces::NONE
             },
 
             // ── Kinds whose consumer is not a snapshot surface ──
@@ -1514,6 +1577,16 @@ impl PushEvent {
                         })
                     })
             }
+            KIND_NEST_INFO_CHANGED => {
+                fauna_cbor::decode_strict::<NestInfoChangedPayload>(&payload_bytes)
+                    .map(PushEvent::NestInfoChanged)
+                    .unwrap_or_else(|_| {
+                        PushEvent::Unknown(Unknown {
+                            kind: kind.to_string(),
+                            payload,
+                        })
+                    })
+            }
             _ => PushEvent::Unknown(Unknown {
                 kind: kind.to_string(),
                 payload,
@@ -1568,6 +1641,7 @@ impl PushEvent {
             }
             PushEvent::PushNotification(_) => "fauna.push.notification",
             PushEvent::SyncChunkWanted(_) => KIND_SYNC_CHUNK_WANTED,
+            PushEvent::NestInfoChanged(_) => KIND_NEST_INFO_CHANGED,
             PushEvent::Unknown(u) => &u.kind,
         }
     }
@@ -2361,6 +2435,10 @@ mod tests {
         })
     }
 
+    fn nest_info_changed() -> PushEvent {
+        PushEvent::NestInfoChanged(NestInfoChangedPayload::default())
+    }
+
     fn spam_model_reset() -> PushEvent {
         PushEvent::BridgeSpamModelReset(crate::bridge_routing::BridgeSpamModelResetPush {
             actor_id: vec![6u8; 32],
@@ -2558,6 +2636,7 @@ mod tests {
             consent_requested(),
             spam_model_updated(),
             spam_model_reset(),
+            nest_info_changed(),
         ] {
             assert!(
                 sweep.covers(&event.invalidates()),
@@ -2604,6 +2683,7 @@ mod tests {
             mail_flags_changed(),
             spam_model_updated(),
             spam_model_reset(),
+            nest_info_changed(),
         ] {
             assert!(
                 reconnect.covers(&event.invalidates()),
@@ -2639,6 +2719,7 @@ mod tests {
             mail_flags_changed(),
             spam_model_updated(),
             spam_model_reset(),
+            nest_info_changed(),
         ] {
             assert!(
                 !event.invalidates().family,
@@ -2651,6 +2732,85 @@ mod tests {
                 event.kind()
             );
         }
+    }
+
+    /// The Devices & Folders reads — the page lists and every open folder row's
+    /// per-set reads — are stale after a reconnect and after a `ResyncRequired`,
+    /// and never from a single kind: `fauna.sync.changed` stales one set's row,
+    /// which the call site matches by payload. Before this flag a row read that
+    /// failed while the nest was down kept "the connection to the nest was lost"
+    /// on `error-message` after the nest came back, because nothing re-read it
+    /// (`folders.md` § Errors & edge cases; `transport.md` § Push events).
+    #[test]
+    fn a_reconnect_and_a_resync_stale_the_devices_pages_and_no_single_kind_does() {
+        assert!(StaleSurfaces::on_reconnect().devices);
+        assert!(resync_required().invalidates().devices);
+        assert!(StaleSurfaces::for_kind("fauna.protocol.resync_required").devices);
+        const { assert!(!StaleSurfaces::NONE.devices) };
+        for event in [
+            knock(),
+            notification(),
+            account_updated(),
+            calendar_changed(),
+            address_book_changed(),
+            sync_changed(),
+            consent_requested(),
+            mail_received(),
+            mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
+            nest_info_changed(),
+        ] {
+            assert!(
+                !event.invalidates().devices,
+                "{:?} stales every folder row, but a push names at most one set",
+                event.kind()
+            );
+        }
+    }
+
+    /// The self-description carries the nest admin's signed rules
+    /// (`nest-rules.md` § Acceptance at joining, and a change of rules): the
+    /// nest's push on an accepted write stales it, and so do the two sweeps — a
+    /// change made while the member was away is found on reconnect, and one
+    /// whose push was dropped on the `ResyncRequired` sweep. No other kind does.
+    #[test]
+    fn the_rules_change_push_and_both_sweeps_stale_the_nest_self_description() {
+        assert!(StaleSurfaces::on_reconnect().nest_info);
+        assert!(resync_required().invalidates().nest_info);
+        assert!(nest_info_changed().invalidates().nest_info);
+        assert_eq!(
+            StaleSurfaces::for_kind(KIND_NEST_INFO_CHANGED),
+            StaleSurfaces {
+                nest_info: true,
+                ..StaleSurfaces::NONE
+            }
+        );
+        const { assert!(!StaleSurfaces::NONE.nest_info) };
+        for event in [
+            knock(),
+            notification(),
+            account_updated(),
+            calendar_changed(),
+            address_book_changed(),
+            sync_changed(),
+            consent_requested(),
+            mail_received(),
+            mail_flags_changed(),
+            spam_model_updated(),
+            spam_model_reset(),
+        ] {
+            assert!(!event.invalidates().nest_info, "{:?}", event.kind());
+        }
+    }
+
+    /// The push travels as a bare map and decodes back to its own variant.
+    #[test]
+    fn the_nest_info_changed_push_round_trips() {
+        let event = nest_info_changed();
+        assert_eq!(event.kind(), "fauna.nest.info_changed");
+        let payload: Value = decode(&encode_canonical(&event).unwrap()).unwrap();
+        assert_eq!(PushEvent::from_push(event.kind(), payload), event);
     }
 
     /// The viewer's own thresholds (`fauna.spam.get_preferences`) are the other
@@ -2728,6 +2888,7 @@ mod tests {
             resync_required(),
             mail_received(),
             mail_flags_changed(),
+            nest_info_changed(),
         ] {
             assert_eq!(
                 StaleSurfaces::for_kind(event.kind()),

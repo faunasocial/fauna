@@ -1,5 +1,5 @@
 """tier_4 (live-remote, OPT-IN, THREE-MACHINE): cross-machine filesync convergence
-against a live nest (example.com), one seat per dev machine, all started manually
+against a live nest, one seat per dev machine, all started manually
 at roughly the same time.
 
 EVERY invocation below needs ``FAUNA_E2E_LIVE=1`` exported — the repo-wide opt-in
@@ -196,7 +196,7 @@ multiseat_config.py supplies every default; each is still env-overridable):
              own domain (mail is not touched; the client discovers the nest by
              DoH from this handle's DOMAIN, and the nest replaces the localpart
              with the account's registered handle at sign-in — helpers/
-             live_handle.py). It used to default to a hardcoded `test@example.com`,
+             live_handle.py). It used to default to a hardcoded `test@example.net`,
              which was a guess about a value only the box knows.
   run id     the announce computes YYYYMMDD-NN by reading the set (above); the
              seat run takes it from FAUNA_MULTISEAT_RUN_ID (the session exports
@@ -325,10 +325,10 @@ pytestmark = [
     pytest.mark.live_box,
     pytest.mark.live_nest,
     # A three-machine round, invoked on its own with no `--nest`: every seat
-    # dials the box `multiseat_config` names (example.com by default), never the
+    # dials the box `multiseat_config` names (the dev nest by default), never the
     # run's provider. A `--nest docker|live` sweep collecting it would aim a
     # round nobody announced at a box the run did not name — measured
-    # 2026-10-05, a dev.example.com sweep sent all three at example.com.
+    # 2026-10-05, a dev-nest sweep sent all three at the live nest.
     pytest.mark.standalone_only,
     pytest.mark.real_sync_agent,
     # BOTH real-agent markers, never just one (conftest `_apply_isolated_sync_agent_env`:

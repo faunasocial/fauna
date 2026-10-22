@@ -26,9 +26,10 @@ import {
   type RegionItem,
   type RegionPlaneHandle,
   type RegionView,
-} from '$lib/wasm';
-import { regionRefresh } from '$lib/rpc';
-import { registerActorScopedReset } from '$lib/actorScope';
+} from '#lib/wasm';
+import { regionRefresh } from '#lib/rpc';
+import { registerActorScopedReset } from '#lib/actorScope';
+import { nestRulesSource } from '#lib/nestRules.svelte';
 
 /** The language the authority's reason is picked in — the app's UI language
  *  (linux/tui `UI_LANG`). */
@@ -133,6 +134,31 @@ export function regionRender(
 ): ContentRender | null {
   void revision;
   if (!plane) return null;
+  // The session nest's published rules compose as the fourth source in the SAME
+  // call (`nest-rules.md` § The nest source in the engine) — one call, so no
+  // surface folds one source while bypassing another.
+  const nest = nestRulesSource();
+  if (nest) {
+    const r = plane.renderWithNest(
+      nest.book,
+      nest.nestId,
+      labels,
+      contentPolicy,
+      ownSpamPermille,
+      ownPhishingPermille,
+      item.contentIdHex ?? null,
+      item.authorHex ?? null,
+      item.text,
+      item.hashtags,
+      item.hasMedia,
+      UI_LANG,
+    );
+    return {
+      verdict: r.verdict,
+      placeholder: r.placeholder ?? r.nestPlaceholder,
+      guardianPlaceholder: r.guardianPlaceholder,
+    };
+  }
   return plane.render(
     labels,
     contentPolicy,

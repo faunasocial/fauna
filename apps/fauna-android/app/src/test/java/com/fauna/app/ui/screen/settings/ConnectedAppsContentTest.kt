@@ -15,6 +15,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import uniffi.fauna_atproto_settings_machine.ConsentCardRow
+import uniffi.fauna_atproto_settings_machine.ConsentInstallRow
+import uniffi.fauna_atproto_settings_machine.ConsentInstallSettingRow
 import uniffi.fauna_atproto_settings_machine.ConsentSetRow
 import uniffi.fauna_client_connected_apps.BlockedAppRow
 import uniffi.fauna_client_connected_apps.ConnectedAppRow
@@ -90,6 +92,7 @@ class ConnectedAppsContentTest {
         id: String = "c1",
         code: String = "AAA-BBB",
         sets: List<ConsentSetRow> = emptyList(),
+        install: ConsentInstallRow? = null,
     ) = ConsentCardRow(
         consentIdHex = id,
         code = code,
@@ -97,6 +100,7 @@ class ConnectedAppsContentTest {
         clientName = "Example App",
         scopeDescriptions = listOf("Read your posts"),
         sets = sets,
+        install = install,
     )
 
     private fun snapshot(
@@ -104,11 +108,13 @@ class ConnectedAppsContentTest {
         requests: List<ConsentCardRow> = emptyList(),
         principals: List<ConnectedAppRow> = emptyList(),
         blocked: List<BlockedAppRow> = emptyList(),
+        externalAppsOff: Boolean = false,
     ) = ConnectedAppsSnapshot(
         loaded = loaded,
         requests = requests,
         principals = principals,
         blocked = blocked,
+        externalAppsOff = externalAppsOff,
         error = null,
     )
 
@@ -121,13 +127,16 @@ class ConnectedAppsContentTest {
         onResolveRequest: (String, Boolean) -> Unit = { _, _ -> },
         onBlockRequest: (String) -> Unit = {},
         onUnblock: (String) -> Unit = {},
+        onSetExternalAppsEnabled: (Boolean) -> Unit = {},
         onArmRevoke: (String) -> Unit = {},
         onConfirmRevoke: (String) -> Unit = {},
         onCancelRevoke: () -> Unit = {},
         onToggleReveal: (String) -> Unit = {},
+        onOpenSettingsCard: () -> Unit = {},
     ) {
         composeTestRule.setContent {
             ConnectedAppsContent(
+                onOpenSettingsCard = onOpenSettingsCard,
                 snapshot = snapshot,
                 code = code,
                 revokeArmed = revokeArmed,
@@ -138,6 +147,7 @@ class ConnectedAppsContentTest {
                 onResolveRequest = onResolveRequest,
                 onBlockRequest = onBlockRequest,
                 onUnblock = onUnblock,
+                onSetExternalAppsEnabled = onSetExternalAppsEnabled,
                 onArmRevoke = onArmRevoke,
                 onConfirmRevoke = onConfirmRevoke,
                 onCancelRevoke = onCancelRevoke,
@@ -179,6 +189,26 @@ class ConnectedAppsContentTest {
         render(snapshot = snapshot(loaded = true))
         composeTestRule.onNodeWithTag("connected-apps-empty").assertExists()
         composeTestRule.onNodeWithTag("connected-apps-item").assertDoesNotExist()
+    }
+
+    // ── A hosted plugin's settings link ───────────────────────────────────
+
+    /** The shared composition says which rows link (`opens_settings_card`): a hosted plugin's, and no other. */
+    @Test
+    fun onlyAHostedPluginsRowLinksToItsSettingsCard() {
+        var opened = 0
+        render(
+            snapshot = snapshot(
+                loaded = true,
+                principals = listOf(row("plugin", name = "Hello Plugin", cls = "wasm"), row("device")),
+            ),
+            onOpenSettingsCard = { opened++ },
+        )
+        composeTestRule.onAllNodesWithTag("connected-apps-item").assertCountEquals(2)
+        composeTestRule.onAllNodesWithTag("connected-apps-item-settings-link").assertCountEquals(1)
+        // The roster scrolls: Robolectric's click lands only on a node scrolled into view.
+        composeTestRule.onNodeWithTag("connected-apps-item-settings-link").performScrollTo().performClick()
+        org.junit.Assert.assertEquals(1, opened)
     }
 
     // ── Connect an app ────────────────────────────────────────────────────
@@ -237,6 +267,50 @@ class ConnectedAppsContentTest {
         composeTestRule.onNodeWithText("Example App", substring = true).assertExists()
         composeTestRule.onNodeWithText("https://example.com/oauth", substring = true).assertExists()
         composeTestRule.onNodeWithText("Read your posts", substring = true).assertExists()
+    }
+
+    // ── An admin's hosted-plugin install card ─────────────────────────────
+    // third-party.md § The runner contract → *The install-approval leg*: the
+    // install section is composed once in shared Rust (`compose::request_install_text`)
+    // and painted as one leaf per fact between the scopes and the binding code.
+
+    private fun installRow() = ConsentInstallRow(
+        executionForm = "wasm",
+        requestedKinds = listOf("ext.plugins.example.notes"),
+        settings = listOf(ConsentInstallSettingRow(key = "greeting", label = "Greeting", settingType = "string")),
+        publisherDomain = "plugins.example",
+        publisherKey = "did:key:z6MkExample",
+        moduleDigest = "sha256:abc123",
+        hosts = emptyList(),
+        ingressPaths = emptyList(),
+        development = false,
+        bind = false,
+    )
+
+    @Test
+    fun anInstallCardPaintsItsInstallSectionLeaves() {
+        render(snapshot = snapshot(requests = listOf(request(install = installRow()))))
+        for (leaf in listOf("", "-form", "-publisher", "-digest", "-kinds", "-hosts", "-settings")) {
+            composeTestRule.onNodeWithTag("connected-apps-request-install$leaf").assertExists()
+        }
+        // The form leaf carries the raw execution form, whatever its words say.
+        composeTestRule.onNodeWithTag("connected-apps-request-install-form")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "wasm"))
+        composeTestRule.onNodeWithTag("connected-apps-request-install-publisher")
+            .assertTextContains("did:key:z6MkExample", substring = true)
+        composeTestRule.onNodeWithTag("connected-apps-request-install-digest")
+            .assertTextContains("sha256:abc123", substring = true)
+        composeTestRule.onNodeWithTag("connected-apps-request-install-kinds")
+            .assertTextContains("ext.plugins.example.notes", substring = true)
+        composeTestRule.onNodeWithTag("connected-apps-request-install-settings")
+            .assertTextContains("Greeting", substring = true)
+    }
+
+    @Test
+    fun anOrdinaryCardPaintsNoInstallSection() {
+        render(snapshot = snapshot(requests = listOf(request())))
+        composeTestRule.onNodeWithTag("connected-apps-request-install").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("connected-apps-request-install-form").assertDoesNotExist()
     }
 
     // ── The card's permission-set section ─────────────────────────────────
@@ -558,6 +632,7 @@ class ConnectedAppsContentTest {
                     onResolveRequest = { _, _ -> },
                     onBlockRequest = {},
                     onUnblock = {},
+                    onSetExternalAppsEnabled = {},
                     onArmRevoke = {},
                     onConfirmRevoke = {},
                     onCancelRevoke = {},
@@ -576,6 +651,29 @@ class ConnectedAppsContentTest {
     }
 
     // ── Blocked apps ──────────────────────────────────────────────────────
+
+    @Test
+    fun theExternalAppsSwitchPaintsTheSnapshotsAnswerAndFiresTheTargetValue() {
+        // Rendered unconditionally, bound to the snapshot's own answer (ON is
+        // the zero value) — never wrapped in an `if`, never a local guess.
+        var enabled: Boolean? = null
+        render(snapshot = snapshot(), onSetExternalAppsEnabled = { enabled = it })
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsOn()
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").performScrollTo().performClick()
+        assertEquals(false, enabled)
+    }
+
+    @Test
+    fun theExternalAppsSwitchReadsOffFromTheSnapshotAndRendersBeforeTheFirstRead() {
+        render(snapshot = snapshot(externalAppsOff = true))
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsOff()
+    }
+
+    @Test
+    fun theExternalAppsSwitchRendersWhileNoSnapshotHasReturned() {
+        render(snapshot = null)
+        composeTestRule.onNodeWithTag("atproto-external-apps-enable").assertIsOn()
+    }
 
     @Test
     fun blockedAppsAreAbsentWhileNothingIsBlocked() {

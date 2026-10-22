@@ -67,6 +67,12 @@ fauna_core::declare_api_error!(
         BadRequest,
         /// A readable set / resource was not found.
         NotFound,
+        /// The nest refused a record for want of a sealed path
+        /// (`fauna.sync.path_seal_required`): its view of the folder's
+        /// audience is private while the write assumed public. Typed so the
+        /// page can react to the code, which `detail` (the nest's prose) does
+        /// not carry.
+        SealRequired,
         /// Transport fault / 5xx / permission — retryable or session-level.
         Transient,
     }
@@ -162,6 +168,19 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// proves the link itself by the statement walk.
     fn set_reader_predecessors(&self, _predecessors: Vec<[u8; 32]>) {}
 
+    /// Hand the seam the page's MLS query ([`MediaMachine::set_mls_query`]) —
+    /// the host's [`FolderChannelOwners`], the anchor a **member** row's
+    /// declassification is judged under: the channel's MLS-recorded owner,
+    /// never the row's nest-filled `owner_actor_id` (`encryption-at-rest.md`
+    /// § Readable classes → *The declassification is owner-ATTESTED*). A seam
+    /// that judges no verdict ignores it; one never handed it seals every
+    /// member row.
+    ///
+    /// [`MediaMachine::set_mls_query`]: crate::MediaMachine::set_mls_query
+    /// [`FolderChannelOwners`]: fauna_client_media::member_rows::FolderChannelOwners
+    fn set_mls_query(&self, _query: std::sync::Arc<dyn fauna_client_media::member_rows::MlsQuery>) {
+    }
+
     /// `fauna.folders.list` with the member-visible projection — the caller's
     /// own folders and the sets shared with it, as the control plane reports
     /// them, including sets that hold no media yet. This is what makes a
@@ -179,7 +198,9 @@ pub trait MediaNestApi: fauna_core::MaybeSendSync + std::fmt::Debug {
     /// reply (`fauna_protocol::member_rows`, `MediaMachine::set_mls_query`)
     /// before any row is offered; unwired, every member row is dropped, so a
     /// stranger's un-accepted knock never appears in Media's filter. A
-    /// member row's declassification verdict is judged under its owner.
+    /// member row's declassification verdict is judged under the channel's
+    /// MLS-recorded owner ([`Self::set_mls_query`]), never the row's
+    /// `owner_actor_id`.
     ///
     /// Mode is carried per row because Media's two option lists differ:
     /// Sync + Backup browse, Sync alone may be an upload target

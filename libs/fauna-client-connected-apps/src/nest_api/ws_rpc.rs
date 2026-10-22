@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use fauna_atproto_settings_machine::NestConsentRow;
-use fauna_client_bridges::AtprotoSettingsClient;
+use fauna_client_bridges::{AtprotoSettingsClient, PluginsClient};
 use fauna_client_capabilities::rpc::CapabilitiesClient;
 use fauna_client_mail_settings::{
     DispatchError, MailCredentialSummary, MailSettingsAction, MailSettingsMachine,
@@ -37,6 +37,8 @@ pub struct WsRpcConnectedAppsNest<R: RpcRequester> {
     /// `fauna.capabilities.{mint,revoke}` — the consent-time grant's deposit
     /// and withdrawal.
     capabilities: CapabilitiesClient<R>,
+    /// `fauna.plugins.bind` — a hosted plugin's bind card.
+    plugins: PluginsClient<R>,
     /// The session's mail-settings machine. `None` on a session that built
     /// none: the roster then simply carries no mail rows.
     mail: Option<Arc<MailSettingsMachine>>,
@@ -58,6 +60,7 @@ where
             apps: ConnectedAppsClient::new(nest.clone()),
             atproto: AtprotoSettingsClient::new(nest.clone()),
             capabilities: CapabilitiesClient::new(nest.clone()),
+            plugins: PluginsClient::new(nest.clone()),
             bunker: NostrBunkerClient::new(nest),
             mail,
         }
@@ -138,6 +141,13 @@ where
         let reply = self.apps.open_handoff(request_uri).await.map_err(map_err)?;
         Ok(reply.consent.map(NestConsentRow::from))
     }
+    async fn do_bind_plugin(
+        &self,
+        principal_id: Vec<u8>,
+    ) -> Result<NestConsentRow, ConnectedAppsApiError> {
+        let reply = self.plugins.bind(principal_id).await.map_err(map_err)?;
+        Ok(NestConsentRow::from(reply.consent))
+    }
     async fn do_block_client(
         &self,
         client_id: String,
@@ -187,6 +197,16 @@ where
             .await
             .map_err(map_err)?
             .external_apps_enabled)
+    }
+    async fn do_set_external_apps_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), ConnectedAppsApiError> {
+        self.atproto
+            .set_external_apps_enabled(enabled)
+            .await
+            .map(|_| ())
+            .map_err(map_err)
     }
     async fn do_revoke_bunker_app(&self, id: i64) -> Result<bool, ConnectedAppsApiError> {
         self.bunker.revoke(id).await.map_err(map_err)
@@ -316,6 +336,12 @@ mod native {
         ) -> Result<Option<NestConsentRow>, ConnectedAppsApiError> {
             self.do_open_handoff(request_uri).await
         }
+        async fn bind_plugin(
+            &self,
+            principal_id: Vec<u8>,
+        ) -> Result<NestConsentRow, ConnectedAppsApiError> {
+            self.do_bind_plugin(principal_id).await
+        }
         async fn block_client(
             &self,
             client_id: String,
@@ -334,6 +360,12 @@ mod native {
         }
         async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
             self.do_external_apps_enabled().await
+        }
+        async fn set_external_apps_enabled(
+            &self,
+            enabled: bool,
+        ) -> Result<(), ConnectedAppsApiError> {
+            self.do_set_external_apps_enabled(enabled).await
         }
         async fn revoke_session(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_session(id).await
@@ -426,6 +458,12 @@ mod wasm {
         ) -> Result<Option<NestConsentRow>, ConnectedAppsApiError> {
             self.do_open_handoff(request_uri).await
         }
+        async fn bind_plugin(
+            &self,
+            principal_id: Vec<u8>,
+        ) -> Result<NestConsentRow, ConnectedAppsApiError> {
+            self.do_bind_plugin(principal_id).await
+        }
         async fn block_client(
             &self,
             client_id: String,
@@ -444,6 +482,12 @@ mod wasm {
         }
         async fn external_apps_enabled(&self) -> Result<bool, ConnectedAppsApiError> {
             self.do_external_apps_enabled().await
+        }
+        async fn set_external_apps_enabled(
+            &self,
+            enabled: bool,
+        ) -> Result<(), ConnectedAppsApiError> {
+            self.do_set_external_apps_enabled(enabled).await
         }
         async fn revoke_session(&self, id: Vec<u8>) -> Result<bool, ConnectedAppsApiError> {
             self.do_revoke_session(id).await

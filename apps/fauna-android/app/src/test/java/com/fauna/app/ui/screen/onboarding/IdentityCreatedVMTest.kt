@@ -46,7 +46,7 @@ class IdentityCreatedVMTest {
 
     @Test
     fun normalOnboard_registersAndActivatesTheIdentity() {
-        makeVm(appendMode = false).confirm()
+        makeVm(appendMode = false).confirm(TEMPLATE)
 
         val active = registry.active()
         assertNotNull("the first-run confirm activates the new identity", active)
@@ -56,7 +56,7 @@ class IdentityCreatedVMTest {
     /** An abandoned append registers nothing: no account, nothing active. */
     @Test
     fun appendMode_registersNothing() {
-        makeVm(appendMode = true).confirm()
+        makeVm(appendMode = true).confirm(TEMPLATE)
 
         assertTrue("an append confirm writes no account", registry.list().isEmpty())
         assertEquals(null, registry.active())
@@ -67,13 +67,38 @@ class IdentityCreatedVMTest {
     fun appendMode_leavesTheLiveAccountActive() {
         val live = registry.confirmIdentity(LIVE_SECRET, false)
 
-        makeVm(appendMode = true).confirm()
+        makeVm(appendMode = true).confirm(TEMPLATE)
 
         assertEquals(live, registry.active())
         assertEquals(listOf(live), registry.list().map { it.actorId })
     }
 
+    /**
+     * A failed moment-1 write is loud (long-term-store.md § Save-failure
+     * handling): the machine is told, with the localized template filled, and
+     * the confirm reports uncommitted so the screen stays put.
+     */
+    @Test
+    fun failedWrite_callsIdentityCommitFailed_andReportsUncommitted() {
+        val host = mock(OnboardingHost::class.java)
+        val machine = mock(OnboardingMachine::class.java)
+        val throwing = mock(FfiAccountRegistry::class.java)
+        whenever(host.machine).thenReturn(machine)
+        whenever(host.appendMode).thenReturn(false)
+        whenever(machine.confirmGeneratedIdentity()).thenReturn(SECRET)
+        whenever(throwing.confirmIdentity(SECRET, false))
+            .thenThrow(com.fauna.ffi.FfiException.General("keystore unavailable"))
+
+        val committed = IdentityCreatedVM(host, throwing).confirm(TEMPLATE)
+
+        assertEquals(false, committed)
+        org.mockito.Mockito.verify(machine).identityCommitFailed(
+            org.mockito.ArgumentMatchers.contains("keystore unavailable"),
+        )
+    }
+
     private companion object {
+        const val TEMPLATE = "Couldn't save your new identity: {message}"
         const val SECRET =
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
         const val LIVE_SECRET =

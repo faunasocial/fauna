@@ -42,9 +42,21 @@ public class FaunaClient {
     /// roster rather than blanking live marks (a page repaint must not
     /// un-flag a real review — mirrors `refreshMailEpochSchedule`'s contract).
     public func reloadMemberReviewRoster() async {
-        if let fresh = try? await api.memberReviewList() {
+        if let fresh = try? await api.memberReviewList(), fresh != memberReviewRoster {
             memberReviewRoster = fresh
         }
+    }
+
+    /// The store-change notice's re-read of the app-wide store-backed render
+    /// sources (account-runtime.md § Multi-instance concurrency, part 4): the
+    /// member-review roster (thread-header chips, contacts badges), the
+    /// inherited-filter marks (Privacy's rows and the Account line's count)
+    /// and the process-held muted-word list. Each keeps its previous value on
+    /// a failed read and republishes only a different answer.
+    public func resyncStoreSources() async {
+        await reloadMemberReviewRoster()
+        await reloadInheritedFilterMarks()
+        await MutedWordsHolder.shared.refresh(api: api)
     }
 
     /// The post-succession aftermath's per-leg progress
@@ -67,6 +79,20 @@ public class FaunaClient {
     /// construction, like ``memberReviewRoster``.
     public private(set) var inheritedFilterMarks: [Int64] = []
 
+    /// Bumped each time the aftermath's `configStageSettled` fires, i.e. once
+    /// its last leg — the mail burn — has finished
+    /// (`succession-aftermath.md` § Implementation status today, the MSEK leg).
+    /// An open Mail settings page watches it and re-hydrates its machine so the
+    /// burned credentials read as revoked without leaving and re-opening the
+    /// page (web's `configStageSettled` re-hydrate, same hook).
+    public private(set) var mailSettledGeneration = 0
+
+    /// The aftermath's settle hook for the Mail page — see
+    /// ``mailSettledGeneration``.
+    public func noteMailSettled() {
+        mailSettledGeneration += 1
+    }
+
     /// The count behind `recovery-kit-inherited-filters-status` — derived,
     /// never stored apart from the marks it counts.
     public var recoveryInheritedFiltersOpen: Int { inheritedFilterMarks.count }
@@ -77,7 +103,8 @@ public class FaunaClient {
     /// `read_filter_marks`' "leave the cache alone" contract).
     public func reloadInheritedFilterMarks() async {
         do {
-            inheritedFilterMarks = try await api.filterMarksList()
+            let fresh = try await api.filterMarksList()
+            if fresh != inheritedFilterMarks { inheritedFilterMarks = fresh }
         } catch {
             logMessage(level: .warn, target: "fauna.app",
                        message: "re-reading the inherited-filter marks failed: \(error)")
@@ -93,6 +120,7 @@ public class FaunaClient {
         case .backupRegrant: aftermathProgress.backupRegrant = line
         case .mlsReseal: aftermathProgress.mlsReseal = line
         case .grantRemint: aftermathProgress.grantRemint = line
+        case .periodRotation: aftermathProgress.periodRotation = line
         case .draftsReseal: aftermathProgress.draftsReseal = line
         case .mailBurn: aftermathProgress.mailBurn = line
         }
@@ -134,6 +162,10 @@ public class FaunaClient {
     /// `fauna.knock` — the *dedicated* knock seam the generic push loop can't carry.
     /// See `startKnockObserver`.
     private var knockObserverTask: Task<Void, Never>?
+
+    /// The store-change notice's app-wide subscription — see `startKnockObserver`
+    /// (where it arms) and ``resyncStoreSources()``.
+    private var storeChangeWatch: StoreChangeWatch?
 
     /// The app-level Nests auto-renew loop (macOS) — see `startNestsAutoRenewLoop`.
     private var nestsAutoRenewTask: Task<Void, Never>?
@@ -532,6 +564,17 @@ public class FaunaClient {
         return try await api.reseedCustodianStore(deviceId: deviceId, dataDir: AccountStateDir.base.path)
     }
 
+    /// See `CustodianStoreAccess.recoverCustodianStore`. The same runtime choice
+    /// as the reseed above: the side that holds the bytes runs the leg — the
+    /// agent on a desktop, this process on a phone. Neither grants anything
+    /// from here; the shared composition (or the agent's job) does.
+    public func recoverCustodianStore() async throws -> FfiRecoveryResult {
+        if let provisioner = syncAgentProvisioner {
+            return try await api.recoverCustodianStore(via: provisioner)
+        }
+        return try await api.recoverCustodianStore(deviceId: deviceId, dataDir: AccountStateDir.base.path)
+    }
+
     #if DEBUG
     /// Run **one** custodian pull pass, on whichever side this platform hosts its
     /// replica — the e2e `custodian_pull_run_now` poke (`CustodianPullTestCommand`;
@@ -665,6 +708,7 @@ public class FaunaClient {
                     Task {
                         await self?.reloadMemberReviewRoster()
                         await self?.reloadInheritedFilterMarks()
+                        await self?.noteMailSettled()
                     }
                 },
                 onProgress: { [weak self] leg, line in
@@ -1112,10 +1156,24 @@ public class FaunaClient {
                     }
                     // 3. The Folders page's per-set device-activity section, for
                     // whichever set is CURRENTLY EXPANDED (`FolderDeviceActivitySection`
-                    // in `FoldersContent.swift`) — carries the folder name so the
-                    // observer can gate on it naming the expanded row, never a
-                    // blanket refetch (mirrors tui/linux/windows' analogous guard).
-                    NotificationCenter.default.post(name: .faunaFolderDeviceActivityChanged, object: folder)
+                    // in `FoldersContent.swift`) — carries the push's folder name
+                    // AND hash so the observer can gate on it naming the expanded
+                    // row through the shared rule (a sealed set's nudge has a
+                    // blank name), never a blanket refetch (mirrors
+                    // tui/linux/windows' analogous guard).
+                    NotificationCenter.default.post(
+                        name: .faunaFolderDeviceActivityChanged,
+                        object: FolderDeviceActivityChange(folder: folder, folderHash: folderHash))
+                }
+                if stale.mailSpam {
+                    // Another device of this account recorded or undid a spam
+                    // training, or reset the model. The open Spam page re-reads
+                    // its history through the shared machine (`onMailSpamChanged`
+                    // — SwiftUI delivers it only to a mounted view, so that is the
+                    // page gate); the view-local reset confirm is untouched
+                    // (mail-spam.md § Implementation status, item 5; the twin of
+                    // tui's `settings::mail_spam_resync_op`).
+                    NotificationCenter.default.post(name: .faunaMailSpamChanged, object: nil)
                 }
                 if stale.media {
                     // The Media page's cross-set all-media aggregate, while Media
@@ -1159,7 +1217,8 @@ public class FaunaClient {
     /// `startReconnectObserver`. Captures `api` and `notificationManager` directly
     /// (not `self`) so the task never retains `FaunaClient`. Each `next()` also
     /// raises the OS knock toast (`NotificationManager.postKnockNotification`,
-    /// `behavior/notifications.md` § The knock toast) before the roster-refresh
+    /// `behavior/notifications.md` § The knock toast — unless `knockPushMutedFor`
+    /// says the knock's row would collapse, § Muted words) before the roster-refresh
     /// signal — like windows, the pump triggers a full re-fetch, not a counter bump.
     ///
     /// Public (and idempotent — cancels any prior task) for the same reason as
@@ -1167,14 +1226,34 @@ public class FaunaClient {
     /// it wires this up explicitly (the iOS agent calls `start()`, which invokes it).
     /// `test_knock_live_refresh.py` depends on it.
     public func startKnockObserver() {
+        // The app-wide store-backed render sources re-read on every
+        // store-change notice (account-runtime.md § Multi-instance concurrency,
+        // the own-pump notice, part 4): the process-held muted-word list, the
+        // member-review roster and the inherited-filter marks. Armed where the
+        // pump arms, for both `start()` and the macOS e2e path.
+        storeChangeWatch?.cancel()
+        storeChangeWatch = StoreChangeNotice.shared.watch { [weak self] in
+            await self?.resyncStoreSources()
+        }
         knockObserverTask?.cancel()
         let api = self.api
         let notificationManager = self.notificationManager
         knockObserverTask = Task {
+            // The knock toast asks the muted-word list before it fires, and no
+            // screen is mounted to have loaded it — so the process-held list
+            // loads where the pump arms (both `start()` and the macOS e2e path).
+            await MutedWordsHolder.shared.refresh(api: api)
             guard let sub = await logTryAsync(.warn, "fauna.client", "subscribeKnocks", { try await api.subscribeKnocks() }) else { return }
             while !Task.isCancelled {
                 guard let knock = await sub.next() else { break }  // nil ⇒ client torn down
-                notificationManager.postKnockNotification(knock)
+                // No toast for a knock whose row would collapse
+                // (`notifications.md` § Muted words, rule 6) — it paints the
+                // same relayed text and cannot be revealed. The roster refresh
+                // below still fires: the mute is a render verb.
+                let muted = await MutedWordsHolder.shared.words
+                if !knockPushMutedFor(knock: knock, mutedKeywords: muted) {
+                    notificationManager.postKnockNotification(knock)
+                }
                 NotificationCenter.default.post(name: .faunaKnockReceived, object: nil)
             }
         }
@@ -1272,6 +1351,8 @@ public class FaunaClient {
         pushObserverTask = nil
         knockObserverTask?.cancel()
         knockObserverTask = nil
+        storeChangeWatch?.cancel()
+        storeChangeWatch = nil
         nestsAutoRenewTask?.cancel()
         nestsAutoRenewTask = nil
 
@@ -1367,7 +1448,7 @@ public class FaunaClient {
     // query-auth handshake (it now requires the `fauna.v1, bearer.<token>`
     // subprotocol), so the socket never opened and its JSON parse could never match
     // the real CBOR `PushEvent`s — the same dead-second-socket web deleted
-    // (`$lib/ws.ts`). Real pushes now ride the one authenticated `FfiNestClient`
+    // (`#lib/ws.ts`). Real pushes now ride the one authenticated `FfiNestClient`
     // socket via `startPushObserver`; MLS receive rides the conversations rail's own
     // `subscribe_kind` inside shared Rust (`ConversationsVM`), not this path.
 }
@@ -1408,17 +1489,17 @@ public extension Notification.Name {
     /// `addressBookChangedTick` (`transport.md` § Push events).
     static let faunaAddressBookChanged = Notification.Name("faunaAddressBookChanged")
     /// A `fauna.sync.changed` push arrived for a folder this actor participates in
-    /// (posted by `FaunaClient`'s push observer, carrying the folder name as
-    /// `object`). The Folders page's per-set device-activity section observes this
-    /// via `onFolderDeviceActivityChanged`, gating on the pushed name matching its
-    /// own (currently-expanded) set — never a blanket refetch for a collapsed row
+    /// (posted by `FaunaClient`'s push observer, carrying a
+    /// `FolderDeviceActivityChange` as `object`). The Folders page's per-set
+    /// device-activity section observes this via `onFolderDeviceActivityChanged`,
+    /// gating on the push naming its own (currently-expanded) set through
+    /// `FolderDeviceActivityChange.names` — never a blanket refetch for a collapsed row
     /// nobody's looking at (file-sync.md § Implementation status today; the apple
     /// twin of tui's `device_activity_resync_op` / windows' `_expandedFolder ==
     /// folder` guard). Unlike the other push signals here this one carries a
     /// payload — the first case needing to know WHICH entity changed, not just
     /// that something did.
-    static let faunaFolderDeviceActivityChanged = Notification.Name("faunaFolderDeviceActivityChanged")
-    /// A `fauna.sync.changed` push arrived for a folder this actor participates in
+    static let faunaFolderDeviceActivityChanged = Notification.Name("faunaFolderDeviceActivityChanged")    /// A `fauna.sync.changed` push arrived for a folder this actor participates in
     /// (posted by `FaunaClient`'s push observer, same event as
     /// `faunaFolderDeviceActivityChanged` above but with no payload — Media's read
     /// is a cross-*set* aggregate, so which folder changed doesn't matter). The
@@ -1429,6 +1510,9 @@ public extension Notification.Name {
     /// open; the apple twin of linux's `media_page_is_visible` guard / tui's
     /// `self.page == Page::Media`).
     static let faunaMediaChanged = Notification.Name("faunaMediaChanged")
+    /// `FfiStaleSurfaces.mail_spam`: another device changed this account's spam
+    /// training history. The open Spam page observes it via `onMailSpamChanged`.
+    static let faunaMailSpamChanged = Notification.Name("faunaMailSpamChanged")
     /// The account registry was mutated by something OTHER than the switcher's own
     /// view model — today the admin auto-default
     /// (`FaunaAccounts.autoEnableRequireConfirmForActiveAdmin`), which writes
@@ -1440,6 +1524,12 @@ public extension Notification.Name {
     /// stale entry and writes the value already there — the user's tap is swallowed.
     /// Observed via the `onAccountRegistryChanged` modifier.
     static let faunaAccountRegistryChanged = Notification.Name("faunaAccountRegistryChanged")
+    /// The append flow's `registry.addAccount` was refused (the account list is full).
+    /// `completeAppendedAccount` runs in the app root, which cannot reach the
+    /// switcher's view model (a `@State` of its section), so it posts this with the
+    /// refusal's `DisplayError.message` under `AccountSwitcherVM.addRefusedMessageKey`
+    /// and the mounted section paints it on its `error-message`.
+    static let faunaAccountAddRefused = Notification.Name("faunaAccountAddRefused")
 }
 
 /// The session object IS this device's custodian-store access — the conformance

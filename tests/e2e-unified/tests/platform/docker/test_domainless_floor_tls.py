@@ -11,7 +11,6 @@ unencrypted one.
 """
 
 import datetime
-import os
 import ssl
 import subprocess
 import tempfile
@@ -31,10 +30,12 @@ from .helpers import (
     docker_build,
     find_free_port,
     get_repo_root,
+    read_data_file,
     remove_container,
     remove_data_dir,
     start_container,
     start_container_with_ports,
+    write_data_file,
 )
 
 try:
@@ -95,14 +96,13 @@ def test_domainless_nest_serves_tls_on_its_own_certificate():
         remove_container(name)
 
 
-def _plant_near_expiry_floor(acme_dir: str, days_left: int) -> None:
+def _plant_near_expiry_floor(data_dir: str, days_left: int) -> None:
     """Rewrite the on-disk floor as the same self-signed cert (same subject,
     same names, same key) but expiring in `days_left` days — the floor as a
     long-lived nest would find it after most of its life has passed."""
-    with open(os.path.join(acme_dir, "fullchain.pem"), "rb") as f:
-        served = x509.load_pem_x509_certificate(f.read())
-    with open(os.path.join(acme_dir, "privkey.pem"), "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
+    served = x509.load_pem_x509_certificate(read_data_file(data_dir, "acme/fullchain.pem"))
+    key = serialization.load_pem_private_key(
+        read_data_file(data_dir, "acme/privkey.pem"), password=None)
     now = datetime.datetime.now(datetime.timezone.utc)
     builder = (
         x509.CertificateBuilder()
@@ -118,8 +118,7 @@ def _plant_near_expiry_floor(acme_dir: str, days_left: int) -> None:
     algorithm = None if isinstance(key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)) \
         else hashes.SHA256()
     cert = builder.sign(key, algorithm)
-    with open(os.path.join(acme_dir, "fullchain.pem"), "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    write_data_file(data_dir, "acme/fullchain.pem", cert.public_bytes(serialization.Encoding.PEM))
 
 
 @pytest.mark.feature("certificates-by-themselves")
@@ -135,9 +134,8 @@ def test_the_floor_renews_itself_on_the_same_key():
     port = find_free_port()
     name = f"fauna-nest-floor-renew-{port}"
     data_dir = tempfile.mkdtemp(prefix="fauna-floor-data-")
-    acme_dir = os.path.join(data_dir, "acme")
     try:
-        start_container_with_ports(name, {3000: port},
+        start_container_with_ports(name, {443: port},
                                    env={"FAUNA_MODE": "public", "FAUNA_PORT": "3000"},
                                    data_volume=data_dir)
         _await_https_health(port, name)
@@ -146,24 +144,36 @@ def test_the_floor_renews_itself_on_the_same_key():
         key_fingerprint = spki_sha256_hex(original)
 
         subprocess.run(["docker", "stop", name], check=True, capture_output=True, timeout=60)
-        _plant_near_expiry_floor(acme_dir, days_left=2)
+        _plant_near_expiry_floor(data_dir, days_left=2)
         subprocess.run(["docker", "start", name], check=True, capture_output=True, timeout=60)
         _await_https_health(port, name)
 
         # The renewed floor: a validity well past the 30-day lead again.
         lead = datetime.timedelta(days=30)
 
+        # A handshake can be reset while the router restarts once after the
+        # nest's restart (it re-reads the sidecar token the nest re-mints on
+        # every boot — `docker/s6/fauna-sni-router/run`): not yet, not a verdict.
+        last: dict = {}
+
         def _renewed():
-            leaf = served_leaf("127.0.0.1", port, sni="localhost")
+            try:
+                leaf = served_leaf("127.0.0.1", port, sni="localhost")
+            except OSError as e:
+                last["error"] = repr(e)
+                return None
+            last["leaf"] = leaf
             left = leaf.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)
             return leaf if left > lead else None
 
         def _diagnose():
-            leaf = served_leaf("127.0.0.1", port, sni="localhost")
+            leaf = last.get("leaf")
+            served = (leaf.not_valid_after_utc.isoformat() if leaf
+                      else f"no handshake ({last.get('error')})")
             logs = subprocess.run(["docker", "logs", "--tail", "40", name],
                                   capture_output=True, text=True, timeout=10)
             return (f"the near-expiry floor was never renewed: served notAfter="
-                    f"{leaf.not_valid_after_utc.isoformat()}\n{logs.stdout}{logs.stderr}")
+                    f"{served}\n{logs.stdout}{logs.stderr}")
 
         renewed = wait_until(_renewed, 60, interval=1, diagnose=_diagnose)
         assert renewed.issuer == renewed.subject, "the renewed floor is still self-signed"

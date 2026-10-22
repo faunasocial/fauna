@@ -2883,7 +2883,7 @@ fn delete_mailbox_handler() -> crate::rpc_router::RpcHandler {
                     //
                     // Spec § D6 (ε) atomic-with-SQL: SQLite
                     // transaction inside `delete_bridge_imap_mailbox`
-                    // (which writes its own tombstones + drops the
+                    // (which clears the name's expunge log + drops the
                     // mailbox-state row + deletes placements all
                     // in one tx) has committed by the time the
                     // placement append below runs. The crash window
@@ -3213,6 +3213,31 @@ pub(crate) fn emit_mailbox_state_event(
 }
 
 // ── Registration entry point ──────────────────────────────────────
+
+/// This module's admin-plane kinds for an admin-consented principal —
+/// the mail page's spam-baseline publish and its state — each its actor handler behind
+/// [`crate::principal_handlers::admin_twin`] (`apps/bridges.md`
+/// § Capability-allowlist enforcement → rule (e); `authorization-server.md`
+/// § Scope grammar → *The admin arms* names the sets, the sovereign kinds
+/// absent).
+pub(crate) fn principal_admin_handlers()
+-> Vec<(&'static str, crate::principal_handlers::PrincipalHandler)> {
+    use crate::principal_handlers::admin_twin;
+    let kinds: [(&'static str, crate::rpc_router::RpcHandler); 2] = [
+        (
+            "fauna.bridges.publish_spam_baseline",
+            publish_spam_baseline_handler(),
+        ),
+        (
+            "fauna.bridges.get_spam_baseline_state",
+            get_spam_baseline_state_handler(),
+        ),
+    ];
+    kinds
+        .into_iter()
+        .map(|(kind, actor)| (kind, admin_twin(kind, actor)))
+        .collect()
+}
 
 pub fn register_bridge_imap_handlers(b: &mut RpcRouterBuilder) {
     b.add(
@@ -6633,6 +6658,40 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "fauna.protocol.malformed");
+    }
+
+    /// **The APPEND leg's reference ceiling** — the
+    /// `body_ref`'s own `total_bytes` is a claim separate from the declared
+    /// `ciphertext_size`, and is refused over the same sealed ceiling before any
+    /// chunk is read (`mail-message-size.md` § the bounded-reference rule). The
+    /// reference names a chunk never staged, so a resolver that read first would
+    /// answer "not staged" instead.
+    #[tokio::test]
+    async fn append_body_ref_declaring_over_its_sealed_ceiling_is_refused_unread() {
+        let (state, _tmp) = crate::test_support::fixture_state_with_backup().await;
+        let mda = [9u8; 32];
+        approve_bridge(&state.db, &mda, BridgeRole::Mda).await;
+        let target = [233u8; 32];
+
+        let mut req = sample_append_req(&target, "INBOX", vec![]);
+        req.encrypted_body = Vec::new();
+        req.body_ref = Some(fauna_protocol::bridge_routing::MailBodyRef {
+            chunk_hashes: vec![serde_bytes::ByteBuf::from(vec![0xABu8; 32])],
+            total_bytes: 4 * u64::from(u32::MAX),
+        });
+        let err = call_append_message(state.clone(), mda, req)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::mail_body_plane::INVALID_BODY_REF_CODE);
+        let detail = err
+            .details
+            .as_ref()
+            .map(|d| format!("{d:?}"))
+            .unwrap_or_default();
+        assert!(
+            detail.contains("ceiling"),
+            "a ceiling refusal, got: {detail}"
+        );
     }
 
     /// Message-size ceiling (`smtp-server.md` § Message size limits). Since

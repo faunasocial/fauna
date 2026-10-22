@@ -772,7 +772,7 @@ async fn server_types_are_the_providers_own_catalog_in_its_order_capped_at_five(
         .await;
     // The registry's `["*"]` wildcard is ignored — the server curates.
     let got = BundledVps::new(server.uri(), "tok".into())
-        .list_server_types(&reqwest::Client::new(), &["*"])
+        .list_server_types(&reqwest::Client::new(), &["*"], "fsn1")
         .await
         .unwrap();
     assert_eq!(
@@ -1001,7 +1001,10 @@ async fn live_read_only_conformance() {
         quotes.is_some_and(|q| !q.is_empty()),
         "public TLD pricing must be non-empty"
     );
-    let types = vps.list_server_types(&client, &["*"]).await.unwrap();
+    let types = vps
+        .list_server_types(&client, &["*"], "fsn1")
+        .await
+        .unwrap();
     assert!(
         !types.is_empty() && types.len() <= 5,
         "1..=5 curated server types, got {}",
@@ -1074,7 +1077,7 @@ async fn live_mutating_conformance() {
         .unwrap()
         .id;
     let server_type = vps
-        .list_server_types(&client, &["*"])
+        .list_server_types(&client, &["*"], "fsn1")
         .await
         .unwrap()
         .into_iter()

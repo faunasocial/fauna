@@ -37,7 +37,27 @@ pub struct BackupFolderRow {
     pub name: String,
     pub snapshot_count: i64,
     pub last_snapshot_at: Option<i64>,
+    /// `Some(kind)` on a **kind entry** (§ Snapshot-list shape → *Kind
+    /// entries*): the wire message kind (`"mail"`, `"calendar"`, `"card"`,
+    /// `"post"`, `"conv"`) whose snapshots this row lists, creates, prunes and
+    /// checks. `name` is then the row's i18n label key from [`KIND_ENTRIES`] —
+    /// the app resolves it for the label, and it is the locale-stable
+    /// selection key `select_folder` takes. `None` on a folder row.
+    pub message_kind: Option<String>,
 }
+
+/// The kind entries of `backup-folder-selector`, in the order they follow the
+/// folders: `(wire message kind, i18n label key)`. Every label is a string the
+/// apps already carry — the ratified section adds no new one — and the kinds
+/// are exactly the ones the nest snapshots
+/// (`fauna_protocol::segments::BACKUP_SET_KINDS`, pinned in the tier_1 suite).
+pub const KIND_ENTRIES: &[(&str, &str)] = &[
+    ("mail", "backups.reseed_set_mail"),
+    ("calendar", "events.calendar"),
+    ("card", "common.contacts"),
+    ("post", "common.posts"),
+    ("conv", "conversations.list.title"),
+];
 
 /// Where a snapshot row sits in the delete → soft-delete → purge lifecycle
 /// (`backup-restore.md` § 2 *Row lifecycle fields*, § 7 *Deletion safety*).
@@ -260,6 +280,11 @@ pub struct SnapshotDetail {
     /// The set's wire hash, hex — `None` when the reply carried none.
     pub folder_hash: Option<String>,
     pub files: Vec<SnapshotFileRow>,
+    /// `Some(kind)` when the snapshot belongs to a kind entry. Such a row has
+    /// no files to list: the app renders one line pointing at the Restore
+    /// section instead, never an empty list without a reason (§ Snapshot-list
+    /// shape → *Kind entries*).
+    pub message_kind: Option<String>,
 }
 
 /// The result of an integrity check — session-local, from the last check reply.

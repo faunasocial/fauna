@@ -471,9 +471,10 @@ class AccountStoresEraseTest {
      * *Built — W3 the android host* calls silent: the container is a SIBLING of
      * `filesDir`'s per-actor scopes, so the pre-container erase missed it
      * entirely — and because the credential namespace swept alongside holds the
-     * store's writer key, the stranded store then refuses every later sign-in
-     * ("account store belongs to a different writer") and the app runs with no
-     * account runtime, for good. Nothing fails loudly at any point.
+     * store's writer key, the stranded store then refused every later sign-in
+     * ("account store belongs to a different writer") — until the 2026-08-27
+     * lost-slot self-heal, which instead adopts the signed-out user's data at the
+     * next sign-in. Either way nothing fails loudly at any point.
      *
      * The Rust twin (`fauna-ffi`'s `a_sandboxed_host_erases_under_the_container_
      * it_hosts_from`) proves the shared sweep reaches a container it is GIVEN.
@@ -500,7 +501,7 @@ class AccountStoresEraseTest {
         assertFalse(
             "the active account's W6 store survived sign-out — the container is a " +
                 "SIBLING of the filesDir scopes, so an erase that does not receive it " +
-                "sweeps neither, and the stranded store refuses every later sign-in",
+                "sweeps neither, and the signed-out user's store outlives the sign-out",
             store.exists(),
         )
         assertFalse("another account's W6 store survived sign-out", other.exists())

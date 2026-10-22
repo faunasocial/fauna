@@ -293,7 +293,7 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
   raw token). **web** and **android** adopted it 2026-08-20, each deleting its
   own closed match and resolving the returned `LocalizedText` through the
   resolver it already had — web `resolveLocalized(searchTypeFilterLabel(token))`
-  in `+page.svelte` over a new `$lib/wasm` wrapper, android
+  in `+page.svelte` over a new `#lib/wasm` wrapper, android
   `resolveLocalized(context, com.fauna.ffi.searchTypeFilterLabel(token))` in
   `SearchResultsScreen.kt`. Both resolvers already surface an unknown key raw,
   so the unrecognised-token arm holds without app glue, and the `<option>` /
@@ -646,7 +646,7 @@ CS0104), and snapshot rows are **projections with no serde-flatten catch-all**
   query never loaded, which is the common case for a search hit. The shared
   `FeedManager::resolve_post` now fetches such a post into the snapshot's
   one-slot deep-link surface; the design and its ratified properties are owned
-  by `feed.md` § The read model → *Opening a post the timeline never loaded*.
+  by `../architecture/feed-read-model.md` § The read model → *Opening a post the timeline never loaded*.
   Because the gap was structural to `libs/fauna-feed`, the other apps
   inherit the fix with their own navigation lift — each needs only to read
   `FeedSnapshot::find_post` instead of `snapshot.posts` on its `post_detail`

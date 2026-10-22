@@ -280,9 +280,10 @@ async fn fetch_unseen_trend_posts(
         )
         .await
         {
-            Ok(reply) => {
-                // Empty body = missing/withheld (legal takedown discloses via the
-                // marker but withholds the body) — nothing to ingest.
+            Ok(Ok(reply)) => {
+                // Empty body = missing/withheld (a legal takedown or an admin
+                // block discloses via its marker but withholds the body) —
+                // nothing to ingest.
                 if reply.post.is_empty() {
                     continue;
                 }
@@ -291,6 +292,13 @@ async fn fetch_unseen_trend_posts(
                 {
                     tracing::debug!("drop fetched trend post {}: {e}", hex::encode(content_id));
                 }
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    "fetch trend post {} from {peer_url}: peer refused: {}",
+                    hex::encode(content_id),
+                    e.code
+                );
             }
             Err(e) => {
                 tracing::debug!(

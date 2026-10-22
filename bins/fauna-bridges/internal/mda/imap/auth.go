@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-sasl"
 
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/auth"
+	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/connlimit"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/mailfauna"
 	"github.com/faunasocial/fauna/bins/fauna-bridges/internal/wsrpc"
 	faunaFfi "github.com/faunasocial/fauna/libs/fauna-mail-go/fauna_ffi"
@@ -18,6 +20,17 @@ import (
 // translates a returned error into `<tag> NO ...`; the wording here
 // is deliberately generic to avoid leaking which step failed.
 var errAuthFailed = errors.New("imap: authentication failed")
+
+// errAuthUnavailable answers an attempt the credential-KDF gate had no slot for
+// (mailfauna.ErrKDFBusy): `NO [UNAVAILABLE]` (RFC 5530), the
+// temporary failure a MUA retries. No password was checked, so it records no
+// lockout failure and no result=fail audit row; the unknown-user dummy-KDF
+// paths answer the same, so a saturated gate is no account-existence oracle.
+var errAuthUnavailable = &imap.Error{
+	Type: imap.StatusResponseTypeNo,
+	Code: imap.ResponseCodeUnavailable,
+	Text: "Credential check temporarily unavailable, try again",
+}
 
 // The credential_id is resolved per AUTH attempt from the MUA username's RFC
 // 5233 "+suffix" (auth.CredentialFromLocalPart) — `<handle>+<credential_id>@…`,
@@ -173,12 +186,18 @@ func (s *Session) runGuardedAuth(username string, secret []byte, kind mailfauna.
 		// Argon2id as an existing-user wrong-password attempt (finishAuth's
 		// UnwrapMLSBlob below); otherwise the KDF-vs-no-KDF timing gap
 		// enumerates valid accounts (network-exposure.md § Rulings F3).
-		mailfauna.DummyCredentialKDF(secret, kind)
+		if mailfauna.DummyCredentialKDF(secret, kind, s.sourceIP) != nil {
+			return s.kdfBusy()
+		}
 		s.lockout.RecordFailureFor(principal, credentialID, s.sourceIP)
 		return s.reportAuthFail(nil, credentialID, err)
 	}
 
 	if err := s.finishAuth(ctx, actorID, credentialID, base, secret, kind); err != nil {
+		if err == errAuthUnavailable {
+			// A busy KDF gate checked no credential: no failure to book.
+			return err
+		}
 		// finishAuth already fired report_auth_event(fail) on its way out.
 		s.lockout.RecordFailureFor(principal, credentialID, s.sourceIP)
 		return err
@@ -206,11 +225,16 @@ func (s *Session) finishAuth(
 		// The user exists but this credential_id has no wrapped blob. Run a
 		// dummy KDF so a valid-user-but-unknown-credential attempt is timing-
 		// uniform with a wrong-password attempt (network-exposure.md § F3).
-		mailfauna.DummyCredentialKDF(secret, kind)
+		if mailfauna.DummyCredentialKDF(secret, kind, s.sourceIP) != nil {
+			return s.kdfBusy()
+		}
 		return s.reportAuthFail(actorID, credentialID, errAuthFailed)
 	}
 
-	cap, err := mailfauna.UnwrapMLSBlob(blob, secret, actorID, credentialID, kind)
+	cap, err := mailfauna.UnwrapMLSBlob(blob, secret, actorID, credentialID, kind, s.sourceIP)
+	if errors.Is(err, mailfauna.ErrKDFBusy) {
+		return s.kdfBusy()
+	}
 	if err != nil {
 		return s.reportAuthFail(actorID, credentialID, err)
 	}
@@ -316,6 +340,11 @@ func (s *Session) finishAuth(
 	s.recordOpener = recordOpener
 	s.indexSession = indexSession
 	s.mu.Unlock()
+	// The one auth-success point lifts the pre-auth connection deadline
+	// (smtp-server.md § Connection-time limits); nil-safe for unit tests.
+	if s.conn != nil {
+		connlimit.MarkAuthenticated(s.conn.NetConn())
+	}
 
 	occurredAt := uint64(s.now().UnixMilli())
 	if err := wsrpc.ReportAuthEvent(ctx, s.client, actorID, credentialID, "ok", s.sourceIP, "", occurredAt); err != nil {
@@ -327,6 +356,15 @@ func (s *Session) finishAuth(
 		}
 	}
 	return nil
+}
+
+// kdfBusy logs a busy credential-KDF gate and returns errAuthUnavailable —
+// no audit row, no lockout failure (errAuthUnavailable's doc).
+func (s *Session) kdfBusy() error {
+	if s.logger != nil {
+		s.logger.Warn("imap: AUTH deferred, credential KDF busy", "source_ip", s.sourceIP)
+	}
+	return errAuthUnavailable
 }
 
 // reportAuthFail fires a result=fail audit event and returns

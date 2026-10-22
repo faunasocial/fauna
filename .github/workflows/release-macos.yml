@@ -7,8 +7,9 @@ name: Release (macOS)
 #
 #   gh attestation verify Fauna-<version>.dmg --repo faunasocial/fauna
 #
-# Two jobs on purpose. `build` compiles and assembles the bundle with NO
-# credentials in scope; `sign` runs in the `release-macos` Environment (required
+# Build and sign are separate jobs on purpose. `build` (the app) and
+# `build-tui` (the terminal app's archives, one job per target, in parallel
+# with it) compile and assemble with NO credentials in scope; `sign` runs in the `release-macos` Environment (required
 # reviewer + `v*` tags only), so the Developer ID certificate and the notary key
 # are exposed only to a run a maintainer approved, on an ephemeral runner, never
 # to a pull request or a fork. Design + the verification recipe:
@@ -28,11 +29,20 @@ concurrency:
   group: release-macos-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Artifact builds: per-invocation feature resolution, never workspace-unified
+  # (.cargo/config.toml § feature unification) -- the recipes' own setting, so a
+  # shipped binary carries only the features its own invocation asks for.
+  CARGO_RESOLVER_FEATURE_UNIFICATION: selected
+
 jobs:
   build:
     name: Build Fauna.app (no credentials)
     runs-on: macos-15
-    timeout-minutes: 120
+    # Measured on the 0.1.5 dry run: the app alone took 93 minutes (the whole
+    # serial job, with the terminal app's two darwin builds, 2 h 47 m -- which
+    # is why those build in `build-tui`, beside this job); about 1.5x the app.
+    timeout-minutes: 140
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
@@ -55,31 +65,55 @@ jobs:
           name: Fauna.app-unsigned
           path: Fauna.app.zip
           if-no-files-found: error
-      # The terminal app's macOS archives (installers/tui.md § The ratified
-      # channel): fauna-tui + fauna-sync-agent + install.sh per darwin target,
-      # staged here with NO credentials and signed + notarized by the `sign`
-      # job below — the user's ruling that an ad-hoc-signed archive never
-      # ships. Built here rather than in release.yml because this is the only
-      # workflow whose sign job holds the Developer ID certificate.
-      - name: Build fauna-tui + fauna-sync-agent (both darwin targets)
+
+  # The terminal app's macOS archives (installers/tui.md § The ratified
+  # channel): fauna-tui + fauna-sync-agent + fauna-cli + install.sh per darwin
+  # target (fauna-cli is the cli app's device shell, package fauna-cli-device —
+  # the archive's third member, decision 4), staged here with NO credentials
+  # and signed + notarized by the `sign` job below — the user's ruling that an
+  # ad-hoc-signed archive never ships. Built in this workflow rather than in
+  # release.yml because this is the only workflow whose sign job holds the
+  # Developer ID certificate; one job per target, in parallel with `build`.
+  build-tui:
+    name: Build the fauna-tui archive (no credentials)
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            suffix: aarch64-darwin
+          - target: x86_64-apple-darwin
+            suffix: x86_64-darwin
+    runs-on: macos-15
+    # The serial job spent 74 minutes on both targets after the app (0.1.5 dry
+    # run); one target is at most that. Set back to about 1.5x the first dry
+    # run's figure.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659  # v1.17.0, toolchain from rust-toolchain.toml
+        with:
+          target: ${{ matrix.target }}
+          rustflags: ""
+          cache: false
+      - name: Install uv
+        run: bash scripts/install-uv.sh
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4.0.0
+      # The recipe release.yml's Linux legs build the archive with, per target.
+      - name: Build fauna-tui + fauna-sync-agent + fauna-cli
+        run: just tui-release ${{ matrix.target }}
+      - name: Stage the archive
         run: |
-          rustup target add x86_64-apple-darwin
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --locked -p fauna-tui -p fauna-sync-agent --release --target "$target"
-          done
           bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
-            --bin-dir target/aarch64-apple-darwin/release --out tui-unsigned --suffix aarch64-darwin
-          bash apps/fauna-tui/packaging/assemble-archive.sh --no-tar \
-            --bin-dir target/x86_64-apple-darwin/release --out tui-unsigned --suffix x86_64-darwin
+            --bin-dir target/${{ matrix.target }}/release --out tui-unsigned --suffix ${{ matrix.suffix }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: fauna-tui-unsigned
+          name: fauna-tui-unsigned-${{ matrix.suffix }}
           path: tui-unsigned/
           if-no-files-found: error
 
   sign:
     name: Sign, notarize, attest, publish
-    needs: build
+    needs: [build, build-tui]
     runs-on: macos-15
     timeout-minutes: 60
     environment: release-macos
@@ -105,8 +139,9 @@ jobs:
           test -d build/Release/Fauna.app
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
-          name: fauna-tui-unsigned
+          pattern: fauna-tui-unsigned-*
           path: tui-unsigned
+          merge-multiple: true
 
       # A throwaway keychain holding only the Developer ID Application
       # certificate, unlocked for this job and deleted at the end. Plain
@@ -147,10 +182,11 @@ jobs:
       - name: Sign, notarize and staple
         run: just mac-dmg-package
 
-      # The terminal app's archives: Developer ID + hardened runtime on both
-      # binaries (the agent with its own entitlements, as the .pkg signs it),
-      # notarized, then tarred — an ad-hoc-signed archive never ships
-      # (installers/tui.md § Decisions). Same recipe for both targets.
+      # The terminal app's archives: Developer ID + hardened runtime on all
+      # three binaries (the agent with its own entitlements, as the .pkg signs
+      # it; fauna-tui and fauna-cli with none), notarized, then tarred — an
+      # ad-hoc-signed archive never ships (installers/tui.md § Decisions).
+      # Same recipe for both targets.
       - name: Sign and notarize the fauna-tui archives
         run: |
           just mac-tui-archive aarch64-darwin tui-unsigned/fauna-tui-aarch64-darwin
@@ -194,6 +230,7 @@ jobs:
           # `fauna-publish release` flips the Release after the promote.
           prerelease: true
           generate_release_notes: true
+          # public-text: release-body-macos
           body: |
             ## Verify the macOS download
 
@@ -212,3 +249,4 @@ jobs:
             The terminal app's `fauna-tui-<arch>-darwin.tar.gz` archives are built,
             attested, Developer-ID-signed and notarized the same way. Unpack one and
             run its `install.sh`, or `gh attestation verify` it first.
+          # public-text-end: release-body-macos

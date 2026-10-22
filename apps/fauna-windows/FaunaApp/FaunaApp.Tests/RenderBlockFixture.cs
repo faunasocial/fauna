@@ -21,5 +21,5 @@ internal static class RenderBlockFixture
         AuthoringOriginStatus authoringOrigin = AuthoringOriginStatus.Unknown,
         string? legalTakedownRef = null,
         bool notFound = false) =>
-        new RenderBlock.QuotedPost(postId, author, body, verification, authoringOrigin, legalTakedownRef, notFound);
+        new RenderBlock.QuotedPost(postId, author, body, verification, authoringOrigin, legalTakedownRef, notFound, null);
 }

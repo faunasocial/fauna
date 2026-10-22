@@ -32,6 +32,11 @@ thread_local! {
     /// guardian floor, and the Guardian Notify counter, all in one instance.
     static CORE: RefCell<fauna_core::obligation::ContentPolicyState> =
         RefCell::new(fauna_core::obligation::ContentPolicyState::default());
+    /// The guardian document's scorers, run on this (the ward's) device — fed
+    /// the same guardian policy as the engine (`nest-rules.md` § The shared
+    /// rule editor; `fauna_client_policy::GuardianRules`).
+    static GUARDIAN: RefCell<fauna_client_policy::GuardianRules> =
+        RefCell::new(fauna_client_policy::GuardianRules::default());
     /// See [`epoch`].
     static EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The own-threshold pair last set, so [`set_spam_preferences`] bumps [`EPOCH`]
@@ -82,7 +87,43 @@ pub fn set_spam_preferences(prefs: Option<SpamPreferences>) {
 /// bubble build, notify, or test inject — enforces it via [`verdict_for`].
 /// `None` clears the floor (unsupervised, or a graduated ward).
 pub fn set_ward_content_policy(policy: Option<ContentPolicy>) {
+    GUARDIAN.with(|g| g.borrow_mut().set_policy(policy.as_ref()));
     CORE.with(|c| c.borrow_mut().set_ward_content_policy(policy));
+}
+
+/// An item's labels with the guardian document's keyword and labeler factors
+/// joined, on a supervised account — the one ward-side join
+/// (`GuardianRules::join_labels`), made inside `crate::region`'s composed
+/// call.
+pub fn join_guardian_labels<'a>(
+    content_id: Option<&[u8; 32]>,
+    labels: &'a [ContentLabelEntry],
+    input: impl FnOnce() -> fauna_core::scoring::LabelerPostInput,
+) -> std::borrow::Cow<'a, [ContentLabelEntry]> {
+    GUARDIAN.with(
+        |g| match g.borrow().join_labels(content_id, labels, input) {
+            std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Borrowed(labels),
+            std::borrow::Cow::Owned(joined) => std::borrow::Cow::Owned(joined),
+        },
+    )
+}
+
+/// The number of rules in the guardian's rule document the engine holds, or
+/// `None` with no document — the e2e witness that a guardian's save reached
+/// this device (`ward_rule_document_rules`, tui's twin).
+pub fn ward_document_rule_count() -> Option<usize> {
+    CORE.with(|c| {
+        c.borrow()
+            .ward_content_policy()
+            .and_then(|p| p.document.as_ref())
+            .map(|d| d.rules.len())
+    })
+}
+
+/// Set the nest rule sets in force — the session nest's
+/// (`crate::nest_rules::apply_rule_sets`). Replaces, never merges.
+pub fn set_nest_policies(policies: Vec<fauna_core::obligation::NestRuleSet>) {
+    CORE.with(|c| c.borrow_mut().set_nest_policies(policies));
 }
 
 /// The content-policy render verdict for a piece of content, keyed on the
@@ -127,6 +168,32 @@ pub fn block_notice(reported: bool) -> &'static str {
     } else {
         family::CONTENT_BLOCKED_NOTICE
     }
+}
+
+/// The guardian's own reason, verbatim and in the app's language, when a rule
+/// of the guardian's document drove `verdict` — `None` for a floor, an
+/// unreadable document, the viewer's own threshold or any other source
+/// (`nest-rules.md` § The shared rule editor → *The reason is the member's to
+/// read*). The shared engine decides which; this only picks the language.
+pub fn guardian_reason(verdict: &ComposedVerdict) -> Option<String> {
+    let rule = verdict.guardian()?.rule.as_ref()?;
+    let text = fauna_core::content_policy::reason_text(&rule.reason, crate::nest_rules::UI_LANG);
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The `content-policy-blocked-reason` label beside a family-policy
+/// placeholder's notice: the guardian's reason verbatim, never inside the
+/// notice's text. `None` when no document rule drove the verdict.
+pub fn reason_label(verdict: &ComposedVerdict) -> Option<gtk::Label> {
+    use fauna_ui_ids as ids;
+    use gtk::prelude::*;
+    let label = gtk::Label::new(Some(&guardian_reason(verdict)?));
+    label.add_css_class("dim-label");
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    crate::testid::set_test_id(&label, ids::CONTENT_POLICY_BLOCKED_REASON);
+    Some(label)
 }
 
 /// Replace the viewer's reported-and-hidden ids with the stored list a load or
@@ -201,6 +268,7 @@ pub fn note_enforcement(item_id: &str, labels: &[ContentLabelEntry]) {
 pub fn clear_for_identity_change() {
     LAST_OWN.with(|l| l.set(None));
     EPOCH.with(|e| e.set(e.get() + 1));
+    GUARDIAN.with(|g| g.borrow_mut().set_policy(None));
     CORE.with(|c| c.borrow_mut().clear_for_identity_change());
 }
 

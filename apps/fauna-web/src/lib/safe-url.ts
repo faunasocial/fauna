@@ -41,7 +41,7 @@ function isLoopbackHostname(hostname: string): boolean {
 
 /**
  * Guard for the stored nest URL — the nest API base the SPA talks to
- * (`$lib/api.ts` `storedNestUrlOrNull()` / `nodeUrl()`). The value is persisted
+ * (`#lib/api.ts` `storedNestUrlOrNull()` / `nodeUrl()`). The value is persisted
  * in browser storage, so a spoofed value could silently point the client at an
  * attacker-controlled origin; an untrusted value is ignored and `nodeUrl()`
  * falls back to `window.location.origin`.

@@ -1,6 +1,6 @@
 //! The **shared-folder** arms of [`WriteTokenBearer`] — the byte-plane bearers a
 //! cross-nest folder member presents to a set's **home** nest: a writer's
-//! write token on direct chunk/manifest POSTs (`federation.md`
+//! write token on direct chunk/manifest POSTs (`federation-shared-folders.md`
 //! § Cross-nest shared folders + channel append), and a
 //! reader's read token on the GETs that miss the home store
 //! (§ *Relay serving across nests*).

@@ -454,7 +454,7 @@ pub fn open_result(
 /// tombstone paints text only). The mark still paints; only the scroll is owed
 /// to a control, and a page that cannot scroll to it is better than a ring
 /// parked on an unrelated message.
-fn focus_selected_message(app: &mut App) {
+pub(crate) fn focus_selected_message(app: &mut App) {
     let Some(marker_at) = app.page_elements().iter().position(|e| {
         e.attrs
             .iter()
@@ -1016,6 +1016,41 @@ mod tests {
         );
     }
 
+    /// The room search's post hit is this same door (`room-search.md`
+    /// § The surface → *Opening a hit*), reached through the gesture door its
+    /// row paints: a room homed elsewhere hands its home to the op, so the
+    /// detail resolves through `resolve_post_from`; a same-nest room's hit
+    /// carries none and resolves as a search hit does.
+    #[test]
+    fn a_room_search_post_hit_opens_its_post_detail_through_the_rooms_home() {
+        use fauna_conversations::room::RoomSearchNav;
+        for (home, expected) in [
+            (
+                Some("https://home.example".to_string()),
+                Some("https://home.example"),
+            ),
+            (None, None),
+        ] {
+            let mut app = app_ready_to_navigate();
+            let work = crate::app::gesture_work(
+                &mut app,
+                Gesture::OpenRoomSearchHit(RoomSearchNav::Post {
+                    post_id: "p3".into(),
+                    home_nest_url: home,
+                }),
+            );
+            let crate::app::GestureWork::Page(op) = work else {
+                panic!("the hit hands back the detail-open op");
+            };
+            let crate::app::PageOp::Feed(crate::feed::Op::OpenPostDetail { home, .. }) = *op else {
+                panic!("a post hit is the feed's detail-open op");
+            };
+            assert_eq!(home.as_deref(), expected);
+            assert_eq!(app.page, Page::Feed);
+            assert_eq!(app.feed.mode, crate::feed::Mode::PostDetail("p3".into()));
+        }
+    }
+
     /// A draft already tied to a thread opens that thread, exactly like
     /// clicking `conversation-item` would.
     #[test]
@@ -1027,12 +1062,12 @@ mod tests {
                 thread_id: Some("t1".into()),
             },
         );
-        // The only follow-up is re-deriving the opened thread's list-send view
-        // (`refresh_list_send`), exactly as a `conversation-item` click runs it.
+        // The only follow-up is the opened thread's own reads (list-send view,
+        // scan verdicts), exactly as a `conversation-item` click runs them.
         assert!(matches!(
             op,
             Some(crate::app::PageOp::Conversations(
-                crate::conversations::Op::RefreshListSend { .. }
+                crate::conversations::Op::RefreshOpenedThread { .. }
             ))
         ));
         assert_eq!(app.page, Page::Conversations);
@@ -1069,7 +1104,13 @@ mod tests {
                 message_id: "m1".into(),
             },
         );
-        assert!(op.is_none());
+        // The opened thread's own reads follow, as on a `conversation-item` click.
+        assert!(matches!(
+            op,
+            Some(crate::app::PageOp::Conversations(
+                crate::conversations::Op::RefreshOpenedThread { .. }
+            ))
+        ));
         assert_eq!(app.page, Page::Conversations);
         assert_eq!(
             app.conversations.mode,

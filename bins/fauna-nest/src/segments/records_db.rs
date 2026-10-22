@@ -464,6 +464,27 @@ pub fn insert_conv_record_author(
     Ok(())
 }
 
+/// The attested author of the one conv record `record_cid` names — the mirror
+/// row's `(scope_id, seq)` joined onto `conv_record_authors`. `None` for a
+/// record no attestation names (appended before v70, or by a path that
+/// authenticated no actor) and for no such record alike. The key a takedown or
+/// block of a conversation record writes its author's queue row under
+/// (`moderation.md` § Legal takedown → *Conversations*).
+pub fn conv_record_author(conn: &Connection, record_cid: &Cid) -> Result<Option<[u8; 32]>> {
+    let author: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT a.author FROM segment_records r
+               JOIN conv_record_authors a ON a.channel_id = r.scope_id AND a.seq = r.seq
+              WHERE r.kind = 'conv' AND r.record_cid = ?1
+              LIMIT 1",
+            params![&record_cid.as_bytes()[..]],
+            |r| r.get(0),
+        )
+        .optional()
+        .context("conv_record_author")?;
+    Ok(author.and_then(|a| <[u8; 32]>::try_from(a.as_slice()).ok()))
+}
+
 /// The attested authors of one channel's records in `(after_seq, up_to_seq]`,
 /// keyed by `seq` — the serve-side read both `channel.fetch` surfaces join onto
 /// a page. A `seq` with no row (a record appended before v70, or by a path that
@@ -572,25 +593,70 @@ pub fn next_conv_seq(conn: &Connection, scope_id: &[u8; 32]) -> Result<i64> {
     Ok(seq)
 }
 
+/// A conv record's two withhold flags, as the read primitives carry them
+/// (`moderation.md` § Legal takedown → *Conversations* and § Admin block of a
+/// reported item). Either one withholds the sealed body from every fetch; each
+/// carries what its in-thread marker names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConvWithhold {
+    /// `legal_takedown_ref` — the legal reference the tombstone cites.
+    pub legal_takedown: Option<String>,
+    /// The blocking report's reason token, when `admin_block_report_id` is set
+    /// (`other` if the report row cannot be read).
+    pub admin_block: Option<String>,
+}
+
+impl ConvWithhold {
+    /// Whether the sealed body is withheld — on either ground.
+    pub fn is_withheld(&self) -> bool {
+        self.legal_takedown.is_some() || self.admin_block.is_some()
+    }
+
+    /// Whether the record's attested author may still read the body — the
+    /// block's ground alone (`moderation.md` § Admin block of a reported item,
+    /// decision 4). A takedown withholds from every viewer, the author included.
+    pub fn author_exempt(&self) -> bool {
+        self.admin_block.is_some() && self.legal_takedown.is_none()
+    }
+
+    /// The wire marker of the legal ground.
+    pub fn legal_takedown_marker(&self) -> Option<fauna_protocol::posts::LegalTakedownMarker> {
+        fauna_protocol::posts::LegalTakedownMarker::from_ref(self.legal_takedown.clone())
+    }
+
+    /// The wire marker of the admin-block ground.
+    pub fn admin_block_marker(&self) -> Option<fauna_protocol::posts::AdminBlockMarker> {
+        fauna_protocol::posts::AdminBlockMarker::from_reason(self.admin_block.as_deref())
+    }
+}
+
+/// The SELECT tail every conv list read shares for the two withhold flags,
+/// against `segment_records sr` left-joined to the blocking report: the
+/// takedown reference, then the block's reason token.
+const CONV_WITHHOLD_COLUMNS: &str = "sr.legal_takedown_ref, \
+     CASE WHEN sr.admin_block_report_id IS NULL THEN NULL \
+          ELSE COALESCE(ar.reason, 'other') END";
+
 /// List live conv records for one channel with `seq > after_seq`, oldest
-/// first, up to `limit`. Returns `(seq, segment_id, record_cid,
-/// legal_takedown_ref)` tuples; the caller reads the envelope bytes per row
-/// (and **withholds** it when `legal_takedown_ref` is `Some` — the legal-
-/// obligation relay-withhold gate). Tombstoned rows are excluded.
+/// first, up to `limit`. Returns `(seq, segment_id, record_cid, withhold)`
+/// tuples; the caller reads the envelope bytes per row (and **withholds** it
+/// when [`ConvWithhold::is_withheld`] — the relay-withhold gate of both
+/// grounds). Tombstoned rows are excluded.
 pub fn list_conv_after_seq(
     conn: &Connection,
     scope_id: &[u8; 32],
     after_seq: i64,
     limit: i64,
-) -> Result<Vec<(i64, u32, Cid, Option<String>)>> {
+) -> Result<Vec<(i64, u32, Cid, ConvWithhold)>> {
     let mut stmt = conn
-        .prepare(
-            "SELECT seq, segment_id, record_cid, legal_takedown_ref
-               FROM segment_records
-              WHERE scope_id = ?1 AND kind = 'conv' AND seq > ?2 AND tombstoned = 0
-              ORDER BY seq ASC
-              LIMIT ?3",
-        )
+        .prepare(&format!(
+            "SELECT sr.seq, sr.segment_id, sr.record_cid, {CONV_WITHHOLD_COLUMNS}
+               FROM segment_records sr
+               LEFT JOIN abuse_reports ar ON ar.id = sr.admin_block_report_id
+              WHERE sr.scope_id = ?1 AND sr.kind = 'conv' AND sr.seq > ?2 AND sr.tombstoned = 0
+              ORDER BY sr.seq ASC
+              LIMIT ?3"
+        ))
         .context("prepare list_conv_after_seq")?;
     let rows = stmt
         .query_map(params![&scope_id[..], after_seq, limit], |r| {
@@ -598,16 +664,65 @@ pub fn list_conv_after_seq(
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)? as u32,
                 r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, Option<String>>(3)?,
+                ConvWithhold {
+                    legal_takedown: r.get::<_, Option<String>>(3)?,
+                    admin_block: r.get::<_, Option<String>>(4)?,
+                },
             ))
         })
         .context("query_map list_conv_after_seq")?;
     let mut out = Vec::new();
     for r in rows {
-        let (seq, seg, cid_blob, legal_ref) = r.context("row list_conv_after_seq")?;
-        out.push((seq, seg, cid_from_blob(cid_blob)?, legal_ref));
+        let (seq, seg, cid_blob, withhold) = r.context("row list_conv_after_seq")?;
+        out.push((seq, seg, cid_from_blob(cid_blob)?, withhold));
     }
     Ok(out)
+}
+
+/// Set (or clear) the admin-block flag on a single conv record, keyed by its
+/// `record_cid` — `Some(report_id)` blocks it under that report, `None`
+/// unblocks. Returns the number of rows updated. The conv-kind guard and the
+/// point lookup are [`set_conv_legal_takedown`]'s. `only_if` narrows the write
+/// to a record currently blocked under that report (the unblock's guard).
+pub fn set_conv_admin_block(
+    conn: &Connection,
+    record_cid: &Cid,
+    report_id: Option<&str>,
+    only_if: Option<&str>,
+) -> Result<usize> {
+    let n = match only_if {
+        None => conn.execute(
+            "UPDATE segment_records
+                SET admin_block_report_id = ?1
+              WHERE kind = 'conv' AND record_cid = ?2",
+            params![report_id, &record_cid.as_bytes()[..]],
+        ),
+        Some(current) => conn.execute(
+            "UPDATE segment_records
+                SET admin_block_report_id = ?1
+              WHERE kind = 'conv' AND record_cid = ?2 AND admin_block_report_id = ?3",
+            params![report_id, &record_cid.as_bytes()[..], current],
+        ),
+    }
+    .context("set_conv_admin_block")?;
+    Ok(n)
+}
+
+/// The report a conv record is currently blocked under, if any. `Ok(None)`
+/// for a live record and for no such record alike — the caller has already
+/// resolved the record's existence through [`conv_record_scope_and_takedown`].
+pub fn conv_admin_block_report(conn: &Connection, record_cid: &Cid) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT admin_block_report_id FROM segment_records
+              WHERE kind = 'conv' AND record_cid = ?1
+              LIMIT 1",
+            params![&record_cid.as_bytes()[..]],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .context("conv_admin_block_report")?
+        .flatten())
 }
 
 /// Set (or clear) the legal-obligation takedown reference on a single conv
@@ -663,7 +778,7 @@ pub fn conv_record_scope_and_takedown(
 
 /// List live conv records across many channels with `seq > after_seq`, oldest
 /// first, up to `limit` total. Returns `(seq, scope_id, segment_id,
-/// record_cid, legal_takedown_ref)`. The `scope_ids` `IN (...)` list is chunked (≤ ~900 params)
+/// record_cid, withhold)`. The `scope_ids` `IN (...)` list is chunked (≤ ~900 params)
 /// like [`live_set_for_segments`]; multi-chunk results are merged, re-sorted
 /// by `seq`, then truncated to `limit`. Empty `scope_ids` → empty Vec.
 pub fn list_conv_for_scopes_after_seq(
@@ -671,9 +786,9 @@ pub fn list_conv_for_scopes_after_seq(
     scope_ids: &[[u8; 32]],
     after_seq: i64,
     limit: i64,
-) -> Result<Vec<(i64, [u8; 32], u32, Cid, Option<String>)>> {
+) -> Result<Vec<(i64, [u8; 32], u32, Cid, ConvWithhold)>> {
     const CHUNK: usize = 900; // leaves headroom for the after_seq + limit params
-    let mut out: Vec<(i64, [u8; 32], u32, Cid, Option<String>)> = Vec::new();
+    let mut out: Vec<(i64, [u8; 32], u32, Cid, ConvWithhold)> = Vec::new();
     if scope_ids.is_empty() {
         return Ok(out);
     }
@@ -681,11 +796,12 @@ pub fn list_conv_for_scopes_after_seq(
         // Params: [?1 = after_seq, ?2 = limit, ?3.. = scope ids].
         let placeholders: Vec<String> = (0..chunk.len()).map(|i| format!("?{}", i + 3)).collect();
         let sql = format!(
-            "SELECT seq, scope_id, segment_id, record_cid, legal_takedown_ref
-               FROM segment_records
-              WHERE kind = 'conv' AND seq > ?1 AND tombstoned = 0
-                AND scope_id IN ({})
-              ORDER BY seq ASC
+            "SELECT sr.seq, sr.scope_id, sr.segment_id, sr.record_cid, {CONV_WITHHOLD_COLUMNS}
+               FROM segment_records sr
+               LEFT JOIN abuse_reports ar ON ar.id = sr.admin_block_report_id
+              WHERE sr.kind = 'conv' AND sr.seq > ?1 AND sr.tombstoned = 0
+                AND sr.scope_id IN ({})
+              ORDER BY sr.seq ASC
               LIMIT ?2",
             placeholders.join(", ")
         );
@@ -708,15 +824,18 @@ pub fn list_conv_for_scopes_after_seq(
                     r.get::<_, Vec<u8>>(1)?,
                     r.get::<_, i64>(2)? as u32,
                     r.get::<_, Vec<u8>>(3)?,
-                    r.get::<_, Option<String>>(4)?,
+                    ConvWithhold {
+                        legal_takedown: r.get::<_, Option<String>>(4)?,
+                        admin_block: r.get::<_, Option<String>>(5)?,
+                    },
                 ))
             })
             .context("query_map list_conv_for_scopes_after_seq")?;
         for r in rows {
-            let (seq, scope_v, seg, cid_blob, legal_ref) =
+            let (seq, scope_v, seg, cid_blob, withhold) =
                 r.context("row list_conv_for_scopes_after_seq")?;
             let scope: [u8; 32] = crate::db::blob_to_array(scope_v.as_slice(), "scope_id")?;
-            out.push((seq, scope, seg, cid_from_blob(cid_blob)?, legal_ref));
+            out.push((seq, scope, seg, cid_from_blob(cid_blob)?, withhold));
         }
     }
     // Merge across chunks: global oldest-first order, then cap at `limit`.

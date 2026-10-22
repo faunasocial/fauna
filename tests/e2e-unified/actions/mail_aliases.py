@@ -374,6 +374,62 @@ class MailAliasesActions:
             "mail-aliases-list-item-disabled-toggle", scope=self._row_scope(index)
         )
 
+    def extend(self, index: int) -> None:
+        """Press the row's extend button (`mail-aliases-list-item-extend-button`,
+        disposable rows that have not expired) — the expiry moves out by the
+        disposable default lifetime."""
+        self.driver.click(
+            "mail-aliases-list-item-extend-button", scope=self._row_scope(index)
+        )
+
+    def can_extend(self, index: int) -> bool:
+        """Whether the row at `index` shows its extend button."""
+        return self.driver.is_visible(
+            "mail-aliases-list-item-extend-button", scope=self._row_scope(index)
+        )
+
+    def extend_absent(self, index: int) -> bool:
+        """Whether the row at `index` carries no extend button at all — exact on
+        every app, unlike a negative visibility read (convention 6's rider)."""
+        return self.driver.is_absent(
+            "mail-aliases-list-item-extend-button", scope=self._row_scope(index)
+        )
+
+    # ── the per-address history (mail-aliases.md § Per-alias-hit audit list) ──
+
+    def toggle_audit(self, index: int) -> None:
+        """Press the row's `mail-aliases-list-item-show-audit` — opens that
+        address's history, or closes it when it is the one open."""
+        self.driver.click(
+            "mail-aliases-list-item-show-audit", scope=self._row_scope(index)
+        )
+
+    def audit_count(self, index: int) -> int:
+        """How many `mail-aliases-audit-item` rows the row at `index` shows."""
+        return self.driver.count("mail-aliases-audit-item", scope=self._row_scope(index))
+
+    def audit_text(self, leaf: str, index: int, hit: int = 0) -> str:
+        """One history leaf (`-matched-address`, `-sender-domain`,
+        `-received-at`, without the `mail-aliases-audit-item` prefix) of hit
+        `hit` under the row at `index`."""
+        return self.driver.get_text(
+            f"mail-aliases-audit-item-{leaf}", index=hit, scope=self._row_scope(index)
+        )
+
+    def audit_empty_shown(self, index: int) -> bool:
+        """Whether the row at `index` shows the empty-history line."""
+        return self.driver.is_visible(
+            "mail-aliases-audit-empty", scope=self._row_scope(index)
+        )
+
+    def audit_closed(self, index: int) -> bool:
+        """Whether the row at `index` shows no history at all — neither a hit
+        nor the empty line (exact, convention 6's rider)."""
+        scope = self._row_scope(index)
+        return self.driver.is_absent(
+            "mail-aliases-audit-item", scope=scope
+        ) and self.driver.is_absent("mail-aliases-audit-empty", scope=scope)
+
     # ── errors ────────────────────────────────────────────────────────────
 
     def page_error_text(self, timeout: float = 10.0) -> str:
